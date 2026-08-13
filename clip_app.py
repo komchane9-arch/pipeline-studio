@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import threading
@@ -39,7 +40,9 @@ import tiktok_source
 from shopee_service import shopee_collect
 
 APP_VERSION = "1"
-PORT = 8877
+# app.py ส่ง STUDIO_CLIP_PORT มาให้ตอนสั่งเปิด — สำเนาโค้ดอีกชุด (git worktree)
+# จะได้เปิดสายคลิปของตัวเองคนละพอร์ต ไม่ไปชนกับตัวจริง
+PORT = int(os.environ.get("STUDIO_CLIP_PORT", "") or 8877)
 
 DATA_DIR = shared.DATA_DIR
 WEB_DIR = shared.WEB_DIR

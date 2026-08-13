@@ -25,7 +25,15 @@ from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+
+# ต้องรับ STUDIO_DATA_DIR เหมือน app.py ไม่งั้น "แยก data ตอนทดสอบ" ไม่จริง
+#
+# เจอตอนระยะ 4: app.py ย้าย data/ ตามตัวแปรนี้ แต่ไฟล์นี้ยังชี้ data/ ของจริงเสมอ
+# ผลคือสำเนาที่ตั้งใจให้แยก (git worktree) จะเปิด clip_app ที่อ่าน **โทเคนบอทตัวจริง**
+# แล้วไปแย่ง getUpdates กับบอทที่ผู้ใช้ใช้อยู่ — โทเคนหนึ่งมีตัวอ่านได้ตัวเดียว
+# อีกตัวจะได้ 409 แล้วข้อความหายสลับไปมา (เคยเจอมาแล้วตอนทำบอทตัวที่สาม)
+_data_name = os.environ.get("STUDIO_DATA_DIR", "data").strip() or "data"
+DATA_DIR = Path(_data_name) if Path(_data_name).is_absolute() else BASE_DIR / _data_name
 LOG_DIR = DATA_DIR / "logs"
 WEB_DIR = BASE_DIR / "web"
 CONFIG_FILE = DATA_DIR / "config.json"

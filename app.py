@@ -57,7 +57,11 @@ import telegram_bot
 import scrcpy_control
 from shopee_service import shopee_collect
 
-PORT = 8866
+# พอร์ตย้ายได้ด้วย STUDIO_PORT — มีไว้เพื่อรัน "สำเนาโค้ดอีกชุด" (git worktree)
+# ทดสอบพร้อมกับตัวจริงโดยไม่แย่งพอร์ตและไม่แย่ง data/ กัน:
+#     set STUDIO_PORT=8966 && set STUDIO_DATA_DIR=data-wt && python app.py
+# ต้องย้ายพร้อมกันทั้งสองอย่างเสมอ ไม่งั้นสำเนาจะไปเขียนทับข้อมูลของตัวจริง
+PORT = int(os.environ.get("STUDIO_PORT", "") or 8866)
 
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
@@ -2834,7 +2838,9 @@ def clip_channel() -> tuple[str, str]:
     return _fb_telegram()
 
 
-CLIP_PORT = 8877
+# ย้ายตาม STUDIO_PORT ไปด้วย — สำเนาที่รันบน 8966 ต้องเปิดสายคลิปของตัวเองที่ 8977
+# ไม่งั้นมันจะไปใช้ clip_app ของตัวจริงร่วมกัน แล้วคิวงานคลิปจะปนกันสองชุด
+CLIP_PORT = int(os.environ.get("STUDIO_CLIP_PORT", "") or (PORT + 11))
 
 
 def clip_server_up(timeout: float = 1.5) -> bool:
@@ -2873,7 +2879,10 @@ def ensure_clip_server() -> bool:
         # ที่ผู้ใช้เห็นเลยเหลือแค่ "Flow ยังไม่ได้ล็อกอิน" ซึ่งชี้ผิดทาง
         # PYTHONIOENCODING จำเป็น — พอ stdout ไม่ใช่คอนโซล Python จะใช้ cp1252
         # แล้ว print ภาษาไทยจะพังทั้งโปรเซส (แก้บั๊กหนึ่งไปทำอีกบั๊กหนึ่งแทน)
-        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        # ส่ง STUDIO_CLIP_PORT ต่อให้ลูกด้วย ไม่งั้นสำเนาที่รันคนละพอร์ต (worktree)
+        # จะสั่งเปิดสายคลิปแล้วลูกไปฟังพอร์ตเดิม = ไปชนกับตัวจริง
+        # (STUDIO_DATA_DIR ติดไปเองอยู่แล้วเพราะสืบทอด os.environ ทั้งก้อน)
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", STUDIO_CLIP_PORT=str(CLIP_PORT))
         log_file = open(DATA_DIR / "clip_server.log", "a", encoding="utf-8")
         try:
             subprocess.Popen(

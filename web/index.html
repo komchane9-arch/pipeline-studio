@@ -639,6 +639,8 @@
       <p id="settingsNote" class="note" aria-live="polite"></p>
     </dialog>
 
-    <script src="/static/app.js?v=__VERSION__"></script>
+    <!-- โหลดไฟล์เดียว ที่เหลือ (core/phone/post/video) ถูก import ต่อกันเป็นทอดๆ
+         type="module" รันหลัง DOM เสร็จเสมอ จึงไม่ต้องใส่ defer -->
+    <script type="module" src="/static/boot.js?v=__VERSION__"></script>
   </body>
 </html>

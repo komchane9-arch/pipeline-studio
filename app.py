@@ -79,9 +79,16 @@ def _compute_version() -> str:
     หน้าเว็บกับเซิร์ฟเวอร์จึงตรงกันโดยธรรมชาติ แก้มือให้ผิดไม่ได้อีก
     """
     digest = hashlib.sha1()
-    for name in ("index.html", "app.js", "styles.css"):
+    # ไล่ทุกไฟล์หน้าเว็บที่เบราว์เซอร์โหลดจริง เรียงชื่อให้ผลคงที่ทุกรอบ
+    # ใช้ glob แทนรายชื่อตายตัว เพราะระยะ 2.3 แยก app.js เป็น core/phone/post/video/boot
+    # ถ้าต้องเติมชื่อใหม่เข้าลิสต์เอง วันหนึ่งจะลืม แล้วกลับไปเป็น "แก้แล้วเวอร์ชันไม่ขยับ"
+    # (นับชื่อไฟล์ด้วย — เปลี่ยนชื่อไฟล์ก็ต้องนับว่าเป็นคนละรุ่น)
+    for path in sorted(WEB_DIR.glob("*.*")):
+        if path.suffix.lower() not in (".html", ".js", ".css"):
+            continue
         try:
-            digest.update((WEB_DIR / name).read_bytes())
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
         except OSError:
             pass
     return digest.hexdigest()[:8]
@@ -102,7 +109,23 @@ app = FastAPI(title="Pipeline Studio")
 
 # ทะเบียนอุปกรณ์ที่ขอเข้าใช้จากมือถือ (เครื่องหลักอนุมัติทีละเครื่อง)
 access_store = access_control.AccessStore(DATA_DIR / "access_devices.json")
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+class _RevalidateStatic(StaticFiles):
+    """บังคับให้เบราว์เซอร์ถามก่อนใช้ไฟล์ในแคชทุกครั้ง
+
+    หน้าเว็บโหลด boot.js?v=<แฮช> แต่โมดูลที่ boot.js import ต่อ (core/phone/post/video)
+    ไม่มี ?v= ต่อท้าย ถ้าปล่อยให้เบราว์เซอร์เดาอายุไฟล์เอง จะได้ของใหม่ปนของเก่า
+    (เช่น core.js ใหม่ + post.js เก่า) ซึ่งพังแบบเงียบและไล่หาสาเหตุยากมาก
+
+    no-cache ไม่ได้แปลว่าห้ามแคช — แคชได้แต่ต้องถามก่อนใช้ ถ้าไฟล์ไม่เปลี่ยนได้ 304 ก็ยังเร็ว
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _RevalidateStatic(directory=WEB_DIR), name="static")
 
 _config_lock = threading.Lock()
 

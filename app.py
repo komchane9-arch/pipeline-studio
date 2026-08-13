@@ -26,6 +26,7 @@ import base64
 import ctypes
 import dataclasses
 import json
+import hashlib
 import os
 import re
 import secrets
@@ -55,12 +56,38 @@ import telegram_bot
 import scrcpy_control
 from shopee_service import shopee_collect
 
-APP_VERSION = "60"
 PORT = 8866
 
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
-DATA_DIR = BASE_DIR / "data"
+
+# data/ ย้ายที่ได้ด้วย STUDIO_DATA_DIR — ทดสอบโดยไม่แตะของจริง:
+#     set STUDIO_DATA_DIR=data-test && python app.py
+# มีเพราะเคยมีสคริปต์ทดสอบลบโปรไฟล์บอท Bot1..Bot10 ของจริงหายถาวร (13 ส.ค. 2026)
+_data_name = os.environ.get("STUDIO_DATA_DIR", "data").strip() or "data"
+DATA_DIR = Path(_data_name) if Path(_data_name).is_absolute() else BASE_DIR / _data_name
+
+
+def _compute_version() -> str:
+    """เวอร์ชัน = ลายนิ้วมือของไฟล์หน้าเว็บจริง ไม่ใช่เลขที่ต้องแก้เอง
+
+    เดิมเป็นค่าคงที่ที่ต้อง bump ให้ตรงกัน 2-3 ที่ พอหลายแชทแก้พร้อมกันก็หลุด
+    (13 ส.ค. 2026 ชนกัน 3 รอบใน 1 วัน: 56 -> 57 -> 60) และ "ลืมรีสตาร์ต"
+    ก็ทำให้ขึ้นแบนเนอร์ผิดรุ่นทั้งที่โค้ดใหม่แล้ว
+
+    คิดจากเนื้อไฟล์ที่เบราว์เซอร์แคชจริง — แก้ไฟล์ไหนเวอร์ชันขยับเอง
+    หน้าเว็บกับเซิร์ฟเวอร์จึงตรงกันโดยธรรมชาติ แก้มือให้ผิดไม่ได้อีก
+    """
+    digest = hashlib.sha1()
+    for name in ("index.html", "app.js", "styles.css"):
+        try:
+            digest.update((WEB_DIR / name).read_bytes())
+        except OSError:
+            pass
+    return digest.hexdigest()[:8]
+
+
+APP_VERSION = _compute_version()
 LOG_DIR = DATA_DIR / "logs"
 UPLOAD_DIR = DATA_DIR / "uploads"
 CONFIG_FILE = DATA_DIR / "config.json"
@@ -448,10 +475,18 @@ def save_positions(serial: str, positions: dict) -> None:
 
 
 @app.get("/")
-async def index() -> FileResponse:
-    # no-store — โปรเจกต์เดิมโดน Chrome cache หน้า HTML จนเวอร์ชันไม่ตรงมาแล้ว
-    return FileResponse(
-        WEB_DIR / "index.html",
+async def index() -> Response:
+    """เสิร์ฟหน้าแรกพร้อมใส่เวอร์ชันให้อัตโนมัติ
+
+    ไฟล์บนดิสก์เขียน ?v=__VERSION__ ไว้ แล้วแทนค่าตอนเสิร์ฟด้วย APP_VERSION
+    ซึ่งคิดจากเนื้อไฟล์ชุดเดียวกัน — หน้าเว็บกับเซิร์ฟเวอร์จึงตรงกันเสมอ
+    ไม่มีทางหลุดเหมือนตอนที่ต้อง bump เลขเองทีละที่
+    """
+    html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    return Response(
+        content=html.replace("__VERSION__", APP_VERSION),
+        media_type="text/html; charset=utf-8",
+        # no-store — โปรเจกต์เดิมโดน Chrome cache หน้า HTML จนเวอร์ชันไม่ตรงมาแล้ว
         headers={"Cache-Control": "no-store, must-revalidate"},
     )
 

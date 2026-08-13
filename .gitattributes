@@ -1,0 +1,19 @@
+# ตรึง line ending ไว้ตามที่เป็นในไฟล์ ไม่ให้เครื่องมือแปลงไปมา
+#
+# เจอจริง 13 ส.ค. 2026: `sed -i` เขียน styles.css ใหม่ทั้งไฟล์แล้ว CR หายหมด
+# git เลยรายงานว่า "เปลี่ยน 1194 บรรทัด" ทั้งที่เนื้อหาเหมือนเดิมเป๊ะ
+# ประวัติรกจนหาของจริงไม่เจอ
+#
+# -text = อย่ายุ่งกับ line ending ของไฟล์เหล่านี้
+* -text
+
+# ไฟล์ไบนารี — ห้าม diff/merge เด็ดขาด
+*.ttf   binary
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.mp4   binary
+*.zip   binary
+*.bin   binary

@@ -1,0 +1,1194 @@
+/* Pipeline Studio — โทน iOS (Liquid Glass, Light)
+ *
+ * ค่าทุกตัวในบล็อกนี้ **ถอดจากไฟล์ต้นฉบับจริง** ไม่ได้เดาตาม HIG:
+ *   C:\Gen AI\KVID5\Apple iOS 27 UI Kit.sketch  (Sketch 2026.2)
+ *   - accent #0088FF        ← layerStyle "Controls/Light/Tracks/Active, Filled, 01 - Idle"
+ *   - track  rgba(0,0,0,.10) ← "Controls/Light/Tracks/Active, Unfilled, 01 - Idle"
+ *   - กดค้าง rgba(0,0,0,.19) ← "…Unfilled, 03 - Clicked"
+ *   - knob   #FFFFFF        ← "Controls/Light/Knobs - Toggle/01 - Idle"
+ *   - แผ่นแก้ว rgba(255,255,255,.70) + เบลอ ← "Liquid Glass/Light/Regular - Large"
+ *   - สเกลตัวอักษร SF Pro   ← layerTextStyles 105 ตัวในไฟล์
+ *
+ * **เรื่องขนาดตัวอักษร — ตัดสินใจต่างจากไฟล์โดยตั้งใจ**
+ * ไฟล์นี้เป็น UI kit ของ iPhone จอ 393pt ค่า Body คือ 17/22 ถ้ายกมาตรงๆ บนจอ
+ * คอมที่อัดข้อมูลแน่นแบบหน้านี้ ตัวหนังสือจะใหญ่จนตารางและแท็บล้นทันที
+ * จึงยึด **ภาษาการออกแบบ** (สี · แผ่นแก้ว · ความโค้ง · เส้นคั่น · ฟอนต์ SF)
+ * แต่ใช้ขั้น Subheadline 15/20 เป็นตัวฐานแทน Body 17/22 — ยังเป็นขั้นจริงในสเกล
+ * ของ Apple ไม่ได้คิดเลขเอง
+ */
+
+* { box-sizing: border-box; }
+
+:root {
+  /* --- พื้นและผิว (iOS systemGroupedBackground) --- */
+  --bg: #f2f2f7;            /* พื้นหลังรวมแบบ grouped ของ iOS */
+  --panel: #ffffff;         /* การ์ด/กลุ่มรายการ */
+  --panel-deep: #f2f2f7;    /* ช่องกรอก/จอมือถือ/log — fill ระดับรอง */
+
+  /* --- ตัวหนังสือ (label ของ iOS) --- */
+  --ink: #000000;                       /* label หลัก — ในไฟล์เป็นดำสนิท */
+  --ink-2: #000000;                     /* เดิมเป็นเทาจาง — ผู้ใช้สั่งให้ตัวหนังสือเป็นดำ */
+  --ink-3: #48484a;                     /* ใช้เฉพาะ placeholder/เชฟรอน — ยังเข้มพอให้เห็นชัด */
+
+  /* --- เส้นคั่น --- */
+  --line: rgba(0, 0, 0, 0.10);          /* เส้นขอบการ์ด (= สี track ที่ยังไม่เติม) */
+  --separator: rgba(60, 60, 67, 0.29);  /* เส้นคั่นในรายการ */
+
+  /* --- สีระบบ --- */
+  --accent: #aeaeb2;        /* เทาอ่อน (systemGray2) — แทนสีฟ้าเดิมตามที่ผู้ใช้ขอ */
+  --accent-deep: #98989d;   /* เทาเข้มขึ้นตอนกด */
+  --accent-ink: #1c1c1e;    /* ตัวหนังสือบนพื้นเทา — พื้นอ่อนแล้วตัวขาวจะอ่านไม่ออก */
+  --accent-text: #000000;   /* ตัวหนังสือเป็นดำตามที่ผู้ใช้สั่ง */
+  --olive: #34c759;         /* systemGreen — สำเร็จ */
+  --danger: #ff3b30;        /* systemRed — พัง */
+  --shade: rgba(120, 120, 128, 0.08);   /* พื้นจางไว้แยกกล่อง */
+
+  /* --- แผ่นแก้ว (Liquid Glass / Materials) --- */
+  --glass: rgba(255, 255, 255, 0.70);
+  --glass-blur: saturate(180%) blur(20px);
+
+  /* --- ความโค้ง --- */
+  --r-sheet: 14px;          /* action sheet / การ์ดใหญ่ */
+  --r-card: 12px;
+  --r-field: 10px;
+  --r-pill: 980px;          /* ปุ่มแคปซูล */
+
+  --soft-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+}
+
+body {
+  margin: 0;
+  /* SF Pro มากับ macOS/iOS ส่วน Windows ไม่มี จึงไล่ไปที่ Segoe UI แล้วค่อยถึง
+     ฟอนต์ไทยที่มีติดเครื่อง — ห้ามตัดฟอนต์ไทยออก ไม่งั้นสระลอยผิดตำแหน่ง */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+               "Segoe UI", "Noto Sans Thai", "Leelawadee UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 15px;          /* iOS Subheadline */
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button { font: inherit; cursor: pointer; }
+input, select, textarea {
+  font: inherit;
+  background: var(--panel-deep);
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: var(--r-field);
+  padding: 7px 11px;
+}
+/* iOS ใช้วงแหวนโฟกัสสีฟ้าเรืองรอบช่อง ไม่ใช่เส้นทึบ 1px */
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3.5px rgba(120, 120, 128, 0.20);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.topbar-note { opacity: 0.6; font-size: 12px; flex: 1; }
+.gear-button {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: inherit;
+  font-size: 18px;
+  padding: 4px 10px;
+}
+.gear-button:hover { border-color: var(--accent); color: var(--accent-text); }
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) 1fr;
+  gap: 16px;
+  padding: 16px;
+  align-items: start;
+}
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+/* ----------------------------------------------------- ซ้าย: จอมือถือ (A) */
+.phone-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 12px;
+  position: sticky;
+  top: 12px;
+}
+.device-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.device-row select { flex: 1; min-width: 0; }
+.phone-viewer {
+  position: relative;
+  aspect-ratio: 9 / 19;
+  max-height: 68vh;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--panel-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.phone-viewer img,
+.phone-viewer canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  /* ลูกศรปกติ ไม่ใช่กากบาท — ตามที่ผู้ใช้ขอ */
+  cursor: default;
+  /* กันเบราว์เซอร์ตีความการลากเป็น scroll/เลือกข้อความ ระหว่างกดค้างบนจอ */
+  touch-action: none;
+  user-select: none;
+}
+.phone-hint {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(251, 247, 240, 0.92);
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.mini-title { font-size: 12px; color: var(--accent-text); margin-top: 4px; }
+
+/* รูปสินค้าที่ดึงมาจาก Shopee — เรียงเป็นแถบเลื่อนแนวนอน ไม่กินพื้นที่แนวตั้ง */
+.shopee-gallery {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 6px 0;
+}
+.shopee-shot { margin: 0; flex: 0 0 auto; width: 76px; }
+.shopee-gallery img {
+  width: 76px;
+  height: 76px;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  display: block;
+}
+/* ภาพรวมเป็นใบที่เอาไปทำฉากเปิด ต้องดูออกทันทีว่าใบไหน */
+.shopee-shot.overview img { border-color: var(--accent); border-width: 2px; }
+.shopee-shot figcaption {
+  font-size: 10px;
+  opacity: 0.65;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shopee-shot.overview figcaption { color: var(--accent-text); opacity: 1; }
+
+.approval-badge {
+  font-size: 11px;
+  font-weight: normal;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  opacity: 0.8;
+}
+.approval-badge.approved { color: var(--olive); border-color: var(--olive); opacity: 1; }
+.approval-badge.rejected { color: var(--danger); border-color: var(--danger); opacity: 1; }
+.approval-badge.pending { color: var(--accent-text); border-color: var(--accent); opacity: 1; }
+
+.highlight-list { margin: 4px 0; padding-left: 20px; font-size: 12px; line-height: 1.7; }
+.highlight-list:empty::after { content: "ยังไม่มีจุดขาย"; opacity: 0.5; }
+.shopee-gallery:empty::after { content: "ไม่พบรูป"; opacity: 0.5; font-size: 12px; }
+#shopeeResult { display: flex; flex-direction: column; gap: 8px; }
+
+/* เปิดจากมือถือ — QR + รายชื่ออุปกรณ์ที่ขอเข้าใช้ */
+.mobile-access { display: flex; gap: 12px; align-items: center; margin: 6px 0; }
+.mobile-access img {
+  width: 120px;
+  height: 120px;
+  image-rendering: pixelated;   /* QR ต้องคมเป็นบล็อก ห้ามเบลอ ไม่งั้นสแกนไม่ติด */
+  background: #fff;
+  padding: 6px;
+  border-radius: 12px;
+}
+.mobile-access-info { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.mobile-access code { font-size: 13px; color: var(--accent-text); }
+
+.device-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.device-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.device-row.pending { border-color: rgba(199, 123, 79, 0.5); }
+.device-row.approved { border-color: rgba(153, 168, 107, 0.5); }
+.device-row.revoked { opacity: 0.55; }
+.device-info { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-state { font-size: 11px; opacity: 0.7; flex: 0 0 auto; }
+.device-row.approved .device-state { color: var(--olive); opacity: 1; }
+.device-row.pending .device-state { color: var(--accent-text); opacity: 1; }
+.device-list .compact { padding: 2px 8px; font-size: 11px; flex: 0 0 auto; }
+.device-list .compact.danger { color: var(--danger); border-color: rgba(207, 122, 104, 0.4); }
+
+.link-inbox { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.link-inbox li {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 5px 8px;
+  font-size: 11px;
+}
+.link-inbox a {
+  color: var(--ink);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-tag { color: var(--accent-text); flex: 0 0 auto; }
+.link-inbox .compact { padding: 2px 8px; font-size: 11px; flex: 0 0 auto; }
+.link-inbox:empty { display: none; }
+
+.key-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin: 10px 0;
+}
+.key-grid button {
+  background: none;
+  border: 1px solid var(--line);
+  color: inherit;
+  border-radius: 12px;
+  padding: 6px 4px;
+  font-size: 12px;
+}
+.key-grid button:hover { border-color: var(--accent); color: var(--accent-text); }
+.phone-placeholder { opacity: 0.5; font-size: 13px; padding: 12px; text-align: center; }
+.phone-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+
+/* ------------------------------------------------- ขวา: แท็บ Process (B,C) */
+.process-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 12px 14px;
+  /* สูงตามเนื้อหาจริง — ตรึง min-height ไว้ทำให้แท็บที่เนื้อหาสั้น
+     (เช่น Publish) เหลือพื้นที่ว่างยาวใต้ log */
+  align-self: start;
+}
+.tab-bar { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+.tab {
+  background: none;
+  border: 1px solid var(--line);
+  color: inherit;
+  border-radius: 999px;
+  padding: 6px 16px;
+}
+.tab.active {
+  background: rgba(192, 113, 74, 0.14);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.tab-area { display: flex; flex-direction: column; gap: 12px; }
+/* หน้าใครหน้ามัน — display:flex ด้านบนแรงกว่ากฎ [hidden] ของเบราว์เซอร์
+   ต้องกดทับกลับ ไม่งั้นทุกแท็บโชว์พร้อมกันหมด (บั๊กที่เจอจริง) */
+.tab-area[hidden] { display: none !important; }
+
+.block { border: 1px solid var(--line); border-radius: 14px; padding: 0; }
+.block > summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 600;
+  list-style: none;
+}
+.block > summary::before { content: "▸ "; opacity: 0.6; }
+.block[open] > summary::before { content: "▾ "; }
+.block-body { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+
+.radio-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.radio-row small, .check-row small { opacity: 0.55; }
+.check-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.inline-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.inline-row input[type="text"] { flex: 1; min-width: 120px; }
+.inline-row input.short { flex: 0 1 140px; }
+
+.primary {
+  background: var(--accent);
+  border: 1px solid transparent;
+  color: #ffffff;
+  border-radius: 999px;      /* ปุ่มทรงแคปซูลตามภาพต้นแบบ */
+  padding: 7px 18px;
+  box-shadow: var(--soft-shadow);
+}
+.primary:hover { background: var(--accent); }
+.ghost {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: inherit;
+  border-radius: 999px;
+  padding: 7px 16px;
+}
+.ghost:hover { border-color: var(--accent); }
+.ghost.danger { color: var(--danger); border-color: rgba(207, 122, 104, 0.45); }
+button:disabled { opacity: 0.4; cursor: not-allowed; filter: grayscale(0.6); }
+
+.note { font-size: 12px; opacity: 0.65; margin: 2px 0; }
+
+/* Input ②: สินค้าเดียว */
+.single-grid { display: flex; gap: 12px; }
+.image-drop {
+  width: 110px;
+  height: 110px;
+  border: 2px dashed var(--line);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.image-drop:hover { border-color: var(--accent); }
+.image-drop img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+#singlePlus { font-size: 28px; opacity: 0.5; }
+.single-fields { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+
+/* log ทุกแท็บ */
+.log-box { border: 1px solid var(--line); border-radius: 14px; }
+.log-head {
+  padding: 6px 10px;
+  font-size: 12px;
+  opacity: 0.6;
+  border-bottom: 1px solid var(--line);
+}
+.log-box pre, .stage pre {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 150px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel-deep);
+  border-radius: 0 0 10px 10px;
+}
+
+/* Process: 4 ขั้น */
+.stage-flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.stage { border: 1px solid var(--line); border-radius: 14px; padding: 10px; }
+.stage h3 { margin: 0 0 4px; font-size: 14px; color: var(--accent-text); }
+.stage p { margin: 0 0 8px; font-size: 12px; opacity: 0.65; }
+.stage pre { border-top: 1px solid var(--line); min-height: 90px; border-radius: 12px; }
+
+/* Release */
+.area-title { margin: 4px 0; font-size: 14px; color: var(--accent-text); }
+.clip-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+.clip-strip .clip {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 10px;
+  font-size: 12px;
+  background: var(--panel-deep);
+}
+.clip-strip:empty::after { content: "ยังไม่มีคลิปที่เจนเสร็จ"; opacity: 0.5; font-size: 12px; }
+
+/* Publish */
+.publish-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.publish-step {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 6px 8px;
+  flex-wrap: wrap;
+}
+.publish-step .order { opacity: 0.6; width: 18px; text-align: right; }
+.publish-step input[type="text"] { flex: 1; min-width: 100px; }
+.publish-step select { flex: 0 1 auto; }
+.publish-step.armed { border-color: var(--accent); background: rgba(192, 113, 74, 0.12); }
+/* ขั้นตายตัว — ให้ดูออกว่าลบไม่ได้ */
+.publish-step.fixed { border-style: dashed; opacity: 0.9; }
+.publish-step .fixed-label { flex: 1; font-size: 12px; opacity: 0.75; }
+.publish-step .trained-mark { color: var(--olive); font-size: 12px; }
+
+/* ตั้งค่า (D) */
+dialog {
+  background: var(--panel);
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 18px;
+  width: min(560px, 92vw);
+}
+dialog::backdrop { background: rgba(59, 47, 36, 0.35); }
+/* dialog พื้นขาวเหมือน .block — ให้กล่องพับได้เป็นสีพื้นรองจะได้แยกชั้นออก */
+dialog .block { background: var(--panel-deep); margin-bottom: 10px; }
+dialog .block[open] > summary { border-bottom: 0.5px solid var(--line); }
+
+/* แถวโปรไฟล์บอท — ของเยอะ (ติ๊ก+ปุ่มหลายตัว) ใช้ flex-wrap ไม่ใช่ grid ตายตัว */
+.farm-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 0.5px solid var(--separator);
+}
+.farm-row:last-child { border-bottom: none; }
+.farm-row > strong { margin-right: 2px; }
+.farm-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12.5px;
+  margin-left: auto;   /* ดันติ๊ก+ปุ่มไปชิดขวา ชื่อยังอยู่ซ้าย */
+}
+.farm-row button { padding: 6px 12px; font-size: 13px; }
+.farm-name { cursor: text; border-bottom: 1px dashed var(--line); }
+.farm-name:hover { border-bottom-color: var(--accent, #2f9e8f); }
+.farm-name-edit {
+  font: inherit;
+  font-weight: 700;
+  padding: 2px 6px;
+  width: 9em;
+  border: 1px solid var(--accent, #2f9e8f);
+  border-radius: 6px;
+}
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #8a8070;
+  margin-left: 6px;
+}
+.status-dot.ok { background: var(--olive); box-shadow: 0 0 6px var(--olive); }
+.status-dot.fail { background: var(--danger); }
+
+.mode-blocks { display: flex; gap: 10px; flex-wrap: wrap; }
+.mode-block {
+  flex: 1 1 200px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+}
+.mode-block:has(input:checked) {
+  border-color: var(--accent);
+  background: rgba(192, 113, 74, 0.12);
+}
+.frame-pick { display: flex; gap: 12px; }
+.model-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.model-list label { display: flex; gap: 8px; align-items: center; }
+.model-list label.disabled { opacity: 0.35; }
+.duration-row { display: flex; gap: 12px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.dialog-actions { margin-top: 8px; }
+
+/* ---------------- โพสต์ลงกลุ่ม Facebook (รับงานจาก Telegram) */
+.area-subtitle {
+  margin: 14px 0 6px;
+  font-size: 14px;
+  opacity: 0.7;
+}
+.fb-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.fb-group {
+  display: grid;
+  /* ติ๊ก · ชื่อ(ยืด) · รหัส · ผลล่าสุด · ปุ่มลบ */
+  grid-template-columns: auto minmax(140px, 2fr) auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.fb-group input[type="text"] { min-width: 0; }
+.fb-id { font-size: 12px; opacity: 0.55; font-family: Consolas, monospace; }
+.fb-settings { flex-wrap: wrap; align-items: center; gap: 12px; }
+.fb-settings input[type="number"] { width: 68px; }
+
+.fb-jobs { display: flex; flex-direction: column; gap: 10px; }
+.fb-job {
+  display: flex;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px;
+  background: var(--shade);
+}
+.fb-job img {
+  width: 90px;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 12px;
+  flex: none;
+}
+.fb-job-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+/* แคปชันยาวต้องตัดบรรทัดเอง ไม่งั้นการ์ดยืดจนแถบขวาล้น */
+.fb-caption { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fb-group a, .fb-job a { color: var(--accent-text); text-decoration: none; }
+.fb-group a:hover, .fb-job a:hover { text-decoration: underline; }
+
+/* ---------------- ป้ายบอกว่าช่องนี้เป็นบอทตัวไหน */
+.bot-who { font-size: 12px; margin: 2px 0 6px; opacity: 0.7; }
+.bot-who.ok { color: var(--olive); opacity: 1; font-weight: 600; }
+.bot-who.fail { color: var(--danger); opacity: 1; }
+
+/* ---------------- ผิวแบบภาพต้นแบบ: การ์ดขาวลอยบนพื้นม่วงจาง เงานุ่ม ไม่มีเส้นหนา */
+.phone-panel,
+.process-panel { box-shadow: var(--soft-shadow); }
+.block,
+.log-box,
+.stage,
+.fb-job { box-shadow: 0 2px 10px rgba(90, 45, 120, 0.05); }
+/* แท็บที่เลือกอยู่เป็นเม็ดยาสีม่วงเหมือนปุ่ม Login ในภาพ */
+.tab {
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 7px 16px;
+}
+.tab.active {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: transparent;
+  box-shadow: var(--soft-shadow);
+}
+.topbar { background: var(--panel); box-shadow: 0 1px 0 var(--line); }
+.topbar strong { letter-spacing: -0.01em; }
+h2, h3, .area-title { letter-spacing: -0.01em; }
+dialog { box-shadow: 0 20px 60px rgba(60, 30, 90, 0.18); }
+
+/* ---------------------------------------------- 🎬 แท็บสตอรีบอร์ด */
+/* รายการซ้าย รายละเอียดขวา — จอแคบให้ซ้อนกันลงมาแทน */
+.story-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .story-layout { grid-template-columns: 1fr; }
+}
+.story-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.story-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  cursor: pointer;
+}
+.story-item:hover { border-color: var(--accent); }
+.story-item.active {
+  background: var(--panel-deep);
+  border-color: var(--accent);
+}
+.story-item small { opacity: 0.7; }
+.story-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+  min-height: 160px;
+}
+.story-detail h4 { margin: 0; }
+.story-highlights { margin: 0; padding-left: 20px; }
+/* สตอรีบอร์ดเป็นภาพสูง (941×1672) — จำกัดความสูงไม่ให้ดันเนื้อหาอื่นตกจอ */
+.story-frame {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  align-self: flex-start;
+}
+.story-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-deep);
+}
+/* คำสั่งยาวมาก ต้องเลื่อนในกล่องตัวเอง ห้ามดันหน้าให้เลื่อนแนวนอน */
+.story-prompt pre,
+.story-raw {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.story-prompt button { align-self: flex-start; }
+
+/* ---- คิวงานสายเจนคลิป (สั่งได้ทั้งจากหน้านี้และจากแชท) */
+.story-add {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 8px 0 4px;
+}
+.story-add textarea {
+  flex: 1;
+  min-height: 46px;
+  resize: vertical;
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: inherit;
+}
+.switch-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  opacity: 0.85;
+}
+.pill {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.7;
+  margin-left: 6px;
+}
+.story-side { display: flex; flex-direction: column; gap: 8px; }
+.story-queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+.story-queue-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  /* เว้นที่ขวาไว้ให้แถวปุ่ม ไม่ให้ชื่อยาวมุดไปใต้ปุ่มจนกดไม่โดน */
+  padding-right: 88px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  cursor: pointer;
+}
+.story-queue-item:hover { border-color: var(--accent); }
+.story-queue-item.active { background: var(--panel-deep); border-color: var(--accent); }
+.story-queue-item small { opacity: 0.72; font-size: 12px; }
+/* สีขอบซ้าย = สถานะ ดูปราดเดียวรู้ว่าอันไหนต้องกด อันไหนรออยู่เฉยๆ */
+.story-queue-item.wait   { border-left-color: #9aa0a6; }
+.story-queue-item.run    { border-left-color: #4c8dff; }
+.story-queue-item.review { border-left-color: #e8a33d; }
+.story-queue-item.ok     { border-left-color: #46a758; }
+.story-queue-item.fail   { border-left-color: #cf5f4a; }
+.story-queue-item.off    { border-left-color: transparent; opacity: 0.6; }
+.story-queue-tools {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 2px;
+}
+.icon-btn {
+  border: 1px solid var(--line);
+  background: var(--panel-deep);
+  border-radius: 8px;
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  color: inherit;
+}
+.icon-btn:hover { border-color: var(--accent); }
+.story-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+.story-cell { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.story-cell-tools { display: flex; gap: 4px; }
+.story-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+.story-approve {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-deep);
+}
+.story-approve textarea {
+  font: inherit;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: inherit;
+}
+.story-video { max-width: 100%; max-height: 60vh; border-radius: 12px; }
+.note.ok { color: #46a758; }
+.note.fail { color: #cf5f4a; }
+
+/* =====================================================================
+ * ชั้นผิว iOS 26/27 (Liquid Glass · Light)
+ *
+ * ทุกค่าถอดจากไฟล์จริง: C:\Gen AI\KVID5\Apple iOS 27 UI Kit.sketch
+ * รวมถึง **ตัวฟอนต์เอง** ที่แกะออกมาจากโฟลเดอร์ fonts/ ในไฟล์นั้น
+ *
+ * วางเป็นชั้นทับท้ายไฟล์ ไม่ไปแก้กฎเดิมทีละจุด เพราะ JS ผูก element ~57 ตัว
+ * โดยไม่มี null guard (notes.md ข้อ 2.3) — ไม่ชอบเมื่อไรลบบล็อกนี้ก้อนเดียวจบ
+ * ===================================================================== */
+
+/* ---------------------------------------------------------- ฟอนต์ SF Pro
+ * แกะจาก fonts/ ในไฟล์ .sketch — เป็น variable font จริง มีแกน
+ *   wght 1–1000   น้ำหนักต่อเนื่อง ไม่ใช่ 400/700 แบบไฟล์ธรรมดา
+ *   opsz 17–28    optical size — **ตัวนี้คือหัวใจ** Apple ใช้แบบตัวอักษร
+ *                 คนละชุดระหว่างข้อความเล็ก (Text) กับหัวข้อใหญ่ (Display)
+ *                 ตัวเล็กช่องไฟกว้างหางชัด ตัวใหญ่ช่องไฟแคบทรงคม
+ *   wdth 30–150   ความกว้าง (ไม่ได้ใช้ คงไว้ที่ 100)
+ *
+ * ไฟล์ 22 MB โหลดครั้งเดียวแล้วเบราว์เซอร์แคชไว้ — วิ่งบน localhost ไม่ออกเน็ต
+ */
+@font-face {
+  font-family: "SF Pro VF";
+  src: url("/static/fonts/SFPro.ttf") format("truetype-variations");
+  font-weight: 1 1000;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "SF Pro VF";
+  src: url("/static/fonts/SFPro-Italic.ttf") format("truetype-variations");
+  font-weight: 1 1000;
+  font-style: italic;
+  font-display: swap;
+}
+
+body {
+  /* SF Pro ไม่มีอักษรไทย จึงต้องมีฟอนต์ไทยตามหลังเสมอ
+     ไม่งั้นสระ/วรรณยุกต์จะลอยผิดตำแหน่ง */
+  /* SF Pro ไม่มีอักษรไทย ตัวไทยจะตกไปฟอนต์ถัดไปเสมอ — ตรวจเครื่องนี้แล้ว
+     มี Leelawadee UI (ฟอนต์ไทย UI ของ Windows) แต่ **ไม่มี Noto Sans Thai**
+     จึงต้องวาง Leelawadee UI ไว้ก่อน ไม่งั้นตัวไทยตกไปที่ Segoe UI ซึ่งทรงไม่เข้ากัน */
+  font-family: "SF Pro VF", "Leelawadee UI", -apple-system, "Segoe UI", sans-serif;
+  font-variation-settings: "opsz" 17, "wght" 400;
+  /* ไม่บีบช่องไฟ — ภาษาไทยมีสระบนล่าง บีบแล้วชนกัน */
+  letter-spacing: 0;
+  line-height: 22px;
+}
+
+/* หัวข้อใหญ่สลับไปโหมด Display ตามที่ Apple ทำ */
+.area-title {
+  font-size: 22px;
+  line-height: 28px;
+  font-variation-settings: "opsz" 28, "wght" 700;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+/* --------------------------------------------------------- แถบบน = แผ่นแก้ว */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  padding: 12px 22px;
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-bottom: 0.5px solid var(--separator);
+}
+.topbar strong { font-variation-settings: "opsz" 28, "wght" 700; font-size: 17px; }
+.topbar-note { color: var(--ink-2); font-size: 13px; opacity: 1; }
+.gear-button {
+  width: 34px; height: 34px;
+  display: grid; place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--ink-2);
+  font-size: 15px;
+  padding: 0;
+}
+.gear-button:hover { background: rgba(120, 120, 128, 0.20); color: var(--ink); }
+
+.layout { padding: 22px; gap: 22px; }
+
+/* ------------------------------------------- แท็บ = segmented control ของ iOS
+ * ของจริงคือ "ราง" เทาจาง แล้วตัวที่เลือกเป็นแคปซูลขาวยกลอยอยู่ในราง
+ * ไม่ใช่ปุ่มลอยๆ เรียงกัน — จุดนี้คือสิ่งที่ทำให้ดูเป็น iOS ทันที
+ */
+.tab-bar {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: rgba(120, 120, 128, 0.12);
+  border-radius: 10px;
+  margin-bottom: 18px;
+}
+.tab {
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-variation-settings: "opsz" 17, "wght" 500;
+  transition: background 0.18s ease;
+}
+.tab:hover:not(.active) { background: rgba(120, 120, 128, 0.10); }
+.tab.active {
+  background: #fff;
+  /* กฎเดิมตั้ง color:#ffffff ไว้ (ตัวขาวบนพื้นสีเข้ม) พอเปลี่ยนพื้นเป็นขาว
+     ต้องทับสีตัวอักษรด้วย ไม่งั้นได้ขาวบนขาว = ป้ายแท็บหายไปเลย (เจอจริง) */
+  color: var(--ink);
+  border-color: transparent;
+  font-variation-settings: "opsz" 17, "wght" 600;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12), 0 3px 1px rgba(0, 0, 0, 0.04);
+}
+
+/* ------------------------------------------ การ์ด = inset grouped list ของ iOS
+ * ของ iOS ไม่มีเส้นขอบรอบกล่อง มีแต่พื้นขาวโค้งวางบนพื้นเทา
+ * และเส้นคั่นระหว่างแถว **เว้นจากขอบซ้าย** ไม่ลากเต็มความกว้าง
+ */
+.block {
+  background: var(--panel);
+  border: none;
+  border-radius: 12px;
+  box-shadow: none;
+  overflow: hidden;
+  margin-bottom: 22px;
+}
+.block > summary {
+  list-style: none;
+  padding: 13px 16px;
+  font-size: 15px;
+  font-variation-settings: "opsz" 17, "wght" 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;              /* ขนาดเป้าแตะมาตรฐานของ Apple */
+  cursor: pointer;
+}
+.block > summary::-webkit-details-marker { display: none; }
+/* กฎเดิมใส่สามเหลี่ยม ▸/▾ ไว้หน้าหัวข้อ — ต้องปิด ไม่งั้นซ้อนกับเชฟรอนด้านขวา */
+.block > summary::before,
+.block[open] > summary::before { content: none; }
+/* ลูกศรเชฟรอนขวาแบบ iOS — ชี้ลงเมื่อกางออก */
+.block > summary::after {
+  content: "";
+  margin-left: auto;
+  width: 7px; height: 7px;
+  border-right: 2px solid var(--ink-3);
+  border-bottom: 2px solid var(--ink-3);
+  transform: rotate(-45deg);
+  transition: transform 0.2s ease;
+}
+.block[open] > summary::after { transform: rotate(45deg); }
+.block[open] > summary { border-bottom: 0.5px solid var(--separator); }
+.block-body { padding: 6px 16px 14px; }
+
+/* แถวในกลุ่ม — เส้นคั่นเว้นขอบซ้ายแบบรายการของ iOS */
+.block-body > .inline-row,
+.block-body > .check-row,
+.block-body > .radio-row {
+  padding: 9px 0;
+  margin: 0;
+  border-bottom: 0.5px solid var(--separator);
+}
+.block-body > *:last-child { border-bottom: none; }
+
+/* หัวข้อย่อย = section header ของ iOS: ตัวเล็ก ตัวพิมพ์ใหญ่ สีเทา */
+.mini-title,
+.area-subtitle {
+  display: block;
+  font-size: 12px;
+  font-variation-settings: "opsz" 17, "wght" 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  margin: 16px 0 6px;
+}
+.note { font-size: 13px; line-height: 18px; color: var(--ink-2); }
+
+/* ------------------------------------------------------------------ ปุ่ม */
+.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: none;
+  border-radius: var(--r-pill);
+  padding: 8px 18px;
+  font-size: 14px;
+  font-variation-settings: "opsz" 17, "wght" 600;
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+.primary:hover:not(:disabled) { background: var(--accent-deep); }
+.primary:active:not(:disabled) { transform: scale(0.96); }
+
+/* ปุ่มรองของ iOS = ตัวหนังสือฟ้าบนพื้นฟ้าจาง ไม่มีเส้นขอบ */
+.ghost {
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--ink);
+  border: none;
+  border-radius: var(--r-pill);
+  padding: 8px 16px;
+  font-size: 14px;
+  font-variation-settings: "opsz" 17, "wght" 500;
+  transition: background 0.12s ease, transform 0.12s ease;
+}
+.ghost:hover:not(:disabled) { background: rgba(120, 120, 128, 0.20); }
+.ghost:active:not(:disabled) { transform: scale(0.96); }
+
+.danger, .ghost.danger {
+  background: rgba(255, 59, 48, 0.11);
+  color: var(--danger);
+  border: none;
+}
+.danger:hover:not(:disabled) { background: rgba(255, 59, 48, 0.18); }
+button:disabled { opacity: 0.3; }
+
+/* --------------------------------------------------- ช่องกรอกแบบ iOS
+ * ในรายการของ iOS ช่องกรอกไม่มีกรอบ เป็นพื้นเทาจางโค้งมน
+ */
+input[type="text"], input[type="url"], input[type="number"],
+input[type="password"], input[type="search"], select, textarea {
+  background: rgba(120, 120, 128, 0.12);
+  border: none;
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 14px;
+}
+input::placeholder, textarea::placeholder { color: var(--ink-3); }
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  background: rgba(120, 120, 128, 0.16);
+  box-shadow: 0 0 0 3.5px rgba(120, 120, 128, 0.26);
+}
+
+/* ------------------------------------------------- สวิตช์แบบ iOS
+ * เปลี่ยนช่องติ๊กสี่เหลี่ยมเป็นสวิตช์เลื่อน — ตัวนี้เห็นแล้วรู้ทันทีว่า iOS
+ * สีตอนเปิดใช้ #0088FF ตาม layerStyle "Tracks/Active, Filled" ในไฟล์
+ * (ไม่ใช่เขียวแบบ iOS รุ่นเก่า — ยึดค่าจากไฟล์ที่ผู้ใช้ให้มา)
+ */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 44px; height: 26px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(120, 120, 128, 0.16);
+  border: none;
+  padding: 0;
+  transition: background 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  vertical-align: middle;
+}
+input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.18), 0 0 1px rgba(0, 0, 0, 0.12);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+input[type="checkbox"]:checked { background: var(--accent); }
+input[type="checkbox"]:checked::after { transform: translateX(18px); }
+input[type="checkbox"]:focus { box-shadow: 0 0 0 3.5px rgba(120, 120, 128, 0.26); }
+
+/* ปุ่มตัวเลือกวงกลม — iOS ใช้เครื่องหมายถูกสีฟ้า ไม่ใช่จุดในวง */
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 21px; height: 21px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink-3);
+  background: transparent;
+  padding: 0;
+  position: relative;
+  flex: 0 0 auto;
+  vertical-align: middle;
+}
+input[type="radio"]:checked { border-color: var(--accent); background: var(--accent); }
+input[type="radio"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 6px; top: 2.5px;
+  width: 5px; height: 10px;
+  border-right: 2px solid var(--accent-ink);
+  border-bottom: 2px solid var(--accent-ink);
+  transform: rotate(45deg);
+}
+
+.check-row, .radio-row { display: flex; align-items: center; gap: 10px; }
+.check-row label, .radio-row label { flex: 1; }
+
+/* --------------------------------------------------------------- อื่นๆ */
+.log-box {
+  background: rgba(120, 120, 128, 0.10);
+  border: none;
+  border-radius: 10px;
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+.phone-panel {
+  border: none;
+  border-radius: 16px;
+  box-shadow: none;
+  padding: 14px;
+}
+.phone-viewer { border-radius: 20px; border: 0.5px solid var(--line); }
+.phone-hint { background: rgba(255, 255, 255, 0.86); backdrop-filter: blur(8px); }
+
+/* ปุ่มคุมมือถือ — ให้เป็นแคปซูลเทาจางเหมือนปุ่มระบบของ iOS */
+.phone-panel button:not(.primary):not(.ghost):not(.danger) {
+  background: rgba(120, 120, 128, 0.12);
+  border: none;
+  border-radius: 999px;
+  color: var(--ink);
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.phone-panel button:not(.primary):not(.ghost):not(.danger):hover {
+  background: rgba(120, 120, 128, 0.20);
+}
+
+.status-dot { box-shadow: none; }
+.approval-badge { border: none; background: rgba(120, 120, 128, 0.14); }
+
+/* --- จุดที่ CSS เดิมใช้ --accent เป็น "ตัวหนังสือ" ---
+ * พอเปลี่ยน --accent เป็นเทาอ่อน ตัวหนังสือพวกนี้จะจางจนอ่านไม่ออกบนพื้นขาว
+ * จึงต้องชี้ไปที่ --accent-text (เทาเข้มพอ) แทน — ไม่ใช่ปล่อยให้จางแล้วบอกว่าเสร็จ
+ */
+.gear-button:hover { color: var(--accent-text); border-color: transparent; }
+.shopee-shot.overview figcaption,
+.approval-badge.pending,
+.mobile-access code,
+.mini-title { color: var(--accent-text); }
+.approval-badge.pending { border-color: transparent; }
+.shopee-shot.overview img { border-color: var(--accent-text); }
+
+/* =====================================================================
+ * ตัวหนังสือต้องดำและอ่านชัด — ตามที่ผู้ใช้สั่ง "ห้ามใช้สีเมามองยาก"
+ *
+ * ปัญหาเดิมมี 2 ชั้นซ้อนกัน ต้องแก้ทั้งคู่ ไม่งั้นแก้สีอย่างเดียวก็ยังซีด:
+ *   1) สีตัวอักษรเป็นเทาจาง  → เปลี่ยน --ink-2 / --accent-text เป็นดำแล้ว
+ *   2) **opacity ต่ำ 23 จุด** → ต่อให้สีดำ พอ opacity 0.5 ก็ซีดอยู่ดี
+ *
+ * ลำดับความสำคัญของข้อมูลย้ายไปอยู่ที่ **ขนาดกับน้ำหนัก** แทนความจาง
+ * ซึ่งอ่านง่ายกว่าและยังเป็นวิธีที่ Apple ใช้กับ Dynamic Type อยู่แล้ว
+ * ===================================================================== */
+
+.topbar-note,
+.note,
+.area-subtitle,
+.bot-who,
+.device-state,
+.fb-id,
+.log-head,
+.stage p,
+.phone-placeholder,
+.phone-hint,
+.shopee-shot figcaption,
+.publish-step .order,
+.publish-step .fixed-label,
+.story-item small,
+.radio-row small,
+.check-row small,
+#singlePlus {
+  opacity: 1;
+  color: var(--ink);
+}
+
+/* ข้อความว่างเปล่า (placeholder ของรายการ) — ดำเหมือนกัน แค่ตัวเล็กลง */
+.highlight-list:empty::after,
+.shopee-gallery:empty::after,
+.clip-strip:empty::after {
+  opacity: 1;
+  color: var(--ink);
+}
+
+/* คำอธิบายใต้ตัวเลือก — ดำ แต่เล็กกว่าและบางกว่าเพื่อยังแยกลำดับออก */
+.radio-row small,
+.check-row small,
+.note {
+  font-size: 12.5px;
+  font-variation-settings: "opsz" 17, "wght" 400;
+}
+
+/* หัวข้อย่อย — ดำและหนา ให้เด่นด้วยน้ำหนักแทนสี */
+.mini-title,
+.area-subtitle {
+  color: var(--ink);
+  opacity: 1;
+  font-variation-settings: "opsz" 17, "wght" 700;
+}
+
+/* ป้ายสถานะ — พื้นจางได้ แต่ตัวหนังสือต้องดำ ยกเว้นสีที่สื่อความหมายจริง */
+.approval-badge { opacity: 1; color: var(--ink); }
+.approval-badge.approved { color: #1d7a37; }   /* เขียวเข้มพอให้อ่านออกบนพื้นจาง */
+.approval-badge.rejected { color: #c02a20; }   /* แดงเข้ม */
+
+/* ช่องกรอกที่ยังไม่พิมพ์ — ต้องเห็นชัดว่าเขียนอะไรได้ ไม่ใช่จางจนหาไม่เจอ */
+input::placeholder, textarea::placeholder {
+  color: var(--ink-3);
+  opacity: 1;
+}
+
+/* สถานะ "ปิดใช้งาน" ยังต้องจางเพื่อสื่อความหมาย แต่ไม่จางจนอ่านไม่ออก */
+button:disabled { opacity: 0.5; }
+.model-list label.disabled { opacity: 0.55; }
+.device-row.revoked { opacity: 0.7; }
+
+/* ป้ายบนจอมือถือ — พื้นทึบขึ้นเพื่อให้ตัวดำอ่านออกทับภาพได้ */
+.phone-hint {
+  background: rgba(255, 255, 255, 0.94);
+  font-size: 11.5px;
+}

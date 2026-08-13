@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pipeline Studio</title>
+    <link rel="stylesheet" href="/static/styles.css?v=60" />
+  </head>
+  <body>
+    <header class="topbar">
+      <strong>Pipeline Studio</strong>
+      <span class="topbar-note">เจนคลิปสินค้า → ตัดต่อ → โพสต์</span>
+      <button id="openSettings" class="gear-button" type="button" aria-label="ตั้งค่า">⚙</button>
+    </header>
+
+    <main class="layout">
+      <!-- (A) ซ้าย: Device no. + จอมือถือ -->
+      <section class="phone-panel">
+        <div class="device-row">
+          <label for="deviceSelect">Device no.</label>
+          <select id="deviceSelect"><option value="">กำลังค้นหา…</option></select>
+          <button id="renameDevice" class="ghost" type="button" title="ตั้งชื่อเครื่องนี้">✎</button>
+          <button id="refreshDevices" class="ghost" type="button">รีเฟรช</button>
+        </div>
+        <div id="phoneViewer" class="phone-viewer">
+          <canvas id="phoneCanvas" hidden></canvas>
+          <img id="phoneScreen" alt="หน้าจอมือถือ" hidden />
+          <div id="phonePlaceholder" class="phone-placeholder">
+            เลือกมือถือแล้วกด “เริ่มดูจอ”
+          </div>
+          <span id="phoneHint" class="phone-hint" hidden>คลิกเพื่อแตะ · กดค้างได้ · ลากเพื่อปัด</span>
+        </div>
+        <div class="phone-actions">
+          <button id="startScreen" class="primary" type="button" disabled>เริ่มดูจอ</button>
+          <button id="stopScreen" class="ghost" type="button" disabled>หยุด</button>
+          <span id="phoneNote" class="note" aria-live="polite"></span>
+        </div>
+
+        <div class="key-grid" role="group" aria-label="ปุ่มควบคุมมือถือ">
+          <button type="button" data-key="BACK">← ย้อนกลับ</button>
+          <button type="button" data-key="HOME">● หน้าหลัก</button>
+          <button type="button" data-key="RECENTS">▣ แอปล่าสุด</button>
+          <button type="button" data-key="POWER">⏻ เปิด/ปิดจอ</button>
+          <button type="button" data-key="VOLUME_DOWN">− เสียง</button>
+          <button type="button" data-key="VOLUME_UP">＋ เสียง</button>
+        </div>
+        <div class="inline-row">
+          <input id="phoneText" type="text" maxlength="500" placeholder="พิมพ์ข้อความลงมือถือ (ไทยได้)" />
+          <button id="sendPhoneText" class="ghost" type="button">ส่ง</button>
+          <button id="restoreKeyboard" class="ghost" type="button"
+                  title="ปิด ADBKeyboard กลับไปใช้คีย์บอร์ดปกติของมือถือ">คืนคีย์บอร์ด</button>
+        </div>
+
+        <details class="block">
+          <summary>ลิงก์ คอม ↔ มือถือ</summary>
+          <div class="block-body">
+            <strong class="mini-title">คอม → มือถือ</strong>
+            <div class="inline-row">
+              <input id="toPhoneText" type="text" placeholder="วางลิงก์/ข้อความที่จะส่งไปมือถือ" />
+            </div>
+            <div class="inline-row">
+              <button id="toPhoneCopy" class="ghost" type="button">คัดลอกเข้าคลิปบอร์ดมือถือ</button>
+              <button id="toPhonePaste" class="primary" type="button">วางลงช่องเลย</button>
+            </div>
+
+            <strong class="mini-title">มือถือ → คอม</strong>
+            <div class="inline-row">
+              <button id="bridgeOpen" class="primary" type="button">เปิดหน้าส่งลิงก์บนมือถือ</button>
+              <button id="linksRefresh" class="ghost" type="button">รีเฟรช</button>
+              <button id="linksClear" class="ghost danger" type="button">ล้าง</button>
+            </div>
+            <ul id="linkInbox" class="link-inbox"></ul>
+            <p id="linkNote" class="note" aria-live="polite"></p>
+          </div>
+        </details>
+
+        <details class="block">
+          <summary>ส่งคลิปเข้ามือถือแล้วเปิดแอปโพสต์</summary>
+          <div class="block-body">
+            <div class="inline-row">
+              <input id="clipFile" type="file" accept=".mp4,.mov,.webm,.mkv" />
+            </div>
+            <div class="inline-row">
+              <button id="clipPush" class="ghost" type="button">ส่งคลิปเข้ามือถือ</button>
+              <select id="clipTarget" aria-label="แอปปลายทาง"></select>
+              <button id="clipLaunch" class="primary" type="button" disabled>เปิดแอปพร้อมคลิป</button>
+            </div>
+            <div class="inline-row">
+              <button id="clipDelete" class="ghost danger" type="button" disabled>ลบคลิปออกจากมือถือ</button>
+            </div>
+            <p id="clipNote" class="note" aria-live="polite"></p>
+          </div>
+        </details>
+
+        <details class="block">
+          <summary>เชื่อมต่อผ่าน Wi-Fi</summary>
+          <div class="block-body">
+            <p class="note">
+              บนมือถือ: ตั้งค่า → Developer options → Wireless debugging →
+              Pair device with pairing code (พอร์ตตอนจับคู่กับตอนเชื่อมต่อ<strong>คนละตัว</strong>)
+            </p>
+            <div class="inline-row">
+              <input id="pairEndpoint" type="text" placeholder="IP:พอร์ตจับคู่ เช่น 192.168.1.20:37123" />
+              <input id="pairCode" type="text" inputmode="numeric" maxlength="6" placeholder="รหัส 6 หลัก" class="short" />
+              <button id="wifiPair" class="ghost" type="button">จับคู่</button>
+            </div>
+            <div class="inline-row">
+              <input id="connectEndpoint" type="text" placeholder="IP:พอร์ตเชื่อมต่อ เช่น 192.168.1.20:42175" />
+              <button id="wifiConnect" class="primary" type="button">เชื่อมต่อ</button>
+              <button id="wifiDisconnect" class="ghost danger" type="button">ยกเลิก Wi-Fi</button>
+            </div>
+            <p id="wifiNote" class="note" aria-live="polite"></p>
+          </div>
+        </details>
+      </section>
+
+      <!-- (B)(C) ขวา: แท็บ Process เปิดทีละอัน พื้นที่ใครพื้นที่มัน -->
+      <section class="process-panel">
+        <nav class="tab-bar" role="tablist">
+          <button class="tab active" data-tab="input" role="tab">① Input</button>
+          <button class="tab" data-tab="process" role="tab">② Process</button>
+          <button class="tab" data-tab="release" role="tab">③ Release</button>
+          <button class="tab" data-tab="publish" role="tab">💰 Publish</button>
+          <button class="tab" data-tab="story" role="tab">🎬 สตอรีบอร์ด</button>
+        </nav>
+
+        <!-- ================================================== ① Input -->
+        <div id="tab-input" class="tab-area">
+          <details class="block" open>
+            <summary>① สินค้าหลายรายการ (จาก Excel)</summary>
+            <div class="block-body">
+              <label class="radio-row">
+                <input type="radio" name="excelSource" value="file" />
+                Excel file
+                <small>รีเช็คไฟล์เดิม — แถวใหม่ถูกเพิ่มเข้า list ให้เอง</small>
+              </label>
+              <div class="inline-row">
+                <input id="excelPath" type="text" placeholder="C:\path\to\products.xlsx" />
+                <button id="excelBrowse" class="ghost" type="button">เลือกไฟล์…</button>
+              </div>
+              <label class="radio-row">
+                <input type="radio" name="excelSource" value="online" />
+                Excel sheet online
+                <small>วางลิงก์ Google Sheet — กดตรวจเมื่อมีรายการใหม่</small>
+              </label>
+              <input id="excelUrl" type="text" placeholder="https://docs.google.com/spreadsheets/…" />
+              <div class="inline-row">
+                <label>ทำวนซ้ำ
+                  <input id="loopRounds" type="number" min="1" max="999" value="1" /> รอบ
+                </label>
+                <button id="excelSave" class="ghost" type="button">บันทึก</button>
+                <button id="excelScan" class="primary" type="button">สแกนรายการ</button>
+              </div>
+              <p id="productCount" class="note"></p>
+            </div>
+          </details>
+
+          <details class="block" open>
+            <summary>ดึงข้อมูลจากลิงก์ Shopee</summary>
+            <div class="block-body">
+              <p class="note">
+                วางลิงก์สินค้า (ลิงก์สั้น s.shopee.co.th ก็ได้) ระบบจะดึง
+                ชื่อสินค้า · รายละเอียด · รูปทั้งหมด มาใส่ช่องด้านล่างให้เอง
+              </p>
+              <div class="inline-row">
+                <input id="shopeeLink" type="text" placeholder="https://s.shopee.co.th/…" />
+                <button id="shopeeFetch" class="primary" type="button">ดึงข้อมูล</button>
+              </div>
+              <label class="check-row">
+                <input id="shopeeAllImages" type="checkbox" />
+                เอารูปทั้งหมด <small>(ปกติเอาแค่ภาพรวม 1 ใบ + ตัวเลือกสีละ 1 ใบ)</small>
+              </label>
+              <div id="shopeeResult" hidden>
+                <strong id="shopeeName" class="mini-title"></strong>
+                <div id="shopeeGallery" class="shopee-gallery"></div>
+                <strong class="mini-title">
+                  จุดขาย 3 ข้อ
+                  <span id="approvalBadge" class="approval-badge" hidden></span>
+                </strong>
+                <ol id="shopeeHighlights" class="highlight-list"></ol>
+                <div id="approvalActions" class="inline-row" hidden>
+                  <button id="approveWeb" class="primary" type="button">อนุมัติ</button>
+                  <button id="rejectWeb" class="ghost danger" type="button">ไม่เอา</button>
+                </div>
+                <details>
+                  <summary class="note">รายละเอียดเต็ม</summary>
+                  <textarea id="shopeeDetail" rows="5" placeholder="รายละเอียดสินค้า"></textarea>
+                </details>
+                <div class="inline-row">
+                  <button id="shopeeUse" class="ghost" type="button">ใส่ลงช่องสินค้าเดียว</button>
+                  <span id="shopeeFolder" class="note"></span>
+                </div>
+              </div>
+              <p id="shopeeNote" class="note" aria-live="polite"></p>
+            </div>
+          </details>
+
+          <details class="block">
+            <summary>② สินค้าเดียวลองเทส</summary>
+            <div class="block-body">
+              <div class="single-grid">
+                <label class="image-drop" for="singleImage">
+                  <img id="singleThumb" alt="" hidden />
+                  <span id="singlePlus">＋</span>
+                  <input id="singleImage" type="file" accept=".jpg,.jpeg,.png,.webp" hidden />
+                </label>
+                <div class="single-fields">
+                  <input id="singleName" type="text" placeholder="ชื่อสินค้า" />
+                  <textarea id="singleDetail" rows="3" placeholder="รายละเอียด"></textarea>
+                </div>
+              </div>
+              <label class="check-row">
+                <input id="stripText" type="checkbox" />
+                รูปสินค้ามีตัวอักษร — ให้ลบตัวอักษรออกเหลือแต่รูป
+              </label>
+              <button id="singleSave" class="primary" type="button">บันทึกสินค้าเดียว</button>
+            </div>
+          </details>
+
+          <details class="block">
+            <summary>GEMS</summary>
+            <div class="block-body">
+              <div class="inline-row">
+                <select id="gemsSelect"><option value="">— ยังไม่มี GEMS —</option></select>
+                <button id="gemsProbe" class="ghost" type="button" title="test 1 รอบ เพื่อรู้ความยาว/จำนวนฉาก">test</button>
+                <button id="gemsDelete" class="ghost danger" type="button">ลบ</button>
+              </div>
+              <p id="gemsProbeNote" class="note"></p>
+              <div class="inline-row">
+                <input id="gemsLink" type="text" placeholder="Link GEMS (https://gemini.google.com/gem/…)" />
+                <input id="gemsName" type="text" placeholder="ชื่อ" class="short" />
+                <button id="gemsAdd" class="primary" type="button">＋ เพิ่ม</button>
+              </div>
+            </div>
+          </details>
+
+          <div class="log-box">
+            <div class="log-head">Log</div>
+            <pre id="log-input" aria-live="polite"></pre>
+          </div>
+        </div>
+
+        <!-- ================================================ ② Process -->
+        <div id="tab-process" class="tab-area" hidden>
+          <div class="stage-flow">
+            <div class="stage" data-stage="gems">
+              <h3>GEMS</h3>
+              <p>ดึงชื่อ รายละเอียด รูป ส่งเข้า GEMS → get prompt</p>
+              <pre id="log-gems"></pre>
+            </div>
+            <div class="stage" data-stage="gen_pic">
+              <h3>GEN PIC</h3>
+              <p>Picture prompt + ค่าตั้ง → เจนรูปตาม Scene</p>
+              <pre id="log-gen_pic"></pre>
+            </div>
+            <div class="stage" data-stage="gen_video">
+              <h3>GEN VIDEO</h3>
+              <p>รูปตาม Scene + video prompt + บทพูด → เจนคลิป</p>
+              <pre id="log-gen_video"></pre>
+            </div>
+            <div class="stage" data-stage="judge">
+              <h3>Judge</h3>
+              <p>Claude ตรวจ: ไม่มีตัวอักษรเพี้ยน · ภาพไม่ดูเป็น AI</p>
+              <pre id="log-judge"></pre>
+            </div>
+          </div>
+          <p class="note">
+            เริ่มรันทั้งสายจากหน้านี้ในรุ่นถัดไป — ตอนนี้เจนผ่าน
+            <code>python flow_worker.py add … / run</code> แล้ว log ขึ้นที่นี่
+          </p>
+        </div>
+
+        <!-- ================================================ ③ Release -->
+        <div id="tab-release" class="tab-area" hidden>
+          <h3 class="area-title">Cutting</h3>
+          <div id="clipStrip" class="clip-strip"></div>
+          <label class="check-row">
+            <input id="trimSilence" type="checkbox" checked /> ตัดช่วงเงียบ
+          </label>
+          <label class="check-row">
+            ใส่คำบรรยาย
+            <select id="subtitleMode">
+              <option value="none">ไม่ใส่</option>
+              <option value="thai">ไทย</option>
+              <option value="thai_english">ไทย + อังกฤษ</option>
+            </select>
+            <small>ตัวอย่าง: <span id="subtitleSample">—</span></small>
+          </label>
+          <label class="check-row">
+            <input id="headlineAi" type="checkbox" /> ใส่คำพาดหัวคลิปด้วย AI
+          </label>
+          <label class="check-row">
+            ใส่คำพาดหัวเอง
+            <input id="headlineText" type="text" placeholder="เว้นว่าง = ไม่ใส่" />
+          </label>
+          <button id="releaseSave" class="primary" type="button">บันทึกตัวเลือก</button>
+          <h3 class="area-title">Judgement</h3>
+          <p class="note">ผลตรวจของ Claude จะสรุปที่นี่หลังรัน Judge</p>
+          <div class="log-box">
+            <div class="log-head">Log</div>
+            <pre id="log-release"></pre>
+          </div>
+        </div>
+
+        <!-- ================================================ 💰 Publish -->
+        <div id="tab-publish" class="tab-area" hidden>
+          <!-- ---------------- ผังการโพสต์วิดีโอ — เทรนเองแยกต่อปลายทาง -->
+          <h3 class="area-title">ผังการกดโพสต์วิดีโอ</h3>
+          <div class="inline-row">
+            <select id="pfTarget">
+              <option value="shopee_video">Shopee Video</option>
+              <option value="facebook_reels">Facebook Reels</option>
+            </select>
+            <button id="pfRun" class="primary" type="button">▶▶ รันทั้งผัง</button>
+            <button id="pfAdd" class="ghost" type="button">＋ เพิ่มขั้น</button>
+            <button id="pfReset" class="ghost" type="button">คืนผังเดิม</button>
+          </div>
+          <ol id="pfList" class="publish-list"></ol>
+          <p id="pfNote" class="note">
+            กด <b>เทรน</b> แล้วคลิกจุดบนจอมือถือด้านซ้าย ·
+            กด <b>▶</b> เพื่อทดลองทีละขั้น · ทุกขั้นระบบจะตรวจว่าทำสำเร็จจริงก่อนไปต่อ
+          </p>
+
+          <!-- ---------------- แฮชแท็ก: สร้างจากข้อมูลสินค้า แก้ได้ก่อนใช้ -->
+          <h3 class="area-title">แฮชแท็กของสินค้า</h3>
+          <div class="inline-row">
+            <select id="pfItem"></select>
+            <button id="pfTagBuild" class="ghost" type="button">🔄 ให้ AI สกัดใหม่</button>
+          </div>
+          <div class="inline-row">
+            <input id="pfBrand" type="text" placeholder="ยี่ห้อ" autocomplete="off" />
+            <input id="pfKind" type="text" placeholder="ชนิดสินค้า" autocomplete="off" />
+          </div>
+          <div class="inline-row">
+            <input id="pfDetail1" type="text" placeholder="รายละเอียด 1" autocomplete="off" />
+            <input id="pfDetail2" type="text" placeholder="รายละเอียด 2" autocomplete="off" />
+            <input id="pfDetail3" type="text" placeholder="รายละเอียด 3" autocomplete="off" />
+            <button id="pfTagSave" class="primary" type="button">บันทึก</button>
+          </div>
+          <p id="pfTags" class="note"></p>
+          <p class="note">
+            ตอนโพสต์ระบบจะพิมพ์ทีละแท็ก อ่านยอดพูดถึงที่แอปโชว์
+            แล้ว <b>เก็บเฉพาะตัวที่มากกว่า 10,000</b> ตัวที่ไม่ถึงจะลบทิ้งแล้วรายงานให้ดู
+          </p>
+
+          <!-- ตัวเทรนแบบเดิม 6 ขั้น — ยุบเก็บไว้ ไม่ลบ เพราะ app.js ผูก id ชุดนี้อยู่ -->
+          <details class="block">
+            <summary>ตัวเทรนแบบเดิม (6 ขั้น)</summary>
+            <label class="check-row">
+              <input id="publishReels" type="checkbox" checked />
+              โพสต์ลง Facebook Reels
+            </label>
+            <ol id="publishList" class="publish-list"></ol>
+            <div class="inline-row">
+              <button id="publishAdd" class="ghost" type="button">＋ เพิ่มขั้น</button>
+              <button id="publishSave" class="primary" type="button">บันทึก</button>
+            </div>
+            <p id="publishNote" class="note">
+              ขั้นชนิด “เทรนตำแหน่ง” — กด TR แล้วคลิกจุดบนจอมือถือด้านซ้าย
+            </p>
+          </details>
+
+          <!-- ---------------- โพสต์ลงกลุ่ม Facebook อัตโนมัติ (งานมาจาก Telegram) -->
+          <h3 class="area-title">โพสต์ลงกลุ่ม Facebook — ส่งงานผ่าน Telegram</h3>
+          <p class="note">
+            ส่ง <b>รูป + แคปชัน</b> เข้าบอทในแอป Telegram → บอทตอบการ์ดให้ติ๊กกลุ่ม → กด 🚀
+            (วางลิงก์กลุ่มในแชทก็เพิ่มกลุ่มได้)
+          </p>
+
+          <ul id="fbGroupList" class="fb-list"></ul>
+          <div class="inline-row">
+            <input id="fbGroupLink" type="text"
+                   placeholder="วางลิงก์กลุ่ม — ลิงก์ปุ่มแชร์ในแอปก็ได้" />
+            <input id="fbGroupName" type="text" placeholder="ชื่อกลุ่ม (ไม่ใส่ก็ได้)" />
+            <button id="fbGroupAdd" class="primary" type="button">＋ เพิ่มกลุ่ม</button>
+          </div>
+
+          <div class="inline-row fb-settings">
+            <label>เว้นระยะระหว่างกลุ่ม
+              <input id="fbGapMin" type="number" min="5" max="600" /> –
+              <input id="fbGapMax" type="number" min="5" max="600" /> วินาที
+            </label>
+            <label class="check-row">
+              <input id="fbAutoStart" type="checkbox" />
+              ครบแล้วโพสต์เลย (ไม่ต้องกดยืนยันในแชท)
+            </label>
+            <button id="fbSettingsSave" class="ghost" type="button">บันทึกค่า</button>
+          </div>
+
+          <h4 class="area-subtitle">งานที่รับมา</h4>
+          <div id="fbJobs" class="fb-jobs"></div>
+          <p id="fbNote" class="note"></p>
+
+          <div class="log-box">
+            <div class="log-head">Log</div>
+            <pre id="log-publish"></pre>
+          </div>
+        </div>
+
+        <!-- ============================================= 🎬 สตอรีบอร์ด -->
+        <div id="tab-story" class="tab-area" hidden>
+          <div class="inline-row">
+            <h3 class="area-title">สายเจนคลิป</h3>
+            <label class="switch-line" title="ปิดไว้ = หยุดที่สตอรีบอร์ด ไม่เผาเครดิต Flow">
+              <input id="storyFlowOn" type="checkbox" /> เจนคลิปต่อใน Google Flow
+            </label>
+            <button id="storyRefresh" class="ghost" type="button">↻ โหลดใหม่</button>
+          </div>
+          <p class="note">
+            วางลิงก์ที่นี่ หรือส่งเข้าบอท <b>@ClipAiABot</b> ก็ได้ — ทำงานร่วมคิวเดียวกัน
+            กดอนุมัติทางไหนก็มีผลทั้งสองทาง
+          </p>
+
+          <div class="story-add">
+            <textarea id="storyLinks" rows="2"
+              placeholder="วางลิงก์ Shopee หรือ TikTok — วางหลายลิงก์รวดเดียวได้ ระบบต่อคิวให้เอง"></textarea>
+            <button id="storyQueueAdd" class="primary" type="button">➕ เข้าคิว</button>
+          </div>
+          <p id="storyAddNote" class="note" aria-live="polite"></p>
+
+          <div class="story-layout">
+            <div class="story-side">
+              <h4 class="area-subtitle">คิวงาน <span id="storyQueueCount" class="pill"></span></h4>
+              <ul id="storyQueueList" class="story-queue"></ul>
+              <h4 class="area-subtitle">งานที่เก็บไว้</h4>
+              <ul id="storyList" class="story-list"></ul>
+            </div>
+            <div id="storyDetail" class="story-detail">
+              <p class="note">เลือกงานทางซ้าย — งานที่รอตรวจจะมีปุ่มอนุมัติ/สั่งแก้ให้ตรงนี้</p>
+            </div>
+          </div>
+          <p id="storyNote" class="note"></p>
+        </div>
+      </section>
+    </main>
+
+    <!-- (D) ตั้งค่า — เหลือแค่หัวข้อ กดแล้วค่อยกางรายละเอียด -->
+    <dialog id="settingsDialog">
+      <h2>ตั้งค่า</h2>
+
+      <details class="block">
+        <summary>Gemini API <span id="geminiStatus" class="status-dot" title="สถานะ"></span></summary>
+        <div class="block-body">
+          <div class="inline-row">
+            <input id="geminiKey" type="password" autocomplete="new-password" placeholder="วาง API Key แล้วกดบันทึก" />
+            <button id="geminiSave" class="primary" type="button">บันทึก</button>
+            <button id="geminiClear" class="ghost danger" type="button">clear</button>
+          </div>
+          <p id="geminiNote" class="note"></p>
+        </div>
+      </details>
+
+      <details class="block">
+        <summary>Claude API <span id="claudeStatus" class="status-dot"></span></summary>
+        <div class="block-body">
+          <p class="note">ใช้เป็นตัวตัดสิน (Judge)</p>
+          <div class="inline-row">
+            <input id="claudeKey" type="password" autocomplete="new-password" placeholder="sk-ant-…" />
+            <button id="claudeSave" class="primary" type="button">บันทึก</button>
+            <button id="claudeClear" class="ghost danger" type="button">clear</button>
+          </div>
+          <p id="claudeNote" class="note"></p>
+        </div>
+      </details>
+
+      <details class="block">
+        <summary>Video setting</summary>
+        <div class="block-body">
+        <div class="mode-blocks">
+          <label class="mode-block">
+            <input type="radio" name="videoMode" value="frame" />
+            <strong>Frame</strong>
+            <span class="frame-pick">
+              <label><input type="radio" name="frameRatio" value="9:16" /> 9:16</label>
+              <label><input type="radio" name="frameRatio" value="16:9" /> 16:9</label>
+            </span>
+          </label>
+          <label class="mode-block">
+            <input type="radio" name="videoMode" value="common" />
+            <strong>Common ingredients</strong>
+            <small>จำกัดโมเดลเหลือ Veo 3.1-Lite (Lower) กับ Omni Flash</small>
+          </label>
+        </div>
+        <div id="modelList" class="model-list"></div>
+        <div id="durationRow" class="duration-row" hidden>
+          เวลา (เฉพาะ Omni Flash):
+          <label><input type="radio" name="omniDur" value="4" /> 4s</label>
+          <label><input type="radio" name="omniDur" value="6" /> 6s</label>
+          <label><input type="radio" name="omniDur" value="8" /> 8s</label>
+          <label><input type="radio" name="omniDur" value="10" /> 10s</label>
+        </div>
+
+        <strong class="mini-title">Picture (Image model)</strong>
+        <div class="inline-row">
+          <select id="imageModel">
+            <option value="nano_banana_2">Nano banana 2</option>
+            <option value="nano_banana_pro">Nano banana pro</option>
+          </select>
+        </div>
+        </div>
+      </details>
+
+      <details class="block">
+        <summary>เปิดจากมือถือ</summary>
+        <div class="block-body">
+          <p class="note">
+            ให้มือถืออยู่ Wi-Fi วงเดียวกับคอม แล้วสแกน QR หรือพิมพ์ลิงก์นี้
+            จากนั้นกด “อนุญาต” ที่รายชื่อด้านล่าง
+          </p>
+          <div class="mobile-access">
+            <img id="mobileQr" alt="QR สำหรับเปิดบนมือถือ" hidden />
+            <div class="mobile-access-info">
+              <code id="mobileUrl">—</code>
+              <button id="copyMobileUrl" class="ghost" type="button">คัดลอกลิงก์</button>
+            </div>
+          </div>
+          <div class="inline-row">
+            <button id="devicesRefresh" class="ghost" type="button">รีเฟรชรายชื่อ</button>
+            <button id="devicesPurge" class="ghost danger" type="button">ล้างที่ถูกถอนสิทธิ์</button>
+          </div>
+          <ul id="deviceList" class="device-list"></ul>
+          <p id="deviceNote" class="note" aria-live="polite"></p>
+        </div>
+      </details>
+
+      <details class="block">
+        <summary>Telegram chat <span id="telegramDot" class="status-dot"></span></summary>
+        <div class="block-body">
+          <strong class="mini-title">บอทที่เชื่อมต่อทั้งหมด</strong>
+          <div class="inline-row">
+            <select id="botOverview" aria-label="บอทที่เชื่อมต่อทั้งหมด">
+              <option value="">— ยังไม่มีบอทเชื่อมต่อ —</option>
+            </select>
+          </div>
+
+          <p class="note">
+            สร้างบอทกับ <code>@BotFather</code> → คัดลอกโทเคนมาใส่ → ทัก <code>/start</code>
+            ให้บอทหนึ่งครั้ง ระบบจะหา chat id ให้เอง
+          </p>
+          <p id="mainBotWho" class="bot-who"></p>
+          <div class="inline-row">
+            <input id="telegramToken" type="password" autocomplete="new-password" placeholder="โทเคนบอท (123456:ABC-DEF…)" />
+            <button id="telegramSave" class="primary" type="button">บันทึก</button>
+          </div>
+          <div class="inline-row">
+            <input id="telegramChat" type="text" placeholder="chat id (เว้นว่างให้ระบบหาเอง)" class="short" />
+            <button id="telegramTest" class="ghost" type="button">ส่งข้อความทดสอบ</button>
+            <button id="telegramDelete" class="ghost danger" type="button"
+                    title="เอาบอทออกจากช่องนี้ — ต้องลบก่อนถ้าจะเปลี่ยนเป็นบอทตัวอื่น">🗑 ลบบอทช่องนี้</button>
+          </div>
+          <label class="check-row">
+            <input id="telegramAuto" type="checkbox" checked />
+            ส่งขออนุมัติอัตโนมัติทุกครั้งที่ Gemini คัดจุดขายเสร็จ
+          </label>
+          <p id="telegramNote" class="note" aria-live="polite"></p>
+
+          <h4 class="area-subtitle">บอทเจนคลิป (แยกอีกตัว) <span id="clipBotDot" class="status-dot"></span></h4>
+          <p class="note">
+            ตั้งไว้แล้วงานอนุมัติ <b>จุดขาย + คลิป</b> จะไปเข้าบอทนี้แทน
+            ส่วนบอทข้างบนเหลือไว้รับงานโพสต์ Facebook — ไม่ตั้งก็ใช้บอทเดียวเหมือนเดิม
+          </p>
+          <p id="clipBotWho" class="bot-who"></p>
+          <div class="inline-row">
+            <input id="clipBotToken" type="password" autocomplete="new-password" placeholder="โทเคนบอทเจนคลิป" />
+            <button id="clipBotSave" class="primary" type="button">บันทึก</button>
+          </div>
+          <div class="inline-row">
+            <input id="clipBotChat" type="text" placeholder="chat id (เว้นว่างให้ระบบหาเอง)" class="short" />
+            <button id="clipBotTest" class="ghost" type="button">ส่งข้อความทดสอบ</button>
+            <button id="clipBotDelete" class="ghost danger" type="button"
+                    title="เอาบอทออกจากช่องนี้ — ต้องลบก่อนถ้าจะเปลี่ยนเป็นบอทตัวอื่น">🗑 ลบบอทช่องนี้</button>
+          </div>
+          <p id="clipBotNote" class="note" aria-live="polite"></p>
+
+          <h4 class="area-subtitle">บอทเพิ่มเติม (ใส่ได้หลายตัว)</h4>
+          <p class="note">
+            เพิ่มบอทกี่ตัวก็ได้ แต่ละตัวเลือกหน้าที่เองว่า <b>รับงานโพสต์</b> หรือ <b>สายเจนคลิป</b>
+            — บอทหลักมีปัญหาเมื่อไร ตัวที่เหลือรับงานแทนได้ทันที
+          </p>
+          <ul id="botList" class="fb-list"></ul>
+          <div class="inline-row">
+            <input id="botName" type="text" placeholder="ชื่อเรียก (เว้นว่างได้)" class="short" />
+            <select id="botRole" aria-label="หน้าที่ของบอท">
+              <option value="facebook">รับงานโพสต์ Facebook</option>
+              <option value="clip">สายเจนคลิป</option>
+            </select>
+          </div>
+          <div class="inline-row">
+            <input id="botToken" type="password" autocomplete="new-password" placeholder="วางโทเคนจาก @BotFather" />
+            <button id="botAdd" class="primary" type="button">＋ เพิ่มบอท</button>
+          </div>
+          <p id="botNote" class="note" aria-live="polite"></p>
+        </div>
+      </details>
+
+      <details class="block">
+        <summary>Bot profiles (Chrome) <span id="farmDot" class="status-dot"></span></summary>
+        <div class="block-body">
+          <p class="note">
+            คัดลอก Chrome profile ออกมาเป็นโปรไฟล์บอทแยก — รันขนานกันได้
+            ล็อกอิน/คุกกี้ติดมาด้วย กด <b>เปิดล็อกอิน</b> เพื่อเปิด Chrome ของบอท
+            แล้วล็อกอินเว็บต่างๆ ทิ้งไว้เองได้เลย
+          </p>
+          <p class="note">
+            ติ๊ก <b>รีเฟรชก่อนเปิด</b> = ทุกครั้งที่เปิด จะดึงล็อกอินล่าสุดจาก Chrome จริง
+            มาทับก่อน (โปรไฟล์ต้นทางต้องไม่เปิดค้างอยู่) — <b>ปิดติ๊ก</b> ถ้าจะใช้โปรไฟล์นี้
+            เก็บล็อกอินที่กดเองทิ้งไว้ ไม่งั้น refresh จะทับของที่กดเอง
+          </p>
+
+          <div class="inline-row">
+            <label>รันพร้อมกันสูงสุด
+              <input id="farmMax" type="number" min="1" max="20" value="3" class="short" />
+            </label>
+            <button id="farmMaxSave" class="ghost" type="button">บันทึกเพดาน</button>
+            <span id="farmRunning" class="note"></span>
+          </div>
+
+          <ul id="farmList" class="fb-list"></ul>
+
+          <strong class="mini-title">นำเข้าโปรไฟล์จาก Chrome</strong>
+          <p id="farmChromeWarn" class="note" hidden>
+            ℹ Chrome เปิดอยู่ — นำเข้าได้ตามปกติ ยกเว้น<b>โปรไฟล์ที่กำลังเปิดดูอยู่</b>
+            (Cookies ถูกล็อก) ถ้าเจอว่านำเข้าไม่ได้ ให้ปิดหน้าต่างของโปรไฟล์นั้นก่อน
+          </p>
+          <div class="inline-row">
+            <select id="farmSource" aria-label="เลือกโปรไฟล์ Chrome ต้นทาง"></select>
+            <input id="farmName" type="text" placeholder="ชื่อเรียก (เว้นว่าง = ใช้ชื่อเดิม)" class="short" />
+            <button id="farmImport" class="primary" type="button">＋ นำเข้า</button>
+          </div>
+          <p id="farmSourceHint" class="note"></p>
+          <p id="farmNote" class="note" aria-live="polite"></p>
+        </div>
+      </details>
+
+      <div class="inline-row dialog-actions">
+        <button id="settingsSave" class="primary" type="button">บันทึกตั้งค่า</button>
+        <button id="settingsClose" class="ghost" type="button">ปิด</button>
+      </div>
+      <p id="settingsNote" class="note" aria-live="polite"></p>
+    </dialog>
+
+    <script src="/static/app.js?v=60"></script>
+  </body>
+</html>

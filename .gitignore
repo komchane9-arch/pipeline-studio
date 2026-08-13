@@ -1,0 +1,37 @@
+# ───────────────────────────────────────────────────────────────
+# data/ ทั้งก้อน — ห้ามเข้า repo เด็ดขาด
+#   • คีย์/โทเคนเข้ารหัส (gemini, claude, telegram) = ความลับ
+#   • โปรไฟล์เบราว์เซอร์ 1.4 GB (bot_profiles + flow_browser_profile)
+#     มีคุกกี้ล็อกอิน Google/Facebook อยู่ข้างใน
+#   • สถานะงาน/คิว/log ที่เปลี่ยนตลอดเวลา — commit แล้วชนกันทุกครั้ง
+# ───────────────────────────────────────────────────────────────
+data/
+data-test/
+data-*/
+
+# ไฟล์ลับที่อาจหลุดมาอยู่นอก data/
+*.bin
+*.key
+*.pem
+cookies.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ของชั่วคราว/ผลลัพธ์
+*.log
+*.tmp
+~$*
+downloads/
+output/
+temp/
+
+# Windows / เครื่องมือ
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

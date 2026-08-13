@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ส่งลิงก์เข้าคอม</title>
+    <link rel="stylesheet" href="/static/styles.css?v=15" />
+    <style>
+      /* หน้านี้เปิดบนมือถือ — ปุ่มต้องใหญ่พอกดด้วยนิ้ว */
+      body { padding: 16px; }
+      .send-card { max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+      .send-card h1 { font-size: 20px; margin: 0; }
+      .send-card textarea { width: 100%; min-height: 120px; font-size: 16px; }
+      .send-card button { padding: 14px; font-size: 16px; border-radius: 10px; }
+      .sent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+      .sent-list li {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12px;
+        word-break: break-all;
+      }
+      .sent-list .tag { color: var(--accent); margin-right: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="send-card">
+      <h1>ส่งลิงก์เข้าคอม</h1>
+      <p class="note">
+        แชร์ลิงก์จากแอป → เลือกเบราว์เซอร์ → วางในช่องนี้ → กดส่ง
+        ลิงก์จะไปโผล่ในหน้า Pipeline Studio บนคอมทันที
+      </p>
+
+      <textarea id="linkText" placeholder="วางลิงก์ที่นี่ (วางทั้งข้อความแชร์ได้เลย ระบบจะดึงเฉพาะลิงก์)"></textarea>
+      <button id="pasteButton" class="ghost" type="button">วางจากคลิปบอร์ด</button>
+      <button id="sendButton" class="primary" type="button">ส่งเข้าคอม</button>
+      <p id="sendNote" class="note" aria-live="polite"></p>
+
+      <h2 style="font-size: 14px; margin: 8px 0 0">ส่งไปแล้ว</h2>
+      <ul id="sentList" class="sent-list"></ul>
+      <button id="clearButton" class="ghost danger" type="button">ล้างรายการทั้งหมด</button>
+    </div>
+
+    <script src="/static/send-link.js?v=15"></script>
+  </body>
+</html>

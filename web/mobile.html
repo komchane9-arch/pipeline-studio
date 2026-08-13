@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pipeline Studio · มือถือ</title>
+    <link rel="stylesheet" href="/static/styles.css?v=15" />
+    <style>
+      body { padding: 16px; }
+      .mobile-card { max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+      .mobile-card h1 { font-size: 20px; margin: 0; }
+      .gate {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px;
+        text-align: center;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .gate .big { font-size: 34px; }
+      .tools { display: flex; flex-direction: column; gap: 10px; }
+      .tools a {
+        display: block;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        text-decoration: none;
+        color: var(--ink);
+        font-size: 16px;
+      }
+      .tools a:active { border-color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div class="mobile-card">
+      <h1>Pipeline Studio</h1>
+
+      <section id="gate" class="gate">
+        <div class="big">⏳</div>
+        <strong id="gateTitle">กำลังตรวจสิทธิ์…</strong>
+        <p id="gateText" class="note">รอสักครู่</p>
+      </section>
+
+      <section id="tools" class="tools" hidden>
+        <a href="/send-link">📎 ส่งลิงก์เข้าคอม</a>
+        <a href="/">🖥 เปิดหน้าจัดการเต็ม</a>
+      </section>
+    </div>
+
+    <script src="/static/mobile.js?v=15"></script>
+  </body>
+</html>

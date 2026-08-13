@@ -49,6 +49,7 @@ from fastapi.staticfiles import StaticFiles
 
 import access_control
 import bot_profiles
+import studio_shared
 import fb_auto_post
 import facebook_group_post
 import qr_code
@@ -303,12 +304,21 @@ def load_config() -> dict:
 
 
 def save_config(config: dict) -> None:
+    """บันทึกตั้งค่า — ต้องล็อก**ข้ามโปรเซส** เพราะ clip_app.py ก็เขียนไฟล์นี้
+
+    ของเดิมกันแค่ `_config_lock` ซึ่งเป็น threading.Lock มองไม่เห็น clip_app.py
+    เลย และทั้งสองฝั่งยังใช้ชื่อไฟล์ชั่วคราว `config.tmp` ชื่อเดียวกันด้วย
+    เขียนพร้อมกันเมื่อไรมีสิทธิ์ได้ไฟล์ที่เขียนค้างครึ่งทางทับของจริง
+
+    ยังเหลือช่องที่แคบลงมากแต่ไม่หมด: หน้าเว็บอ่านค่าไปตอนหนึ่ง ผู้ใช้กดบันทึก
+    ทีหลัง ถ้าระหว่างนั้น clip_app แก้คีย์ของมัน ค่านั้นจะถูกทับ — ปิดสนิทต้อง
+    ให้ทุก endpoint แก้ทีละคีย์ผ่าน update_json ซึ่งเป็นงานคนละก้อน
+    """
     with _config_lock:
-        temporary = CONFIG_FILE.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
+        studio_shared.update_json(
+            CONFIG_FILE, lambda _stored: config, default={},
+            label="บันทึกตั้งค่าจากหน้าเว็บ",
         )
-        temporary.replace(CONFIG_FILE)
 
 
 # ------------------------------------------------------------------- logs

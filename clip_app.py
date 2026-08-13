@@ -74,22 +74,25 @@ clip_watcher = telegram_bot.ApprovalWatcher(
 
 
 def set_config(key: str, value) -> bool:
-    """แก้ค่าเดียวใน config.json
+    """แก้ค่าเดียวใน config.json — อ่าน-แก้-เขียน จบเป็นชิ้นเดียวใต้ล็อกข้ามโปรเซส
 
-    อ่านสดก่อนเขียนทุกครั้ง เพราะอีกโปรเซส (app.py) ก็เขียนไฟล์นี้เหมือนกัน —
-    ลดโอกาสทับค่าที่อีกฝั่งเพิ่งใส่ (ทั้งคู่เขียนนานๆ ครั้ง จึงพอ)
+    ของเดิมอ่านสดแล้วเขียนทับตรงๆ โดยไม่มีล็อก คอมเมนต์เดิมเขียนไว้เองว่าแค่
+    "ลดโอกาส" ทับค่าที่ app.py เพิ่งใส่ — คือรู้ว่ามีช่องแต่ยอมรับไว้ ตอนนี้ปิดแล้ว
+
+    สองอย่างที่เปลี่ยน: (1) ถือล็อกไฟล์ตลอดช่วงอ่านถึงเขียน อีกฝั่งจึงแทรกกลาง
+    ไม่ได้ (2) เขียนแบบ temp+replace อีกฝั่งไม่มีวันอ่านเจอไฟล์ครึ่งๆ ซึ่งเดิม
+    จะทำให้ app.py อ่านไม่ออกแล้วถอยไปใช้ค่าปริยาย = ตั้งค่าผู้ใช้หายทั้งชุด
     """
-    import json
-
-    config = shared.read_config()
-    if config.get(key) == value:
+    if shared.read_config().get(key) == value:
         return True
-    config[key] = value
     try:
-        shared.CONFIG_FILE.write_text(
-            json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
+        shared.update_json(
+            shared.CONFIG_FILE,
+            lambda stored: stored.__setitem__(key, value),
+            default={},
+            label=f"บอทคลิปแก้ {key}",
         )
-    except OSError as error:
+    except (OSError, shared.DataBusy) as error:
         append_log("clip", f"บันทึกตั้งค่า {key} ไม่ได้: {error}")
         return False
     return True

@@ -296,6 +296,117 @@ def who_holds_bot(profile_id: str) -> str:
     return _read_info(_bot_lock_paths(profile_id)[1])
 
 
+# --------------------------------------- ไฟล์ข้อมูลที่สองเซิร์ฟเวอร์เขียนร่วมกัน (ระยะ 2.2)
+
+class DataBusy(RuntimeError):
+    """ไฟล์ข้อมูลนั้นถูกอีกโปรเซสถืออยู่"""
+
+
+def data_lock(name: str, timeout: float = 30.0, poll: float = 0.2, label: str = ""):
+    """ล็อกไฟล์ข้อมูลหนึ่งไฟล์ — ใช้ตอนอ่าน-แก้-เขียน ข้ามโปรเซส
+
+    timeout สั้นมาก (30 วินาที) เพราะงานพวกนี้คือแก้ JSON ไม่กี่ KB หลักมิลลิวินาที
+    รอเกินครึ่งนาทีแปลว่ามีอะไรผิดปกติ ไม่ใช่คิวยาว
+    """
+    key = _lock_key(name)
+    return _resource_lock(
+        LOCK_DIR / f"data-{key}.lock", LOCK_DIR / f"data-{key}.info",
+        timeout=timeout, poll=poll, label=label,
+        busy=DataBusy, what=f"ไฟล์ {name}",
+    )
+
+
+# replace ทับไฟล์ที่คนอื่นเปิดอ่านค้างอยู่จะโดน WinError 5 — ลองซ้ำสั้นๆ พอ
+# (0.02+0.04+... รวมราว 1.3 วินาที ผู้อ่านถือไฟล์แค่ระดับมิลลิวินาที)
+_REPLACE_TRIES = 10
+_REPLACE_WAIT = 0.02
+
+
+def read_json(path: Path, default):
+    """อ่าน JSON แบบไม่ล้ม — ไฟล์ยังไม่มีหรืออ่านไม่ออกก็คืนค่าตั้งต้น
+
+    **ต้องลองซ้ำเมื่อเปิดไฟล์ไม่ได้** ระหว่างที่อีกโปรเซส replace ไฟล์ทับ จะมีช่วง
+    สั้นๆ ที่เปิดไฟล์ปลายทางไม่ได้เลย (Windows ล็อกชื่อไฟล์ตอน rename) วัดจากของจริง:
+    อ่าน 404,074 ครั้งระหว่างอีกฝั่งเขียนรัวๆ **ไม่มีไฟล์เสียสักครั้ง** แต่เปิดไม่ได้
+    ชั่วขณะ 435 ครั้ง (0.108%)
+
+    ถ้าคืนค่าตั้งต้นทันทีตอนนั้น จะกลายเป็นเรื่องใหญ่: `load_config` จะได้ {} แล้ว
+    ถอยไปใช้ค่าปริยายทั้งชุด ผู้ใช้เห็นตั้งค่าตัวเองหายไปเฉยๆ และถ้ากดบันทึกต่อ
+    ค่าจริงจะถูกทับหายถาวร — ล้มเงียบแบบที่แพงที่สุด
+    """
+    for attempt in range(_REPLACE_TRIES):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return default                       # ยังไม่เคยมีไฟล์ = ค่าตั้งต้นจริงๆ
+        except OSError:                          # อีกฝั่งกำลัง replace อยู่ รอแป๊บ
+            time.sleep(_REPLACE_WAIT * (attempt + 1))
+        except ValueError:                       # ไฟล์เสียจริง (ไม่ควรเกิดหลังเขียน atomic)
+            return default
+    return default
+
+
+def write_json_atomic(path: Path, payload) -> None:
+    """เขียน JSON แบบที่อีกโปรเซสไม่มีวันอ่านเจอครึ่งๆ
+
+    เขียนลงไฟล์ชั่วคราวก่อนแล้วค่อย replace ทับ — replace บนไดรฟ์เดียวกันเป็น
+    ปฏิบัติการเดียวจบ อีกฝั่งจึงเห็นได้แค่ "ของเก่าทั้งไฟล์" หรือ "ของใหม่ทั้งไฟล์"
+
+    **ชื่อไฟล์ชั่วคราวต้องมี PID** ของเดิมทั้งสองเซิร์ฟเวอร์ใช้ชื่อ `<ชื่อ>.tmp`
+    เหมือนกัน สองโปรเซสเขียนพร้อมกันจะทับไฟล์ชั่วคราวของกันเอง แล้ว replace
+    ไฟล์ที่เขียนค้างครึ่งทางทับของจริง — เสียหายกว่า "อัปเดตหาย" มาก
+
+    **ต้องลองซ้ำตอน replace** — Windows ไม่ยอมให้ rename ทับไฟล์ที่โปรเซสอื่น
+    "เปิดค้างอยู่" แม้จะเปิดแค่อ่าน เพราะ open() ของ Python บน Windows ไม่ได้ขอ
+    FILE_SHARE_DELETE ผลคือได้ PermissionError (WinError 5) เป็นครั้งคราวเมื่อ
+    อีกฝั่งบังเอิญอ่านพอดี — วัดจากของจริงแล้ว: เขียน 120 รอบพร้อมอ่านรัวๆ เจอชนจริง
+
+    ปล่อยให้ล้มไม่ได้ เพราะ clip_app จับ OSError แล้วแค่เขียน log ว่าบันทึกไม่ได้
+    = ผู้ใช้กดตั้งค่าแล้วไม่ติด โดยไม่มีอะไรบอกบนหน้าจอ ส่วน ApprovalStore ไม่จับเลย
+    ผู้อ่านถือไฟล์แค่ระดับมิลลิวินาที ลองซ้ำสั้นๆ จึงผ่านเสมอ
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        last: OSError | None = None
+        for attempt in range(_REPLACE_TRIES):
+            try:
+                temporary.replace(path)
+                return
+            except PermissionError as error:      # มีคนเปิดไฟล์ปลายทางค้างอยู่
+                last = error
+                time.sleep(_REPLACE_WAIT * (attempt + 1))
+        raise OSError(
+            f"เขียน {path.name} ไม่สำเร็จ — มีโปรเซสอื่นเปิดไฟล์ค้างนานผิดปกติ ({last})"
+        ) from last
+    finally:
+        # replace สำเร็จแล้วไฟล์นี้จะไม่มีอยู่ ที่เก็บกวาดคือกรณีเขียนแล้วล้มกลางทาง
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def update_json(path: Path, mutate, default=None, timeout: float = 30.0, label: str = ""):
+    """อ่าน-แก้-เขียน ไฟล์ JSON ให้จบเป็นชิ้นเดียว **ข้ามโปรเซส**
+
+    ของเดิมทั้ง app.py และ clip_app.py ต่างคนต่างอ่านแล้วเขียนทับไฟล์เดียวกัน
+    โดยกันแค่ `threading.Lock` ซึ่งมองไม่เห็นกันข้ามโปรเซส ผลคือค่าที่อีกฝั่ง
+    เพิ่งบันทึกหายไปเงียบๆ (config.json กับ approvals.json เจอทั้งคู่)
+
+    `mutate` แก้ค่าที่ได้ในที่แล้วคืน None หรือจะคืนค่าใหม่ทั้งก้อนก็ได้
+    """
+    with data_lock(path.name, timeout=timeout, label=label or f"แก้ {path.name}"):
+        current = read_json(path, default)
+        changed = mutate(current)
+        payload = current if changed is None else changed
+        write_json_atomic(path, payload)
+        return payload
+
+
 # ------------------------------------------------------------------- โทเคน
 
 def _windows_dpapi(data: bytes, decrypt: bool = False) -> bytes:

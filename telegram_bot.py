@@ -21,6 +21,8 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+import studio_shared
+
 API_BASE = "https://api.telegram.org/bot"
 # long polling — Telegram ค้างสายให้จนกว่าจะมีอะไรใหม่
 #
@@ -112,20 +114,23 @@ class ApprovalStore:
         self.path = path
         self.lock = threading.RLock()
 
+    def _guard(self, what: str):
+        """ล็อก**ข้ามโปรเซส** ตอนอ่าน-แก้-เขียน
+
+        ไฟล์นี้ถูกเปิดจากสองเซิร์ฟเวอร์พร้อมกัน — app.py และ clip_app.py ต่างสร้าง
+        ApprovalStore ชี้ `data/approvals.json` ไฟล์เดียวกัน ส่วน `self.lock` เป็น
+        RLock ในโปรเซส มองไม่เห็นอีกฝั่งเลย สองฝั่งอ่านพร้อมกัน แก้คนละรายการ
+        แล้วเขียนทับกัน ผลคือผลการกดอนุมัติในแชทหายไปเฉยๆ โดยไม่มี error
+        """
+        return studio_shared.data_lock(self.path.name, label=what)
+
     def _read(self) -> list[dict]:
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
+        return studio_shared.read_json(self.path, [])
 
     def _write(self, items: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(items[-APPROVAL_LIMIT:], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(self.path)
+        # เดิมใช้ชื่อไฟล์ชั่วคราว approvals.tmp เหมือนกันทั้งสองโปรเซส เขียนพร้อมกัน
+        # เมื่อไรมีสิทธิ์ replace ไฟล์ที่อีกฝั่งเขียนค้างครึ่งทางทับของจริง
+        studio_shared.write_json_atomic(self.path, items[-APPROVAL_LIMIT:])
 
     def add(self, product: str, highlights: list[str], extra: dict | None = None) -> dict:
         entry = {
@@ -138,14 +143,14 @@ class ApprovalStore:
             "message_id": None,
             **(extra or {}),
         }
-        with self.lock:
+        with self.lock, self._guard("เพิ่มคำขออนุมัติ"):
             items = self._read()
             items.append(entry)
             self._write(items)
         return entry
 
     def update(self, approval_id: str, **changes) -> dict | None:
-        with self.lock:
+        with self.lock, self._guard(f"อัปเดตคำขอ {approval_id}"):
             items = self._read()
             for entry in items:
                 if entry["id"] == approval_id:

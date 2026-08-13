@@ -482,9 +482,12 @@ async def index() -> Response:
     ซึ่งคิดจากเนื้อไฟล์ชุดเดียวกัน — หน้าเว็บกับเซิร์ฟเวอร์จึงตรงกันเสมอ
     ไม่มีทางหลุดเหมือนตอนที่ต้อง bump เลขเองทีละที่
     """
+    # คิดแฮชสดจากดิสก์ ไม่ใช้ APP_VERSION ที่ค้างตั้งแต่ตอนเซิร์ฟเวอร์เริ่ม
+    # ต่างกันเมื่อไร = "แก้ไฟล์แล้วลืมรีสตาร์ต" ซึ่งเป็นเคสที่แบนเนอร์ต้องจับให้ได้
+    # (ถ้าใช้ตัวเดียวกันทั้งคู่ มันจะตรงกันเสมอ แล้วแบนเนอร์ก็ไร้ประโยชน์)
     html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
     return Response(
-        content=html.replace("__VERSION__", APP_VERSION),
+        content=html.replace("__VERSION__", _compute_version()),
         media_type="text/html; charset=utf-8",
         # no-store — โปรเจกต์เดิมโดน Chrome cache หน้า HTML จนเวอร์ชันไม่ตรงมาแล้ว
         headers={"Cache-Control": "no-store, must-revalidate"},

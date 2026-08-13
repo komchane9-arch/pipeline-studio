@@ -772,7 +772,9 @@ dialog { box-shadow: 0 20px 60px rgba(60, 30, 90, 0.18); }
   background: var(--panel);
   color: inherit;
 }
-.story-video { max-width: 100%; max-height: 60vh; border-radius: 12px; }
+.story-video { max-width: 100%; max-height: 60vh; border-radius: 12px; display: block; }
+/* ทางออกเผื่อเบราว์เซอร์เล่น codec นั้นไม่ได้ — ยังเปิด/เซฟไฟล์ตรงๆ ได้ */
+.story-video-link { display: inline-block; margin: 4px 0 10px; font-size: 13px; opacity: .8; }
 .note.ok { color: #46a758; }
 .note.fail { color: #cf5f4a; }
 

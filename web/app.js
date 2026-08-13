@@ -1888,11 +1888,29 @@
     return out;
   }
 
+  /** เครื่องเล่นคลิปของงานนั้น — ใช้ทั้งตอนรอตรวจและตอนเปิดดูย้อนหลัง
+   *  เขียนที่เดียวเพื่อให้สองที่นั้นแสดงเหมือนกันเสมอ */
+  function videoBlock(run, heading = "🎬 คลิปที่เจนได้") {
+    const names = run?.videos || [];
+    if (!names.length) return [];
+    const out = [el("h4", { textContent: `${heading} (${names.length} ไฟล์)` })];
+    names.forEach((name) => {
+      const src = clipFile(run.item_id, name);
+      out.push(el("video", {
+        className: "story-video", controls: true, preload: "metadata", src,
+      }));
+      // เผื่อ codec ที่เบราว์เซอร์เล่นไม่ได้ ต้องยังเปิด/เซฟไฟล์ตรงๆ ได้
+      out.push(el("a", {
+        className: "story-video-link", href: src, target: "_blank",
+        rel: "noreferrer", textContent: `⬇️ ${name.split("/").pop()}`,
+      }));
+    });
+    return out;
+  }
+
   function videoReview(job, run) {
-    const out = [el("h4", { textContent: "🎬 คลิปที่เจนได้" })];
-    (run.videos || []).forEach((name) => out.push(el("video", {
-      className: "story-video", controls: true, src: clipFile(run.item_id, name),
-    })));
+    const out = videoBlock(run, "🎬 คลิปที่เจนได้");
+    if (!out.length) out.push(el("h4", { textContent: "🎬 ยังไม่พบไฟล์คลิป" }));
     out.push(el("div", { className: "inline-row" },
       textBtn("✅ อนุมัติคลิป", "primary",
         () => act(() => jobPost(`${job.id}/action`, { action: "vid_ok" }))),
@@ -1933,7 +1951,7 @@
       parts.push(el("p", { className: "note", textContent: "ยังไม่ถึงจุดที่ต้องตัดสินใจ — รอระบบทำต่อ" }));
     }
 
-    parts.push(...runExtras(run));
+    parts.push(...runExtras(run, job.stage === "video_review"));
     box.replaceChildren(...parts);
   }
 
@@ -1943,6 +1961,8 @@
     const marks = [];
     marks.push(run.storyboard_count ? `🖼 ${run.storyboard_count}` : "🖼 —");
     marks.push(run.flow_prompt_count ? `🎥 ${run.flow_prompt_count}` : "🎥 —");
+    // มีคลิปแล้วหรือยัง — เห็นจากรายการได้เลยว่าอันไหนกดเข้าไปดูคลิปได้
+    if (run.videos?.length) marks.push(`▶️ ${run.videos.length}`);
     if (run.refused) marks.push("⚠️ โดนปฏิเสธ");
     return marks.join(" · ");
   }
@@ -2028,9 +2048,12 @@
 
   /** ของที่ดูได้เสมอไม่ว่างานอยู่ขั้นไหน — ลิงก์ แชท GPT และคำสั่ง Flow
    *  ใช้ร่วมกันระหว่างหน้ารายละเอียดของคิว กับรายการงานที่เก็บไว้ */
-  function runExtras(run) {
+  function runExtras(run, skipVideos = false) {
     if (!run || !run.item_id) return [];
     const parts = [];
+    // คลิปขึ้นก่อนของอื่น — เป็นผลลัพธ์ที่คนอยากดูที่สุด
+    // ข้ามเมื่องานอยู่ขั้นรอตรวจคลิป เพราะตรงนั้นแสดงไปแล้วพร้อมปุ่มอนุมัติ
+    if (!skipVideos) parts.push(...videoBlock(run, "▶️ คลิปที่เจนไว้"));
     if (run.affiliate_url) {
       parts.push(el("a", {
         href: run.affiliate_url, target: "_blank", rel: "noreferrer",

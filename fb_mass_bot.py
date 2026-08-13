@@ -31,16 +31,43 @@ import telegram_bot
 from bot_profiles import FarmError
 
 LOCK_FILE = mf.DATA_DIR / "fb_mass_bot.lock"
+# ชีพจร — เขียนเวลาปัจจุบันทุกรอบ poll ให้ app.py เช็คว่าบอทยังมีชีวิต
+# (app.py ปลุกใหม่ถ้าชีพจรค้างเกิน ~90 วิ) ใช้ไฟล์แยกจากล็อก เพราะเปิดไฟล์
+# ที่ถูก msvcrt ล็อกจากอีกโปรเซสได้ PermissionError — เช็คด้วยล็อกไม่ได้
+HEARTBEAT_FILE = mf.DATA_DIR / "fb_mass_bot.heartbeat"
 LOG_FILE = studio_shared.LOG_DIR / "fb_mass.log"
 LOG_LIMIT = studio_shared.LOG_LIMIT_BYTES
+
+
+def beat() -> None:
+    """แตะไฟล์ชีพจร — บอก app.py ว่ายังมีชีวิต"""
+    try:
+        HEARTBEAT_FILE.write_text(str(int(time.time())), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _heartbeat_loop() -> None:
+    """เต้นทุก 15 วิใน thread แยก — ไม่ผูกกับ getUpdates ที่อาจ long-poll ค้างนาน
+    (ถ้า beat แค่ในลูปหลัก ชีพจรจะห่างเท่า latency ของ poll แล้วดูเหมือนตาย)"""
+    while True:
+        beat()
+        time.sleep(15)
 
 HELP = "\n".join([
     "🤖 <b>บอทหาโพสต์แมส</b>",
     "/find — เริ่มหาโพสต์แมสทุกกลุ่มตอนนี้",
+    "/test — เจาะลึก 1000 โพสต์ล่าสุด (เลือกได้หลายกลุ่ม เทียบกัน)",
     "/add ลิงก์กลุ่ม — เข้าร่วมกลุ่ม + เพิ่มเข้า list",
     "/groups — ดูกลุ่มทั้งหมด เลือกลบได้",
     "/set — ดู/ปรับเกณฑ์คัดโพสต์",
 ])
+
+# จำนวนโพสต์ที่ /test เจาะลึกต่อกลุ่ม (ตามที่ผู้ใช้สั่ง: 1000 โพสต์ล่าสุด)
+TEST_TARGET = 1000
+# กลุ่มที่ผู้ใช้ติ๊กเลือกใน /test — {chat_id: set(index)} (ในหน่วยความจำพอ
+# เพราะเลือกเสร็จกดเริ่มในคราวเดียว รีสตาร์ตก็แค่เลือกใหม่)
+_test_selection: dict[str, set] = {}
 
 # ชื่อเกณฑ์ที่ /set รับ — รับทั้งไทย/อังกฤษ (พิมพ์แบบไหนก็ต้องเข้าใจ)
 SET_FIELDS = {
@@ -96,6 +123,87 @@ def groups_card(config: dict) -> tuple[str, dict | None]:
     return "\n".join(lines), {"inline_keyboard": rows}
 
 
+# ---------------------------------------------------- /test เจาะลึกหลายกลุ่ม
+
+def test_card(config: dict, selected: set) -> tuple[str, dict | None]:
+    """การ์ดเลือกกลุ่มสำหรับ /test — ติ๊กได้หลายกลุ่ม"""
+    groups = config.get("groups", [])
+    if not groups:
+        return "ยังไม่มีกลุ่มใน list — เพิ่มด้วย /add ลิงก์กลุ่มก่อน", None
+    lines = [f"🔬 <b>เลือกกลุ่มเจาะลึก {TEST_TARGET:,} โพสต์ล่าสุด</b>",
+             "ติ๊กได้หลายกลุ่มเพื่อเทียบกัน แล้วกดเริ่ม", ""]
+    rows = []
+    for index, group in enumerate(groups):
+        name = group.get("name") or group.get("url", "")
+        mark = "☑️" if index in selected else "⬜"
+        rows.append([{"text": f"{mark} {name[:34]}",
+                      "callback_data": f"mt:t:{index}"}])
+    rows.append([
+        {"text": "เลือกทั้งหมด", "callback_data": "mt:all"},
+        {"text": "ล้าง", "callback_data": "mt:none"},
+    ])
+    rows.append([{"text": f"▶️ เริ่มเจาะลึก ({len(selected)} กลุ่ม)",
+                  "callback_data": "mt:go"}])
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def do_test(token: str, chat_id: str, groups: list) -> None:
+    """เจาะลึกกลุ่มที่เลือก แล้วรายงานสถิติ engagement เทียบกัน"""
+    if not _busy.acquire(blocking=False):
+        say(token, chat_id, "⏳ มีงานเบราว์เซอร์ค้างอยู่ — รอให้เสร็จก่อนแล้วสั่งใหม่")
+        return
+
+    def work() -> None:
+        try:
+            mins = max(1, len(groups) * TEST_TARGET // 80)   # ~12 นาที/กลุ่ม
+            say(token, chat_id,
+                f"🔬 เจาะลึก {len(groups)} กลุ่ม กลุ่มละสูงสุด {TEST_TARGET:,} โพสต์ "
+                f"(~{mins} นาที) — เดี๋ยวสรุปผลเทียบให้")
+            results = mf.deep_scan_groups(groups, TEST_TARGET, log=log)
+            # กราฟ PNG ก่อน (ภาพรวมเห็นง่าย) แล้วตามด้วยรายงานข้อความ (มีลิงก์)
+            min_eng = int(mf.load_config().get("min_likes", 100))
+            chart = mf.render_test_chart(results, min_eng, log=log)
+            if chart and chart.is_file():
+                try:
+                    telegram_bot.send_photo(
+                        token, chat_id, chart,
+                        caption="🔬 ผลเจาะลึก — engagement ตามความลึกฟีด")
+                except telegram_bot.TelegramError as error:
+                    log(f"ส่งกราฟไม่ได้: {error}")
+            say(token, chat_id, _test_report(results))
+            log(f"/test เสร็จ {len(results)} กลุ่ม")
+        except (mf.MassFinderError, FarmError) as error:
+            say(token, chat_id, f"❌ {error}")
+            log(f"/test ล้ม: {error}")
+        except Exception:
+            say(token, chat_id, "❌ เจาะลึกล้มกลางทาง — ดูรายละเอียดใน log")
+            log(f"/test ล้มกลางทาง:\n{traceback.format_exc()}")
+        finally:
+            _busy.release()
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def _test_report(results: list) -> str:
+    """สรุปผล /test — เรียงกลุ่มที่ engagement ดีสุดขึ้นก่อน"""
+    ok = [r for r in results if not r.get("error")]
+    ok.sort(key=lambda r: -r["avg"])
+    lines = ["🔬 <b>ผลเจาะลึก (เรียงตาม engagement เฉลี่ย)</b>", ""]
+    for r in ok:
+        verdict = "✅ มีชีวิต" if r["over"] >= 5 else "❌ เงียบ"
+        lines.append(f"<b>{html.escape(r['name'][:40])}</b> {verdict}")
+        lines.append(f"อ่าน {r['count']:,} · เกิน 100: {r['over']} · "
+                     f"เฉลี่ย {r['avg']} ({r['seconds']:.0f} วิ)")
+        for i, p in enumerate(r["top"][:3], 1):
+            lines.append(f"  {i}. 🔥{p['eng']:,} (❤️{p['likes']} 💬{p['comments']} "
+                         f"↗{p['shares']})\n  {p['url']}")
+        lines.append("")
+    for r in results:
+        if r.get("error"):
+            lines.append(f"⚠ {html.escape(r['name'][:40])}: อ่านไม่ได้")
+    return "\n".join(lines).strip()
+
+
 def do_find(token: str, chat_id: str) -> None:
     if not _busy.acquire(blocking=False):
         say(token, chat_id, "⏳ มีงานเบราว์เซอร์ค้างอยู่ — รอให้เสร็จก่อนแล้วสั่งใหม่")
@@ -136,14 +244,16 @@ def do_add(token: str, chat_id: str, url: str) -> None:
             say(token, chat_id, "🚪 กำลังเปิดกลุ่มด้วยโปรไฟล์บอท…")
             result = mf.join_group(url, log=log)
             status = {
-                "joined-request": "กดเข้าร่วมแล้ว (ถ้ากลุ่มปิดต้องรอแอดมินอนุมัติ)",
-                "already": "เป็นสมาชิกอยู่แล้ว",
-                "pending": "เคยส่งคำขอไว้แล้ว — รอแอดมินอนุมัติ",
-            }[result["status"]]
+                "joined-request": "✅ เข้าร่วมกลุ่มสำเร็จ",
+                "already": "✅ เป็นสมาชิกอยู่แล้ว",
+                "pending": "⏳ ส่งคำขอแล้ว — รอแอดมินอนุมัติ",
+                "stuck": "⚠️ กดเข้าร่วมแล้วแต่กลุ่มอาจมีคำถามสมาชิกให้กรอก "
+                         "— เปิดบอทเข้าไปกรอกเองหนึ่งครั้ง",
+            }.get(result["status"], result["status"])
             note = ("เพิ่มเข้า list ค้นหาแล้ว ✅" if result["added"]
                     else "มีอยู่ใน list แล้ว ไม่เพิ่มซ้ำ")
             say(token, chat_id,
-                f"✅ <b>{html.escape(result['name'] or url)}</b>\n{status}\n{note}")
+                f"<b>{html.escape(result['name'] or url)}</b>\n{status}\n{note}")
             log(f"/add {url} → {result['status']} added={result['added']}")
         except (mf.MassFinderError, FarmError) as error:
             say(token, chat_id, f"❌ {error}")
@@ -187,10 +297,16 @@ def on_command(token: str, chat_id: str, text: str) -> None:
     command, _, argument = text.partition(" ")
     command = command.lower().split("@")[0]
     argument = argument.strip()
+    # log ทุกคำสั่งที่รับ — ไม่ปล่อยให้เป็นกล่องดำ (เห็นชัดว่ารับถึงจริง)
+    log(f"รับคำสั่ง: {command}{(' ' + argument[:40]) if argument else ''}")
     if command in ("/start", "/help"):
         say(token, chat_id, HELP)
     elif command == "/find":
         do_find(token, chat_id)
+    elif command == "/test":
+        _test_selection[chat_id] = set()
+        message, keyboard = test_card(mf.load_config(), set())
+        say(token, chat_id, message, keyboard)
     elif command == "/add":
         do_add(token, chat_id, argument)
     elif command == "/groups":
@@ -205,6 +321,7 @@ def on_command(token: str, chat_id: str, text: str) -> None:
 def on_callback(token: str, callback: dict) -> None:
     data = str(callback.get("data") or "")
     chat_id = str(((callback.get("message") or {}).get("chat") or {}).get("id", ""))
+    log(f"รับปุ่ม: {data}")
     answer = ""
     if data.startswith("mr:"):
         # ผู้ใช้กด "ไม่เอาโพสต์นี้" — เข้าบัญชีดำถาวร รอบหน้าไม่นับไม่ส่งอีก
@@ -241,6 +358,48 @@ def on_callback(token: str, callback: dict) -> None:
             answer = "รายการนี้ถูกลบไปแล้ว — ดูรายการล่าสุดด้านล่าง"
             message, keyboard = groups_card(mf.load_config())
             say(token, chat_id, message, keyboard)
+    elif data.startswith("mt:"):
+        # เลือกกลุ่มสำหรับ /test — ติ๊กหลายกลุ่มแล้วกดเริ่ม
+        config = mf.load_config()
+        groups = config.get("groups", [])
+        sel = _test_selection.setdefault(chat_id, set())
+        action = data[3:]
+        msg = callback.get("message") or {}
+        mid = msg.get("message_id")
+        if action == "go":
+            chosen = [groups[i] for i in sorted(sel) if 0 <= i < len(groups)]
+            if not chosen:
+                answer = "ยังไม่ได้เลือกกลุ่ม — ติ๊กอย่างน้อย 1 กลุ่ม"
+            else:
+                if mid:
+                    try:
+                        telegram_bot.call(token, "editMessageText", {
+                            "chat_id": chat_id, "message_id": mid,
+                            "text": f"🔬 กำลังเจาะลึก {len(chosen)} กลุ่ม…",
+                            "parse_mode": "HTML"})
+                    except telegram_bot.TelegramError:
+                        pass
+                _test_selection.pop(chat_id, None)
+                answer = "เริ่มเจาะลึกแล้ว"
+                do_test(token, chat_id, chosen)
+        else:
+            if action == "all":
+                sel.clear()
+                sel.update(range(len(groups)))
+            elif action == "none":
+                sel.clear()
+            elif action.startswith("t:"):
+                index = int(action[2:])
+                sel.discard(index) if index in sel else sel.add(index)
+            if mid:
+                _, keyboard = test_card(config, sel)
+                try:
+                    telegram_bot.call(token, "editMessageReplyMarkup", {
+                        "chat_id": chat_id, "message_id": mid,
+                        "reply_markup": keyboard})
+                except telegram_bot.TelegramError as error:
+                    log(f"อัปเดตการ์ด /test ไม่ได้: {error}")
+            answer = f"เลือก {len(sel)} กลุ่ม"
     try:
         telegram_bot.call(token, "answerCallbackQuery", {
             "callback_query_id": callback.get("id", ""), "text": answer[:180],
@@ -263,6 +422,8 @@ def main() -> int:
 
     config = mf.load_config()
     token, home_chat = mf.telegram_target(config)
+    beat()
+    threading.Thread(target=_heartbeat_loop, daemon=True).start()
     log(f"บอทหาโพสต์แมสเริ่มทำงาน (chat {home_chat})")
     say(token, home_chat, "🟢 บอทหาโพสต์แมสพร้อมทำงาน\n\n" + HELP)
 

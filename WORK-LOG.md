@@ -762,3 +762,104 @@ python flow_worker.py login-chatgpt   # ChatGPT
 - เทส logic ครบ (offline ไม่แตะ Bot10 ที่ผู้ใช้เปิดใช้อยู่): quota-fill enough(), passes() แชร์/คอมเมนต์, reject_post idempotent, send_report 1 หัว+N ปุ่ม, callback mr: → blacklist+ขีดฆ่า — ผ่านหมด
 
 **บทเรียนตัวเอง (misdiagnosis)**: เห็นสแกนโดนบล็อก "Bot10 เปิดอยู่" แล้วรีบสรุปว่าเป็น PID reuse ในฟาร์ม จนไปแก้ bot_profiles.py (shared code) — ที่จริง registry ถูกสร้างใหม่ Bot10 id เปลี่ยน 4c00a191→6e42cfbd และ **เปิดอยู่จริง** ระบบปฏิเสธถูกต้องแล้ว · revert bot_profiles.py กลับหมด ไม่ควรแก้ shared code ที่แชทพี่น้องแตะด้วยจากการอ่านสถานะเก่า
+
+---
+
+## 13 ส.ค. 2026 — fb_mass_bot ตายเงียบ → app.py supervise ด้วย heartbeat
+
+### อาการ
+ผู้ใช้แจ้ง "คำสั่ง Telegram ไม่ทำงาน" — /find /add /groups /set เงียบหมด
+
+### Why-Why (จากของจริง)
+1. ไม่มีโปรเซส fb_mass_bot.py (process list เหลือแค่ app.py + clip_app.py) → ไม่มีใคร poll getUpdates ของ @NewestBoyBot
+2. โปรเซสตายช่วง session teardown (log หยุด 15:02 แล้วเงียบ)
+3. **ทำไมเงียบ:** เป็นโปรเซสที่ 3 ที่ไม่มี lifecycle management ต่างจาก app.py/clip_app.py — ตายแล้วไม่มีใครปลุก ไม่มีอะไรฟ้อง
+- **Root cause:** ไม่มี supervisor ให้ fb_mass_bot ฟื้นเมื่อตาย
+
+### กับดักที่เกือบพลาด
+ตอนไล่ เจอ "fb_mass_bot 2 ตัว" → เกือบสรุปว่า 409 conflict **แต่ตัวที่ 2 คือคำสั่ง diagnostic ของตัวเอง** (`Get-CimInstance ... -like '*fb_mass_bot*'`) ที่มีคำว่า fb_mass_bot ใน command line เลยจับตัวเอง — ต้องกรอง `-notmatch 'Get-CimInstance'` ออกก่อน (บทเรียนเดิม: แยกทราฟฟิกทดสอบตัวเองก่อนสรุป)
+
+### Corrective
+รีสตาร์ต fb_mass_bot.py — คำสั่งใช้ได้ทันที
+
+### Preventive — app.py เป็น supervisor (มิเรอร์ ensure_clip_server)
+- `fb_mass_bot.py`: thread แยกเขียน **heartbeat** (`data/fb_mass_bot.heartbeat`) ทุก 15 วิ — ไม่ผูกกับ getUpdates ที่ long-poll ค้างได้นาน (พิสูจน์แล้ว: ถ้า beat แค่ในลูปหลัก ชีพจรห่างเท่า latency ของ poll แล้วดูเหมือนตาย)
+- `app.py`: `ensure_mass_bot()` + `_mass_bot_keeper()` thread เช็คทุก 60 วิ — ชีพจรค้างเกิน 90 วิ = ตาย → spawn ใหม่ (detached) · เช็คด้วย heartbeat ไม่ใช่ไฟล์ล็อก เพราะ **เปิดไฟล์ที่ถูก msvcrt ล็อกจากอีกโปรเซสได้ PermissionError** (เข้าใจผิดว่าตายทั้งที่รันอยู่)
+- ฟื้นภายใน ~150 วิหลังตาย · lock เดิมใน fb_mass_bot ยังกันรันซ้อน (spawn ซ้ำก็เด้งออกเอง)
+
+### /add ล้ม "กดเข้าร่วมแล้วแต่ปุ่มยังอยู่" — แก้แล้ว
+Why-Why: บอท join กลุ่มสาธารณะ (แม่บ้านชอบรีวิว 1.1M) **สำเร็จจริง** แต่โค้ดเช็คแค่ 4 วิ ปุ่มยังไม่ทันเปลี่ยนเป็น "เข้าร่วมแล้ว" เลย throw error → แถม throw ก่อนโค้ด add-to-list กลุ่มเลยไม่ถูกเพิ่ม = ผู้ใช้เห็นล้มสนิททั้งที่ join สำเร็จ (double bug)
+แก้: `_join_state()` อ่านสถานะจากปุ่มจริง (pending/member/can-join/unknown) · หลังกด **poll สูงสุด 15 วิ** รอสถานะเปลี่ยนจริง · รู้จัก "เข้าร่วมแล้ว" (MEMBER_LABEL) เป็นสำเร็จ · **add เข้า list ทุกกรณี** (แม้ join ค้าง status=stuck) — /add ไม่ล้มสนิทอีก
+พิสูจน์: รัน join_group ซ้ำ → "already" + added=True (แม่บ้านชอบรีวิวเข้า list เป็นกลุ่มที่ 8)
+
+---
+
+## Flow แจ้ง "ยังไม่ได้ล็อกอิน" ทั้งที่ล็อกอินแล้ว — แก้แล้ว (13 ส.ค. 2026)
+
+**อาการ** งานเจนคลิปล้มด้วย error `ยังไม่ได้ล็อกอิน Google Flow`
+(งาน `19ffa98b7cb14`) และ `login_flow()` รอจนครบ 15 นาทีแล้ว `TIMEOUT`
+ทั้งที่บัญชี Google ล็อกอินอยู่จริง
+
+### Why-Why (ทุกชั้นมีหลักฐานจากของจริง)
+
+1. **ทำไมบอกว่าไม่ได้ล็อกอิน?** → `_is_signed_in()` ตัดสินจากเงื่อนไขเดียว
+   `"accounts.google.com" in page.url` และ log จับได้ว่าแท็บไปจบที่
+   `accounts.google.com/v3/signin/accountchooser`
+2. **ทำไมไปโดน accounts.google.com?** → ดูดหน้านั้นออกมาอ่าน ได้ข้อความ
+   `Choose an account to continue to AI Test Kitchen` พร้อมรายชื่อ **3 บัญชี**
+   (milk0650361448 / komchand9 / komchane9) — ไม่ใช่หน้าล็อกอิน แต่เป็น
+   **หน้าเลือกบัญชี** ที่รอให้กด
+3. **ทำไมมี 3 บัญชี?** → โปรไฟล์ `data/flow_browser_profile` ล็อกอินสะสมไว้
+   หลายบัญชี (ตรวจ `Default/Network/Cookies` = 128 คุกกี้ · SID ครบ · หมดอายุ
+   ปี 2027 · มีคุกกี้ `labs.google` 10 ตัว = เคยเข้า Flow จริง)
+   Google จึงไม่ auto-continue แต่หยุดถามก่อน
+4. **ทำไมระบบผ่านตรงนั้นไม่ได้?** → ไม่มีขั้นตอนเลือกบัญชีในโค้ดเลย
+   ทั้ง `_app_page()` และ `login_flow()` เอาแต่วนเช็คว่า "ล็อกอินหรือยัง"
+   ไม่มีใครกด → ค้างจนหมดเวลา
+
+**root cause** ล็อกอินหลายบัญชีในโปรไฟล์เดียว → Google บังคับให้เลือกบัญชี →
+ระบบไม่มีขั้นตอนเลือก และตีความหน้านั้นว่า "ยังไม่ได้ล็อกอิน"
+
+### ทำไมถึงไม่รู้ตัว (ต้องแก้แยกอีกเรื่อง)
+
+- `config.json` ตั้ง `flow_bot_profile: "b7e2355d"` ซึ่ง **ไม่มีอยู่แล้ว** —
+  ฟาร์มโปรไฟล์ถูกสร้างใหม่ทั้งชุด 13 ส.ค. 00:13 (id ใหม่หมด) แต่ config
+  เขียนไว้ตั้งแต่ 12 ส.ค. 23:34 ยังชี้ id เก่า
+- `flow_profile_dir()` เจอ error แล้ว **ถอยไปใช้โปรไฟล์เดิมเงียบๆ**
+  พิมพ์เตือนแค่ทาง stdout
+- `ensure_clip_server()` ใน app.py ส่ง stdout/stderr ของสายคลิปลง
+  `DEVNULL` → คำเตือนหายหมด เหลือให้ผู้ใช้เห็นแค่ "ยังไม่ได้ล็อกอิน"
+  ซึ่งชี้ผิดทาง
+
+### Corrective
+
+- กดเลือกบัญชี `komchane9@gmail.com` (บัญชีที่มีเครดิต Flow 10,020 ตาม
+  `data/flow_credits_dump.txt`) → Google จำค่าไว้ → เข้า Flow ได้แล้ว
+- `config.json`: `flow_bot_profile` → `""` (ใช้โปรไฟล์ Flow เดี่ยวที่ล็อกอินอยู่)
+  และเพิ่ม `flow_account: "komchane9@gmail.com"`
+- **กู้ไม่ได้**: งานที่ล้มไปแล้ว 2 ใบยังอยู่สถานะ failed ต้องสั่งเจนใหม่เอง
+  (เจนใหม่ = จ่ายเครดิตจริง จึงไม่สั่งให้อัตโนมัติ)
+
+### Preventive
+
+- `flow_worker._pick_account()` — เจอหน้าเลือกบัญชีเมื่อไรกดให้เอง โดยอ่าน
+  อีเมลจาก `[data-identifier]` (ยืนยันกับหน้าจริงแล้ว: count=1, กดแล้วผ่าน)
+  เรียกจาก 3 จุด: `_app_page()` · `login_flow()` · `_check_page_health()`
+- **ไม่เดาบัญชีเอง** ถ้ามีหลายบัญชีแต่ไม่ได้ตั้ง `flow_account` → โยน
+  `NeedsLogin` พร้อมรายชื่อบัญชีที่มี เพราะแต่ละบัญชีมีเครดิตแยกกัน
+  กดผิด = ตัดเครดิตบัญชีที่ไม่ได้ตั้งใจ
+- `flow_profile_dir()` — โปรไฟล์บอทที่ตั้งไว้หาย **โยน error ทันที** ไม่ถอย
+  ไปโปรไฟล์อื่นเงียบๆ (คนละโปรไฟล์ = คนละบัญชี = คนละกระเป๋าเครดิต)
+- `ensure_clip_server()` — เขียน stdout/stderr ลง `data/clip_server.log`
+  แทน DEVNULL พร้อมตั้ง `PYTHONIOENCODING=utf-8` (ไม่งั้น print ไทยพัง
+  ทั้งโปรเซสเพราะ stdout กลายเป็น cp1252)
+
+### พิสูจน์
+
+| ทดสอบ | ผล |
+|---|---|
+| ชุดทดสอบ `_pick_account` (6 สถานการณ์) | ✅ 14/14 |
+| `flow_profile_dir()` กับ id ที่ไม่มีอยู่ | ✅ โยน RuntimeError พร้อมวิธีแก้ |
+| `_app_page()` เส้นทางเดียวกับตอนเจน | ✅ `_is_signed_in=True` · health ผ่าน |
+| `login_flow()` เส้นทางจริงที่บอทเรียก | ✅ `LOGIN OK` ใน **10.1 วิ** (เดิม TIMEOUT 15 นาที) |
+| สายคลิปเขียน log หลังรีสตาร์ต | ✅ `clip_server.log` โตต่อ ภาษาไทยไม่เพี้ยน |

@@ -221,8 +221,11 @@ CLIP_HELP = (
     "/clips — รายการงานที่เก็บไว้\n"
     "/clip &lt;เลข&gt; — เปิดดูงานนั้น (สตอรีบอร์ด + บทพูด)\n"
     "/gen &lt;เลข&gt; — <b>เจนคลิปต่อ</b>จากสตอรีบอร์ดที่ทำไว้แล้ว\n"
-    "/genall — <b>ไล่ทำสตอรีบอร์ดทุกงานที่ยังไม่มี</b> (ใส่ <code>all</code> = ทำใหม่ทั้งหมด)\n"
+    "/genall — <b>ไล่เจนวิดีโอทุกงานที่ยังไม่มีคลิป</b> (ต้องมีสตอรีบอร์ด + บทพูดครบ)\n"
+    "/genall sb — ไล่ทำสตอรีบอร์ดทุกงานที่ยังไม่มี (<code>/genall all</code> = ทำใหม่ทั้งหมด)\n"
     "/storyboard — สตอรีบอร์ดที่ทำแล้วแต่<b>ยังไม่ได้เจนคลิป</b>\n"
+    "/videos — <b>คลิปที่เจนไว้แล้วทั้งหมด</b> กดดูย้อนหลังได้\n"
+    "/video &lt;เลข&gt; — ส่งคลิปของงานนั้นมาดูในแชท\n"
     "/basket &lt;ข้อความ&gt; — คำพูดบนปุ่มตะกร้าตอนโพสต์ TikTok"
 )
 
@@ -1733,15 +1736,122 @@ def _clip_show_run(chat_id: str, argument: str) -> None:
     # ปุ่มเดินต่อ — งานที่หยุดไว้ตอนขั้นเจนปิดอยู่ กดตรงนี้ทำต่อได้เลย
     # ไม่ต้องส่งลิงก์ใหม่และไม่ต้องคุยกับ GPT ซ้ำ
     count = run.get("flow_prompt_count") or 0
+    videos = run.get("videos") or []
+    rows = []
+    # มีคลิปแล้วให้กดดูได้เลย — ไม่ต้องไปเปิดไฟล์ในเครื่องเอง
+    if videos:
+        rows.append([{
+            "text": f"▶️ ดูคลิปที่เจนไว้ ({len(videos)} ไฟล์)",
+            "callback_data": f"clip:vid::{run.get('item_id', '')}",
+        }])
     if count:
+        rows.append([{
+            "text": f"🎬 เจนคลิปจากงานนี้ ({count} ฉาก)",
+            "callback_data": f"clip:gen::{run.get('item_id', '')}",
+        }])
+    if rows:
+        note = []
+        if videos:
+            note.append(f"▶️ มีคลิปเก็บไว้ <b>{len(videos)} ไฟล์</b>")
+        if count:
+            note.append(f"🎥 มีคำสั่งเจนวิดีโอเก็บไว้ <b>{count} ฉาก</b>")
+        _clip_say(chat_id, "\n".join(note), {"inline_keyboard": rows})
+
+
+def _clip_send_videos(chat_id: str, item_id: str) -> str:
+    """ส่งคลิปของงานนั้นเข้าแชท — เปิดดูย้อนหลังได้ทุกเมื่อ ไม่ต้องรอขั้นอนุมัติ
+
+    คลิปที่เจนเสร็จแล้วเคยดูได้แค่ตอนบอทส่งมาให้อนุมัติรอบเดียว พอกดผ่านไปแล้ว
+    ก็หาย ต้องไปเปิดไฟล์ในเครื่องเอง — ตัวนี้ทำให้เรียกกลับมาดูได้เรื่อยๆ
+    """
+    run = clip_store.load_run(DATA_DIR, item_id)
+    if not run:
+        return "ไม่พบงานนี้"
+    videos = run.get("videos") or []
+    if not videos:
+        return "งานนี้ยังไม่มีคลิป"
+
+    token = load_clip_token() or ""
+    folder = Path(run["folder"])
+    name = telegram_bot._escape((run.get("name") or "")[:90])
+    sent, failed = 0, []
+    for index, item in enumerate(videos, 1):
+        path = folder / item
+        caption = (f"🎬 <b>{name}</b>"
+                   + (f" · คลิปที่ {index}/{len(videos)}" if len(videos) > 1 else ""))
+        try:
+            telegram_bot.send_video(token, chat_id, path, caption)
+            sent += 1
+        except telegram_bot.TelegramError as error:
+            failed.append(f"{item}: {error}")
+            append_log("input", f"[บอทคลิป] ส่งคลิป {item} ไม่ได้: {error}")
+
+    if failed:
         _clip_say(
             chat_id,
-            f"🎥 มีคำสั่งเจนวิดีโอเก็บไว้ <b>{count} ฉาก</b> — เจนต่อได้เลย",
-            {"inline_keyboard": [[{
-                "text": f"🎬 เจนคลิปจากงานนี้ ({count} ฉาก)",
-                "callback_data": f"clip:gen::{run.get('item_id', '')}",
-            }]]},
+            f"⚠️ ส่งคลิปไม่ได้ {len(failed)} ไฟล์\n"
+            + "\n".join(f"  • {telegram_bot._escape(text)}" for text in failed[:5]),
         )
+    return f"ส่งคลิปแล้ว {sent} ไฟล์" if sent else "ส่งคลิปไม่สำเร็จ"
+
+
+def _clip_video_list(chat_id: str) -> None:
+    """รายการงานที่**มีคลิปแล้ว** พร้อมปุ่มกดเรียกคลิปมาดู
+
+    เลขที่แสดงเป็นเลขเดียวกับ /clips เพื่อให้พิมพ์ /video <เลข> ได้ตรงกัน
+    (เหตุผลเดียวกับ /storyboard — ไล่เลขใหม่แล้วผู้ใช้จะกดไปโดนสินค้าคนละตัว)
+    """
+    runs = clip_store.list_runs(DATA_DIR)
+    have = [(index, run) for index, run in enumerate(runs, 1) if run.get("videos")]
+    if not have:
+        _clip_say(
+            chat_id,
+            "ยังไม่มีคลิปที่เจนเสร็จ — <code>/genall</code> ไล่เจนงานที่พร้อมแล้ว"
+            if runs else "ยังไม่มีงานที่เก็บไว้",
+        )
+        return
+
+    escape = telegram_bot._escape
+    lines = [f"🎬 <b>คลิปที่เจนไว้แล้ว</b> {len(have)} ชิ้น\n"]
+    buttons = []
+    for index, run in have:
+        count = len(run.get("videos") or [])
+        when = (run.get("video_at") or "")[5:16].replace("T", " ")
+        lines.append(
+            f"<b>{index}.</b> {escape((run.get('name') or '')[:55])}\n"
+            f"     🎥 {count} ไฟล์ · {escape(when)} · <code>/video {index}</code>"
+        )
+        if len(buttons) < 8:
+            buttons.append([{
+                "text": f"▶️ {index}. {(run.get('name') or '')[:24]}",
+                "callback_data": f"clip:vid::{run.get('item_id', '')}",
+            }])
+
+    lines.append("\nกดปุ่มหรือพิมพ์ <code>/video &lt;เลข&gt;</code> เพื่อให้ส่งคลิปมาดู")
+    parts = _split_text("\n".join(lines), TELEGRAM_TEXT_LIMIT)
+    for part in parts[:-1]:
+        _clip_say(chat_id, part)
+    _clip_say(chat_id, parts[-1], {"inline_keyboard": buttons} if buttons else None)
+
+
+def _clip_send_video_by_index(chat_id: str, argument: str) -> None:
+    """/video <เลข> — รับได้ทั้งเลขลำดับจาก /clips และรหัสสินค้า เหมือน /clip"""
+    runs = clip_store.list_runs(DATA_DIR)
+    target = (argument or "").strip()
+    if not target:
+        _clip_video_list(chat_id)
+        return
+    run = None
+    if target.isdigit() and 1 <= int(target) <= len(runs):
+        run = runs[int(target) - 1]
+    else:
+        run = next((r for r in runs if str(r.get("item_id")) == target), None)
+    if not run:
+        _clip_say(chat_id, "ใช้ <code>/video &lt;เลขจาก /clips&gt;</code> — /videos ดูรายการที่มีคลิป")
+        return
+    note = _clip_send_videos(chat_id, str(run.get("item_id")))
+    if note.startswith(("ไม่พบ", "งานนี้ยังไม่มี")):
+        _clip_say(chat_id, f"⚠️ {note}")
 
 
 def _clip_start_storyboard(chat_id: str, item_id: str) -> str:
@@ -1765,6 +1875,80 @@ def _clip_start_storyboard(chat_id: str, item_id: str) -> str:
 
 
 def _clip_gen_all(chat_id: str, argument: str) -> None:
+    """ไล่ **เจนวิดีโอ** ทุกงานที่ยังไม่มีคลิป และของพร้อมครบแล้ว
+
+    "พร้อมครบ" = มีสตอรีบอร์ด + มีบทพูด + มีคำสั่ง Flow  ขาดข้อไหนไม่เอาเข้าคิว
+    แต่รายงานออกมาให้เห็นว่าขาดอะไร ไม่เงียบหาย
+
+    ข้ามงานที่มีคลิปแล้วเสมอ และ **ไม่มีตัวเลือกบังคับทำใหม่** เพราะเจนซ้ำหนึ่ง
+    รอบ = จ่ายเครดิต Flow จริง (รอบละ 15) การพิมพ์ผิดครั้งเดียวไม่ควรเผาเครดิต
+    ทั้งคิว — ถ้าจะเจนซ้ำจริงๆ ให้สั่งเจาะจงทีละงานด้วย /gen <เลข>
+
+    ของเดิมที่ /genall เคยทำ (ไล่ทำสตอรีบอร์ด) ย้ายไปอยู่ที่ `/genall sb`
+    """
+    if argument.strip().lower() in ("sb", "storyboard", "สตอรีบอร์ด", "all", "ทั้งหมด", "force"):
+        _clip_gen_all_storyboards(
+            chat_id, argument.strip().lower() in ("all", "ทั้งหมด", "force")
+        )
+        return
+
+    runs = clip_store.list_runs(DATA_DIR)
+    if not runs:
+        _clip_say(chat_id, "ยังไม่มีงานที่เก็บไว้ — ส่งลิงก์ Shopee เข้ามาก่อน")
+        return
+
+    escape = telegram_bot._escape
+    queued, has_video, not_ready, blocked = [], 0, [], []
+    for run in runs:
+        item_id = str(run.get("item_id") or "")
+        if not item_id:
+            continue
+        name = (run.get("name") or item_id)[:42]
+        if run.get("videos"):
+            has_video += 1
+            continue
+        missing = []
+        if not run.get("storyboard_count"):
+            missing.append("สตอรีบอร์ด")
+        if not run.get("script_count"):
+            missing.append("บทพูด")
+        if not run.get("flow_prompt_count"):
+            missing.append("คำสั่ง Flow")
+        if missing:
+            not_ready.append(f"{name} — ขาด{' + '.join(missing)}")
+            continue
+        note = _clip_start_flow(chat_id, item_id, announce=False)
+        (blocked if note != "เข้าคิวเจนคลิปแล้ว ✅" else queued).append(
+            f"{name} — {note}" if note != "เข้าคิวเจนคลิปแล้ว ✅" else name
+        )
+
+    if queued:
+        _clip_log(f"/genall เข้าคิวเจนวิดีโอ {len(queued)} งาน")
+
+    lines = [f"🎥 <b>/genall — เจนวิดีโอ</b> · งานที่เก็บไว้ {len(runs)} ชิ้น"]
+    if queued:
+        lines += ["", f"📥 <b>เข้าคิวเจนแล้ว {len(queued)} งาน</b>"]
+        lines += [f"  {i}. {escape(n)}" for i, n in enumerate(queued[:20], 1)]
+        if len(queued) > 20:
+            lines.append(f"  …และอีก {len(queued) - 20} งาน")
+    if has_video:
+        lines += ["", f"⏭ <b>ข้าม {has_video} งาน</b> (มีคลิปแล้ว)"]
+    if not_ready:
+        lines += ["", f"🚧 <b>ยังไม่พร้อม {len(not_ready)} งาน</b>"]
+        lines += [f"  • {escape(n)}" for n in not_ready[:10]]
+        lines.append("  ทำสตอรีบอร์ดให้ครบก่อนด้วย <code>/genall sb</code>")
+    if blocked:
+        lines += ["", f"⚠️ <b>เข้าคิวไม่ได้ {len(blocked)} งาน</b>"]
+        lines += [f"  • {escape(n)}" for n in blocked[:10]]
+    if not queued:
+        lines += ["", "ไม่มีงานที่พร้อมเจนวิดีโอตอนนี้"]
+    else:
+        lines += ["", "ทำทีละงานตามลำดับ — <code>/queue</code> ดูสถานะ"]
+    for part in _split_text("\n".join(lines), TELEGRAM_TEXT_LIMIT):
+        _clip_say(chat_id, part)
+
+
+def _clip_gen_all_storyboards(chat_id: str, force: bool) -> None:
     """ไล่ทำสตอรีบอร์ดให้ทุกงานที่ยังไม่มี — เข้าคิวรวดเดียว แล้วทำทีละงาน
 
     ปริยายทำ **เฉพาะงานที่ยังไม่มีสตอรีบอร์ด** เพราะการรันซ้ำงานที่มีอยู่แล้วคือ
@@ -1773,7 +1957,6 @@ def _clip_gen_all(chat_id: str, argument: str) -> None:
 
     ทำทีละงานอยู่แล้วเพราะเบราว์เซอร์มีโปรไฟล์เดียว — คิวเป็นคนคุมลำดับให้
     """
-    force = argument.strip().lower() in ("all", "ทั้งหมด", "force")
     runs = clip_store.list_runs(DATA_DIR)
     if not runs:
         _clip_say(chat_id, "ยังไม่มีงานที่เก็บไว้ — ส่งลิงก์ Shopee เข้ามาก่อน")
@@ -1797,7 +1980,7 @@ def _clip_gen_all(chat_id: str, argument: str) -> None:
                   + (" (บังคับทำใหม่ทั้งหมด)" if force else ""))
 
     escape = telegram_bot._escape
-    lines = [f"🎬 <b>/genall</b> — งานที่เก็บไว้ {len(runs)} ชิ้น"]
+    lines = [f"🖼 <b>/genall sb — ทำสตอรีบอร์ด</b> · งานที่เก็บไว้ {len(runs)} ชิ้น"]
     if queued:
         lines += ["", f"📥 <b>เข้าคิวแล้ว {len(queued)} งาน</b>"]
         lines += [f"  {i}. {escape(n)}" for i, n in enumerate(queued[:20], 1)]
@@ -1874,7 +2057,7 @@ def _clip_pending_storyboards(chat_id: str) -> None:
               {"inline_keyboard": buttons} if buttons else None)
 
 
-def _clip_start_flow(chat_id: str, item_id: str) -> str:
+def _clip_start_flow(chat_id: str, item_id: str, announce: bool = True) -> str:
     """เอางานที่มีสตอรีบอร์ด+คำสั่งเก็บไว้แล้ว มาเข้าคิวเจนคลิปต่อ
 
     ใช้กับงานที่ทำค้างไว้ตอนขั้นเจนยังปิดอยู่ — ไม่ต้องส่งลิงก์ใหม่ ไม่ต้องคุยกับ
@@ -1882,13 +2065,17 @@ def _clip_start_flow(chat_id: str, item_id: str) -> str:
 
     **สั่งตรงแบบนี้ข้ามสวิตช์ /flow** เพราะเป็นการสั่งเจาะจงทีละงาน ต่างจากการ
     เจนอัตโนมัติหลังอนุมัติที่สวิตช์คุมอยู่
+
+    announce=False สำหรับตอนสั่งทีเดียวหลายงาน (/genall) — ไม่งั้นยิงข้อความ
+    รายงานทีละงานจนท่วมแชท ตัวเรียกไปสรุปรวมทีเดียวเองแทน
     """
     run = clip_store.load_run(DATA_DIR, item_id)
     if not run:
         return "ไม่พบงานนี้"
     prompts = run.get("flow_prompts") or []
     if not prompts:
-        _clip_say(chat_id, "❌ งานนี้ไม่มีคำสั่งสำหรับ Google Flow เจนต่อไม่ได้")
+        if announce:
+            _clip_say(chat_id, "❌ งานนี้ไม่มีคำสั่งสำหรับ Google Flow เจนต่อไม่ได้")
         return "ไม่มีคำสั่ง Flow"
 
     # งานที่ยังไม่จบของสินค้าชิ้นเดียวกันอย่าให้ซ้อน — เบราว์เซอร์มีตัวเดียว
@@ -1905,11 +2092,12 @@ def _clip_start_flow(chat_id: str, item_id: str) -> str:
     )
     clip_runner.wake()
     _clip_log(f"สั่งเจนต่อจากงานเดิม {item_id} — คำสั่ง {len(prompts)} ชุด")
-    _clip_say(
-        chat_id,
-        f"🎥 เข้าคิวเจนคลิปแล้ว — <b>{telegram_bot._escape((run.get('name') or '')[:60])}</b>\n"
-        f"คำสั่ง {len(prompts)} ฉาก · ใช้สตอรีบอร์ดกับบทพูดที่อนุมัติไว้แล้ว",
-    )
+    if announce:
+        _clip_say(
+            chat_id,
+            f"🎥 เข้าคิวเจนคลิปแล้ว — <b>{telegram_bot._escape((run.get('name') or '')[:60])}</b>\n"
+            f"คำสั่ง {len(prompts)} ฉาก · ใช้สตอรีบอร์ดกับบทพูดที่อนุมัติไว้แล้ว",
+        )
     return "เข้าคิวเจนคลิปแล้ว ✅"
 
 
@@ -2070,6 +2258,14 @@ def _clip_telegram_command(chat_id: str, text: str) -> bool:
         _clip_pending_storyboards(chat_id)
         return True
 
+    if command == "/videos":
+        _clip_video_list(chat_id)
+        return True
+
+    if command == "/video":
+        _clip_send_video_by_index(chat_id, argument)
+        return True
+
     if command == "/claude":
         # ช่องฝากงานของ **สายคลิปโดยเฉพาะ** — แยกจากช่องของสายโพสต์ที่บอทหลัก
         # ไม่งั้นงานสองสายไปโผล่ในเซสชันของกันและกัน
@@ -2164,6 +2360,10 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
     # (งานเดิมจบไปแล้ว จะสร้างงานใหม่ให้) จึงต้องดักก่อนไปหาในคิว
     if action == "gen":
         return _clip_start_flow(chat_id, arg)
+
+    # ปุ่ม "ดูคลิป" ก็ผูกกับรหัสสินค้าเหมือนกัน — งานในคิวจบไปแล้วแต่ไฟล์ยังอยู่
+    if action == "vid":
+        return _clip_send_videos(chat_id, arg)
 
     job = clip_jobs.get(job_id)
     if not job:

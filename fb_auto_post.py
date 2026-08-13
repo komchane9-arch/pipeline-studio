@@ -22,6 +22,15 @@ from pathlib import Path
 from typing import Callable
 
 import facebook_group_post
+import studio_shared
+
+# รอสิทธิ์ใช้จอมือถือนานสุดกี่วินาทีก่อนยอมแพ้
+#
+# สั้นโดยตั้งใจ: งานโพสต์เป็นงานที่ผู้ใช้สั่งมาตรงๆ ส่วนที่มาแย่งจอคืองานเบื้องหลัง
+# (fb_engage) ซึ่งถือล็อกทีละโพสต์แล้วปล่อย รอเกินสองนาทีแปลว่ามีอะไรค้างจริง
+# ไม่ใช่แค่คิวยาว — ล้มเร็วแล้วบอกให้ชัดดีกว่าค้างเงียบ งานยังอยู่ในรายการ
+# กดรันใหม่ได้ทันที
+PHONE_LOCK_WAIT = 120.0
 
 JOB_LIMIT = 50              # เก็บงานย้อนหลังเท่านี้พอ ไฟล์จะได้ไม่บวม
 # โพสต์ครั้งเดียวหลายกลุ่มเกินไปเข้าข่ายสแปม — จำกัดตายตัวที่ 6 กลุ่มต่อครั้ง
@@ -528,9 +537,23 @@ class JobStore:
         return None
 
     def latest_open(self, chat_id: str = "") -> dict | None:
-        """งานล่าสุดที่ยังไม่ได้โพสต์ — ใช้ต่อรูปกับแคปชันที่ส่งมาคนละข้อความ"""
+        """งานล่าสุดที่ยัง "แก้ไขอยู่" — ใช้ต่อรูปกับแคปชันที่ส่งมาคนละข้อความ
+
+        **ข้ามงานที่ตั้งเวลาไว้แล้ว** (มี run_at) เพราะตั้งเวลาแล้ว = ปิดกล่องแล้ว
+        รูปหรือข้อความที่ส่งเข้ามาทีหลังเป็นของงานใหม่ ไม่ใช่ของงานนั้น
+
+        ไม่ข้าม = พิมพ์ข้อความอะไรก็ตามหลังตั้งเวลาไว้ จะไป**ทับแคปชัน**ของงานที่
+        รอโพสต์อยู่โดยผู้ใช้ไม่รู้ตัว (ทางรับข้อความตั้งใจให้ "พิมพ์ทับงานที่พร้อม
+        โพสต์ = แก้แคปชัน" ซึ่งถูกสำหรับร่าง แต่ผิดสำหรับงานที่สั่งไว้แล้ว)
+
+        อยากแก้งานที่ตั้งเวลาไว้ ให้เรียกด้วยรหัสงานตรงๆ เช่น
+        `/caption p616725077 ข้อความใหม่` — ทางนั้นใช้ _fb_pick_job ซึ่งยังเห็น
+        งานที่ตั้งเวลาไว้ตามปกติ
+        """
         for job in self.listing():
             if job["status"] not in OPEN_STATUSES:
+                continue
+            if job.get("run_at"):
                 continue
             if chat_id and job.get("chat_id") and job["chat_id"] != chat_id:
                 continue
@@ -563,6 +586,18 @@ class PostRunner:
             return False
         self.stop_flag.set()
         return True
+
+    def _phone(self, serial: str, what: str):
+        """ขอสิทธิ์ใช้จอมือถือ **เครื่องนั้น** — กันข้ามโปรเซส ไม่ใช่แค่ในโปรเซสนี้
+
+        `PhoneGate` ใน app.py กันได้แค่งานโพสต์กับ Claude CLI ซึ่งอยู่โปรเซส
+        เดียวกัน พอมีบอทเบื้องหลัง (fb_engage_bot) ที่ยิง ADB จากอีกโปรเซส
+        ล็อกนั้นมองไม่เห็นกันเลย — สองฝั่งจะแตะจอทับกันเละทั้งคู่
+
+        ล็อกแยกรายเครื่อง (ระยะ 2.1) — งานบนมือถือคนละเครื่องจึงไม่ต้องรอกัน
+        ตอนไม่มีใครแย่ง จะได้ล็อกทันที พฤติกรรมจึงเหมือนเดิมทุกประการ
+        """
+        return studio_shared.phone_lock(serial, timeout=PHONE_LOCK_WAIT, label=what)
 
     def start(
         self, *, job: dict, adb: str, serial: str, image: Path,
@@ -622,12 +657,16 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            results = facebook_group_post.followup_groups(
-                adb=adb, serial=serial, caption=caption, targets=targets,
-                comment=comment, log=on_log, stop=self.stop_flag.is_set,
-                on_result=on_result, comment_images=comment_images,
-                clipboard=clipboard,
-            )
+            with self._phone(serial, f"รอบตามเก็บ {self.job_id}"):
+                results = facebook_group_post.followup_groups(
+                    adb=adb, serial=serial, caption=caption, targets=targets,
+                    comment=comment, log=on_log, stop=self.stop_flag.is_set,
+                    on_result=on_result, comment_images=comment_images,
+                    clipboard=clipboard,
+                )
+        except studio_shared.PhoneBusy as error:
+            error_text = str(error)
+            on_log(f"เริ่มไม่ได้ — {error}")
         except Exception as error:
             error_text = str(error)
             on_log(f"งานล้ม: {error}")
@@ -668,11 +707,60 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            results = facebook_group_post.collect_groups(
-                adb=adb, serial=serial, caption=caption, targets=targets,
-                log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
-                clipboard=clipboard,
+            with self._phone(serial, f"รอบเก็บยอด {self.job_id}"):
+                results = facebook_group_post.collect_groups(
+                    adb=adb, serial=serial, caption=caption, targets=targets,
+                    log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
+                    clipboard=clipboard,
+                )
+        except studio_shared.PhoneBusy as error:
+            error_text = str(error)
+            on_log(f"เริ่มไม่ได้ — {error}")
+        except Exception as error:
+            error_text = str(error)
+            on_log(f"งานล้ม: {error}")
+        finally:
+            self.job_id = ""
+            try:
+                on_done(results, error_text)
+            except Exception as error:
+                on_log(f"สรุปผลไม่สำเร็จ: {error}")
+
+    def start_fiximage(
+        self, *, job_id: str, adb: str, serial: str, caption: str,
+        targets: list[dict], images: list, on_log, on_result, on_done,
+    ) -> None:
+        """รอบแก้รูป: เปิดโพสต์ที่ลงไปแล้วจากลิงก์ แล้วเปลี่ยนรูปให้ถูกใบ"""
+        with self.lock:
+            if self.busy:
+                raise AutoPostError(f"กำลังทำงาน {self.job_id} อยู่ — รอให้จบก่อน")
+            self.stop_flag.clear()
+            self.job_id = job_id
+            self.thread = threading.Thread(
+                target=self._run_fiximage,
+                kwargs={
+                    "adb": adb, "serial": serial, "caption": caption,
+                    "targets": targets, "images": images, "on_log": on_log,
+                    "on_result": on_result, "on_done": on_done,
+                },
+                daemon=True,
             )
+            self.thread.start()
+
+    def _run_fiximage(self, *, adb, serial, caption, targets, images,
+                      on_log, on_result, on_done) -> None:
+        error_text = ""
+        results: list[dict] = []
+        try:
+            with self._phone(serial, f"รอบแก้รูป {self.job_id}"):
+                results = facebook_group_post.fix_images_groups(
+                    adb=adb, serial=serial, caption=caption, targets=targets,
+                    images=images, log=on_log, stop=self.stop_flag.is_set,
+                    on_result=on_result,
+                )
+        except studio_shared.PhoneBusy as error:
+            error_text = str(error)
+            on_log(f"เริ่มไม่ได้ — {error}")
         except Exception as error:
             error_text = str(error)
             on_log(f"งานล้ม: {error}")
@@ -690,13 +778,17 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            results = facebook_group_post.post_to_groups(
-                adb=adb, serial=serial, image=image, caption=job["caption"],
-                group_ids=job["groups"], gap_range=gap_range,
-                log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
-                clipboard=clipboard, comment=comment,
-                comment_images=comment_images,
-            )
+            with self._phone(serial, f"งานโพสต์ {self.job_id}"):
+                results = facebook_group_post.post_to_groups(
+                    adb=adb, serial=serial, image=image, caption=job["caption"],
+                    group_ids=job["groups"], gap_range=gap_range,
+                    log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
+                    clipboard=clipboard, comment=comment,
+                    comment_images=comment_images,
+                )
+        except studio_shared.PhoneBusy as error:
+            error_text = str(error)
+            on_log(f"เริ่มไม่ได้ — {error}")
         except Exception as error:      # ต้องจับให้หมด ไม่งั้น thread ตายเงียบ
             error_text = str(error)
             on_log(f"งานล้ม: {error}")
@@ -709,10 +801,24 @@ class PostRunner:
 
 
 def result_line(entry: dict, label: Callable[[str], str]) -> str:
-    """หนึ่งบรรทัดสรุปผลของกลุ่มหนึ่ง (พร้อมลิงก์โพสต์ถ้าเก็บมาได้)"""
+    """หนึ่งบรรทัดสรุปผลของกลุ่มหนึ่ง (พร้อมลิงก์โพสต์ถ้าเก็บมาได้)
+
+    **ต้องแยก "posted=False" ออกจาก "ไม่มีคีย์ posted เลย"**
+
+    รอบตามเก็บ (`followup_groups`) ตั้งใจไม่ใส่คีย์ `posted` มาเลย เพราะ
+    "โพสต์ขึ้นหรือยัง" เป็นผลของรอบโพสต์ ไม่ใช่ของรอบตามเก็บ — รอบตามเก็บ
+    เปิดโพสต์ไม่เจอไม่ได้แปลว่าโพสต์ไม่ขึ้น
+
+    ของเดิมเช็ค `not entry.get("posted")` ซึ่ง `None` กับ `False` ให้ผลเหมือนกัน
+    รายงานรอบตามเก็บจึงขึ้น "❌ ไม่สำเร็จ" **ทุกกลุ่ม** ทั้งที่ถูกใจกับคอมเมนต์
+    ขึ้นครบ (เจอจริง 13 ส.ค. งาน p617465263: จริงๆ สำเร็จ 5/6 แต่แชทขึ้น ❌ หมด)
+    ตัวเลขสรุปท้ายข้อความถูกอยู่แล้ว เลยยิ่งขัดกันเองจนอ่านไม่รู้เรื่อง
+    """
     name = label(entry.get("group_id", ""))
-    if not entry.get("posted"):
-        return f"❌ {name} — {entry.get('error', 'ไม่สำเร็จ')}"
+    if not entry.get("posted") and entry.get("error"):
+        return f"❌ {name} — {entry['error']}"
+    if "posted" in entry and not entry["posted"]:
+        return f"❌ {name} — ไม่สำเร็จ"
     verified = entry.get("verified") or {}
     liked = entry.get("liked") or verified.get("liked")
     # รายงาน 4 อย่างเสมอ: โพสต์ · ถูกใจ · คอมเมนต์ · ถูกใจคอมเมนต์
@@ -739,6 +845,23 @@ def summarize(results: list[dict], label: Callable[[str], str]) -> str:
         f"\nโพสต์ {posted}/{total} · ถูกใจ {liked}/{total} · "
         f"คอมเมนต์ {commented}/{total} · ถูกใจคอมเมนต์ {comment_liked}/{total}"
     )
+    return "\n".join(lines)
+
+
+def fix_line(entry: dict, label: Callable[[str], str]) -> str:
+    """หนึ่งบรรทัดผลการแก้รูปของกลุ่มหนึ่ง"""
+    name = label(entry.get("group_id", ""))
+    if entry.get("image_fixed"):
+        return f"🖼️ {name} — เปลี่ยนรูปแล้ว"
+    return f"❌ {name} — {entry.get('error', 'แก้ไม่สำเร็จ')}"
+
+
+def summarize_fix(results: list[dict], label: Callable[[str], str]) -> str:
+    if not results:
+        return "ไม่มีกลุ่มให้แก้รูป"
+    lines = [fix_line(entry, label) for entry in results]
+    fixed = sum(1 for e in results if e.get("image_fixed"))
+    lines.append(f"\nแก้รูปสำเร็จ {fixed}/{len(results)} กลุ่ม")
     return "\n".join(lines)
 
 

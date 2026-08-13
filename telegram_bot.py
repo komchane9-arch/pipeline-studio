@@ -178,6 +178,49 @@ def _escape(text: str) -> str:
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024      # เพดานอัปโหลดของ Bot API
 
 
+def send_video(
+    token: str, chat_id: str, video: Path, caption: str = "",
+    keyboard: dict | None = None,
+) -> int:
+    """ส่งไฟล์คลิปเข้าแชท — ตัวส่งจริงตัวเดียวของทั้งระบบ
+
+    ใช้ร่วมกันทั้งตอนขออนุมัติคลิปที่เพิ่งเจน และตอนเปิดดูคลิปเก่าย้อนหลัง
+    จะได้ไม่มีพฤติกรรมสองแบบ (เช่นตัวหนึ่งรองรับไฟล์ใหญ่ อีกตัวเงียบหาย)
+
+    ไฟล์เกิน 50 MB ส่งไม่ได้ตามข้อจำกัดของ Bot API — ส่งเป็นข้อความบอก path
+    แทน เพื่อให้ยังกดปุ่มต่อได้ ไม่ใช่เงียบหายไปเฉยๆ
+    """
+    size = video.stat().st_size if video.is_file() else 0
+    if not video.is_file() or size > MAX_UPLOAD_BYTES:
+        reason = ("ไม่พบไฟล์คลิป" if not video.is_file()
+                  else f"คลิปใหญ่ {size / 1e6:.0f} MB ส่งเข้าแชทไม่ได้")
+        body = {
+            "chat_id": chat_id,
+            "text": f"{caption}\n\n({reason})\nไฟล์: <code>{_escape(str(video))}</code>",
+            "parse_mode": "HTML",
+        }
+        if keyboard:
+            body["reply_markup"] = keyboard
+        return call(token, "sendMessage", body).get("message_id", 0)
+
+    fields = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+    if keyboard:
+        fields["reply_markup"] = json.dumps(keyboard)
+    payload = _multipart(fields, ("video", video))
+    request = urllib.request.Request(
+        f"{API_BASE}{token}/sendVideo", data=payload["body"],
+        headers={"Content-Type": payload["content_type"]},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except OSError as error:
+        raise TelegramError(f"ส่งคลิปไม่สำเร็จ: {error}") from error
+    if not result.get("ok"):
+        raise TelegramError(result.get("description", "Telegram ปฏิเสธคลิป"))
+    return result["result"].get("message_id", 0)
+
+
 def send_video_approval(
     token: str, chat_id: str, entry: dict, video: Path,
     keyboard: dict | None = None,
@@ -199,35 +242,7 @@ def send_video_approval(
         ]]
     }
     caption = f"🎬 <b>{_escape(entry['product'][:120])}</b>\n\nคลิปเจนเสร็จแล้ว โพสต์ได้ไหม?"
-    size = video.stat().st_size if video.is_file() else 0
-    if not video.is_file() or size > MAX_UPLOAD_BYTES:
-        reason = "ไม่พบไฟล์คลิป" if not video.is_file() else f"คลิปใหญ่ {size / 1e6:.0f} MB ส่งเข้าแชทไม่ได้"
-        result = call(token, "sendMessage", {
-            "chat_id": chat_id,
-            "text": f"{caption}\n\n({reason})\nไฟล์: <code>{_escape(str(video))}</code>",
-            "parse_mode": "HTML",
-            "reply_markup": keyboard,
-        })
-        return result.get("message_id", 0)
-
-    payload = _multipart({
-        "chat_id": chat_id,
-        "caption": caption,
-        "parse_mode": "HTML",
-        "reply_markup": json.dumps(keyboard),
-    }, ("video", video))
-    request = urllib.request.Request(
-        f"{API_BASE}{token}/sendVideo", data=payload["body"],
-        headers={"Content-Type": payload["content_type"]},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=300) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except OSError as error:
-        raise TelegramError(f"ส่งคลิปไม่สำเร็จ: {error}") from error
-    if not result.get("ok"):
-        raise TelegramError(result.get("description", "Telegram ปฏิเสธคลิป"))
-    return result["result"].get("message_id", 0)
+    return send_video(token, chat_id, video, caption, keyboard)
 
 
 def _multipart(

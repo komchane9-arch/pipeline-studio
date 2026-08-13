@@ -16,6 +16,8 @@ import ctypes
 import json
 import msvcrt
 import os
+import re
+import threading
 import time
 from contextlib import contextmanager
 from ctypes import wintypes
@@ -41,14 +43,128 @@ BROWSER_LOCK_INFO = DATA_DIR / "browser.lock.info"
 # โปรไฟล์ Chrome ที่ใช้ขับ ChatGPT / Shopee / Google Flow — **มีตัวเดียว**
 BROWSER_PROFILE = DATA_DIR / "flow_browser_profile"
 
+# ล็อกที่แยกต่อทรัพยากร (มือถือรายเครื่อง / โปรไฟล์บอทรายตัว) อยู่ในโฟลเดอร์นี้
+# ของเดิม browser.lock / phone.lock อยู่ที่ data/ ตรงๆ — ปล่อยไว้ที่เดิมไม่ย้าย
+LOCK_DIR = DATA_DIR / "locks"
+
 
 class BrowserBusy(RuntimeError):
     """โปรไฟล์เบราว์เซอร์ถูกอีกงานใช้อยู่"""
 
 
-# ------------------------------------------------------- ล็อกเบราว์เซอร์ข้ามโปรเซส
+class BotBusy(RuntimeError):
+    """โปรไฟล์บอทตัวนั้นถูกอีกงานใช้อยู่"""
+
+
+# ------------------------------------------------------ เครื่องล็อกกลาง (ระยะ 2.1)
+#
+# เดิมมีล็อกรวมตัวเดียวต่อชนิด: browser.lock กับ phone.lock
+# ล็อกรวมแปลว่า **งานคนละเครื่องก็ยังต้องรอกัน** — มือถือ A โพสต์อยู่ มือถือ B
+# ว่างเปล่าแต่เริ่มไม่ได้ ยิ่งเพิ่มมือถือยิ่งไม่ได้ความเร็วเพิ่ม
+# ตรงนี้จึงทำเป็น "ล็อกต่อทรัพยากร" — คนละเครื่อง/คนละโปรไฟล์บอท = คนละไฟล์ล็อก
+
+_local_guard = threading.Lock()
+_local_locks: dict[str, threading.RLock] = {}
+_local_depth: dict[tuple[int, str], int] = {}
+
+
+def _lock_key(text: str) -> str:
+    """แปลงชื่อทรัพยากรให้เป็นชื่อไฟล์ที่ Windows รับได้
+
+    serial ที่ต่อผ่าน Wi-Fi หน้าตาเป็น `192.168.1.5:5555` ซึ่งมี ":" ที่ Windows
+    ห้ามใช้ในชื่อไฟล์ ถ้าไม่แปลงก่อน open จะพังตั้งแต่สร้างไฟล์ แล้วล็อกไม่ทำงานเลย
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(text).strip())[:60]
+
+
+def _read_info(info_file: Path) -> str:
+    try:
+        return info_file.read_text(encoding="utf-8").strip() or "ไม่ทราบ"
+    except OSError:
+        return "ไม่ทราบ"
+
 
 @contextmanager
+def _resource_lock(lock_file: Path, info_file: Path, *, timeout: float, poll: float,
+                   label: str, busy: type[RuntimeError], what: str):
+    """ล็อกทรัพยากรหนึ่งชิ้น — กันทั้งข้ามโปรเซสและข้ามเธรด และ "ขอซ้อนได้"
+
+    สองชั้นที่ต้องมีทั้งคู่:
+      1. `threading.RLock` ต่อไฟล์ — กันเธรดอื่นในโปรเซสเดียวกัน และยอมให้
+         **เธรดเดิม**ขอซ้อนได้
+      2. `msvcrt.locking` บนไฟล์ — กันข้ามโปรเซส ขอเฉพาะครั้งนอกสุดเท่านั้น
+
+    ทำไมต้องขอซ้อนได้: `bot_profiles` เรียกกันเองลึกถึง 3 ชั้น
+        delete() -> stop() -> backup_login()      launch() -> refresh_from_source()
+    ล็อกไฟล์ของ Windows เป็นของ "แฮนเดิล" ไม่ใช่ของเธรด เปิดไฟล์เดิมซ้ำในโปรเซส
+    เดียวกันแล้วขอล็อก = **บล็อกตัวเองค้างถาวร** ไม่มีใครมาปลดให้ (จะเป็นบั๊กที่
+    เกิดเฉพาะตอนกดลบบอท ซึ่งกว่าจะเจอก็สายไปแล้ว)
+
+    ใช้ล็อกของ OS ไม่ใช่ "สร้างไฟล์แล้วลบทิ้ง" เพราะถ้าโปรเซสตายกลางทาง ไฟล์ที่
+    สร้างไว้จะค้างและบล็อกทุกงานตลอดไป ส่วนล็อกของ OS ระบบปล่อยให้เองเมื่อโปรเซสตาย
+    """
+    path_key = str(lock_file)
+    with _local_guard:
+        rlock = _local_locks.setdefault(path_key, threading.RLock())
+    if not rlock.acquire(timeout=timeout):
+        raise busy(f"{what}ถูกงานอื่นในโปรเซสนี้ใช้อยู่เกิน {int(timeout)} วินาที")
+
+    ident = (threading.get_ident(), path_key)
+    handle = None
+    try:
+        if _local_depth.get(ident, 0) == 0:
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+            opened = open(lock_file, "a+b")
+            deadline = time.time() + timeout
+            while True:
+                try:
+                    opened.seek(0)
+                    msvcrt.locking(opened.fileno(), msvcrt.LK_NBLCK, 1)
+                    handle = opened
+                    break
+                except OSError:
+                    if time.time() >= deadline:
+                        opened.close()
+                        raise busy(
+                            f"{what}ถูกงานอื่นใช้อยู่เกิน {int(timeout)} วินาที "
+                            f"({_read_info(info_file)})"
+                        )
+                    time.sleep(poll)
+            # จดว่าใครถืออยู่ ไว้บอกผู้ใช้ตอนงานอื่นต้องรอ — ไม่ใช่กลไกของล็อกเอง
+            # ต้องแยกจากไฟล์ล็อก เพราะไบต์ที่ msvcrt ล็อกไว้ โปรเซสอื่นอ่านไม่ได้
+            try:
+                info_file.write_text(
+                    f"{label or 'ไม่ระบุงาน'} · PID {os.getpid()} · "
+                    f"เริ่ม {datetime.now():%H:%M:%S}",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+
+        _local_depth[ident] = _local_depth.get(ident, 0) + 1
+        try:
+            yield
+        finally:
+            _local_depth[ident] -= 1
+            if _local_depth[ident] <= 0:
+                _local_depth.pop(ident, None)
+    finally:
+        if handle is not None:
+            try:
+                info_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            handle.close()
+        rlock.release()
+
+
+# ------------------------------------------------------- ล็อกเบราว์เซอร์ข้ามโปรเซส
+
 def browser_lock(timeout: float = 900.0, poll: float = 2.0, label: str = ""):
     """กันไม่ให้สองโปรเซสเปิดโปรไฟล์ Chrome เดียวกันพร้อมกัน
 
@@ -59,49 +175,19 @@ def browser_lock(timeout: float = 900.0, poll: float = 2.0, label: str = ""):
     เดิมกันด้วย threading.Lock ซึ่งกันได้แค่ภายในโปรเซสเดียว — พอแยกเป็นสอง
     เซิร์ฟเวอร์ ล็อกนั้นไม่กันข้ามกันอีกต่อไป ต้องใช้ล็อกระดับไฟล์ของ Windows แทน
 
-    ใช้ `msvcrt.locking` ไม่ใช่ "สร้างไฟล์แล้วลบทิ้ง" เพราะถ้าโปรเซสตายกลางทาง
-    ไฟล์ล็อกจะค้างและบล็อกทุกงานตลอดไป ส่วนล็อกของ OS ปล่อยให้เองเมื่อโปรเซสตาย
+    ตัวนี้ยังเป็น "ล็อกรวมตัวเดียว" อยู่โดยตั้งใจ เพราะโปรไฟล์ที่มันกันคือ
+    `flow_browser_profile` ซึ่ง**มีตัวเดียวจริงๆ** — ไม่ใช่ทรัพยากรที่แยกเป็นรายตัว
+    ได้เหมือนมือถือหรือโปรไฟล์บอท (ถ้าอยากรันขนานต้องแยกโปรไฟล์ก่อน ไม่ใช่แยกล็อก)
+
+    ไฟล์ล็อกยังอยู่ที่ data/browser.lock ที่เดิม — ห้ามย้าย เพราะถ้าโปรเซสเก่าที่
+    ยังไม่ได้รีสตาร์ตล็อกไฟล์เดิม แต่โปรเซสใหม่ไปล็อกไฟล์ใหม่ = ต่างคนต่างล็อก
+    แล้วเปิด Chrome โปรไฟล์เดียวกันซ้อนกัน ซึ่งคือหายนะที่ล็อกนี้มีไว้กัน
     """
-    BROWSER_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(BROWSER_LOCK_FILE, "a+b")
-    deadline = time.time() + timeout
-    got = False
-    try:
-        while True:
-            try:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                got = True
-                break
-            except OSError:
-                if time.time() >= deadline:
-                    raise BrowserBusy(
-                        f"เบราว์เซอร์ถูกงานอื่นใช้อยู่เกิน {int(timeout)} วินาที "
-                        f"({who_holds_browser()})"
-                    )
-                time.sleep(poll)
-        # จดว่าใครถืออยู่ ไว้บอกผู้ใช้ตอนงานอื่นต้องรอ — ไม่ใช่กลไกของล็อกเอง
-        try:
-            BROWSER_LOCK_INFO.write_text(
-                f"{label or 'ไม่ระบุงาน'} · PID {os.getpid()} · "
-                f"เริ่ม {datetime.now():%H:%M:%S}",
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-        yield
-    finally:
-        if got:
-            try:
-                BROWSER_LOCK_INFO.unlink(missing_ok=True)
-            except OSError:
-                pass
-            try:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            except OSError:
-                pass
-        handle.close()
+    return _resource_lock(
+        BROWSER_LOCK_FILE, BROWSER_LOCK_INFO,
+        timeout=timeout, poll=poll, label=label,
+        busy=BrowserBusy, what="เบราว์เซอร์",
+    )
 
 
 def who_holds_browser() -> str:
@@ -110,10 +196,104 @@ def who_holds_browser() -> str:
     เป็นแค่บันทึกประกอบ ไม่ใช่กลไกของล็อก ถ้าไฟล์หายหรืออ่านไม่ได้ก็ไม่กระทบ
     การกันงานชนกัน
     """
-    try:
-        return BROWSER_LOCK_INFO.read_text(encoding="utf-8").strip() or "ไม่ทราบ"
-    except OSError:
-        return "ไม่ทราบ"
+    return _read_info(BROWSER_LOCK_INFO)
+
+
+# --------------------------------------------------- ล็อกมือถือ (แยกรายเครื่อง)
+
+class PhoneBusy(RuntimeError):
+    """มือถือเครื่องนั้นถูกอีกโปรเซสใช้อยู่"""
+
+
+def _phone_lock_paths(serial: str) -> tuple[Path, Path]:
+    key = _lock_key(serial)
+    return LOCK_DIR / f"phone-{key}.lock", LOCK_DIR / f"phone-{key}.info"
+
+
+def phone_lock(serial: str, timeout: float = 600.0, poll: float = 2.0, label: str = ""):
+    """กันไม่ให้สองโปรเซสสั่ง ADB ใส่มือถือ **เครื่องเดียวกัน** พร้อมกัน
+
+    **มือถือมีจอเดียว** สองโปรเซสยิง ADB ใส่เครื่องเดียวกันคือแตะทับกันเละทั้งคู่ —
+    ฝั่งหนึ่งกำลังพิมพ์แคปชันอยู่ อีกฝั่ง force-stop แอปหรือกด Back ทิ้ง
+
+    ของเดิม `PhoneGate` ใน app.py กันได้แค่ **ภายในโปรเซสเดียว** (งานโพสต์ vs
+    Claude CLI) พอมีบอทตัวที่สี่ที่ใช้ ADB ด้วย ล็อกนั้นไม่กันข้ามโปรเซสอีกต่อไป
+    — เรื่องเดียวกับที่เคยเจอกับ Chrome จนต้องทำ `browser_lock()`
+
+    **ระยะ 2.1 เปลี่ยนจากล็อกรวมเป็นล็อกรายเครื่อง** ของเดิมใช้ `data/phone.lock`
+    ไฟล์เดียวสำหรับมือถือทุกเครื่อง — เครื่อง A โพสต์อยู่ เครื่อง B ที่ว่างเปล่า
+    ก็เริ่มไม่ได้ ซื้อมือถือเพิ่มแล้วไม่ได้ความเร็วเพิ่มเลย ตอนนี้แยกเป็น
+    `data/locks/phone-<serial>.lock` คนละเครื่องจึงทำงานขนานกันได้จริง
+
+    **serial บังคับใส่** และใส่ค่าว่างไม่ได้ — ตั้งใจให้พังเสียงดังตรงจุดที่เรียก
+    ถ้าปล่อยให้ไม่ใส่ได้ คนที่ลืมใส่จะไปล็อกคนละดอกกับคนที่ใส่ แล้วสองงานจะแตะจอ
+    เครื่องเดียวกันพร้อมกันโดยไม่มีใครรู้ตัว — พังเงียบแบบที่หาสาเหตุยากที่สุด
+
+    timeout สั้นกว่าฝั่งเบราว์เซอร์ (10 นาที) เพราะงานมือถือหนึ่งกลุ่มใช้เวลา
+    ราวหนึ่งถึงสองนาที รอเกินสิบนาทีแปลว่ามีอะไรค้าง ไม่ใช่แค่คิวยาว
+
+    **ใครใช้ล็อกนี้บ้าง** (ต้องครบทุกฝั่งถึงจะกันได้จริง):
+      · `fb_auto_post.PostRunner` — ทั้ง 4 ทาง (โพสต์ · ตามเก็บ · เก็บยอด · แก้รูป)
+        ขอด้วย timeout สั้น 120 วินาที ไม่ได้ก็ล้มพร้อมข้อความ ไม่ค้างเงียบ
+      · `fb_engage` — ขอ**ทีละโพสต์แล้วปล่อย** ไม่ถือยาวทั้งรอบ งานของผู้ใช้
+        จะได้ไม่ต้องรอเกินหนึ่งโพสต์ (~40 วินาที)
+
+    ฝั่ง fb_engage ยังถาม app.py ผ่าน HTTP ควบคู่ไปด้วยเป็นด่านที่สอง เพราะล็อกนี้
+    บอกได้แค่ "มีคนถืออยู่ไหม" แต่ไม่รู้ว่าคิวงานฝั่งโน้นยาวแค่ไหน
+    """
+    if not str(serial or "").strip():
+        raise ValueError(
+            "phone_lock ต้องระบุ serial ของมือถือ — ล็อกแยกรายเครื่องแล้ว "
+            "ถ้าไม่ระบุจะกลายเป็นสองงานแตะจอเครื่องเดียวกันพร้อมกันโดยไม่มีใครกัน"
+        )
+    lock_file, info_file = _phone_lock_paths(serial)
+    return _resource_lock(
+        lock_file, info_file, timeout=timeout, poll=poll, label=label,
+        busy=PhoneBusy, what=f"มือถือ {serial}",
+    )
+
+
+def who_holds_phone(serial: str) -> str:
+    """ข้อความบอกว่าใครถือล็อกมือถือเครื่องนั้นอยู่ — ใช้แจ้งผู้ใช้เท่านั้น"""
+    return _read_info(_phone_lock_paths(serial)[1])
+
+
+# ------------------------------------------- ล็อกโปรไฟล์บอท (แยกรายโปรไฟล์)
+
+def _bot_lock_paths(profile_id: str) -> tuple[Path, Path]:
+    key = _lock_key(profile_id)
+    return LOCK_DIR / f"bot-{key}.lock", LOCK_DIR / f"bot-{key}.info"
+
+
+def bot_lock(profile_id: str, timeout: float = 120.0, poll: float = 1.0, label: str = ""):
+    """กันไม่ให้สองโปรเซสยุ่งกับโฟลเดอร์โปรไฟล์บอทตัวเดียวกันพร้อมกัน
+
+    เรื่องเดียวกับ `browser_lock` เป๊ะ แต่คนละโปรไฟล์: Chrome เปิด user-data-dir
+    เดียวกันซ้อนกันไม่ได้ และการ "รีเฟรชจากโปรไฟล์จริง" คือการเขียนทับไฟล์คุกกี้
+    ทั้งชุด ถ้าอีกฝั่งกำลังเปิดอยู่ = ล็อกอินพัง ต้องล็อกอินใหม่ทุกเว็บ
+
+    ของเดิม `bot_profiles` กันด้วย `threading.Lock` ซึ่งกันได้แค่ในโปรเซสเดียว
+    พอระยะ 3 แยก `post_app.py` ออกไปคนละพอร์ต จะมีสองโปรเซสที่สั่งเปิดบอทได้
+    ล็อกในโปรเซสจะมองไม่เห็นกัน — ต้องเป็นล็อกระดับไฟล์เท่านั้น
+
+    แยกรายโปรไฟล์เพราะ**บอทคนละตัวคือคนละโฟลเดอร์** จึงรันขนานกันได้จริง
+    (นั่นคือเหตุผลทั้งหมดที่ทำฟาร์มบอท ถ้าใช้ล็อกรวมก็เท่ากับทิ้งของที่ทำไว้)
+
+    timeout สั้น (2 นาที) เพราะงานพวกนี้เป็นการก๊อปไฟล์กับสั่งเปิด/ปิดโปรแกรม
+    หลักวินาที รอเกินสองนาทีแปลว่ามีอะไรค้าง ควรบอกผู้ใช้ ไม่ใช่รอเงียบ
+    """
+    if not str(profile_id or "").strip():
+        raise ValueError("bot_lock ต้องระบุ profile_id ของบอท")
+    lock_file, info_file = _bot_lock_paths(profile_id)
+    return _resource_lock(
+        lock_file, info_file, timeout=timeout, poll=poll, label=label,
+        busy=BotBusy, what=f"โปรไฟล์บอท {profile_id}",
+    )
+
+
+def who_holds_bot(profile_id: str) -> str:
+    """ข้อความบอกว่าใครถือล็อกโปรไฟล์บอทตัวนั้นอยู่ — ใช้แจ้งผู้ใช้เท่านั้น"""
+    return _read_info(_bot_lock_paths(profile_id)[1])
 
 
 # ------------------------------------------------------------------- โทเคน

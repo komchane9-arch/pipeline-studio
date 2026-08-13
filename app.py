@@ -2856,11 +2856,23 @@ def ensure_clip_server() -> bool:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
             subprocess, "DETACHED_PROCESS", 0
         )
-        subprocess.Popen(
-            [sys.executable, str(script)], cwd=str(BASE_DIR),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=flags,
-        )
+        # เก็บ output ลงไฟล์ ไม่ทิ้งลง DEVNULL
+        #
+        # เจอจริง 13 ส.ค.: สายคลิปพิมพ์เตือน "ใช้โปรไฟล์บอทไม่ได้ — ใช้โปรไฟล์
+        # เดิมแทน" ทุกครั้งที่เจนคลิป แต่คำเตือนถูกทิ้งลง DEVNULL ทั้งหมด อาการ
+        # ที่ผู้ใช้เห็นเลยเหลือแค่ "Flow ยังไม่ได้ล็อกอิน" ซึ่งชี้ผิดทาง
+        # PYTHONIOENCODING จำเป็น — พอ stdout ไม่ใช่คอนโซล Python จะใช้ cp1252
+        # แล้ว print ภาษาไทยจะพังทั้งโปรเซส (แก้บั๊กหนึ่งไปทำอีกบั๊กหนึ่งแทน)
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        log_file = open(DATA_DIR / "clip_server.log", "a", encoding="utf-8")
+        try:
+            subprocess.Popen(
+                [sys.executable, str(script)], cwd=str(BASE_DIR),
+                stdout=log_file, stderr=subprocess.STDOUT,
+                creationflags=flags, env=env,
+            )
+        finally:
+            log_file.close()   # ลูกถือสำเนาของตัวเองแล้ว พ่อไม่ต้องค้างไว้
     except OSError as error:
         append_log("input", f"เปิดเซิร์ฟเวอร์สายคลิปไม่สำเร็จ: {error}")
         return False
@@ -2872,6 +2884,63 @@ def ensure_clip_server() -> bool:
             return True
     append_log("input", f"สั่งเปิดสายคลิปแล้วแต่พอร์ต {CLIP_PORT} ยังไม่ตอบใน 10 วินาที")
     return False
+
+
+MASS_BOT_HEARTBEAT = DATA_DIR / "fb_mass_bot.heartbeat"
+MASS_BOT_STALE = 90     # ชีพจรค้างเกินกี่วิ ถือว่าบอทตาย
+
+
+def mass_bot_running() -> bool:
+    """บอทหาโพสต์แมสยังมีชีวิตไหม — เช็คจากไฟล์ชีพจรที่ fb_mass_bot เขียนทุกรอบ poll
+
+    ไม่เช็คจากไฟล์ล็อก เพราะเปิดไฟล์ที่ถูก msvcrt ล็อกจากอีกโปรเซสได้
+    PermissionError (เข้าใจผิดว่าบอทตายทั้งที่รันอยู่ แล้ว spawn ซ้ำ)
+    ชีพจรสดกว่า MASS_BOT_STALE วิ = ยังมีชีวิต
+    """
+    try:
+        stamp = int(MASS_BOT_HEARTBEAT.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    return (time.time() - stamp) < MASS_BOT_STALE
+
+
+def ensure_mass_bot() -> bool:
+    """ปลุกบอทหาโพสต์แมส (fb_mass_bot.py) ถ้ามีบอท role mass ตั้งไว้แต่ยังไม่รัน
+
+    **ทำไมต้องมี** ตัวอ่านคำสั่งของบอท @NewestBoyBot อยู่ในโปรเซส fb_mass_bot.py
+    ถ้าโปรเซสนั้นตาย บอทจะเงียบสนิท ผู้ใช้พิมพ์ /find /add ไปแล้วรอเก้อ
+    (เกิดจริง 13 ส.ค.: โปรเซสตายตอน session teardown ไม่มีใครปลุก คำสั่งไม่ทำงาน)
+    เหตุผลเดียวกับ [ensure_clip_server] — แต่ตัวนี้เช็คซ้ำเป็นระยะ ไม่ใช่แค่ตอนสตาร์ต
+    """
+    has_mass = any(b.get("role") == "mass" and extra_bot_token(b["id"])
+                   for b in extra_bots())
+    if not has_mass or mass_bot_running():
+        return False
+    script = BASE_DIR / "fb_mass_bot.py"
+    if not script.is_file():
+        return False
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
+            subprocess, "DETACHED_PROCESS", 0)
+        subprocess.Popen(
+            [sys.executable, str(script)], cwd=str(BASE_DIR),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=flags)
+        append_log("input", "ปลุกบอทหาโพสต์แมส (fb_mass_bot) อัตโนมัติ")
+        return True
+    except OSError as error:
+        append_log("input", f"เปิด fb_mass_bot ไม่สำเร็จ: {error}")
+        return False
+
+
+def _mass_bot_keeper() -> None:
+    """เฝ้าให้ fb_mass_bot รันอยู่เสมอ — ตายเมื่อไรปลุกใหม่ใน ≤60 วิ"""
+    while True:
+        try:
+            ensure_mass_bot()
+        except Exception as error:                              # noqa: BLE001
+            append_log("input", f"keeper fb_mass_bot ผิดพลาด: {error}")
+        time.sleep(60)
 
 
 @app.on_event("startup")
@@ -2888,6 +2957,8 @@ async def _start_watcher() -> None:
     sync_extra_watchers()
     threading.Thread(target=_fb_scheduler, daemon=True).start()
     ensure_clip_server()
+    # บอทหาโพสต์แมสเป็นโปรเซสแยก (role mass) — ให้ app.py ปลุกและเฝ้าให้ฟื้นเอง
+    threading.Thread(target=_mass_bot_keeper, daemon=True).start()
 
 
 # บอท 2 ตัว: main = โพสต์ Facebook · clip = สายเจนคลิป (อนุมัติจุดขาย/คลิป)
@@ -2923,6 +2994,8 @@ BOT_ROLES = {
     "clip": "สายเจนคลิป",
     # สายหาโพสต์แมส — fb_mass_bot.py (โปรเซสแยก) เป็นคนเฝ้า ไม่ใช่ 8866/8877
     "mass": "หาโพสต์แมสในกลุ่ม",
+    # สายตามยอดโพสต์ + ตอบคอมเมนต์ — fb_engage_bot.py (โปรเซสแยก) เป็นคนเฝ้า
+    "engage": "ตามยอดโพสต์ + ตอบคอมเมนต์",
 }
 
 
@@ -2984,6 +3057,14 @@ def sync_extra_watchers() -> None:
         if bot.get("role") == "mass":
             # บอทสายหาโพสต์แมสเป็นหน้าที่ของ fb_mass_bot.py (โปรเซสแยก)
             # เหตุผลเดียวกับ clip ด้านล่าง: getUpdates มีตัวอ่านได้ตัวเดียวต่อโทเคน
+            continue
+        if bot.get("role") == "engage":
+            # บอทสายตามยอด/ตอบคอมเมนต์เป็นหน้าที่ของ fb_engage_bot.py
+            # เหตุผลเดียวกัน: อ่านโทเคนซ้อนกัน = 409 Conflict
+            #
+            # **ยังไม่ปลุกให้อัตโนมัติเหมือนสาย mass** เพราะบอทตัวนั้นยังไม่เคย
+            # ทดสอบกับมือถือจริง — ปลุกเองตอนรีสตาร์ตแล้วมันไปแตะจอผิดจังหวะ
+            # จะพาลทำให้งานโพสต์พังด้วย ต้องรันมือจนกว่าจะทดสอบผ่าน
             continue
         if bot.get("role") == "clip":
             # บอทสายคลิปเป็นหน้าที่ของ clip_app.py (พอร์ต 8877) ไม่ใช่ของที่นี่
@@ -3686,14 +3767,32 @@ def _fb_show_card(job: dict) -> dict:
 
 
 def _fb_new_job(chat_id: str, **fields) -> dict:
-    """เปิดงานใหม่ พร้อมปิดงานเก่าที่ค้างอยู่
+    """เปิดงานใหม่ พร้อมปิด**ร่าง**เก่าที่ค้างอยู่
 
-    ต้องปิดของเก่าทิ้ง ไม่งั้นรูปที่ส่งมาทีหลังจะไปเข้ากับงานไหนก็เดาไม่ถูก
+    ต้องปิดร่างเก่าทิ้ง ไม่งั้นรูปที่ส่งมาทีหลังจะไปเข้ากับงานไหนก็เดาไม่ถูก
     (ผู้ใช้ส่งรูปใหม่ = ตั้งใจเริ่มงานใหม่ ไม่ใช่แก้ของเก่า)
+
+    **แต่ห้ามแตะงานที่ตั้งเวลาไว้แล้ว** — งานที่มี run_at คืองานที่ผู้ใช้สั่งเสร็จ
+    เรียบร้อยแล้ว ไม่ใช่ร่างที่ค้างอยู่
+
+    เจอจริง 13 ส.ค.: ตั้งงาน p616725077 ไว้ 18:30 ตอน 17:26 พอส่งงานใหม่เข้ามา
+    ตอน 17:37 งาน 18:30 ถูกล้างทิ้ง**เงียบสนิท** — ไม่มีทั้ง log และข้อความแจ้ง
+    เพราะเรียก update() ตรงๆ ไม่ผ่าน _fb_cancel_job สุดท้ายไม่ได้โพสต์ทั้ง 6 กลุ่ม
+    โดยไม่มีใครรู้จนผู้ใช้มาถามเองตอน 19:13
+
+    รอบนี้จึงเพิ่มทั้งสองอย่าง: ไม่แตะงานที่ตั้งเวลา และยกเลิกทีต้องดังพอให้รู้ตัว
     """
     for old in fb_jobs.listing():
-        if old["status"] in fb_auto_post.OPEN_STATUSES:
-            fb_jobs.update(old["id"], status=fb_auto_post.STATUS_CANCELLED)
+        if old["status"] not in fb_auto_post.OPEN_STATUSES:
+            continue
+        if old.get("run_at"):
+            continue                 # ตั้งเวลาไว้แล้ว = ไม่ใช่ร่าง อย่าไปยุ่ง
+        fb_jobs.update(old["id"], status=fb_auto_post.STATUS_CANCELLED)
+        append_log("publish", f"[{old['id']}] ปิดร่างเก่าเพราะเริ่มงานใหม่")
+        # บอกเฉพาะร่างที่มีเนื้อจริง — ร่างเปล่าไม่ต้องกวนผู้ใช้
+        if chat_id and (old.get("caption") or old.get("images")
+                        or old.get("image")):
+            _fb_say(chat_id, f"🗑 ปิดร่าง {old['id']} เพราะเริ่มงานใหม่")
     active_set = load_config().get("facebook", {}).get("set", "")
     return fb_jobs.add(
         chat_id=chat_id, set=active_set,
@@ -4059,6 +4158,7 @@ FB_HELP = (
     "• /schedule &lt;เวลา&gt; — ตั้งเวลาโพสต์ (20:30 / 9/8 20:30 / +30)\n"
     "• /followup — ตามเก็บ: เปิดโพสต์จากแจ้งเตือนแล้วกดถูกใจ/คอมเมนต์ให้\n"
     "• /collect — เก็บยอดถูกใจ/คอมเมนต์/แชร์ ของโพสต์ทุกกลุ่ม\n"
+    "• /fiximage — แก้รูปของโพสต์ที่ลงไปแล้วให้เป็นรูปที่ถูก\n"
     "• /links — ลิงก์โพสต์ที่เก็บไว้ (ใส่ตัวเลขต่อท้ายเพื่อดูย้อนหลังมากขึ้น)\n"
     "• /cancel — ยกเลิกงานที่ค้าง\n"
     "• /stop — สั่งหยุดงานที่กำลังโพสต์"
@@ -4368,6 +4468,84 @@ def _fb_collect(job_id: str = "", queued: bool = False) -> str:
         return str(error)
     append_log("publish", f"[{job_id}] เริ่มเก็บยอด {len(targets)} กลุ่ม")
     return f"📊 เริ่มเก็บยอด {len(targets)} กลุ่ม — ถูกใจ · คอมเมนต์ · แชร์"
+
+
+def _fb_fiximage(job_id: str = "", queued: bool = False) -> str:
+    """แก้รูปของโพสต์ที่ลงไปแล้วให้เป็นรูปที่ถูกต้อง
+
+    ใช้ตอนโพสต์ขึ้นไปแล้วแต่รูปผิดใบ — เปิดโพสต์จากลิงก์ที่เก็บไว้ แล้วสั่ง
+    "แก้ไขโพสต์ → ลบรูปภาพออก → เพิ่มสื่อ → บันทึก" ผ่านหน้าจอจริง
+
+    ทำไมไม่ลบแล้วโพสต์ใหม่: ลิงก์ คอมเมนต์ และยอดถูกใจของเดิมจะหายหมด แถมการ
+    ยิงเนื้อหาเดิมซ้ำลงกลุ่มเดิมยังเพิ่มสัญญาณสแปมให้ Facebook อีก
+
+    ต้องมีลิงก์โพสต์ถึงจะแก้ได้ — กลุ่มที่ยังไม่เคยเก็บลิงก์ให้สั่ง /followup ก่อน
+    """
+    job = fb_jobs.get(job_id) if job_id else \
+        next((j for j in fb_jobs.listing() if j.get("results")), None)
+    if job is None:
+        return f"ไม่พบงาน {job_id}" if job_id else "ยังไม่มีงานที่โพสต์ไปแล้ว"
+    if not (job.get("images") or job.get("image")):
+        return f"งาน {job['id']} ไม่มีรูป — ไม่มีอะไรให้แก้"
+    if not phone_is_free():
+        if queued:
+            return PHONE_WAIT_NOTE
+        place = _phone_wait_add("fiximage", job["id"], job.get("chat_id", ""))
+        if place < 0:
+            return f"คิวรอจอเต็ม ({PHONE_WAITLIST_LIMIT} งาน)"
+        holder = phone_gate.held_by() or f"งานโพสต์ {fb_runner.job_id}"
+        return (
+            f"📥 แก้รูป {job['id']} เข้าคิวรอจอแล้ว — คิวที่ {place or 1}\n"
+            f"<i>ตอนนี้ {telegram_bot._escape(holder)} ใช้จออยู่</i>"
+        )
+    targets = [
+        {"group_id": r["group_id"], "name": fb_groups.label(r["group_id"]),
+         "link": r.get("link", ""), "post_id": r.get("post_id", "")}
+        for r in job["results"] if r.get("posted") and r.get("link")
+    ]
+    if not targets:
+        return (f"งาน {job['id']} ยังไม่มีกลุ่มที่เก็บลิงก์ไว้ — "
+                "สั่ง /followup เก็บลิงก์ก่อนแล้วค่อยแก้รูป")
+    try:
+        serial = _fb_serial()
+    except fb_auto_post.AutoPostError as error:
+        return str(error)
+
+    job_id = job["id"]
+    chat_id = job.get("chat_id", "")
+    images = [
+        Path(p) for p in (job.get("images") or [job.get("image", "")]) if p
+    ]
+
+    def on_log(line: str) -> None:
+        append_log("publish", f"[{job_id}·แก้รูป] {line}")
+        fb_jobs.append_log(job_id, line)
+
+    def on_result(entry: dict) -> None:
+        fb_jobs.upsert_result(job_id, entry)
+        step = f"[{entry['index']}/{entry['total']}] " if entry.get("index") else ""
+        _fb_say(chat_id, step + fb_auto_post.fix_line(entry, fb_groups.label))
+
+    def on_done(results: list[dict], error: str) -> None:
+        _fb_say(chat_id, (
+            f"🏁 <b>แก้รูปงาน {job_id} จบแล้ว</b>\n\n"
+            + fb_auto_post.summarize_fix(results, fb_groups.label)
+            + (f"\n\n⚠️ {telegram_bot._escape(error)}" if error else "")
+        ))
+        fixed = sum(1 for r in results if r.get("image_fixed"))
+        append_log("publish",
+                   f"[{job_id}·แก้รูป] จบ — สำเร็จ {fixed}/{len(results)} กลุ่ม")
+
+    try:
+        fb_runner.start_fiximage(
+            job_id=job_id, adb=ADB, serial=serial, caption=job["caption"],
+            targets=targets, images=images, on_log=on_log,
+            on_result=on_result, on_done=on_done,
+        )
+    except fb_auto_post.AutoPostError as error:
+        return str(error)
+    append_log("publish", f"[{job_id}] เริ่มแก้รูป {len(targets)} กลุ่ม")
+    return f"🖼️ เริ่มแก้รูป {len(targets)} กลุ่ม — เปิดโพสต์เดิมแล้วเปลี่ยนรูปให้"
 
 
 # รอก่อนไล่หาแจ้งเตือน — ผู้ดูแลบางกลุ่มอนุมัติภายในไม่กี่สิบวินาที
@@ -4692,6 +4870,8 @@ def _phone_wait_pump() -> None:
         note = _fb_followup(job_id=job_id, queued=True)
     elif kind == "collect":
         note = _fb_collect(job_id=job_id, queued=True)
+    elif kind == "fiximage":
+        note = _fb_fiximage(job_id=job_id, queued=True)
     else:
         note = _fb_run_job(job_id, queued=True)
     # ยังเริ่มไม่ได้ (จอถูกแย่งไปใน 20 วินาทีที่ผ่านมา) — คืน**หัวคิว**
@@ -5561,6 +5741,11 @@ def _telegram_command(chat_id: str, text: str) -> bool:
         return True
     if command == "/collect":
         note = _fb_collect(argument.strip())
+        if note:
+            _fb_say(chat_id, note)
+        return True
+    if command == "/fiximage":
+        note = _fb_fiximage(argument.strip())
         if note:
             _fb_say(chat_id, note)
         return True

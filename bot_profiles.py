@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -17,6 +18,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
+
+import studio_shared
 
 CHROME_USER_DATA = Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
 
@@ -42,6 +45,26 @@ _LOGIN_FILES = [
 ]
 
 _registry_lock = threading.Lock()
+
+
+def _with_bot_lock(method):
+    """ทุกงานที่แตะโฟลเดอร์โปรไฟล์ต้องถือล็อกของบอท **ตัวนั้น** ก่อน
+
+    `_registry_lock` ข้างบนกันได้แค่ในโปรเซสนี้ พอระยะ 3 แยก post_app.py ออกไป
+    คนละพอร์ต จะมีสองโปรเซสที่สั่งเปิด/รีเฟรชบอทได้ ล็อกในโปรเซสจะมองไม่เห็นกัน
+    — เรื่องเดียวกับที่เคยเจอกับ Chrome จนต้องทำ browser_lock()
+
+    ล็อกแยกรายบอท บอทคนละตัวจึงทำงานขนานกันได้ตามที่ตั้งใจไว้ตั้งแต่แรก
+    ขอซ้อนได้ด้วย เพราะเมธอดพวกนี้เรียกกันเองลึกถึง 3 ชั้น
+    (delete -> stop -> backup_login  ·  launch -> refresh_from_source)
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, profile_id, *args, **kwargs):
+        with studio_shared.bot_lock(profile_id, label=f"{method.__name__} {profile_id}"):
+            return method(self, profile_id, *args, **kwargs)
+
+    return wrapper
 # โปรเซส Chrome ที่ฟาร์มเปิดไว้ {profile_id: Popen}
 _running: dict[str, subprocess.Popen] = {}
 
@@ -295,6 +318,7 @@ class ProfileFarm:
         return {"created": created, "total": count}
 
     # ------------------------------------------------------- refresh ล็อกอิน
+    @_with_bot_lock
     def refresh_from_source(self, profile_id: str) -> dict:
         """ก๊อปเฉพาะไฟล์ล็อกอินจากโปรไฟล์ Chrome ต้นทางมาทับ (ไม่ก๊อปทั้งโปรไฟล์)
 
@@ -396,6 +420,7 @@ class ProfileFarm:
         return path
 
     # ------------------------------------------------------------- เปิด/ปิด
+    @_with_bot_lock
     def launch(self, profile_id: str, url: str = "") -> dict:
         state = self.list_profiles()
         if state["running_count"] >= state["max_concurrent"]:
@@ -435,6 +460,7 @@ class ProfileFarm:
             self._save(data)
         return {"message": "เปิด Chrome ของบอทแล้ว" + refresh_note}
 
+    @_with_bot_lock
     def stop(self, profile_id: str) -> dict:
         with _registry_lock:
             data = self._load()
@@ -467,6 +493,7 @@ class ProfileFarm:
         return {"message": "ปิดแล้ว" + note}
 
     # ------------------------------------------------------ สำรอง/กู้ ล็อกอิน
+    @_with_bot_lock
     def backup_login(self, profile_id: str) -> dict:
         """เก็บสำเนาไฟล์ล็อกอินไว้ที่ _backups/<id>/<เวลา>/ — เก็บ 5 ชุดล่าสุด
 
@@ -516,6 +543,7 @@ class ProfileFarm:
             return []
         return sorted((d.name for d in folder.iterdir() if d.is_dir()), reverse=True)
 
+    @_with_bot_lock
     def restore_login(self, profile_id: str, stamp: str = "") -> dict:
         """เอาไฟล์ล็อกอินจากชุดสำรองกลับเข้าโปรไฟล์ (ไม่ระบุ = ชุดล่าสุด)"""
         snaps = self.list_backups(profile_id)
@@ -542,6 +570,7 @@ class ProfileFarm:
                 raise FarmError(f"กู้คืนไม่สำเร็จ: {error}") from error
         return {"stamp": stamp}
 
+    @_with_bot_lock
     def delete(self, profile_id: str) -> dict:
         """ย้ายลงถังขยะ ไม่ลบถาวร — ล็อกอินที่สะสมไว้มีค่าเกินกว่าจะลบทิ้งกู้ไม่ได้
 

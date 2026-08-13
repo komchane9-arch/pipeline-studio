@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import base64
+import html
 import json
 import random
 import re
@@ -143,12 +144,41 @@ COPY_LINK_HINTS = ["คัดลอกลิงก์", "คัดลอกล�
 MORE_OPTIONS_HINTS = ["ตัวเลือกเพิ่มเติม", "More options", "ดูเพิ่มเติม", "See more"]
 
 
+def _plain(value: str) -> str:
+    """ถอด entity ของ XML กลับเป็นตัวอักษรจริง
+
+    `uiautomator dump` คาย **XML ดิบ** อักขระที่ XML แปลความหมายพิเศษ และอักขระ
+    นอก BMP (อีโมจิทั้งหมด) ถูกเขียนเป็น entity:
+
+        🔥            → `&#128293;`
+        &             → `&amp;`
+        ขึ้นบรรทัดใหม่ → `&#10;`
+
+    ส่วนภาษาไทยไม่โดนแปลง จึงเทียบตรงๆ ได้มาตลอดจนไม่มีใครสังเกต
+
+    เอาข้อความที่ผู้ใช้พิมพ์ไปเทียบกับ XML ดิบจึงไม่มีทางเจอถ้ามีอักขระพวกนี้ปน
+    **เจอจริง 13 ส.ค. งาน p617465263**: คอมเมนต์ขึ้นต้นด้วย 🔥 → ด่าน
+    "พิมพ์คอมเมนต์แล้วแต่ข้อความไม่ขึ้นบนจอ" ตีกลับครบทั้ง 5 กลุ่ม
+    ทั้งที่ข้อความอยู่ในช่องเรียบร้อยแล้ว คอมเมนต์เลยค้างไม่ได้ส่งสักอัน
+    """
+    return html.unescape(value) if "&" in value else value
+
+
+def screen_has(xml: str, probe: str) -> bool:
+    """ข้อความนี้โผล่บนจอไหม — ถอด entity ก่อนเทียบเสมอ
+
+    ใช้แทนการเขียน `probe in xml` ตรงๆ ทุกที่ ไม่งั้นข้อความที่มีอีโมจิหรือ &
+    จะถูกตัดสินว่า "ไม่อยู่บนจอ" ทั้งที่อยู่
+    """
+    return bool(probe) and probe in _plain(xml)
+
+
 def iter_nodes(xml: str):
     """ไล่ node ทั้งหมดพร้อมป้ายข้อความและกรอบ — ใช้ร่วมกันทุกที่ที่ต้องอ่านหน้าจอ"""
     for node in re.finditer(r"<node[^>]*>", xml):
         tag = node.group(0)
         labels = [
-            value.strip()
+            _plain(value).strip()
             for value in re.findall(r'(?:text|content-desc)="([^"]*)"', tag)
             if value.strip()
         ]
@@ -172,6 +202,9 @@ class Phone:
         self.adb = adb
         self.serial = serial
         self.log = log
+        # ตัวนับกันชื่อไฟล์ซ้ำตอนส่งรูป + จำชื่อล่าสุดของแต่ละรูปไว้ลบใบเก่าทิ้ง
+        self._push_seq = 0
+        self._pushed: dict[str, str] = {}
 
     def run(self, *args: str, timeout: float = 30) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -395,26 +428,52 @@ class Phone:
     # -------------------------------------------------------------- รูปภาพ
 
     def push_image(self, local: Path) -> str:
-        """ส่งรูปเข้าเครื่องแล้วให้แกลเลอรีรู้จัก ไม่งั้นเลือกในแอปไม่เจอ"""
-        remote = f"{REMOTE_DIR}/{local.name}"
+        """ส่งรูปเข้าเครื่อง **ด้วยชื่อใหม่ทุกครั้ง** แล้วเก็บกวาดชื่อเก่าทิ้ง
+
+        ทำไมต้องเปลี่ยนชื่อไฟล์ทุกครั้ง — เรื่องนี้วัดกับเครื่องจริงแล้ว (13 ส.ค.):
+
+        ตัวเลือกรูปของแอปเรียงช่องตาม **`_id` ของ MediaStore** ซึ่งเป็นลำดับตอนที่
+        ไฟล์ถูกเพิ่มเข้าฐาน**ครั้งแรก** ไม่ใช่เวลาไฟล์:
+
+            _id=729  p594651692-c1.jpg  แก้ไขล่าสุด 14:55  → ช่องที่ 1
+            _id=728  p594651692-1.jpg   แก้ไขล่าสุด 15:26  → ช่องที่ 2  ← ใหม่กว่าแต่อยู่หลัง
+
+        `push` ทับไฟล์ชื่อเดิมเป็นการ **update แถวเดิม** `_id` ไม่ขยับ รูปจึงไม่เลื่อน
+        มาช่องแรกไม่ว่าจะ `touch` กี่ครั้ง — และแม้จะสั่งลบแถวทิ้งก่อนแล้ว push ใหม่
+        ก็ยังได้ `_id` เดิมกลับมา (ลองแล้ว: ได้ 728 เท่าเดิม) เพราะ MediaStore ผูก
+        `_id` ไว้กับ path
+
+        พอเปลี่ยนชื่อไฟล์ ได้ `_id=731` แล้วขึ้นช่องแรกทันที
+
+        **นี่คือรากของบั๊กรูปโพสต์ผิด**: รูปคอมเมนต์ถูกเพิ่มเข้าฐานทีหลังรูปโพสต์
+        `_id` จึงสูงกว่าตลอดกาล กลุ่มที่ 2 เป็นต้นไปเลยแนบรูปคอมเมนต์เป็นรูปโพสต์
+        (งาน p594651692 — ผิด 5 จาก 6 กลุ่ม)
+        """
         self.shell(f"mkdir -p {REMOTE_DIR}")
+        self._push_seq += 1
+        stem, suffix = local.stem, local.suffix or ".jpg"
+        remote = f"{REMOTE_DIR}/{stem}__{int(time.time())}{self._push_seq:02d}{suffix}"
         result = self.run("push", str(local), remote, timeout=180)
         if result.returncode != 0:
             raise PostError(
                 f"ส่งรูปเข้ามือถือไม่สำเร็จ: "
                 f"{result.stderr.decode('utf-8', errors='replace')[:150]}"
             )
-        # ต้องดันเวลาไฟล์ให้เป็น "เดี๋ยวนี้" ก่อนสั่งสแกน
-        #
-        # adb push **รักษา mtime ของไฟล์ต้นทาง** ไฟล์ที่เพิ่งส่งเข้าไปจึงไม่ได้เป็น
-        # ใบใหม่สุดในแกลเลอรีเสมอไป แต่โค้ดเลือกรูปยึด "ใหม่สุด = รายการที่ 1"
-        # เจอจริง 9 ส.ค.: รูปคอมเมนต์มี mtime 13:10 ส่วนสกรีนช็อตที่ค้างในโฟลเดอร์
-        # เดียวกันเป็น 13:44 → แนบสกรีนช็อตไปใต้คอมเมนต์จริงทั้ง 3 กลุ่ม
+        # ดันเวลาไฟล์เป็น "เดี๋ยวนี้" ก่อนสั่งสแกน — adb push รักษา mtime ของต้นทาง
+        # (ตัวเรียงช่องไม่ได้ใช้ mtime แต่ที่อื่นในแอปใช้ เก็บไว้ให้ตรงกัน)
         self.shell(f"touch {remote}")
         self.shell(
             f"content call --uri content://media --method scan_file --arg {remote}"
         )
         time.sleep(1.5)
+        # ทิ้งใบเก่าของรูปเดียวกัน ไม่งั้นแกลเลอรีผู้ใช้รกขึ้นเรื่อยๆ ทุกกลุ่มที่โพสต์
+        old = self._pushed.get(local.name)
+        if old and old != remote:
+            self.shell(f"rm -f {old}")
+            self.shell(
+                f"content call --uri content://media --method scan_file --arg {old}"
+            )
+        self._pushed[local.name] = remote
         self.log(f"ส่งรูปเข้าเครื่องแล้ว: {remote}")
         return remote
 
@@ -467,17 +526,22 @@ def push_images(phone: Phone, images: list[Path]) -> int:
     return pushed
 
 
-# ถาม MediaStore ว่ารูปใบไหนใหม่สุด — ต้องถามตัวนี้ ไม่ใช่ ls โฟลเดอร์ของเรา
-# เพราะตัวเลือกรูปของแอปเห็นรูป**ทั้งเครื่อง** (กล้อง · ภาพจับหน้าจอ · ดาวน์โหลด)
-# โฟลเดอร์ /sdcard/Pictures/pipeline เป็นแค่ส่วนหนึ่งเท่านั้น
+# ถาม MediaStore ว่าตัวเลือกรูปจะเรียงช่องยังไง
+#
+# **ต้องเรียงด้วย `_id` ไม่ใช่ `date_modified`** — วัดกับเครื่องจริงแล้ว ตัวเลือกรูป
+# เรียงตามลำดับที่ไฟล์ถูกเพิ่มเข้าฐาน (`_id`) ไม่ใช่เวลาไฟล์ ไฟล์ที่ mtime ใหม่กว่า
+# แต่ `_id` ต่ำกว่าจะอยู่ช่องหลัง (ดูรายละเอียดใน Phone.push_image)
+#
+# และต้องถาม MediaStore ไม่ใช่ `ls` โฟลเดอร์ของเรา เพราะตัวเลือกรูปเห็นรูป
+# **ทั้งเครื่อง** (กล้อง · ภาพจับหน้าจอ · ดาวน์โหลด) โฟลเดอร์เราเป็นแค่ส่วนหนึ่ง
 MEDIA_NEWEST_QUERY = (
     "content query --uri content://media/external/images/media "
-    "--projection _data --sort 'date_modified DESC' | head -n {count}"
+    "--projection _data --sort '_id DESC' | head -n {count}"
 )
 
 
 def newest_media_names(phone: Phone, count: int) -> list[str]:
-    """ชื่อไฟล์รูป count ใบใหม่สุดตามที่ตัวเลือกรูปของแอปมองเห็น"""
+    """ชื่อไฟล์รูปที่จะไปอยู่ช่องที่ 1..count ของตัวเลือกรูป (เรียงตามช่อง)"""
     out = phone.shell(MEDIA_NEWEST_QUERY.format(count=max(1, count)), timeout=60)
     names = []
     for line in out.splitlines():
@@ -488,26 +552,29 @@ def newest_media_names(phone: Phone, count: int) -> list[str]:
 
 
 def ensure_images_newest(phone: Phone, images: list[Path]) -> None:
-    """ยืนยันว่ารูปที่เพิ่งส่งเข้าเครื่องเป็นใบใหม่สุดจริง ก่อนไปแตะเลือก
+    """ยืนยันว่าช่องแรกๆ ของตัวเลือกรูปคือรูปที่เราเพิ่งส่ง ก่อนไปแตะเลือก
 
-    ทำไมต้องมีด่านนี้: ตัวเลือกรูปของแอปแตะได้แค่ "ช่องที่ N" ซึ่งเรียงตามเวลาไฟล์
-    ระบุไฟล์ตรงๆ ไม่ได้เลย โค้ดทั้งไฟล์จึงตั้งอยู่บนสมมติฐานว่า
-    **"ใบใหม่สุด = ใบที่เราเพิ่งส่งเข้าไป"**
+    ทำไมต้องมีด่านนี้: ตัวเลือกรูปแตะได้แค่ "ช่องที่ N" ระบุไฟล์ตรงๆ ไม่ได้เลย
+    โค้ดทั้งไฟล์จึงตั้งอยู่บนสมมติฐานว่า **"ช่องแรก = ใบที่เราเพิ่งส่งเข้าไป"**
 
-    สมมติฐานนี้พังทันทีที่มีรูปอื่นถูกส่งแทรกเข้ามาระหว่างทาง — ซึ่งเกิดขึ้นจริง
-    เพราะรูปคอมเมนต์ถูกส่งใหม่ทุกกลุ่ม พอจบกลุ่มแรก รูปคอมเมนต์ก็กลายเป็นใบ
-    ใหม่สุด กลุ่มที่ 2 เป็นต้นไปจึงแนบรูปคอมเมนต์เป็นรูปโพสต์
-    (งาน p594651692 · 13 ส.ค. — ผิด 5 จาก 6 กลุ่ม และไม่มีอะไรฟ้องเลยสักจุด
-     log เขียนแค่ "เลือกรูป 1 ใบ" ซึ่งบอกแค่ว่าจำนวนที่เลือกเพิ่มขึ้น)
+    สมมติฐานนี้พังมาแล้วสองแบบ:
+      1. รูปคอมเมนต์ถูกส่งแทรกทุกกลุ่ม → กลุ่มที่ 2 เป็นต้นไปแนบรูปคอมเมนต์
+      2. ส่งรูปโพสต์ทับชื่อเดิมก็ไม่ช่วย เพราะ `_id` ไม่ขยับ (ดู push_image)
 
     ตรวจไม่ผ่าน = **หยุด** ดีกว่าปล่อยให้โพสต์รูปผิดลงกลุ่มจริง
     """
-    want = [image.name for image in images]
+    want = [
+        phone._pushed.get(image.name, image.name)
+        for image in images if image.name
+    ]
+    if not want:
+        return                      # โพสต์ข้อความล้วน ไม่มีรูปให้ตรวจ
+    want = [name.rsplit("/", 1)[-1] for name in want]
     got = newest_media_names(phone, len(want))
     if sorted(got) == sorted(want):
         return
     raise PostError(
-        f"รูปใหม่สุดในเครื่องไม่ใช่รูปของโพสต์นี้ "
+        f"ช่องแรกของตัวเลือกรูปไม่ใช่รูปของโพสต์นี้ "
         f"(เจอ {got or 'ไม่เจออะไรเลย'} · ต้องเป็น {want}) — "
         "หยุดก่อนแนบรูปผิดใบ"
     )
@@ -738,7 +805,7 @@ def iter_widgets(xml: str):
         if box[2] - box[0] < 8 or box[3] - box[1] < 8:
             continue
         labels = [
-            value.strip()
+            _plain(value).strip()
             for value in re.findall(r'(?:text|content-desc)="([^"]*)"', tag)
             if value.strip()
         ]
@@ -1332,7 +1399,7 @@ def _write_comment(phone: Phone, text: str, photo: Path | None = None) -> bool:
     time.sleep(1.5)
     # ต้องเห็นข้อความบนจอก่อนกดส่ง — broadcast ผ่านไม่ได้แปลว่าข้อความเข้าช่องจริง
     probe = text.strip()[:10]
-    if probe and probe not in phone.dump():
+    if not screen_has(phone.dump(), probe):
         phone.log("  พิมพ์คอมเมนต์แล้วแต่ข้อความไม่ขึ้นบนจอ")
         phone.back()
         return False
@@ -1510,7 +1577,7 @@ def _pick_facebook_in_chooser(phone: Phone) -> bool:
     เองก็มีคำนี้เต็มไปหมด จะกลายเป็นกดมั่วในหน้าปกติ
     """
     xml = phone.dump()
-    if not any(hint in xml for hint in CHOOSER_MARK_HINTS):
+    if not any(screen_has(xml, hint) for hint in CHOOSER_MARK_HINTS):
         return False
     row = phone.find(xml, CHOOSER_APP_HINTS)
     if row is None:
@@ -1869,7 +1936,7 @@ def verify_liked(phone: Phone, group_id: str, caption: str) -> dict:
     xml = phone.dump()
     # ข้อความยาวถูกตัดท้ายด้วย "..." จึงเทียบแค่ท่อนต้น
     probe = caption.strip()[:12]
-    found_post = bool(probe and probe in xml)
+    found_post = screen_has(xml, probe)
     # ต้องดูป้าย "ถูกใจแล้ว" **ใต้โพสต์ของเรา** ไม่ใช่ที่ไหนก็ได้บนจอ
     # (ไม่งั้นไปนับไลก์ของโพสต์คนอื่นที่อยู่บนจอเดียวกัน)
     bottom = _caption_bottom(xml, caption)
@@ -2137,6 +2204,57 @@ def count_comments(phone: Phone) -> int | None:
     return len(seen) if entered else None
 
 
+# ปุ่มตอบกลับใต้คอมเมนต์แต่ละอัน — หนึ่งปุ่ม = หนึ่งคอมเมนต์
+#
+# ป้ายเต็มคือ "ตอบกลับความคิดเห็นของ <ชื่อต้น>, ปุ่ม แตะสองครั้งเพื่อตอบกลับ…"
+# **ห้ามใช้ชื่อในป้ายนี้จับคู่กับรูปโปรไฟล์** เพราะปุ่มใส่มาแค่ชื่อต้น
+# ("Kamolchanok") ส่วนรูปโปรไฟล์ใส่ชื่อเต็ม ("Kamolchanok Lill") — จับคู่ด้วย
+# ตำแหน่งแทน: ปุ่มเป็นของคอมเมนต์ที่มีรูปโปรไฟล์อยู่เหนือมันและใกล้ที่สุด
+REPLY_BUTTON_PREFIX = "ตอบกลับความคิดเห็นของ"
+
+
+def visible_comments(xml: str, low: int = 0, high: int = 10 ** 6) -> list[dict]:
+    """คอมเมนต์ที่เห็นบนจอตอนนี้ — [{"author", "text", "reply", "top"}]
+
+    reply = พิกัดปุ่มตอบกลับของคอมเมนต์นั้น (None = ไม่เห็นปุ่มบนจอนี้)
+
+    แบ่งเขตของแต่ละคอมเมนต์ด้วย "รูปโปรไฟล์ตัวถัดไป" เป็นเส้นแบ่ง ทุกอย่างที่อยู่
+    ระหว่างรูปโปรไฟล์นี้กับตัวถัดไปคือของคอมเมนต์นี้
+
+    หมายเหตุ: การหาข้อความของแต่ละคอมเมนต์ใช้ตรรกะเดียวกับ count_comments
+    (ซึ่งทดสอบกับจอจริงแล้ว) ยังไม่ยุบรวมกันเพราะ count_comments เพิ่งยืนยันผล
+    ไปสดๆ ควรยุบตอนที่ทดสอบทั้งคู่พร้อมกันได้
+    """
+    avatars: list[tuple[int, str]] = []
+    replies: list[tuple[int, tuple[int, int]]] = []
+    rows: list[tuple[int, list[str]]] = []
+    for labels, box, clickable in iter_widgets(xml):
+        y1 = box[1]
+        if not (low < y1 < high):
+            continue
+        if labels:
+            rows.append((y1, labels))
+        for label in labels:
+            if label.startswith(AVATAR_PREFIX):
+                avatars.append((y1, label[len(AVATAR_PREFIX):].strip()))
+                break
+            if clickable and label.startswith(REPLY_BUTTON_PREFIX):
+                replies.append(
+                    (y1, ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2))
+                )
+                break
+    avatars.sort()
+    found: list[dict] = []
+    for index, (top, author) in enumerate(avatars):
+        end = avatars[index + 1][0] if index + 1 < len(avatars) else high
+        text = _comment_text_near(
+            [(y, labels) for y, labels in rows if y < end], top, author
+        )
+        button = next((point for y, point in sorted(replies) if top < y < end), None)
+        found.append({"author": author, "text": text, "reply": button, "top": top})
+    return found
+
+
 def read_post_stats(phone: Phone, caption: str, single_post: bool = True,
                     count_rows: bool = True) -> dict:
     """เลื่อนหาแถวตัวนับของโพสต์เราแล้วอ่านค่า ({} = หาไม่เจอ)
@@ -2225,6 +2343,146 @@ def collect_groups(
     return results
 
 
+# ── แก้รูปของโพสต์ที่ลงไปแล้ว ─────────────────────────────────────────────
+#
+# ทำไมต้องมี: บั๊ก `_id` ของ MediaStore ทำให้โพสต์ตั้งแต่กลุ่มที่ 2 เป็นต้นไปแนบรูป
+# คอมเมนต์แทนรูปโพสต์ (ดูข้อ 3.16 ในไฟล์บั๊ก) โพสต์ที่ลงไปแล้วต้องแก้ย้อนหลัง
+#
+# ทำไมไม่ลบแล้วโพสต์ใหม่:
+#   - ลิงก์ · คอมเมนต์ · ยอดถูกใจ ของเดิมหายหมด
+#   - ยิงเนื้อหาเดิมซ้ำลงกลุ่มเดิม = เพิ่มสัญญาณสแปมให้ Facebook
+#
+# ทดสอบกับโพสต์จริงแล้ว 6/6 กลุ่ม คอมเมนต์และยอดถูกใจอยู่ครบหลังแก้
+EDIT_POST_HINTS = ("แก้ไขโพสต์", "Edit post")
+REMOVE_PHOTO_HINTS = ("ลบรูปภาพออก", "Remove photo")
+# ป้ายปุ่มเพิ่มรูปเปลี่ยนตามสถานะ: ยังมีรูปอยู่ = "เพิ่มสื่อ" (วัดได้ y≈960)
+# ลบรูปหมดแล้ว = "แกลเลอรี" (ย้ายไป y≈1866) ต้องรับทั้งสองคำ
+EDIT_ADD_MEDIA_HINTS = ("เพิ่มสื่อ", "เพิ่มรูปภาพ/วิดีโออื่นๆ", "แกลเลอรี", "Gallery")
+SAVE_EDIT_HINTS = ("บันทึก", "Save")
+COMPOSER_ACTIVITY = "ComposerActivity"
+
+
+def _tap_clickable(phone: Phone, hints, tag: str, wait: float = 3.0) -> bool:
+    """แตะ widget ที่ **กดได้** ตัวแรกที่ป้ายมีคำเหล่านี้
+
+    ต้องกรอง clickable เพราะป้ายเดียวกันมักโผล่ทั้งบนตัวปุ่มและบน TextView ข้างใน
+    แตะตัวที่กดไม่ได้บางทีไม่มีอะไรเกิดขึ้นเลย
+    """
+    for labels, box, clickable in iter_widgets(phone.dump()):
+        if not clickable:
+            continue
+        if any(any(hint in label for hint in hints) for label in labels):
+            phone.tap(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2))
+            time.sleep(wait)
+            return True
+    phone.log(f"  หา {tag} ไม่เจอ")
+    return False
+
+
+def _has_label(phone: Phone, hints) -> bool:
+    return any(
+        any(hint in label for hint in hints)
+        for labels, _, _ in iter_widgets(phone.dump()) for label in labels
+    )
+
+
+def _in_composer(phone: Phone) -> bool:
+    return COMPOSER_ACTIVITY in phone.shell("dumpsys window | grep mCurrentFocus")
+
+
+def replace_post_image(phone: Phone, link: str, caption: str, group_id: str,
+                       images: list[Path], post_id: str = "") -> str:
+    """เปลี่ยนรูปของโพสต์ที่ลงไปแล้วให้เป็น images ("" = สำเร็จ · อื่นๆ = เหตุที่ล้ม)
+
+    ทุกขั้นต้องเจอหมุดจริงถึงไปต่อ เจอไม่ครบ = หยุด ไม่เดาแล้วแตะมั่ว เพราะนี่คือ
+    การแก้โพสต์จริงบนกลุ่มจริง แตะผิดทีเดียวอาจลบโพสต์หรือโพสต์ค้างไม่มีรูป
+    """
+    # รูปที่ถูกต้องต้องอยู่ช่องแรกของตัวเลือกรูป **ก่อน** เปิดแกลเลอรีเสมอ
+    push_images(phone, images)
+    ensure_images_newest(phone, images)
+
+    if not open_post_link(phone, link, caption, group_id, post_id):
+        return "เปิดโพสต์จากลิงก์ไม่ได้"
+    if not _tap_clickable(phone, POST_MENU_HINTS, "ปุ่ม …", wait=2.5):
+        return "หาปุ่ม … ของโพสต์ไม่เจอ"
+    if not _tap_clickable(phone, EDIT_POST_HINTS, "เมนูแก้ไขโพสต์", wait=6.0):
+        return "เมนูนี้ไม่มีตัวเลือกแก้ไขโพสต์"
+    if not _in_composer(phone):
+        return "กดแก้ไขแล้วแต่ไม่ได้เข้าหน้าแก้ไขโพสต์"
+
+    if not _tap_clickable(phone, REMOVE_PHOTO_HINTS, "ปุ่มลบรูป", wait=3.0):
+        return "หาปุ่มลบรูปไม่เจอ"
+    if _has_label(phone, REMOVE_PHOTO_HINTS):
+        return "กดลบรูปแล้วแต่รูปเดิมยังอยู่"
+    phone.log("  ลบรูปเดิมออกแล้ว")
+
+    if not _tap_clickable(phone, EDIT_ADD_MEDIA_HINTS, "ปุ่มเพิ่มรูป", wait=5.0):
+        return "หาปุ่มเพิ่มรูปไม่เจอ"
+    picked = pick_photos(phone, len(images))
+    if picked < len(images):
+        return f"เลือกรูปได้ {picked} จาก {len(images)} ใบ"
+    phone.log(f"  เลือกรูปที่ถูกแล้ว {picked} ใบ")
+    _tap_clickable(phone, NEXT_HINTS, "ปุ่มถัดไป", wait=5.0)
+
+    if not _in_composer(phone):
+        return "หลุดออกจากหน้าแก้ไขหลังเลือกรูป"
+    if not _has_label(phone, REMOVE_PHOTO_HINTS):
+        return "กลับมาหน้าแก้ไขแล้วแต่ไม่เห็นรูปที่แนบ"
+    if not _tap_clickable(phone, SAVE_EDIT_HINTS, "ปุ่มบันทึก", wait=9.0):
+        return "หาปุ่มบันทึกไม่เจอ"
+    # ยังอยู่หน้าเดิม = กดบันทึกแล้วไม่ผ่าน (เน็ตหลุด / แอปเด้งกล่องอะไรมาขวาง)
+    if _in_composer(phone):
+        return "กดบันทึกแล้วแต่ยังค้างอยู่หน้าแก้ไข"
+    phone.log("  บันทึกรูปใหม่แล้ว")
+    return ""
+
+
+def fix_images_groups(
+    adb: str, serial: str, caption: str, targets: list[dict],
+    images: list[Path], log=print, stop=lambda: False, on_result=None,
+) -> list[dict]:
+    """ไล่แก้รูปของโพสต์ทุกกลุ่มในงานเดียว
+
+    targets = [{"group_id", "name", "link", "post_id"}] — ต้องมีลิงก์ถึงจะแก้ได้
+    เพราะต้องเปิดโพสต์นั้นให้ตรงใบ ไม่ใช่ไล่เดาในฟีด
+    """
+    phone = Phone(adb, serial, log=log)
+    require_network(phone)
+    log("เน็ตมือถือใช้ได้")
+    results: list[dict] = []
+    for index, item in enumerate(targets, start=1):
+        if stop():
+            log("ผู้ใช้สั่งหยุด")
+            break
+        name = item.get("name", "")
+        log(f"[{index}/{len(targets)}] {name[:30]}")
+        if not phone.online():
+            log(f"  {OFFLINE_MESSAGE}")
+            break
+        entry = {"group_id": item.get("group_id", ""), "index": index,
+                 "total": len(targets)}
+        link = item.get("link", "")
+        if not link:
+            entry["error"] = "ยังไม่มีลิงก์โพสต์ — แก้รูปไม่ได้"
+        else:
+            try:
+                problem = replace_post_image(
+                    phone, link, caption, entry["group_id"], images,
+                    item.get("post_id", ""),
+                )
+            except PostError as error:
+                problem = str(error)
+            if problem:
+                entry["error"] = problem
+                log(f"  ❌ {problem}")
+            else:
+                entry["image_fixed"] = True
+        results.append(entry)
+        if on_result:
+            on_result(entry)
+    return results
+
+
 def format_stats(stats: dict) -> str:
     """แปลงยอดเป็นข้อความอ่านง่าย — ค่าที่อ่านไม่ได้แสดงเป็น "?" ไม่ใช่ 0"""
     def show(key: str) -> str:
@@ -2279,7 +2537,7 @@ def post_to_group(
     phone.type_text(caption)
     time.sleep(1.5)
     # ยืนยันว่าข้อความเข้าจริง ไม่ใช่เดาจากการส่ง broadcast ผ่าน
-    if caption.strip()[:10] not in phone.dump():
+    if not screen_has(phone.dump(), caption.strip()[:10]):
         raise PostError("พิมพ์แคปชันแล้วแต่ข้อความไม่ขึ้นบนหน้าจอ")
 
     # กลับจากหน้า "เพิ่มข้อความ" เข้าหน้าเขียนโพสต์ ปุ่มโพสต์ถึงจะโผล่

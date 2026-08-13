@@ -465,6 +465,24 @@ def send_report(token: str, chat_id: str, group: dict, fresh: list[dict],
 # ป้ายปุ่มรับสองภาษา (กติกาโปรเจกต์: UI ตามภาษาบัญชี บังคับด้วย URL ไม่ได้)
 JOIN_LABEL = re.compile(r"เข้าร่วมกลุ่ม|Join group", re.I)
 PENDING_LABEL = re.compile(r"ยกเลิกคำขอ|รอการอนุมัติ|Cancel request|Requested", re.I)
+# สถานะ "เป็นสมาชิกแล้ว" — กลุ่มสาธารณะกดเข้าปุ๊บเปลี่ยนเป็นอันนี้ (ไม่ใช่ pending)
+MEMBER_LABEL = re.compile(r"เข้าร่วมแล้ว|^Joined$", re.I)
+
+
+def _join_state(page) -> str:
+    """อ่านสถานะการเป็นสมาชิกจากปุ่มจริงบนหน้า
+
+    pending = ส่งคำขอแล้วรออนุมัติ · member = เป็นสมาชิกแล้ว
+    can-join = มีปุ่มเข้าร่วมให้กด · unknown = ไม่เจอปุ่มพวกนี้ (มักแปลว่าเป็น
+    สมาชิกแล้วและเห็นฟีด — ปุ่มเข้าร่วมหายไป)
+    """
+    if page.get_by_role("button", name=PENDING_LABEL).count():
+        return "pending"
+    if page.get_by_role("button", name=MEMBER_LABEL).count():
+        return "member"
+    if page.get_by_role("button", name=JOIN_LABEL).count():
+        return "can-join"
+    return "unknown"
 
 
 def join_group(url: str, log=print) -> dict:
@@ -491,26 +509,33 @@ def join_group(url: str, log=print) -> dict:
             canonical = page.url.split("?")[0]
             name = re.sub(r"\s*\|\s*Facebook\s*$", "", page.title()).strip()
 
-            join = page.get_by_role("button", name=JOIN_LABEL)
-            pending = page.get_by_role("button", name=PENDING_LABEL)
-            if pending.count():
+            state = _join_state(page)
+            if state == "pending":
                 status = "pending"
                 log("เคยส่งคำขอไว้แล้ว — รอแอดมินอนุมัติ")
-            elif not join.count():
+            elif state in ("member", "unknown"):
                 status = "already"
                 log("เป็นสมาชิกกลุ่มนี้อยู่แล้ว")
-            else:
-                join.first.click()
-                page.wait_for_timeout(4_000)
-                # ตัดสินจากผลจริงหลังกด ไม่ใช่แค่ "กดแล้ว" (กติกา 2.3):
-                # ปุ่มเข้าร่วมต้องหาย หรือกลายเป็นปุ่มยกเลิกคำขอ
-                if page.get_by_role("button", name=JOIN_LABEL).count() \
-                        and not page.get_by_role("button", name=PENDING_LABEL).count():
-                    raise MassFinderError(
-                        "กดเข้าร่วมแล้วแต่ปุ่มยังอยู่เหมือนเดิม — อาจมีป๊อปอัปคำถาม"
-                        "ของกลุ่มขวางอยู่ เปิดบอทเข้าไปดูเองหนึ่งครั้ง")
-                status = "joined-request"
-                log("กดเข้าร่วมแล้ว")
+            else:  # can-join
+                page.get_by_role("button", name=JOIN_LABEL).first.click()
+                # กลุ่มสาธารณะเปลี่ยนเป็น "เข้าร่วมแล้ว" ช้ากว่า 4 วิได้ · กลุ่มปิด
+                # เด้ง pending · บางกลุ่มมีป๊อปอัปคำถาม → ปุ่มค้าง ต้องกรอกเอง
+                # poll จนสถานะเปลี่ยนจริง สูงสุด 15 วิ (กติกา 2.3: เชื่อผลจริง)
+                status = "stuck"
+                for _ in range(15):
+                    page.wait_for_timeout(1_000)
+                    now = _join_state(page)
+                    if now == "pending":
+                        status = "pending"
+                        log("ส่งคำขอเข้ากลุ่มแล้ว — รอแอดมินอนุมัติ")
+                        break
+                    if now in ("member", "unknown"):
+                        status = "joined-request"
+                        log("เข้าร่วมกลุ่มสำเร็จ")
+                        break
+                if status == "stuck":
+                    log("กดแล้วแต่ยังไม่เปลี่ยนสถานะใน 15 วิ — "
+                        "อาจมีคำถามสมาชิกให้กรอก (เพิ่มเข้า list ไว้ก่อน)")
         finally:
             context.close()
 
@@ -525,6 +550,262 @@ def join_group(url: str, log=print) -> dict:
         added = True
     save_config(config)
     return {"status": status, "name": name, "canonical": canonical, "added": added}
+
+
+# ------------------------------------------------- สแกนเจาะลึก N โพสต์ (/test)
+
+# เพดานรอบเลื่อนตอนเจาะลึก — 1000 โพสต์ใช้ ~190-220 รอบ (พิสูจน์แล้ว 13 ส.ค.)
+DEEP_MAX_SCROLLS = 250
+
+
+def _collect_deep(page, share_url: str, target: int, log) -> dict:
+    """เก็บโพสต์ย้อนหลังสูงสุด target โพสต์จากกลุ่มเดียว แล้วคืนสถิติ engagement
+
+    ใช้ page ที่เปิดไว้แล้ว (เรียกวนหลายกลุ่มโดยไม่เปิด/ปิดเบราว์เซอร์ซ้ำ)
+    ดักอ่าน GraphQL แบบเดียวกับ scan_group (จด response แล้ว drain นอก handler)
+    """
+    bucket: dict[str, dict] = {}
+    pending: list = []
+
+    def on_response(response):
+        if "/api/graphql" in response.url:
+            pending.append(response)
+
+    def drain() -> None:
+        for response in pending:
+            try:
+                harvest(response.text(), bucket)
+            except Exception:
+                pass
+        pending.clear()
+
+    page.on("response", on_response)
+    try:
+        page.goto(share_url, wait_until="domcontentloaded", timeout=90_000)
+        page.wait_for_timeout(5_000)
+        canonical = page.url.split("?")[0]
+        name = re.sub(r"\s*\|\s*Facebook\s*$", "", page.title()).strip()
+        log(f"  เปิดแล้ว: {name or canonical}")
+        harvest(page.content(), bucket)
+        drain()
+
+        idle_rounds = 0
+        for round_number in range(1, DEEP_MAX_SCROLLS + 1):
+            if len(bucket) >= target:
+                break
+            before = len(bucket)
+            page.keyboard.press("End")
+            page.wait_for_timeout(3_000)
+            drain()
+            harvest(page.content(), bucket)
+            if round_number % 10 == 0:
+                log(f"  เลื่อน {round_number} รอบ — {len(bucket)} โพสต์")
+            idle_rounds = idle_rounds + 1 if len(bucket) == before else 0
+            if idle_rounds >= IDLE_LIMIT:
+                log(f"  ฟีดหมดที่ {len(bucket)} โพสต์")
+                break
+    finally:
+        page.remove_listener("response", on_response)
+
+    feed = list(bucket.values())         # ลำดับที่เห็นในฟีด (ใหม่→เก่า)
+    posts = sorted(feed, key=lambda p: -engagement(p))
+    return {"share_url": share_url, "canonical": canonical, "name": name,
+            "posts": posts, "feed": feed}
+
+
+def _depth_stats(feed: list[dict], min_eng: int, bands: int = 10) -> tuple:
+    """engagement เฉลี่ยรายช่วงความลึก + โพสต์เกินเกณฑ์สะสม (ตามลำดับฟีด)
+
+    ใช้ทำกราฟ /test — เห็น pattern ว่ายิ่งลึก engagement ยิ่งตกไหม
+    """
+    total = len(feed)
+    if not total:
+        return [], []
+    step = max(1, total // bands)
+    band_avg = []
+    for i in range(bands):
+        seg = feed[i * step:(i + 1) * step] if i < bands - 1 else feed[i * step:]
+        band_avg.append(round(sum(engagement(p) for p in seg) / len(seg), 1)
+                        if seg else 0)
+    cum = []
+    for i in range(1, bands + 1):
+        upto = feed[:i * step] if i < bands else feed
+        cum.append(sum(1 for p in upto if engagement(p) > min_eng))
+    return band_avg, cum
+
+
+def deep_scan_groups(groups: list[dict], target: int, log=print) -> list[dict]:
+    """เปิดเบราว์เซอร์บอทครั้งเดียว แล้วเจาะลึกทีละกลุ่มตามรายการที่เลือก
+
+    คืน list ของสถิติต่อกลุ่ม: {name, canonical, count, over, avg, top, error}
+    ใช้กับคำสั่ง /test — เลือกได้หลายกลุ่ม
+    """
+    config = load_config()
+    min_eng = int(config.get("min_likes", 100))
+    farm = ProfileFarm(DATA_DIR)
+    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+    log(f"ใช้โปรไฟล์บอท: {entry['name']} — เจาะลึกสูงสุด {target:,} โพสต์/กลุ่ม")
+
+    from playwright.sync_api import sync_playwright
+
+    results: list[dict] = []
+    with sync_playwright() as playwright:
+        context = launch_bot_browser(playwright, farm, entry)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            ensure_logged_in(page, context)
+            for number, group in enumerate(groups, 1):
+                gname = group.get("name") or group.get("url", "")
+                log(f"[{number}/{len(groups)}] {gname}")
+                started = time.perf_counter()
+                try:
+                    raw = _collect_deep(page, group["url"], target, log)
+                    posts = raw["posts"]
+                    over = [p for p in posts if engagement(p) > min_eng]
+                    avg = (sum(engagement(p) for p in posts) / len(posts)
+                           if posts else 0)
+                    band_avg, cum = _depth_stats(raw["feed"], min_eng)
+                    results.append({
+                        "name": raw["name"] or gname,
+                        "canonical": raw["canonical"],
+                        "count": len(posts),
+                        "over": len(over),
+                        "avg": round(avg, 1),
+                        "bands": band_avg,
+                        "cum": cum,
+                        "top": [{"eng": engagement(p), "likes": p["likes"],
+                                 "comments": p.get("comments", 0),
+                                 "shares": p.get("shares", 0), "url": p["url"]}
+                                for p in posts[:5]],
+                        "seconds": round(time.perf_counter() - started, 1),
+                        "error": "",
+                    })
+                    r = results[-1]
+                    log(f"  ✅ {r['count']} โพสต์ · เกิน {min_eng} = {r['over']} · "
+                        f"เฉลี่ย {r['avg']} ({r['seconds']} วิ)")
+                except Exception as error:      # กลุ่มเดียวพังต้องไม่ล้มทั้งชุด
+                    results.append({
+                        "name": gname, "canonical": "", "count": 0, "over": 0,
+                        "avg": 0, "bands": [], "cum": [], "top": [], "seconds": 0,
+                        "error": f"{type(error).__name__}: {error}"})
+                    log(f"  ❌ {results[-1]['error']}")
+        finally:
+            context.close()
+    # เก็บผลไว้ debug/ทำกราฟซ้ำได้
+    try:
+        (DATA_DIR / "fb_mass_test_last.json").write_text(
+            json.dumps({"at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "min_eng": min_eng, "results": results},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return results
+
+
+# ------------------------------------------------------- กราฟผล /test (PNG)
+
+TEST_CHART_FILE = DATA_DIR / "fb_mass_test_chart.png"
+# ฟอนต์ที่รองรับไทย — เบราว์เซอร์เลือกตัวแรกที่มี
+_CHART_FONT = ('"Leelawadee UI","Tahoma","Sarabun","Noto Sans Thai",'
+               "system-ui,sans-serif")
+# สเกลสูงสุดของแท่ง engagement (ค่าเกินมีตัวเลขกำกับ) — เท่ากับ proof เดิม
+_CHART_CAP = 60
+
+
+def _chart_bars_svg(bands: list, color: str) -> str:
+    """สร้าง SVG แท่ง engagement รายช่วงความลึก (ตื้น→ลึก)"""
+    if not bands:
+        return ""
+    width, height, base, top = 460, 96, 78, 10
+    bw = (width - 12) / len(bands)
+    parts = [f'<svg width="{width}" height="{height}" '
+             f'viewBox="0 0 {width} {height}">']
+    for tick in (20, 40, 60):
+        ty = base - (min(tick, _CHART_CAP) / _CHART_CAP) * (base - top)
+        parts.append(f'<line x1="6" y1="{ty:.0f}" x2="{width-6}" y2="{ty:.0f}" '
+                     f'stroke="#e2e6ec" stroke-width="1"/>')
+        parts.append(f'<text x="7" y="{ty-2:.0f}" font-size="8" '
+                     f'fill="#8b98ab">{tick}</text>')
+    for i, value in enumerate(bands):
+        x = 6 + i * bw + 2
+        y = base - (min(value, _CHART_CAP) / _CHART_CAP) * (base - top)
+        parts.append(f'<rect x="{x:.0f}" y="{y:.0f}" width="{bw-4:.0f}" '
+                     f'height="{base-y:.0f}" rx="2" fill="{color}" opacity="0.85"/>')
+        if value >= _CHART_CAP:
+            parts.append(f'<text x="{x+(bw-4)/2:.0f}" y="{top-2}" font-size="8.5" '
+                         f'text-anchor="middle" font-weight="700" '
+                         f'fill="{color}">{round(value)}</text>')
+    parts.append(f'<line x1="6" y1="{base}" x2="{width-6}" y2="{base}" '
+                 f'stroke="#c6cfda" stroke-width="1"/>')
+    parts.append(f'<text x="6" y="{height-2}" font-size="8.5" fill="#8b98ab">'
+                 f'ตื้น (ใหม่)</text>')
+    parts.append(f'<text x="{width-6}" y="{height-2}" font-size="8.5" '
+                 f'text-anchor="end" fill="#8b98ab">ลึก (เก่า)</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _chart_html(results: list, min_eng: int) -> str:
+    """หน้า HTML กราฟเปรียบเทียบกลุ่ม — เรียง engagement เฉลี่ยมาก→น้อย"""
+    ok = sorted([r for r in results if not r.get("error")],
+                key=lambda r: -r["avg"])
+    cards = []
+    for r in ok:
+        live = r["over"] >= 5
+        color = "#0f9e88" if live else "#b8524a"
+        badge = ("✅ มีชีวิต" if live else "❌ เงียบ")
+        cards.append(
+            f'<div style="margin-bottom:18px">'
+            f'<div style="display:flex;align-items:center;gap:8px">'
+            f'<b style="font-size:15px;flex:1;min-width:0;overflow:hidden;'
+            f'white-space:nowrap;text-overflow:ellipsis">'
+            f'{html.escape(r["name"][:44])}</b>'
+            f'<span style="flex:none;font-size:12px;font-weight:700;'
+            f'padding:2px 9px;border-radius:20px;border:1px solid {color};'
+            f'color:{color};background:{color}1a">{badge}</span></div>'
+            f'<div style="font-size:13px;color:#5c6a7e;margin:2px 0 6px">'
+            f'อ่าน {r["count"]:,} · เกิน {min_eng} = '
+            f'<b style="color:{color}">{r["over"]}</b> · เฉลี่ย {r["avg"]}</div>'
+            f'{_chart_bars_svg(r.get("bands", []), color)}</div>')
+    return (
+        f'<html><head><meta charset="utf-8"></head>'
+        f'<body style="margin:0;background:#fff">'
+        f'<div id="chart" style="width:520px;padding:20px;'
+        f'font-family:{_CHART_FONT};color:#182233">'
+        f'<div style="font-size:19px;font-weight:800;margin-bottom:2px">'
+        f'🔬 ผลเจาะลึก {ok[0]["count"] if ok else 0:,} โพสต์ล่าสุด</div>'
+        f'<div style="font-size:12.5px;color:#5c6a7e;margin-bottom:16px">'
+        f'engagement เฉลี่ยตามความลึกฟีด (ตื้น=โพสต์ใหม่) · เกณฑ์แมส &gt; {min_eng}</div>'
+        f'{"".join(cards)}</div></body></html>')
+
+
+def render_test_chart(results: list, min_eng: int, log=print) -> "Path | None":
+    """เจนกราฟผล /test เป็น PNG (ผ่าน headless chrome — ฟอนต์ไทยขึ้นครบ)
+
+    ใช้ chrome แบบไม่มีโปรไฟล์ (ไม่แตะ Bot10) render HTML แล้ว screenshot
+    """
+    if not any(not r.get("error") for r in results):
+        return None
+    page_html = _chart_html(results, min_eng)
+    tmp = DATA_DIR / "fb_mass_test_chart.html"
+    tmp.write_text(page_html, encoding="utf-8")
+    from playwright.sync_api import sync_playwright
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(channel="chrome", headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 560, "height": 800},
+                                        device_scale_factor=2)
+                page.goto(tmp.as_uri())
+                page.wait_for_timeout(400)
+                element = page.query_selector("#chart")
+                element.screenshot(path=str(TEST_CHART_FILE))
+            finally:
+                browser.close()
+        return TEST_CHART_FILE
+    except Exception as error:
+        log(f"เจนกราฟไม่สำเร็จ: {error}")
+        return None
 
 
 def settings_text(config: dict) -> str:

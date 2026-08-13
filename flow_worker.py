@@ -237,6 +237,10 @@ def _check_page_health(page) -> None:
     if FLOW_SELECTORS["quota_hint"].lower() in body.lower():
         raise QuotaExhausted("Flow แจ้งว่าโควตาหมด")
     if page.url.startswith("https://accounts.google.com"):
+        # เด้งมาโดเมนนี้ไม่ได้แปลว่าหลุดล็อกอินเสมอไป — ส่วนใหญ่คือหน้าเลือก
+        # บัญชีที่รอให้กด เลือกให้ได้ก็ไปต่อได้เลย ไม่ต้องหยุดทั้งงาน
+        if _pick_account(page):
+            return
         raise NeedsLogin("Flow เด้งไปหน้าล็อกอิน Google")
 
 
@@ -492,8 +496,17 @@ def flow_profile_dir() -> Path:
     except RuntimeError:
         raise
     except Exception as error:
-        print(f"  ⚠ ใช้โปรไฟล์บอทไม่ได้ ({error}) — ใช้โปรไฟล์เดิมแทน", flush=True)
-        return PROFILE_DIR
+        # ห้ามถอยไปโปรไฟล์อื่นเงียบๆ — คนละโปรไฟล์ = คนละบัญชี Google =
+        # ไปตัดเครดิต Flow ของบัญชีที่ไม่ได้ตั้งใจ
+        #
+        # เจอจริง: config ชี้ไป b7e2355d ซึ่งถูกลบไปตอนสร้างฟาร์มโปรไฟล์ใหม่
+        # ระบบถอยไปใช้โปรไฟล์เดิมโดยบอกแค่ทาง stdout ที่ไม่มีใครเห็น แล้วไป
+        # โผล่เป็นอาการ "Flow ยังไม่ได้ล็อกอิน" ให้ไล่หาสาเหตุกันคนละทาง
+        raise RuntimeError(
+            f"โปรไฟล์บอทที่ตั้งไว้ ({bot_id}) ใช้ไม่ได้: {error} — "
+            "ไปตั้ง flow_bot_profile ใหม่ที่หน้าตั้งค่า "
+            "(เว้นว่าง = ใช้โปรไฟล์ Flow เดี่ยวตัวเดิม)"
+        ) from error
 
 
 def open_browser(playwright, hidden: bool = False):
@@ -557,6 +570,69 @@ def _is_signed_in(page) -> bool:
         return False
 
 
+def flow_account() -> str:
+    """อีเมลบัญชี Google ที่สาย Flow ต้องใช้ (ตั้งที่ `flow_account` ใน config)"""
+    try:
+        import studio_shared as shared
+
+        return str((shared.read_config() or {}).get("flow_account") or "").strip()
+    except Exception:
+        return ""
+
+
+def _account_rows(page) -> dict:
+    """รายชื่อบัญชีบนหน้า "Choose an account" → {อีเมล: ตัวกด}"""
+    rows = {}
+    found = page.locator("[data-identifier]")
+    for index in range(found.count()):
+        item = found.nth(index)
+        email = (item.get_attribute("data-identifier") or "").strip()
+        if email:
+            rows[email] = item
+    return rows
+
+
+def _pick_account(page) -> bool:
+    """อยู่หน้า "เลือกบัญชี" ของ Google → กดเลือกให้เอง คืน True ถ้ากดไปแล้ว
+
+    ล็อกอินไว้หลายบัญชีในโปรไฟล์เดียว Google จะไม่ปล่อยผ่าน แต่หยุดถามก่อนว่า
+    จะใช้บัญชีไหน หน้านั้นอยู่บนโดเมน accounts.google.com ตัวเช็คล็อกอินเลย
+    ตัดสินว่า "ยังไม่ได้ล็อกอิน" ทั้งที่ล็อกอินครบทุกบัญชี — เจอจริง 3 บัญชี
+    (milk0650361448 / komchand9 / komchane9) แล้วคิวหยุดค้างโดยข้อความบอกผิดทาง
+
+    ไม่เดาบัญชีเองเมื่อมีให้เลือกหลายตัว เพราะแต่ละบัญชีมีเครดิต Flow แยกกัน
+    กดผิดตัว = ไปตัดเครดิตของบัญชีที่ไม่ได้ตั้งใจ
+    """
+    if "accounts.google.com" not in page.url:
+        return False
+    try:
+        rows = _account_rows(page)
+    except Exception:
+        return False
+    if not rows:
+        return False
+
+    wanted = flow_account()
+    if wanted and wanted not in rows:
+        raise NeedsLogin(
+            f"หน้าเลือกบัญชีไม่มี {wanted} — ที่มีให้เลือกคือ {', '.join(rows)}"
+        )
+    if not wanted:
+        if len(rows) > 1:
+            raise NeedsLogin(
+                f"โปรไฟล์นี้ล็อกอิน Google ไว้ {len(rows)} บัญชี "
+                f"({', '.join(rows)}) เลยค้างที่หน้าเลือกบัญชี — "
+                "ตั้ง flow_account ว่าจะใช้บัญชีไหน"
+            )
+        wanted = next(iter(rows))
+
+    print(f"  เลือกบัญชี Google: {wanted}", flush=True)
+    rows[wanted].click()
+    page.wait_for_load_state("domcontentloaded", timeout=60_000)
+    time.sleep(3)
+    return True
+
+
 def _enter_app(page) -> None:
     """หน้า landing ต้องกดเข้าแอปก่อน ถึงจะเจอหน้าล็อกอิน/หน้าทำงาน"""
     for name in FLOW_SELECTORS["enter_app_buttons"]:
@@ -578,6 +654,9 @@ def _app_page(browser, fallback):
         signed = next((item for item in pages if _is_signed_in(item)), None)
         if signed is not None:
             return signed
+        # ค้างที่หน้าเลือกบัญชี = รอให้กดเฉยๆ ไม่ใช่หลุดล็อกอิน กดให้แล้ววนต่อ
+        if any(_pick_account(item) for item in pages):
+            continue
         if any(
             item.locator(FLOW_SELECTORS["landing_button_probe"]).count()
             for item in pages
@@ -647,6 +726,15 @@ def login_flow(wait_minutes: int) -> int:
             if urls != reported:
                 reported = urls
                 print(f"  แท็บ: {urls}", flush=True)
+            for item in pages:
+                try:
+                    if _pick_account(item):
+                        break
+                except NeedsLogin as error:
+                    # ตั้งบัญชีไว้ผิด/ไม่ได้ตั้ง — บอกให้รู้ทันที ไม่ปล่อยรอจนหมดเวลา
+                    print(f"หยุดรอ — {error}", flush=True)
+                    browser.close()
+                    return 1
             signed = next((item for item in pages if _is_signed_in(item)), None)
             if signed is not None:
                 print(f"LOGIN OK — url={signed.url}", flush=True)

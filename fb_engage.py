@@ -58,8 +58,14 @@ DEFAULT_CONFIG = {
     "telegram_bot": "",
     # ว่าง = ใช้มือถือเครื่องแรกที่ต่ออยู่
     "serial": "",
-    # ชื่อบัญชีที่ใช้โพสต์ — ใช้แยกว่าคอมเมนต์ไหนเป็นของเราเอง **ต้องตั้ง**
+    # ชื่อบัญชีที่ใช้โพสต์ — ใช้แยกว่าคอมเมนต์ไหนเป็นของเราเอง **ต้องตั้งอย่างน้อย 1**
     # ไม่ตั้ง = ไม่ยอมตอบกลับอะไรเลย กันบอทไปตอบคอมเมนต์ตัวเองวนไม่จบ
+    #
+    # **เก็บได้หลายบัญชี** เพราะผู้ใช้โพสต์จากหลายบัญชี (ฟาร์มบอทมี 10 โปรไฟล์)
+    # ถ้าจำได้บัญชีเดียว คอมเมนต์ของบัญชีอื่นของเราเองจะถูกมองเป็นของคนนอก
+    # แล้วบอทจะไปตอบตัวเองวนไม่จบ ซึ่งเป็นสิ่งที่ค่านี้มีไว้กันตั้งแต่แรก
+    "owner_names": [],
+    # ของเดิมเป็นช่องเดียว — เก็บไว้ให้ค่าที่ตั้งไว้แล้วไม่หาย อ่านผ่าน owner_list()
     "owner_name": "",
     # เก็บยอดซ้ำเมื่อผ่านไปกี่ชั่วโมง — ถี่กว่านี้เปลืองเวลาจอโดยไม่ได้ข้อมูลใหม่
     "refresh_hours": 6,
@@ -101,16 +107,23 @@ DEFAULT_CONFIG = {
 # ------------------------------------------------------------- ไฟล์ตั้งค่า
 
 def _read_json(path: Path, fallback):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return fallback
+    return studio_shared.read_json(path, fallback)
 
 
 def _write_json(path: Path, value) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    """เขียนแบบที่อีกเธรด/โปรเซสไม่มีวันอ่านเจอไฟล์ครึ่งๆ
+
+    ของเดิมเขียนทับตรงๆ ด้วย write_text ซึ่งตัดไฟล์ให้ว่างก่อนแล้วค่อยเขียนใหม่
+    ระหว่างนั้นถ้าอีกฝั่งอ่านจะได้ไฟล์ครึ่งๆ แล้ว `_read_json` จะกลืนแล้วคืนค่าตั้งต้น
+    เงียบๆ — แปลว่า **ยอดที่เก็บมาทั้งหมดหายไปเฉยๆ** โดยไม่มี error
+
+    เกิดได้จริงเพราะ `refresh_stats` เขียนไฟล์ยอด **ทุกโพสต์** (บรรทัด ~327)
+    ขณะที่เธรดคำสั่งของบอทอ่านไฟล์เดียวกันตอนสั่ง /mass หรือ /set
+
+    ถือล็อกรายไฟล์ด้วย เพราะเธรดรอบอัตโนมัติกับเธรดคำสั่งเขียนไฟล์เดียวกันได้
+    """
+    with studio_shared.data_lock(path.name, label=f"fb_engage เขียน {path.name}"):
+        studio_shared.write_json_atomic(path, value)
 
 
 def load_config() -> dict:
@@ -126,6 +139,37 @@ def load_config() -> dict:
 
 def save_config(config: dict) -> None:
     _write_json(CONFIG_FILE, config)
+
+
+def owner_list(config: dict) -> list[str]:
+    """ชื่อบัญชีของเราทั้งหมด — รวมช่องเดิม (owner_name) กับช่องใหม่ (owner_names)
+
+    อ่านสองช่องรวมกันเสมอ ไม่ใช่เลือกอันใดอันหนึ่ง เพราะค่าที่ผู้ใช้ตั้งไว้ก่อน
+    อัปเดตอยู่ในช่องเดิม ถ้าอ่านแต่ช่องใหม่ = ชื่อที่เคยตั้งหายไปเงียบๆ แล้วบอท
+    จะกลับไปตอบคอมเมนต์ตัวเองวนไม่จบ ซึ่งคือสิ่งที่ค่านี้มีไว้กัน
+
+    ตัดชื่อซ้ำแบบไม่สนตัวพิมพ์ และคงลำดับที่ผู้ใช้ใส่ไว้
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    raw = [config.get("owner_name")] + list(config.get("owner_names") or [])
+    for item in raw:
+        name = str(item or "").strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        names.append(name)
+    return names
+
+
+def is_owner(author: str, owners: list[str]) -> bool:
+    """คอมเมนต์นี้เป็นของบัญชีเราเองไหม
+
+    เทียบแบบ "ชื่อเราอยู่ในชื่อผู้เขียน" เหมือนเดิม เพราะ Facebook เติมคำต่อท้าย
+    ให้บ่อย (เช่น "ผู้เขียน", "ผู้ดูแล") การเทียบเท่ากันเป๊ะจะพลาดทุกครั้ง
+    """
+    low = (author or "").casefold()
+    return any(name.casefold() in low for name in owners)
 
 
 # --------------------------------------------------------- โพสต์ที่ต้องตาม
@@ -431,11 +475,12 @@ def reply_round(config: dict, log=print, stop=lambda: False,
     """
     if not config.get("reply_enabled"):
         raise EngageError("ยังไม่ได้เปิดโหมดตอบกลับ — สั่ง /reply on ก่อน")
-    owner = str(config.get("owner_name") or "").strip()
-    if not owner:
+    owners = owner_list(config)
+    if not owners:
         raise EngageError(
             "ยังไม่ได้ตั้งชื่อบัญชีที่ใช้โพสต์ — สั่ง /owner <ชื่อ> ก่อน\n"
-            "ไม่ตั้ง = แยกไม่ออกว่าคอมเมนต์ไหนของเราเอง แล้วบอทจะตอบตัวเองวนไม่จบ")
+            "ไม่ตั้ง = แยกไม่ออกว่าคอมเมนต์ไหนของเราเอง แล้วบอทจะตอบตัวเองวนไม่จบ\n"
+            "ใส่ได้หลายบัญชี คั่นด้วยจุลภาค เช่น /owner ชื่อ ก, ชื่อ ข")
     busy = phone_busy_elsewhere()
     if busy:
         raise EngageError(f"ยังทำไม่ได้ — {busy}")
@@ -491,8 +536,8 @@ def reply_round(config: dict, log=print, stop=lambda: False,
                     author, text = comment["author"], comment["text"]
                     if not text:
                         continue
-                    if owner and owner.casefold() in author.casefold():
-                        continue                     # คอมเมนต์ของเราเอง
+                    if is_owner(author, owners):
+                        continue                     # คอมเมนต์ของบัญชีเราเอง
                     mark = _fingerprint(target["key"], author, text)
                     if mark in replied:
                         continue

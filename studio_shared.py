@@ -374,7 +374,10 @@ def write_json_atomic(path: Path, payload) -> None:
     ผู้อ่านถือไฟล์แค่ระดับมิลลิวินาที ลองซ้ำสั้นๆ จึงผ่านเสมอ
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    # ใส่ทั้ง PID และเลขเธรด — ปกติผู้เรียกถือ data_lock อยู่แล้วจึงไม่ชนกัน
+    # แต่ถ้าวันหนึ่งมีคนเรียกตรงๆ โดยลืมถือล็อก สองเธรดในโปรเซสเดียวกันจะเขียน
+    # ไฟล์ชั่วคราวชื่อเดียวกันทับกันเอง แล้ว replace ของที่เขียนค้างครึ่งทางทับของจริง
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"

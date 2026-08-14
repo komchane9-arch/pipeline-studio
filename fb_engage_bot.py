@@ -31,7 +31,9 @@ HELP = (
     "<b>ตอบคอมเมนต์</b>\n"
     "• /reply — ไล่ตอบคอมเมนต์ของคนอื่นหนึ่งรอบ\n"
     "• /reply on | off — เปิด/ปิดโหมดตอบกลับ\n"
-    "• /owner &lt;ชื่อบัญชี&gt; — ชื่อที่ใช้โพสต์ (ไว้แยกคอมเมนต์ของเราเอง)\n\n"
+    "• /owner — ดูบัญชีที่ใช้โพสต์ (ไว้แยกคอมเมนต์ของเราเอง)\n"
+    "• /owner &lt;ชื่อ&gt; — เพิ่มบัญชี ใส่หลายชื่อคั่นด้วย , ได้\n"
+    "• /owner ลบ &lt;ชื่อ&gt; — เอาบัญชีออก\n\n"
     "<b>อื่นๆ</b>\n"
     "• /set — ดูค่าที่ตั้งไว้\n"
     "• /auto on | off — เดินรอบเก็บยอดเองอัตโนมัติ\n"
@@ -205,7 +207,9 @@ def do_set(token: str, chat_id: str) -> None:
     tracked = len(fb_engage.load_stats())
     lines = [
         "⚙️ <b>ค่าที่ตั้งไว้</b>",
-        f"• ชื่อบัญชีที่ใช้โพสต์: <b>{telegram_bot._escape(config.get('owner_name') or '(ยังไม่ตั้ง)')}</b>",
+        "• บัญชีที่ใช้โพสต์: <b>"
+        + telegram_bot._escape(", ".join(fb_engage.owner_list(config)) or "(ยังไม่ตั้ง)")
+        + "</b>",
         f"• โหมดตอบกลับ: <b>{'เปิด' if config.get('reply_enabled') else 'ปิด'}</b>",
         f"• เก็บยอดซ้ำทุก: {config.get('refresh_hours')} ชั่วโมง",
         f"• ต่อรอบเก็บยอด: {config.get('max_posts_per_round')} โพสต์",
@@ -221,15 +225,83 @@ def do_set(token: str, chat_id: str) -> None:
     say(token, chat_id, "\n".join(lines))
 
 
-def do_owner(token: str, chat_id: str, name: str) -> None:
-    name = name.strip()
-    if not name:
-        say(token, chat_id, "ใส่ชื่อด้วย เช่น <code>/owner Kamolchanok Lill</code>")
-        return
+def _owner_text(names: list[str]) -> str:
+    if not names:
+        return "ยังไม่ได้ตั้งบัญชีไหนเลย"
+    return "\n".join(
+        f"{i}. <b>{telegram_bot._escape(n)}</b>" for i, n in enumerate(names, 1))
+
+
+def do_owner(token: str, chat_id: str, argument: str) -> None:
+    """ดู/เพิ่ม/ลบ บัญชีที่ใช้โพสต์ — **เก็บได้หลายบัญชี**
+
+    ผู้ใช้โพสต์จากหลายบัญชี (ฟาร์มบอทมี 10 โปรไฟล์) ถ้าจำได้บัญชีเดียว
+    คอมเมนต์ของบัญชีอื่นของเราเองจะถูกมองเป็นของคนนอก แล้วบอทจะไปตอบตัวเอง
+    วนไม่จบ ซึ่งคือสิ่งที่ค่านี้มีไว้กันตั้งแต่แรก
+
+    ตั้งใจให้ `/owner <ชื่อ>` เป็น "เพิ่ม" ไม่ใช่ "แทนที่" — คำสั่งเดียวกับของเดิม
+    แต่ถ้ายังแทนที่อยู่ ผู้ใช้ที่พิมพ์บัญชีที่สองจะทำบัญชีแรกหายโดยไม่รู้ตัว
+    """
+    argument = argument.strip()
     config = fb_engage.load_config()
-    config["owner_name"] = name
-    fb_engage.save_config(config)
-    say(token, chat_id, f"ตั้งชื่อบัญชีเป็น <b>{telegram_bot._escape(name)}</b> แล้ว")
+    current = fb_engage.owner_list(config)
+
+    def store(names: list[str]) -> None:
+        config["owner_names"] = names
+        config["owner_name"] = ""      # ย้ายมารวมที่ช่องใหม่หมดแล้ว กันอ่านซ้อน
+        fb_engage.save_config(config)
+
+    if not argument:
+        say(token, chat_id,
+            "👤 <b>บัญชีที่ใช้โพสต์</b>\n" + _owner_text(current)
+            + "\n\n<code>/owner ชื่อ</code> เพิ่ม (คั่นด้วย , ได้หลายชื่อ)"
+            + "\n<code>/owner ลบ ชื่อ</code> เอาออก"
+            + "\n<code>/owner ล้าง</code> ลบทั้งหมด")
+        return
+
+    head, _, rest = argument.partition(" ")
+    if head.lower() in ("ล้าง", "clear", "reset"):
+        store([])
+        say(token, chat_id, "ล้างรายชื่อบัญชีทั้งหมดแล้ว — ต้องตั้งใหม่ก่อนสั่ง /reply")
+        return
+
+    if head.lower() in ("ลบ", "del", "remove", "-"):
+        target = rest.strip()
+        if not target:
+            say(token, chat_id, "ใส่ชื่อที่จะลบด้วย เช่น <code>/owner ลบ Kamolchanok</code>")
+            return
+        keep = [n for n in current if n.casefold() != target.casefold()]
+        if len(keep) == len(current):
+            say(token, chat_id,
+                f"ไม่มี <b>{telegram_bot._escape(target)}</b> ในรายชื่อ\n\n" + _owner_text(current))
+            return
+        store(keep)
+        say(token, chat_id,
+            f"เอา <b>{telegram_bot._escape(target)}</b> ออกแล้ว\n\n" + _owner_text(keep))
+        return
+
+    # เพิ่ม — รับหลายชื่อคั่นด้วยจุลภาคในครั้งเดียว
+    added, dup = [], []
+    names = list(current)
+    for piece in argument.split(","):
+        name = piece.strip()
+        if not name:
+            continue
+        if any(name.casefold() == n.casefold() for n in names):
+            dup.append(name)
+            continue
+        names.append(name)
+        added.append(name)
+    if not added:
+        say(token, chat_id,
+            ("มีอยู่แล้วทั้งหมด" if dup else "อ่านชื่อไม่ออก")
+            + "\n\n" + _owner_text(names))
+        return
+    store(names)
+    note = f"\n<i>ข้ามที่ซ้ำ: {telegram_bot._escape(', '.join(dup))}</i>" if dup else ""
+    say(token, chat_id,
+        f"เพิ่ม {len(added)} บัญชีแล้ว{note}\n\n👤 <b>บัญชีที่ใช้โพสต์</b>\n"
+        + _owner_text(names))
 
 
 def do_auto(token: str, chat_id: str, argument: str) -> None:

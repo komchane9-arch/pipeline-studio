@@ -160,11 +160,31 @@ async function testBot(which, noteId) {
 }
 
 // ---- บอทเพิ่มเติม (หลายตัว)
-const BOT_ROLE_LABEL = { facebook: "รับงานโพสต์", clip: "สายเจนคลิป" };
+//
+// รายการหน้าที่ **ต้องมาจากเซิร์ฟเวอร์** (`payload.roles` = BOT_ROLES ใน app.py)
+// ห้าม hardcode ที่นี่ เดิมเขียนไว้แค่ 2 อัน (facebook/clip) ทั้งที่ระบบมี 4 อัน
+// ผลคือผู้ใช้เลือก "engage" ไม่ได้เลย จึงตั้งบอทตามยอดเป็น role facebook แทน
+// แล้ว app.py ไปเฝ้าอ่าน getUpdates ของโทเคนนั้น พอ fb_engage_bot.py อ่านด้วย
+// = 409 Conflict ข้อความหายสลับไปมา (14 ส.ค. 2026)
+let BOT_ROLE_LABEL = { facebook: "รับงานโพสต์", clip: "สายเจนคลิป" };
+
+/** เติมตัวเลือกหน้าที่ในช่อง "เพิ่มบอทใหม่" ให้ตรงกับที่เซิร์ฟเวอร์รองรับจริง */
+function syncBotRoles(roles) {
+  if (!roles || !Object.keys(roles).length) return;
+  BOT_ROLE_LABEL = roles;
+  const picker = $("#botRole");
+  if (!picker) return;
+  const keep = picker.value;
+  picker.replaceChildren(
+    ...Object.entries(roles).map(([value, label]) => new Option(label, value)),
+  );
+  if (keep && roles[keep]) picker.value = keep;
+}
 
 async function loadBots() {
   try {
     const payload = await api("/api/telegram/bots");
+    syncBotRoles(payload.roles);
     $("#botList").replaceChildren(
       ...payload.bots.map((bot) => {
         const row = document.createElement("li");

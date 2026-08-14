@@ -1,6 +1,6 @@
 /* จุดเริ่มทำงาน — ไฟล์เดียวที่ index.html โหลด ที่เหลือถูก import ต่อกันเป็นทอดๆ */
 
-import { api, config, hooks, pollLogs, setConfig, setSystem, system } from "./core.js";
+import { api, config, hooks, pollHealth, pollLogs, setConfig, setSystem, system } from "./core.js";
 import { loadDevices, loadTargets } from "./phone.js";
 import { loadFbGroups, loadFbJobs, renderQueue, setQueue } from "./post.js";
 import { fillGems, fillInput, fillRelease, loadClips, loadJobQueue, loadStoryRuns } from "./video.js";
@@ -43,6 +43,8 @@ hooks.reloadConfig = () => reloadConfig();
     await loadFbGroups();
     await loadFbJobs();
     await pollLogs();
+    // ไว้ท้ายสุด — อ่านจำนวนมือถือจาก dropdown ที่ loadDevices เติมไว้แล้ว
+    await pollHealth();
   } catch (error) {
     document.body.insertAdjacentHTML(
       "afterbegin",

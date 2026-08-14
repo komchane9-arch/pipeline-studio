@@ -10,6 +10,9 @@
     <header class="topbar">
       <strong>Pipeline Studio</strong>
       <span class="topbar-note">เจนคลิปสินค้า → ตัดต่อ → โพสต์</span>
+      <!-- แถบสถานะ: เห็นว่าอะไรตายก่อนจะไปเจอตอนสั่งงานแล้วเงียบ
+           เนื้อในเติมจาก core.js (pollHealth) ทุก 15 วินาที -->
+      <div id="healthStrip" class="health-strip" aria-live="polite"></div>
       <button id="openSettings" class="gear-button" type="button" aria-label="ตั้งค่า">⚙</button>
     </header>
 

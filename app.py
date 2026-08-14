@@ -44,13 +44,17 @@ from fastapi import (
     FastAPI, HTTPException, Request, UploadFile, File, Form,
     WebSocket, WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import access_control
 import bot_profiles
 import studio_shared
 import fb_auto_post
+import fb_backup
+import fb_pending
+import fb_preflight
+import fb_report
 import facebook_group_post
 import qr_code
 import telegram_bot
@@ -2665,6 +2669,18 @@ async def gate_remote_devices(request: Request, call_next):
     )
     record = access_store.find_by_token(token)
     if record is None or record.get("status") != "approved":
+        # คนเปิดหน้าเว็บ กับโค้ดที่ยิง API ต้องได้คนละอย่าง
+        #
+        # เดิมโยน JSON 403 ให้ทุกคนเท่ากัน ผลคือเปิด http://<เครื่อง>:8866/ จาก
+        # คอมอีกเครื่องแล้วเจอ {"detail": "..."} ดิบๆ เต็มจอ ไม่มีทางรู้ว่าต้องไปไหนต่อ
+        # ทั้งที่มีหน้า /mobile ที่อธิบายขั้นตอนขออนุญาตไว้ครบแล้ว
+        #
+        # แยกด้วย Accept: เบราว์เซอร์ที่กดเข้าหน้าเว็บส่ง text/html มาเสมอ
+        # ส่วน fetch() ของหน้าเว็บขอ JSON — ตัวหลังต้องได้ 403 เหมือนเดิม
+        # ไม่งั้นโค้ดฝั่งหน้าเว็บจะได้ HTML แล้ว throw ข้อความที่อ่านไม่รู้เรื่อง
+        wants_page = "text/html" in request.headers.get("accept", "")
+        if wants_page and path != "/mobile":
+            return RedirectResponse("/mobile", status_code=303)
         return JSONResponse(
             status_code=403,
             content={

@@ -1194,3 +1194,100 @@ button:disabled { opacity: 0.5; }
   background: rgba(255, 255, 255, 0.94);
   font-size: 11.5px;
 }
+
+/* ================================================== แถบสถานะระบบ (topbar)
+   เห็นว่าอะไรตายก่อนจะไปเจอตอนสั่งงานแล้วเงียบ — เนื้อในมาจาก core.js pollHealth */
+.health-strip {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.health-chip {
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: none;
+  color: inherit;
+  white-space: nowrap;
+}
+.health-chip.ok { opacity: 0.75; }
+.health-chip.ok::before { content: "● "; color: #46a758; }
+/* ตัวที่ล่มต้องเด่นกว่าตัวปกติชัดๆ ไม่ใช่แค่เปลี่ยนสีจุด — ที่ผ่านมาของล่มถูกมองข้าม */
+.health-chip.down {
+  border-color: #cf5f4a;
+  color: #cf5f4a;
+  font-weight: 600;
+  opacity: 1;
+}
+.health-chip.down::before { content: "● "; }
+.health-chip.waiting {
+  border-color: var(--accent);
+  color: var(--accent-text);
+  cursor: pointer;
+  font-weight: 600;
+}
+.health-chip.waiting:hover { background: var(--accent); }
+
+/* ============================================ ใช้งานบนมือถือ (≤ 760px)
+   ทำเพราะเข้าจากมือถือผ่าน Tailscale ได้แล้ว และคอขวดจริงของระบบคือ
+   "งานรออนุมัติค้าง 27 ชั่วโมง" ซึ่งเกิดเพราะต้องนั่งอยู่หน้าคอมถึงจะกดได้
+   ปุ่มอนุมัติมีอยู่ในหน้านี้อยู่แล้ว (video.js) แค่ทำให้กดบนมือถือได้จริง */
+@media (max-width: 760px) {
+  .topbar { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
+  /* คำโปรยกินที่ flex:1 ทำให้แถบสถานะถูกบีบจนตกบรรทัด — จอแคบไม่ต้องมีก็ได้ */
+  .topbar-note { display: none; }
+  .health-strip { order: 3; width: 100%; }
+
+  .layout { padding: 10px; gap: 10px; }
+
+  /* จอมือถือฝั่งซ้ายไม่ต้องเด่นบนมือถือ — คนเปิดจากมือถือมาเพื่อ "ตัดสินใจ"
+     ไม่ใช่มาบังคับจออีกเครื่อง พับเก็บไว้ก่อน กดขยายได้ถ้าจะใช้จริง */
+  .phone-panel { position: static; order: 2; }
+  .phone-viewer { max-height: 42vh; }
+
+  .process-panel { order: 1; }
+
+  /* แท็บเลื่อนแนวนอนแทนการตัดบรรทัด — ตัดบรรทัดแล้วกินความสูงจอไป 3 แถว */
+  .tab-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+  .tab-bar::-webkit-scrollbar { display: none; }
+  .tab { flex: 0 0 auto; }
+
+  /* นิ้วต้องกดโดนจริง — 44px คือขนาดที่แนะนำกันทั่วไป ของเดิมบางปุ่มสูง ~28px */
+  button, .tab, select, input[type="text"], input[type="password"], input[type="number"] {
+    min-height: 40px;
+  }
+  .story-tools button, .inline-row button { min-height: 40px; }
+
+  /* iOS ซูมหน้าจอเองเวลาโฟกัสช่องที่ตัวอักษรเล็กกว่า 16px แล้ว layout เพี้ยนทั้งหน้า
+     ต้องใช้ !important เพราะกฎเดิมเจาะจงกว่าทับอยู่ — วัดจากของจริงแล้วเหลือ 6 ช่อง
+     ที่ยัง 14-15px: phoneText · toPhoneText · pairEndpoint · pairCode ·
+     connectEndpoint · storyLinks
+     ไม่ใช่เรื่องความสวยแต่เป็นพฤติกรรมของเบราว์เซอร์ และอยู่ในบล็อกจอแคบอย่างเดียว
+     เดสก์ท็อปไม่กระทบ */
+  input, select, textarea { font-size: 16px !important; }
+
+  /* กล่องตั้งค่าเต็มจอบนมือถือ — 92vw บนจอ 390px เหลือขอบไว้ให้เปล่าประโยชน์ */
+  dialog {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    border-radius: 0;
+    padding: 14px;
+  }
+
+  .story-list { max-height: none; }
+  .story-video { max-height: 44vh; }
+  /* ตารางกว้างๆ ให้เลื่อนในกล่องตัวเอง ห้ามดันให้ทั้งหน้าเลื่อนซ้ายขวา */
+  .fb-list, .publish-list, .story-detail { overflow-x: auto; }
+}

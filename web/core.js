@@ -713,6 +713,81 @@ $("#claudeClear").addEventListener("click", async () => {
   testKeys();
 });
 
+// ====================================================== แถบสถานะระบบ
+//
+// **ทำไมต้องมี** ระบบนี้มีหลายโปรเซสที่ตายเงียบได้ (สายคลิป 8877 ตายมาแล้ว
+// 2 ครั้งในสัปดาห์เดียว) ที่ผ่านมารู้ตัวตอน "พิมพ์คำสั่งแล้วบอทเงียบ" ซึ่งสายเกินไป
+//
+// **ตั้งใจให้เบามาก** ยิงแค่ 2 ปลายทางทุก 15 วินาที (8 ครั้ง/นาที)
+//   · ห้ามยิง /api/devices — ปลายทางนั้นสั่ง `adb devices` จริง ถ้าถามทุก 15 วิ
+//     จะไปแย่งจังหวะกับงานที่กำลังแตะจอมือถืออยู่ จำนวนมือถือจึงอ่านจาก
+//     dropdown ที่โหลดไว้แล้วแทน (ฟรี ไม่มี request เพิ่ม)
+//   · จำนวนงานรออนุมัติเอาจาก health ของสายคลิปที่ต้องถามอยู่แล้ว ไม่ถามเพิ่ม
+const HEALTH_EVERY_MS = 15000;
+
+function healthChip(ok, label, detail = "") {
+  const chip = document.createElement("span");
+  chip.className = "health-chip " + (ok ? "ok" : "down");
+  chip.textContent = label;
+  if (detail) chip.title = detail;
+  return chip;
+}
+
+export async function pollHealth() {
+  const strip = $("#healthStrip");
+  if (!strip) return;
+  const chips = [];
+
+  // 1) เซิร์ฟเวอร์หน้าเว็บเอง — ตัวนี้ล้ม = หน้าเว็บที่เห็นอยู่คือของค้าง
+  let webOk = true;
+  try {
+    await api("/api/system");
+  } catch (error) {
+    webOk = false;
+  }
+  chips.push(healthChip(webOk, webOk ? "เว็บ" : "เว็บหลุด",
+    webOk ? "เซิร์ฟเวอร์ 8866 ตอบปกติ"
+          : "ต่อ 8866 ไม่ได้ — ที่เห็นอยู่บนจอคือข้อมูลค้าง"));
+
+  // 2) สายคลิป (คนละโปรเซส คนละพอร์ต) + จำนวนงานที่รอคนตัดสิน
+  let waiting = null;
+  try {
+    const clip = await (await fetch(`${CLIP_API}/api/health`)).json();
+    const bot = (clip.clip_bot || {}).username || "";
+    waiting = typeof clip.queue === "number" ? clip.queue : null;
+    chips.push(healthChip(true, "คลิป",
+      `8877 ปกติ${bot ? ` · บอท @${bot}` : ""}${clip.busy ? " · กำลังทำงาน" : ""}`));
+  } catch (error) {
+    chips.push(healthChip(false, "คลิปหลุด",
+      "ต่อ 8877 ไม่ได้ — บอทสายคลิปจะเงียบ สั่งคำสั่งไปก็ไม่มีใครรับ"));
+  }
+
+  // 3) มือถือที่ต่ออยู่ — อ่านจาก dropdown ที่โหลดไว้แล้ว ไม่ยิง ADB ซ้ำ
+  const phones = [...document.querySelectorAll("#deviceSelect option")]
+    .filter((o) => o.value).length;
+  chips.push(healthChip(phones > 0, phones ? `มือถือ ${phones}` : "ไม่มีมือถือ",
+    phones ? "" : "ต่อ USB แล้วกดรีเฟรชรายการเครื่อง"));
+
+  // 4) งานรออนุมัติ — ตัวเลขที่ค้างนานที่สุดในระบบ กดแล้วพาไปแท็บสตอรีบอร์ดเลย
+  if (waiting) {
+    const jump = document.createElement("button");
+    jump.type = "button";
+    jump.className = "health-chip waiting";
+    jump.textContent = `⏳ รอตัดสิน ${waiting}`;
+    jump.title = "กดเพื่อไปแท็บสตอรีบอร์ด";
+    jump.addEventListener("click", () => {
+      const tab = document.querySelector('.tab[data-tab="story"]');
+      if (tab) tab.click();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+    chips.push(jump);
+  }
+
+  strip.replaceChildren(...chips);
+}
+
+window.setInterval(pollHealth, HEALTH_EVERY_MS);
+
 async function testKeys() {
   // ไฟสถานะ = ยิงเรียกจริง ไม่ใช่แค่เช็คว่ามีไฟล์ key
   for (const [url, dotId, noteId] of [

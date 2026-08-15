@@ -66,6 +66,19 @@ HOLD_MINUTES = 45
 # คนที่พร้อมทำจริงจะถูกบล็อกฟรีๆ
 GRACE_MINUTES = 10
 
+# แตะไฟล์ครั้งล่าสุดภายในกี่นาที ถึงจะนับว่า "ยังทำอยู่จริง" แล้วต่ออายุให้เอง
+#
+# **จำเป็นจริง ไม่ใช่เผื่อไว้** — เจอกับตัวเองรอบแรกที่ใช้เครื่องมือนี้:
+# จองไว้ 4 ไฟล์ตอน 17:48 งานยาวถึง 23:08 การจองหมดอายุกลางทางโดยคนถือไม่รู้ตัว
+# ถ้าช่วงนั้นมีแชทอื่นมาขอ จะได้ไฟล์ไปทั้งที่อีกฝั่งกำลังแก้ค้างอยู่
+#
+# ใช้ "ไฟล์ถูกแตะจริง" เป็นตัวตัดสินแทนการเชื่อนาฬิกา เพราะเป็นหลักฐานว่ายังทำอยู่
+# ไม่ใช่แค่ลืมปล่อย — คนที่ทิ้งไปแล้วไฟล์จะไม่ขยับ แล้วหมดอายุตามปกติ
+ACTIVE_MINUTES = 25
+
+# เตือนล่วงหน้าเมื่อเหลือน้อยกว่านี้ — เห็นตอนรันคำสั่งอะไรก็ได้
+WARN_MINUTES = 12
+
 HISTORY_LIMIT = 60
 
 
@@ -194,13 +207,31 @@ def _sweep(data: dict) -> list[dict]:
     for rel, claim in list(data["claims"].items()):
         if not _expired(claim):
             continue
+        # ยังแตะไฟล์อยู่จริง = ยังทำอยู่ ต่ออายุให้เลย อย่าไปยึดคืนกลางทาง
+        if _still_working(rel, claim):
+            claim["expires"] = _stamp(_now() + timedelta(minutes=HOLD_MINUTES))
+            claim["auto_renewed"] = int(claim.get("auto_renewed", 0)) + 1
+            continue
         data["claims"].pop(rel, None)
         _remember(data, {**claim, "file": rel, "released": _stamp(_now()),
-                         "how": "หมดอายุเอง"})
+                         "how": "หมดอายุเอง",
+                         "last_touch": _stamp(file_touched(rel)) if file_touched(rel) else ""})
         nxt = _promote(data, rel)
         if nxt:
             handovers.append(nxt)
     return handovers
+
+
+def _still_working(rel: str, claim: dict) -> bool:
+    """คนถืออยู่ยังทำอยู่จริงไหม — ดูจากว่าไฟล์ถูกแตะหลังจองและแตะเมื่อไม่นานนี้
+
+    ใช้ `stat()` อย่างเดียว ไม่เรียก subprocess — ฟังก์ชันนี้ทำงานใต้ล็อกไฟล์ข้อมูล
+    """
+    since = _parse(claim.get("since", ""))
+    touched = file_touched(rel)
+    if since is None or touched is None or touched <= since:
+        return False        # ไม่เคยแตะเลยตั้งแต่จอง = จองทิ้งไว้ ไม่ต้องต่อให้
+    return (_now() - touched) <= timedelta(minutes=ACTIVE_MINUTES)
 
 
 def _promote(data: dict, rel: str, base_commit: str = "") -> dict | None:
@@ -305,7 +336,18 @@ def release(path: str, chat: str, note: str = "") -> dict:
         result["handovers"] = _sweep(data)
         holder = data["claims"].get(rel)
         if not holder:
-            result.update(ok=False, reason="ไฟล์นี้ไม่มีใครถืออยู่", file=rel)
+            # "ไม่มีใครถืออยู่" อย่างเดียวไม่พอ — คนสั่งปล่อยมักเป็นคนที่คิดว่าตัวเอง
+            # ถืออยู่ ต้องบอกให้ได้ว่าการจองของเขาจบไปตอนไหนและเพราะอะไร
+            mine = [h for h in data["history"]
+                    if h.get("file") == rel and h.get("chat") == chat]
+            if mine:
+                last = mine[-1]
+                when = _parse(last.get("released", ""))
+                result.update(ok=False, file=rel, expired_before=last, reason=(
+                    f"การจองของ \"{chat}\" จบไปแล้ว — {last.get('how')}"
+                    f" เมื่อ {_ago(when)}"))
+            else:
+                result.update(ok=False, reason="ไฟล์นี้ไม่มีใครถืออยู่", file=rel)
             return
         if holder.get("chat") != chat:
             result.update(ok=False, file=rel, holder=holder,
@@ -368,6 +410,9 @@ def _describe_claim(claim: dict, rel: str) -> list[str]:
         minutes = (ends - _now()).total_seconds() / 60
         left = f" · เหลือ {int(minutes)} นาที" if minutes > 0 else " · หมดอายุแล้ว"
     lines = [f"   ถือโดย : {claim.get('chat') or '(ไม่ระบุ)'}{left}"]
+    if claim.get("auto_renewed"):
+        lines.append(f"   ต่ออายุ : อัตโนมัติ {claim['auto_renewed']} ครั้ง"
+                     " (ไฟล์ยังถูกแก้อยู่จริง)")
     if claim.get("why"):
         lines.append(f"   ทำอะไร : {claim['why']}")
     lines.append(f"   ตั้งแต่ : {_ago(since)}")
@@ -381,6 +426,43 @@ def _describe_claim(claim: dict, rel: str) -> list[str]:
             + ("  ← ยังทำอยู่จริง" if working else "  ← ยังไม่แตะเลยตั้งแต่จอง")
         )
     return lines
+
+
+def expiring_soon(chat: str) -> list[dict]:
+    """การจองของแชทนี้ที่ใกล้หมดอายุ — เอาไปเตือนตอนรันคำสั่งอะไรก็ได้"""
+    if not str(chat or "").strip():
+        return []
+    soon = []
+    for rel, claim in (_load().get("claims") or {}).items():
+        if claim.get("chat") != chat:
+            continue
+        ends = _parse(claim.get("expires", ""))
+        if ends is None:
+            continue
+        left = (ends - _now()).total_seconds() / 60
+        if left <= WARN_MINUTES:
+            soon.append({"file": rel, "left": left,
+                         "working": _still_working(rel, claim)})
+    return soon
+
+
+def _print_expiring(chat: str) -> None:
+    """เตือนก่อนการจองหมดอายุ
+
+    ที่ผ่านมาไม่มีตัวเตือน แล้วการจองหมดอายุกลางงานโดยคนถือไม่รู้ตัว
+    (เจอกับตัวเองรอบแรกที่ใช้: จอง 17:48 งานยาวถึง 23:08)
+    """
+    soon = expiring_soon(chat)
+    if not soon:
+        return
+    print()
+    print("⏰ การจองของคุณใกล้หมดอายุ")
+    for item in soon:
+        left = int(item["left"])
+        state = " (ยังแก้ไฟล์อยู่ ระบบจะต่ออายุให้เอง)" if item["working"] else ""
+        print(f"   · {item['file']} — เหลือ {left} นาที{state}")
+    if any(not i["working"] for i in soon):
+        print(f"   สั่ง claim ซ้ำเพื่อต่ออายุ ถ้ายังทำไม่เสร็จ")
 
 
 def _print_handovers(info: dict) -> None:
@@ -473,10 +555,13 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    watcher = os.environ.get("STUDIO_CHAT", "")
+
     if args.command == "status":
         info = status(args.file)
         _print_status(info)
         _print_handovers(info)
+        _print_expiring(watcher)
         return 0
 
     if args.command == "list":
@@ -498,6 +583,7 @@ def main(argv: list[str] | None = None) -> int:
             if rel not in data["claims"]:
                 print(f"⏳ {rel} — มีคิวรอ {len(waiting)} รายแต่ไม่มีคนถือ (จะได้สิทธิ์รอบหน้า)")
         _print_handovers(data)
+        _print_expiring(watcher)
         return 0
 
     if not str(getattr(args, "chat", "") or "").strip():
@@ -518,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"   หมดอายุใน {args.minutes} นาที (สั่ง claim ซ้ำเพื่อต่ออายุ)")
             print("   ⚠️ ทำเสร็จแล้วอย่าลืม release ไม่งั้นคิวถัดไปต้องรอจนหมดอายุ")
             _print_handovers(out)
+            _print_expiring(args.chat)
             return 0
         holder = out["holder"]
         print(f"⛔ {out['file']} มีคนถืออยู่ — คุณถูกต่อคิวที่ {out['position']}")
@@ -534,6 +621,13 @@ def main(argv: list[str] | None = None) -> int:
         out = release(args.file, args.chat, args.note)
         if not out.get("ok"):
             print(f"❌ คืนไม่ได้ — {out.get('reason')}")
+            if out.get("expired_before"):
+                past = out["expired_before"]
+                print("   งานที่ทำค้างไว้ยังอยู่ในไฟล์ ไม่ได้หายไปไหน —"
+                      " แค่สิทธิ์จองหลุดเท่านั้น")
+                if past.get("still_dirty"):
+                    print("   ⚠️ ตอนหลุดยังมีของแก้ไม่ได้ commit")
+                print("   ถ้ายังต้องแก้ต่อ สั่ง claim ใหม่ได้เลย")
             return 2
         state = out["state"]
         print(f"✅ คืน {out['file']} แล้ว")
@@ -561,6 +655,7 @@ def main(argv: list[str] | None = None) -> int:
             print("   ── ⚠️ ยังมีของแก้ค้างไม่ได้ commit ดู git diff ก่อนเริ่ม")
         print(f"   ── สิทธิ์ของคุณหมดอายุใน {GRACE_MINUTES} นาที "
               f"สั่ง claim ซ้ำเพื่อต่ออายุก่อนเริ่มทำ")
+        _print_expiring(args.chat)
         return 0
 
     return 0

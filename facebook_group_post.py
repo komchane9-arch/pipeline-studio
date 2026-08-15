@@ -1133,6 +1133,12 @@ CAPTION_BACK_TRIES = 6
 # แปลว่ารออนุมัติจริงหรือไม่ขึ้นจริง — เลื่อนต่อไปก็เปลืองเวลาจอเปล่าๆ
 # ต้นทุน: ครั้งละ ~4.3 วินาที (ปัด + รอ 1.8 + dump 2.35)
 VERIFY_SCROLL_TRIES = 4
+
+# เมนูของโพสต์เป็นแผ่นเลื่อนได้ — เลื่อนหาได้กี่ครั้งก่อนยอมแพ้
+#
+# 3 พอ เพราะแผ่นเมนูมีไม่กี่หน้าจอ ถ้าเลื่อนสามครั้งยังไม่เจอ "คัดลอกลิงก์"
+# แปลว่าโพสต์นั้นไม่มีตัวเลือกนั้นจริง (เช่น ยังรออนุมัติ) เลื่อนต่อก็เปลืองเวลา
+MENU_SCROLL_TRIES = 3
 # เลื่อนกลับขึ้นหัวหน้าโพสต์เพื่อหาปุ่ม … (คอมเมนต์ยาวๆ ดันปุ่มไปไกลได้)
 LINK_TOP_SCROLL_TRIES = 8
 
@@ -1886,20 +1892,45 @@ def copy_link_single_post(phone: Phone, clipboard) -> str:
     return ""
 
 
+def _find_in_sheet(phone: Phone, hints: list[str], tries: int = MENU_SCROLL_TRIES):
+    """หาเมนูในแผ่นที่เลื่อนได้ — ไม่เจอบนจอแรกให้เลื่อนขึ้นแล้วหาใหม่
+
+    **เมนูของ Facebook เป็นแผ่นเลื่อนได้ ไม่ใช่รายการสั้นๆ ที่เห็นครบในจอเดียว**
+    ของเดิมถ่ายจอครั้งเดียวแล้วสรุปว่าไม่มี ผลที่วัดได้จาก log จริง:
+    เก็บลิงก์สำเร็จ 68 · "ไม่มีเมนูคัดลอกลิงก์" 29 ครั้ง (84% ของความล้มทั้งหมด)
+    ส่วนความล้มฝั่งคลิปบอร์ดเป็น 0 — ปัญหาอยู่ที่หาเมนูไม่เจอล้วนๆ
+
+    เป็นรูปแบบเดียวกับที่ทำให้ `verify_liked` พังมาตลอด: สมมติว่า dump ครั้งเดียว
+    เห็นเนื้อหาทั้งหมด ทั้งที่หน้าจอ Android เลื่อนได้เกือบทุกอย่าง
+    """
+    found = phone.find(phone.dump(), hints)
+    for _ in range(tries):
+        if found is not None:
+            return found
+        # ปัดขึ้นภายในแผ่นเมนู (แผ่นอยู่ครึ่งล่างของจอ)
+        phone.run(
+            "shell", "input", "swipe", "540", "1600",
+            "540", "1100", str(SCROLL_DURATION_MS),
+        )
+        time.sleep(1.2)
+        found = phone.find(phone.dump(), hints)
+    return found
+
+
 def _copy_link_from_menu(phone: Phone, menu: tuple[int, int], clipboard) -> str:
     """กดปุ่ม … แล้วไล่เมนูไปหา "คัดลอกลิงก์" แล้วอ่านค่าที่ได้จากคลิปบอร์ด"""
     phone.tap(menu)
     time.sleep(2.0)
-    copy = phone.find(phone.dump(), COPY_LINK_HINTS)
+    copy = _find_in_sheet(phone, COPY_LINK_HINTS)
     if copy is None:
         # ชั้นแรกไม่มี — เข้าไปดูใน "ตัวเลือกเพิ่มเติม" อีกชั้น
-        more = phone.find(phone.dump(), MORE_OPTIONS_HINTS)
+        more = _find_in_sheet(phone, MORE_OPTIONS_HINTS)
         if more is not None:
             phone.tap(more)
             time.sleep(2.0)
-            copy = phone.find(phone.dump(), COPY_LINK_HINTS)
+            copy = _find_in_sheet(phone, COPY_LINK_HINTS)
     if copy is None:
-        phone.log("  ไม่มีเมนูคัดลอกลิงก์ — ข้ามการเก็บลิงก์")
+        phone.log("  ไม่มีเมนูคัดลอกลิงก์ — ข้ามการเก็บลิงก์ (เลื่อนหาแล้วไม่เจอ)")
         phone.back()
         return ""
 

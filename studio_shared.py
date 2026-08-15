@@ -17,6 +17,7 @@ import json
 import msvcrt
 import os
 import re
+import subprocess
 import threading
 import time
 from contextlib import contextmanager
@@ -54,6 +55,16 @@ BROWSER_PROFILE = DATA_DIR / "flow_browser_profile"
 # ล็อกที่แยกต่อทรัพยากร (มือถือรายเครื่อง / โปรไฟล์บอทรายตัว) อยู่ในโฟลเดอร์นี้
 # ของเดิม browser.lock / phone.lock อยู่ที่ data/ ตรงๆ — ปล่อยไว้ที่เดิมไม่ย้าย
 LOCK_DIR = DATA_DIR / "locks"
+
+
+# สั่งโปรแกรมภายนอกโดยไม่เด้งหน้าต่างคอนโซลขึ้นมา
+#
+# **จำเป็นกว่าที่คิด** งานโพสต์ 1 กลุ่มยิง ADB หลายร้อยครั้ง (`dump()` เปิด 2
+# หน้าต่างต่อการอ่านจอ 1 ครั้ง) หน้าต่างดำจึงกะพริบรัวทั้งวันจนผู้ใช้นึกว่าเครื่องพัง
+# และหน้าต่างที่แย่งโฟกัสยังทำให้พิมพ์งานอื่นบนเครื่องไม่ได้ด้วย
+#
+# ใช้ getattr เพราะค่านี้มีเฉพาะบน Windows — บนระบบอื่นได้ 0 ซึ่งแปลว่า "ไม่ตั้งอะไร"
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class BrowserBusy(RuntimeError):

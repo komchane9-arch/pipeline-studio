@@ -24,6 +24,8 @@ import threading
 import time
 from pathlib import Path
 
+import studio_shared
+
 FB_PACKAGE = "com.facebook.katana"
 REMOTE_DIR = "/sdcard/Pictures/pipeline"
 ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
@@ -207,9 +209,13 @@ class Phone:
         self._pushed: dict[str, str] = {}
 
     def run(self, *args: str, timeout: float = 30) -> subprocess.CompletedProcess:
+        # ซ่อนหน้าต่างคอนโซล — จุดนี้คือทางผ่านของคำสั่ง ADB **ทุกคำสั่ง**
+        # โพสต์ 1 กลุ่มยิงหลายร้อยครั้ง (dump() เปิด 2 หน้าต่างต่อการอ่านจอ 1 ครั้ง)
+        # ไม่ซ่อน = หน้าต่างดำกะพริบรัวทั้งวันและแย่งโฟกัสจนพิมพ์งานอื่นไม่ได้
         return subprocess.run(
             [self.adb, "-s", self.serial, *args],
             capture_output=True, timeout=timeout,
+            creationflags=studio_shared.NO_WINDOW,
         )
 
     def shell(self, command: str, timeout: float = 30) -> str:
@@ -1120,6 +1126,13 @@ def comment_single_post(phone: Phone, comment, photos=None) -> dict:
 
 
 CAPTION_BACK_TRIES = 6
+
+# ตรวจซ้ำหลังโพสต์ — เลื่อนลงหาโพสต์ของเราได้กี่ครั้งก่อนยอมแพ้
+#
+# ตั้ง 4 เพราะโพสต์ที่เพิ่งลงควรอยู่ใน 2-3 หน้าจอแรก ถ้าเลื่อนเกินนี้ยังไม่เจอ
+# แปลว่ารออนุมัติจริงหรือไม่ขึ้นจริง — เลื่อนต่อไปก็เปลืองเวลาจอเปล่าๆ
+# ต้นทุน: ครั้งละ ~4.3 วินาที (ปัด + รอ 1.8 + dump 2.35)
+VERIFY_SCROLL_TRIES = 4
 # เลื่อนกลับขึ้นหัวหน้าโพสต์เพื่อหาปุ่ม … (คอมเมนต์ยาวๆ ดันปุ่มไปไกลได้)
 LINK_TOP_SCROLL_TRIES = 8
 
@@ -1937,6 +1950,33 @@ def verify_liked(phone: Phone, group_id: str, caption: str) -> dict:
     # ข้อความยาวถูกตัดท้ายด้วย "..." จึงเทียบแค่ท่อนต้น
     probe = caption.strip()[:12]
     found_post = screen_has(xml, probe)
+
+    # **ต้องเลื่อนหาด้วย ไม่ใช่ดูแค่จอแรก**
+    #
+    # ของเดิมเปิดกลุ่ม รอ 8 วินาที ถ่ายจอครั้งเดียว แล้วสรุปเลยว่าเจอ/ไม่เจอ
+    # ผลที่วัดได้จากของจริง 106 ครั้ง: บอกว่า "เจอโพสต์" แค่ 10 ครั้ง (9%)
+    # และ "ถูกใจแล้ว" **0 ครั้ง** — ตัวตรวจที่ตอบว่าไม่ผ่าน 100% ไม่ใช่ตัวตรวจ
+    #
+    # ที่ขัดกันเองชัดๆ: ครั้งที่กดถูกใจโพสต์ตัวเองสำเร็จ 79 ครั้ง ตัวตรวจกลับบอกว่า
+    # "ไม่เจอโพสต์" ถึง 71 ครั้ง — กดถูกใจได้แปลว่าโพสต์อยู่บนจอตอนนั้นแน่นอน
+    # (คอมเมนต์ 63/68 · เก็บลิงก์ 58/64 ก็ขัดกันแบบเดียวกัน)
+    #
+    # สาเหตุ: ฟีดกลุ่มเรียงตาม "ความเกี่ยวข้อง" ไม่ใช่เวลา และจอแรกมักเป็น
+    # หัวกลุ่ม + ช่องเขียนโพสต์ + โพสต์ปักหมุด โพสต์ของเราจึงอยู่ต่ำกว่าขอบจอ
+    # ยืนยันจาก log: ตรวจซ้ำใช้เวลา 10-12 วินาทีต่อกลุ่ม เท่ากับ sleep(8)+dump
+    # พอดี = ไม่ได้ใช้เวลาค้นหาเลยแม้แต่วินาทีเดียว
+    scrolled = 0
+    while not found_post and scrolled < VERIFY_SCROLL_TRIES:
+        phone.run(
+            "shell", "input", "swipe", "540", str(700 + SCROLL_STEP),
+            "540", "700", str(SCROLL_DURATION_MS),
+        )
+        time.sleep(1.8)
+        scrolled += 1
+        xml = phone.dump()
+        found_post = screen_has(xml, probe)
+    if found_post and scrolled:
+        phone.log(f"  เลื่อนลง {scrolled} ครั้งถึงเจอโพสต์ของเรา")
     # ต้องดูป้าย "ถูกใจแล้ว" **ใต้โพสต์ของเรา** ไม่ใช่ที่ไหนก็ได้บนจอ
     # (ไม่งั้นไปนับไลก์ของโพสต์คนอื่นที่อยู่บนจอเดียวกัน)
     bottom = _caption_bottom(xml, caption)

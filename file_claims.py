@@ -131,8 +131,7 @@ def normalise(path: str) -> str:
 def _git(*args: str) -> str:
     try:
         done = subprocess.run(
-            ["git", *args], cwd=str(BASE_DIR), capture_output=True, timeout=20,
-        )
+            ["git", *args], cwd=str(BASE_DIR), capture_output=True, timeout=20, creationflags=studio_shared.NO_WINDOW)
         return done.stdout.decode("utf-8", errors="replace").strip()
     except (OSError, subprocess.SubprocessError):
         return ""

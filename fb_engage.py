@@ -228,8 +228,7 @@ def resolve_serial(config: dict) -> str:
     try:
         out = subprocess.run(
             ["adb", "devices"], capture_output=True, text=True, timeout=30,
-            encoding="utf-8", errors="replace",
-        ).stdout
+            encoding="utf-8", errors="replace", creationflags=studio_shared.NO_WINDOW).stdout
     except (OSError, subprocess.SubprocessError) as error:
         raise EngageError(f"เรียก adb ไม่ได้: {error}") from error
     online = [

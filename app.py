@@ -4320,6 +4320,26 @@ def _fb_links_text(limit_text: str = "") -> str:
     return "🔗 <b>ลิงก์โพสต์ที่เก็บไว้</b>\n\n" + "\n\n".join(blocks)
 
 
+# ตามเก็บได้ศูนย์ติดกันกี่รอบถึงจะบอกว่า "ติดขัด" แล้วเลิกแจ้งรอบปกติ
+#
+# 3 เพราะรอบเดียวหรือสองรอบยังเป็นเรื่องปกติ (โพสต์อาจยังรออนุมัติ) แต่สามรอบ
+# ติดกันที่ได้ศูนย์ทุกช่อง แปลว่าไม่ใช่เรื่องจังหวะเวลาแล้ว
+ZERO_STREAK_ALERT = 3
+
+# นับรอบที่ได้ศูนย์ติดกันของแต่ละงาน — อยู่ในหน่วยความจำพอ
+# รีสตาร์ตแล้วเริ่มนับใหม่ไม่เป็นไร เพราะ fb_pending มีเพดานจำนวนครั้งคุมอีกชั้น
+_fb_zero_rounds: dict[str, int] = {}
+
+
+def _fb_zero_streak(job_id: str, nothing: bool) -> int:
+    """คืนจำนวนรอบที่ได้ศูนย์ติดกันของงานนี้ (ได้ผลจริงเมื่อไร นับใหม่)"""
+    if not nothing:
+        _fb_zero_rounds.pop(job_id, None)
+        return 0
+    _fb_zero_rounds[job_id] = _fb_zero_rounds.get(job_id, 0) + 1
+    return _fb_zero_rounds[job_id]
+
+
 def _fb_followup(comment_override: str = "", job_id: str = "",
                  queued: bool = False) -> str:
     """ตามเก็บงานล่าสุด: เปิดโพสต์จากแจ้งเตือน แล้วกดถูกใจ + คอมเมนต์
@@ -4404,6 +4424,32 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         liked = sum(1 for r in results if r.get("liked"))
         commented = sum(1 for r in results if r.get("commented"))
         links = sum(1 for r in results if r.get("link"))
+        nothing = not liked and not commented and not links
+        streak = _fb_zero_streak(job_id, nothing)
+
+        # **รอบที่ได้ศูนย์ซ้ำๆ ต้องไม่ส่งข้อความหน้าตาปกติอีก**
+        #
+        # ของเดิมส่ง "🏁 จบแล้ว ถูกใจ 0/1" ทุกรอบเท่ากันหมด ผลที่เกิดจริง
+        # 14-15 ส.ค. 2026: งาน p617465263 วน 196 รอบ ได้ศูนย์ 100% และส่ง
+        # ข้อความหน้าตาเดียวกันเข้าแชทครบทุกรอบ — ไม่ได้เงียบ แต่ดังจนกลายเป็น
+        # เสียงรบกวน แล้วสัญญาณจริงจมหายไปกับข้อความปกติ
+        #
+        # ครบเกณฑ์แล้วส่ง "ครั้งเดียว" ว่าติดขัด จากนั้นเงียบจนกว่าจะได้ผลจริง
+        if nothing and streak >= ZERO_STREAK_ALERT:
+            if streak == ZERO_STREAK_ALERT:
+                _fb_say(chat_id, (
+                    f"🛑 <b>งาน {job_id} ตามเก็บไม่ได้ผล {streak} รอบติด</b>\n"
+                    f"ทุกรอบได้ ถูกใจ 0 · คอมเมนต์ 0 · ลิงก์ 0\n\n"
+                    "แปลว่าโพสต์น่าจะไม่ขึ้นจริง (รอผู้ดูแลอนุมัติ หรือไม่อนุมัติ)\n"
+                    "จะไม่แจ้งรอบที่ได้ศูนย์อีกจนกว่าจะเก็บอะไรได้จริง\n\n"
+                    "ดูสถานะ: /pending · สั่งเองอีกครั้ง: /followup"
+                ))
+            append_log(
+                "publish",
+                f"[{job_id}·ตามเก็บ] จบ — ได้ศูนย์ติดกัน {streak} รอบ (ไม่แจ้งซ้ำ)",
+            )
+            return
+
         _fb_say(chat_id, (
             f"🏁 <b>ตามเก็บงาน {job_id} จบแล้ว</b>\n"
             f"ถูกใจ {liked}/{len(results)}"
@@ -4724,8 +4770,7 @@ def claude_run(prompt: str, cwd: Path | None = None) -> tuple[bool, str]:
         result = subprocess.run(
             [str(CLAUDE_CLI), "-p", prompt, "--allowedTools", CLAUDE_ALLOWED_TOOLS],
             cwd=str(cwd or BASE_DIR), capture_output=True,
-            timeout=CLAUDE_RUN_TIMEOUT,
-        )
+            timeout=CLAUDE_RUN_TIMEOUT, creationflags=studio_shared.NO_WINDOW)
     except subprocess.TimeoutExpired:
         return False, f"Claude ทำงานเกิน {CLAUDE_RUN_TIMEOUT} วินาที — ตัดจบ"
     except OSError as error:

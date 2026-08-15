@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import re
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -33,6 +35,10 @@ from flow_driver import (
     PolicyBlocked,
     UnusualActivity,
 )
+
+# ซ่อนหน้าต่างคอนโซลตอนสั่งโปรแกรมภายนอก — ไม่ให้กะพริบใส่ผู้ใช้
+# ประกาศในไฟล์เองแทนการ import studio_shared เพื่อไม่เพิ่มสายพึ่งพาโดยไม่จำเป็น
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 SCENE_COUNT = 4
 BATCH_PAUSE_SECONDS = 10   # พักระหว่างรุ่น ลดโอกาสโดน Google จำกัดการใช้งาน
@@ -60,9 +66,43 @@ speech        = บทพูดภาษาไทยสั้นๆ ของซ
 # ------------------------------------------------------------ ขั้นที่ 1: Gemini
 
 
+def build_scene_parts(instruction: str, product_image: Path | None = None,
+                      log: Callable[[str], None] = print) -> list[dict]:
+    """ประกอบ `parts` ที่จะส่งให้ Gemini — ข้อความ แล้วต่อด้วยรูปสินค้าถ้ามี
+
+    **ระบบเดิมส่งรูปไปด้วยเสมอถ้ามี** (`2.Extension/8.Auto-gen(stepbystep)/
+    sidepanel/app.js:1533`) เพราะคอนเซปต์ที่ได้จะอิงหน้าตาสินค้าจริง ไม่ใช่
+    จินตนาการจากชื่อรุ่นอย่างเดียว
+
+    ใช้ชื่อคีย์แบบ snake_case (`inline_data` / `mime_type`) ตามที่ฝั่ง Python
+    ของโปรเจกต์นี้ใช้อยู่จริงและผ่านของจริงมาแล้ว (`shopee_scrape.judge_images`)
+    ต้นฉบับเป็น JS จึงเป็น camelCase — REST รับได้ทั้งสองแบบ แต่เอาให้เหมือน
+    เพื่อนบ้านในภาษาเดียวกันดีกว่า
+
+    อ่านรูปไม่ได้ = **เตือนแล้วส่งเฉพาะข้อความ ไม่ล้มทั้งงาน** (ตามระบบเดิม)
+    แต่ห้ามเงียบ เพราะคอนเซปต์ที่ได้จะคุณภาพต่างจากที่ควรได้ (กติกาข้อ 2.4)
+    """
+    parts: list[dict] = [{"text": instruction}]
+    if product_image is None:
+        return parts
+    try:
+        payload = Path(product_image).read_bytes()
+    except OSError as error:
+        log(f"⚠️ อ่านรูปสินค้า {product_image} ไม่ได้ ({error}) — ส่งเฉพาะข้อความ")
+        return parts
+    mime = mimetypes.guess_type(str(product_image))[0] or "image/jpeg"
+    parts.append({
+        "inline_data": {
+            "mime_type": mime,
+            "data": base64.b64encode(payload).decode("ascii"),
+        }
+    })
+    return parts
+
+
 def generate_scenes(
     api_key: str, model: str, product: str, detail: str,
-    product_image: Path | None = None,
+    product_image: Path | None = None, log: Callable[[str], None] = print,
 ) -> list[dict]:
     """ให้ Gemini แตกข้อมูลสินค้าเป็นคอนเซปต์ 4 ซีน
 
@@ -71,6 +111,7 @@ def generate_scenes(
     instruction = (
         f"{SCENE_SYSTEM_PROMPT}\n\nสินค้า: {product}\nรายละเอียด: {detail}"
     )
+    parts = build_scene_parts(instruction, product_image, log)
     last_error = ""
     for attempt in range(1, 3 + 1):
         response = httpx.post(
@@ -221,7 +262,7 @@ def merge_scenes(out_dir: Path, name: str, log=print) -> Path:
                f"pad={MERGE_SIZE.replace('x', ':')}:(ow-iw)/2:(oh-ih)/2,fps={MERGE_FPS}",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(target),
     ]
-    result = subprocess.run(command, capture_output=True, cwd=str(out_dir))
+    result = subprocess.run(command, capture_output=True, cwd=str(out_dir), creationflags=_NO_WINDOW)
     listing.unlink(missing_ok=True)
     if result.returncode != 0:
         raise FlowError(
@@ -243,8 +284,7 @@ def trim_silence(source: Path, log=print) -> Path | None:
     probe = subprocess.run(
         ["ffmpeg", "-i", str(source), "-af",
          f"silencedetect=noise={SILENCE_DB}dB:d={SILENCE_MIN_SECONDS}", "-f", "null", "-"],
-        capture_output=True,
-    )
+        capture_output=True, creationflags=_NO_WINDOW)
     text = probe.stderr.decode("utf-8", errors="replace")
     starts = [float(m) for m in re.findall(r"silence_start: ([\d.]+)", text)]
     ends = [float(m) for m in re.findall(r"silence_end: ([\d.]+)", text)]
@@ -280,8 +320,7 @@ def trim_silence(source: Path, log=print) -> Path | None:
     result = subprocess.run(
         ["ffmpeg", "-y", "-i", str(source), "-filter_complex", graph,
          "-map", "[v]", "-map", "[a]", str(target)],
-        capture_output=True,
-    )
+        capture_output=True, creationflags=_NO_WINDOW)
     if result.returncode != 0:
         log("  ตัดช่วงเงียบไม่สำเร็จ — ใช้ไฟล์เต็มแทน")
         return None
@@ -291,8 +330,7 @@ def trim_silence(source: Path, log=print) -> Path | None:
 
 def _media_duration(path: Path) -> float:
     result = subprocess.run(
-        ["ffmpeg", "-i", str(path)], capture_output=True
-    )
+        ["ffmpeg", "-i", str(path)], capture_output=True, creationflags=_NO_WINDOW)
     text = result.stderr.decode("utf-8", errors="replace")
     match = re.search(r"Duration: (\d+):(\d+):([\d.]+)", text)
     if not match:
@@ -339,7 +377,8 @@ def run_pipeline(
     if scenes is None:
         log("ขั้น 1/5 — Gemini แตกคอนเซปต์ 4 ซีน")
         scenes = generate_scenes(
-            api_key, gemini_model, product, detail, product_image=product_image
+            api_key, gemini_model, product, detail, product_image=product_image,
+            log=log,
         )
         (out_dir).mkdir(parents=True, exist_ok=True)
         (out_dir / "scenes.json").write_text(

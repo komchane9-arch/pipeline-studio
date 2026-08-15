@@ -128,7 +128,7 @@ class ProfileFarm:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "(Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\").CommandLine"],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20, creationflags=studio_shared.NO_WINDOW)
         for line in (result.stdout or "").splitlines():
             if line.strip() and "--user-data-dir" not in line:
                 return True
@@ -138,7 +138,7 @@ class ProfileFarm:
     def _alive_chrome_pids() -> set[int]:
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True)
+            capture_output=True, text=True, creationflags=studio_shared.NO_WINDOW)
         pids = set()
         for line in (result.stdout or "").splitlines():
             parts = line.split('","')
@@ -450,7 +450,7 @@ class ProfileFarm:
         ]
         if url:
             args.append(url)
-        proc = subprocess.Popen(args)
+        proc = subprocess.Popen(args, creationflags=studio_shared.NO_WINDOW)
         _running[profile_id] = proc
         with _registry_lock:
             data = self._load()
@@ -472,7 +472,7 @@ class ProfileFarm:
 
         # ปิดแบบสุภาพก่อน (ไม่ใส่ /F) — Chrome ได้ WM_CLOSE แล้วเขียนคุกกี้/เซสชัน
         # ลงดิสก์ให้ครบก่อนตาย ถ้าฆ่าด้วย /F ทันที ล็อกอินรอบล่าสุดอาจหายไป
-        subprocess.run(["taskkill", "/PID", str(pid), "/T"], capture_output=True)
+        subprocess.run(["taskkill", "/PID", str(pid), "/T"], capture_output=True, creationflags=studio_shared.NO_WINDOW)
         for _ in range(16):  # รอสูงสุด ~8 วิ
             if pid not in self._alive_chrome_pids():
                 break
@@ -480,7 +480,7 @@ class ProfileFarm:
         else:
             # ดื้อจริง (ค้าง/มี dialog) — จำเป็นต้องบังคับ
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True)
+                           capture_output=True, creationflags=studio_shared.NO_WINDOW)
             time.sleep(1.0)  # เผื่อคายล็อกไฟล์
 
         # โปรเซสตายแล้วค่อยสำรอง — ตอนเปิดอยู่ไฟล์ถูกล็อก copy ไปก็ได้ของเสีย

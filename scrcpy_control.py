@@ -27,6 +27,11 @@ import threading
 import time
 from pathlib import Path
 
+# ซ่อนหน้าต่างคอนโซลตอนสั่งโปรแกรมภายนอก — ไม่ให้กะพริบใส่ผู้ใช้
+# ประกาศในไฟล์เองแทนการ import studio_shared เพื่อไม่เพิ่มสายพึ่งพาโดยไม่จำเป็น
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 logger = logging.getLogger(__name__)
 
 # ต้องตรงกับไฟล์ jar ที่วางไว้ ไม่งั้นเซิร์ฟเวอร์ฝั่งมือถือจะปฏิเสธตั้งแต่เริ่ม

@@ -94,6 +94,12 @@ REACTION_RE = re.compile(r'"reaction_count"\s*:\s*(?:\{\s*"count"\s*:\s*)?(\d+)'
 SHARE_RE = re.compile(r'"share_count"\s*:\s*\{\s*"count"\s*:\s*(\d+)')
 COMMENT_RE = re.compile(
     r'"(?:comments"\s*:\s*\{\s*"total_count|total_comment_count)"\s*:\s*(\d+)')
+# ยอดวิว "เฉพาะโพสต์วิดีโอ/รีลส์" — โพสต์ข้อความ/รูปไม่มี (Facebook ไม่ส่งมา)
+# จับชื่อฟิลด์ทุกแบบที่ FB เคยใช้: video_view_count · play_count · post_view_count
+# รับค่าได้ทั้งเปลือย 123 · ห่อ {"count":123} · และสตริง "123" (เลขใหญ่ FB ส่งเป็น string)
+VIEW_RE = re.compile(
+    r'"(?:video_view_count|video_play_count|play_count|post_view_count'
+    r'|feedback_view_count)"\s*:\s*(?:\{\s*"count"\s*:\s*)?"?(\d+)')
 # ระยะที่ยอมให้ตัวเลขอยู่ห่างจากลิงก์โพสต์ใน JSON ก้อนเดียวกัน
 # (story หนึ่งก้อนยาวหลักพันตัวอักษร — แคบไปจับไม่เจอ กว้างไปจับข้ามโพสต์)
 PAIR_WINDOW = 6000
@@ -186,7 +192,32 @@ def find_bot(farm: ProfileFarm, name_or_id: str) -> dict:
 
 
 def launch_bot_browser(playwright, farm: ProfileFarm, entry: dict):
-    """เปิด Chrome ของโปรไฟล์บอท — คืน context (ผู้เรียกต้องปิดเอง)"""
+    """เปิด Chrome ของโปรไฟล์บอท — คืน context (ผู้เรียกต้องปิดเอง)
+
+    **ถือ `bot_lock` ของโปรไฟล์นั้นไว้ตลอดเวลาที่ Chrome เปิดอยู่**
+
+    ไฟล์นี้เปิด Chrome ตรงผ่าน Playwright ไม่ได้ผ่าน `farm.launch()` จึงไม่เคย
+    ถือล็อกมาก่อน ผลคือด่าน `find_bot` กันได้ทางเดียว (ฟาร์มเปิดอยู่ → สแกนไม่เริ่ม)
+    แต่ทางกลับกันไม่มีอะไรกัน: สแกนกำลังรัน → ผู้ใช้กด "เปิดล็อกอิน" ในหน้าเว็บ
+    → `farm.launch()` เห็นว่าล็อกว่างจึงเปิด Chrome ตัวที่สองบนโปรไฟล์เดียวกัน
+    → Chrome ไล่ตัวเดิมหลุด **สแกนที่อ่านไปแล้วหลายร้อยโพสต์หายทั้งรอบ**
+
+    ปล่อยล็อกตอน context ปิด (ผูกกับ event ของ Playwright) ถ้าโปรเซสตายกะทันหัน
+    ระบบปฏิบัติการก็ปล่อยล็อกไฟล์ให้เองอยู่แล้ว — ไม่มีทางค้าง
+    """
+    holder = studio_shared.bot_lock(
+        entry["id"], label=f"เบราว์เซอร์สแกน {entry.get('name', entry['id'])}")
+    holder.__enter__()
+    try:
+        context = _open_persistent(playwright, farm, entry)
+    except BaseException:
+        holder.__exit__(None, None, None)
+        raise
+    context.on("close", lambda _ctx=None: holder.__exit__(None, None, None))
+    return context
+
+
+def _open_persistent(playwright, farm: ProfileFarm, entry: dict):
     return playwright.chromium.launch_persistent_context(
         user_data_dir=str(farm.user_data_dir(entry["id"])),
         channel="chrome",
@@ -198,6 +229,14 @@ def launch_bot_browser(playwright, farm: ProfileFarm, entry: dict):
             "--no-first-run",
             "--no-default-browser-check",
             "--window-size=1280,900",
+            # เอาหน้าต่างไปไว้นอกจอ — ผู้ใช้ใช้เครื่องต่อได้โดยไม่มีอะไรเด้งบัง
+            # ห้าม minimize แทน: Chrome จะหรี่ renderer แล้วฟีดหยุดเลื่อน
+            "--window-position=-2400,100",
+            # กัน Chrome หรี่การทำงานของหน้าต่างที่มองไม่เห็น/ถูกบัง —
+            # ไม่งั้นสแกนนอกจอจะช้าลงหรือ timer ค้าง
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling",
         ],
     )
 
@@ -247,6 +286,7 @@ def harvest(text: str, bucket: dict[str, dict]) -> None:
     reactions = [(m.start(), int(m.group(1))) for m in REACTION_RE.finditer(text)]
     shares = [(m.start(), int(m.group(1))) for m in SHARE_RE.finditer(text)]
     comments = [(m.start(), int(m.group(1))) for m in COMMENT_RE.finditer(text)]
+    views = [(m.start(), int(m.group(1))) for m in VIEW_RE.finditer(text)]
     for match in POST_URL_RE.finditer(text):
         group_key, post_id = match.group(1), match.group(2)
         likes = _nearest(reactions, match.start())
@@ -258,12 +298,14 @@ def harvest(text: str, bucket: dict[str, dict]) -> None:
             "likes": likes,
             "shares": _nearest(shares, match.start()) or 0,
             "comments": _nearest(comments, match.start()) or 0,
+            # ยอดวิว: มีเฉพาะโพสต์วิดีโอ · โพสต์ทั่วไป = 0 (ไม่มีให้จับ)
+            "views": _nearest(views, match.start()) or 0,
         }
         known = bucket.get(post_id)
         if known is None:
             bucket[post_id] = found
         else:
-            for field in ("likes", "shares", "comments"):
+            for field in ("likes", "shares", "comments", "views"):
                 known[field] = max(known[field], found[field])
 
 
@@ -453,6 +495,8 @@ def send_report(token: str, chat_id: str, group: dict, fresh: list[dict],
         total = engagement(post)
         stats = (f"{index}. 🔥 {total:,} = ❤️ {post['likes']:,}"
                  f" · 💬 {post.get('comments', 0):,} · ↗ {post.get('shares', 0):,}")
+        if post.get("views", 0):     # โพสต์วิดีโอเท่านั้นถึงมียอดวิว
+            stats += f" · 👁 {post['views']:,}"
         keyboard = {"inline_keyboard": [[
             {"text": "🚫 ไม่เอาโพสต์นี้", "callback_data": f"mr:{post['id']}"},
         ]]}
@@ -665,28 +709,33 @@ def deep_scan_groups(groups: list[dict], target: int, log=print) -> list[dict]:
                     avg = (sum(engagement(p) for p in posts) / len(posts)
                            if posts else 0)
                     band_avg, cum = _depth_stats(raw["feed"], min_eng)
+                    with_views = [p for p in posts if p.get("views", 0)]
                     results.append({
                         "name": raw["name"] or gname,
                         "canonical": raw["canonical"],
                         "count": len(posts),
                         "over": len(over),
                         "avg": round(avg, 1),
+                        "videos": len(with_views),
                         "bands": band_avg,
                         "cum": cum,
                         "top": [{"eng": engagement(p), "likes": p["likes"],
                                  "comments": p.get("comments", 0),
-                                 "shares": p.get("shares", 0), "url": p["url"]}
+                                 "shares": p.get("shares", 0),
+                                 "views": p.get("views", 0), "url": p["url"]}
                                 for p in posts[:5]],
                         "seconds": round(time.perf_counter() - started, 1),
                         "error": "",
                     })
                     r = results[-1]
                     log(f"  ✅ {r['count']} โพสต์ · เกิน {min_eng} = {r['over']} · "
-                        f"เฉลี่ย {r['avg']} ({r['seconds']} วิ)")
+                        f"เฉลี่ย {r['avg']} · วิดีโอมียอดวิว {r['videos']} "
+                        f"({r['seconds']} วิ)")
                 except Exception as error:      # กลุ่มเดียวพังต้องไม่ล้มทั้งชุด
                     results.append({
                         "name": gname, "canonical": "", "count": 0, "over": 0,
-                        "avg": 0, "bands": [], "cum": [], "top": [], "seconds": 0,
+                        "avg": 0, "videos": 0, "bands": [], "cum": [], "top": [],
+                        "seconds": 0,
                         "error": f"{type(error).__name__}: {error}"})
                     log(f"  ❌ {results[-1]['error']}")
         finally:
@@ -832,6 +881,294 @@ def settings_text(config: dict) -> str:
     ])
 
 
+# --------------------------------------- ค้นหากลุ่มตาม keyword (/keyword)
+
+# state ของ /keyword — แยกไฟล์จาก seen/rejected ของ "โพสต์" เพราะคนละชนิดกัน
+# (อันนี้คือ "กลุ่ม" ที่เสนอให้ผู้ใช้กด Approve/Reject)
+KW_STATE_FILE = DATA_DIR / "fb_kw_state.json"
+# เกณฑ์สมาชิกขั้นต่ำตามที่ผู้ใช้สั่ง (14 ส.ค. 2026): เกิน 100,000 คน
+KW_MIN_MEMBERS = 100_000
+
+_KW_DEFAULT = {
+    "keyword": "",
+    "min_members": KW_MIN_MEMBERS,
+    "queue": [],        # กลุ่มที่เจอแล้วรอส่งให้เลือก [{gid, name, url, members}]
+    "current": None,    # กลุ่มที่ส่งไปแล้วรอกด Approve/Reject (+message_id, shot)
+    "decision": None,   # กลุ่มที่ test เสร็จแล้วรอกด Keep/Removed (+message_id)
+    "sent": {},         # gid -> ข้อมูล เคยส่งให้ดูแล้ว (กันเสนอซ้ำทุกกรณี)
+    "rejected": {},     # gid -> ข้อมูล ผู้ใช้ปัดตก — ห้ามโผล่อีกตลอดไป
+    "approved": {},     # gid -> ข้อมูล ผู้ใช้รับ — ส่งเข้า /test แล้ว
+    "private": {},      # gid -> ข้อมูล กลุ่มส่วนตัว — บันทึกแยก ไม่เสนอ (ดู /private)
+    "depth": 0,         # เลื่อนหน้า search ไปแล้วกี่รอบ (ขุดต่อจากเดิมได้)
+    # โหมดอัตโนมัติเต็ม (ผู้ใช้สั่ง 14 ส.ค. 2569): search → test ทุกกลุ่ม >100k
+    # → ตัดสินเอง (มีชีวิต→whitelist · ตาย→rejected · ก้ำกึ่ง→การ์ดให้ผู้ใช้กด)
+    "pending": {},      # gid -> การ์ดก้ำกึ่งรอผู้ใช้ Approve/Reject (+message_id)
+    "test_queue": [],   # (legacy — ไม่ใช้แล้ว คงไว้ให้ migration อ่าน)
+    "testing": None,    # gid ที่กำลังเจาะลึกอยู่
+    "decisions": {},    # (legacy — ไม่ใช้แล้ว คงไว้ให้ migration อ่าน)
+    "whitelist": {},    # gid -> กลุ่มที่ผ่าน (มีชีวิต/ผู้ใช้กดรับ) พร้อม keyword+ตัวเลข
+    "exhausted": False, # ขุดหน้า search จนไม่เจอของใหม่แล้ว (เคลียร์เมื่อเปลี่ยนคำค้น)
+    "summary_sent": False,   # ส่งสรุปท้าย keyword ไปแล้วหรือยัง (กันส่งซ้ำ)
+    "keyword_queue": [],     # คำค้นที่ต่อคิวรอ — คำปัจจุบันสรุปจบแล้วค่อยเริ่มตัวถัดไป
+    "keywords_done": [],     # คำค้นที่เคยทำจบแล้ว — ใช้เตือนว่าพิมพ์ซ้ำ
+    # ตัวนับของ keyword ปัจจุบัน — ใช้ทำสรุปตอนจบ
+    "run": {"keyword": "", "tested": 0, "alive": 0, "dead": 0,
+            "borderline": 0, "private": 0, "failed": []},
+}
+
+# ป้ายสถานะกลุ่มบน Facebook — หน้า search โชว์ "สาธารณะ/ส่วนตัว · สมาชิก..."
+# ส่วนหน้ากลุ่มโชว์ "กลุ่มสาธารณะ/กลุ่มส่วนตัว" (รับสองภาษาตามกติกาโปรเจกต์)
+PRIVATE_LABEL_RE = re.compile(r"(?:กลุ่ม)?ส่วนตัว\s*·|กลุ่มส่วนตัว|Private\s+group", re.I)
+PUBLIC_LABEL_RE = re.compile(r"(?:กลุ่ม)?สาธารณะ\s*·|กลุ่มสาธารณะ|Public\s+group", re.I)
+
+# ที่เก็บภาพหน้ากลุ่มที่แคปตอนเสนอ (ส่งเข้า Telegram แล้วลบทิ้งได้ — เก็บชั่วคราว)
+KW_SHOT_DIR = DATA_DIR / "fb_kw_shots"
+
+
+def load_kw_state() -> dict:
+    try:
+        state = json.loads(KW_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    merged = json.loads(json.dumps(_KW_DEFAULT))
+    merged.update(state)
+    return merged
+
+
+def save_kw_state(state: dict) -> None:
+    KW_STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def group_id_from_url(url: str) -> str:
+    """คีย์กันซ้ำของกลุ่ม = ส่วนแรกหลัง /groups/ ใน URL (id ตัวเลขหรือ slug)"""
+    match = re.search(r"facebook\.com/groups/([^/?#\s]+)", url or "")
+    return match.group(1).rstrip("/") if match else ""
+
+
+# Facebook ย่อจำนวนสมาชิก — ไทย "2.5 แสน" · อังกฤษ "250K"/"1.2M" · เต็ม "250,000"
+_NUM_MULT = {"พัน": 1e3, "หมื่น": 1e4, "แสน": 1e5, "ล้าน": 1e6,
+             "K": 1e3, "k": 1e3, "M": 1e6, "m": 1e6}
+_TH_MEMBER_RE = re.compile(r"สมาชิก\s*([\d.,]+)\s*(พัน|หมื่น|แสน|ล้าน|[KkMm])?")
+_EN_MEMBER_RE = re.compile(r"([\d.,]+)\s*([KkMm])?\s*members", re.I)
+
+
+def parse_member_count(text: str) -> int:
+    """อ่านจำนวนสมาชิกจากข้อความการ์ดกลุ่ม — อ่านไม่ออกคืน 0 (แล้วถูกคัดทิ้ง)"""
+    for regex in (_TH_MEMBER_RE, _EN_MEMBER_RE):
+        match = regex.search(text or "")
+        if match:
+            try:
+                number = float(match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            # round ก่อนตัดเป็น int — 2.3 * 1e5 ใน float ได้ 229999.99...
+            # ปล่อยให้ int() ตัดตรงๆ จะได้ 229,999 แทน 230,000
+            return int(round(number * _NUM_MULT.get(match.group(2) or "", 1)))
+    return 0
+
+
+# เก็บการ์ดกลุ่มจากหน้า search — ลิงก์ /groups/ + ข้อความของการ์ดที่ครอบมัน
+# (บรรทัด "สมาชิก X คน" อยู่ในการ์ด ไม่ได้อยู่ในลิงก์ จึงต้องไต่หา ancestor
+# ที่มีคำนั้น แล้วหยุดก่อนไต่ถึงคอนเทนเนอร์รวมทั้งฟีดซึ่งยาวเป็นพัน)
+_SEARCH_CARDS_JS = """
+() => {
+  const seen = new Map();
+  for (const a of document.querySelectorAll('a[href*="/groups/"]')) {
+    const href = (a.href || '').split('?')[0].replace(/\\/$/, '');
+    if (!/facebook\\.com\\/groups\\/[^/]+$/.test(href)) continue;
+    const name = (a.innerText || '').split('\\n')[0].trim();
+    if (!name) continue;
+    let node = a, card = '';
+    for (let i = 0; i < 8 && node; i++) {
+      node = node.parentElement;
+      const text = node ? (node.innerText || '') : '';
+      if (text.includes('สมาชิก') || /members/i.test(text)) { card = text; break; }
+      if (text.length > 900) break;
+    }
+    const known = seen.get(href);
+    if (!known || card.length > known.card.length)
+      seen.set(href, { href: href, name: name, card: card });
+  }
+  return [...seen.values()];
+}
+"""
+
+
+def search_groups(keyword: str, exclude: set | None = None, depth: int = 0,
+                  rounds: int = 6, log=print) -> list[dict]:
+    """ค้นกลุ่มจากหน้า search ของ Facebook ตาม keyword ด้วยโปรไฟล์บอท
+
+    คืน [{gid, name, url, members}] เรียงสมาชิกมาก→น้อย (อ่านสมาชิกไม่ออก = 0)
+    depth = เลื่อนผ่านมาแล้วกี่รอบ (เรียกซ้ำจะเลื่อนลึกกว่าเดิมเพื่อหาของใหม่)
+    """
+    import urllib.parse as _url
+
+    exclude = exclude or set()
+    config = load_config()
+    farm = ProfileFarm(DATA_DIR)
+    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+    log(f'ค้นหากลุ่ม: "{keyword}" (เลื่อน {depth}+{rounds} รอบ)')
+
+    from playwright.sync_api import sync_playwright
+
+    cards: dict[str, dict] = {}
+    with sync_playwright() as playwright:
+        context = launch_bot_browser(playwright, farm, entry)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            ensure_logged_in(page, context)
+            page.goto("https://www.facebook.com/search/groups/?q="
+                      + _url.quote(keyword), wait_until="domcontentloaded",
+                      timeout=90_000)
+            page.wait_for_timeout(5_000)
+            total = max(1, depth + rounds)
+            for round_number in range(1, total + 1):
+                for item in page.evaluate(_SEARCH_CARDS_JS):
+                    cards[item["href"]] = item
+                if round_number < total:
+                    page.keyboard.press("End")
+                    page.wait_for_timeout(2_500)
+            log(f"  เจอการ์ดกลุ่ม {len(cards)} ใบ")
+        finally:
+            context.close()
+
+    results = []
+    for href, item in cards.items():
+        gid = group_id_from_url(href)
+        if not gid or gid in exclude:
+            continue
+        # ป้ายสถานะจากการ์ด search — True/False/None(ไม่บอก รอตรวจตอนเปิดกลุ่มจริง)
+        private = (True if PRIVATE_LABEL_RE.search(item["card"])
+                   else False if PUBLIC_LABEL_RE.search(item["card"]) else None)
+        results.append({"gid": gid, "name": item["name"], "url": href + "/",
+                        "members": parse_member_count(item["card"]),
+                        "private": private})
+    results.sort(key=lambda g: -g["members"])
+    return results
+
+
+def inspect_groups(groups: list[dict], log=print) -> list[dict]:
+    """เปิดเบราว์เซอร์ Bot10 **รอบเดียว** แล้วไล่ตรวจ+ถ่ายรูปหลายกลุ่ม
+
+    รับ [{gid, url, ...}] คืน list เท่ากันตามลำดับ:
+    {"gid", "shot": str|None, "private": True/False/None, "page_name": str,
+     "error": str}
+    เร็วกว่าเปิด/ปิดเบราว์เซอร์ทีละกลุ่มมาก (โหมดคิวต้องเติมการ์ดครั้งละหลายใบ)
+    กลุ่มเดียวพังไม่ล้มทั้งชุด — จดใน error ของกลุ่มนั้น
+    """
+    config = load_config()
+    farm = ProfileFarm(DATA_DIR)
+    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+    KW_SHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+    from playwright.sync_api import sync_playwright
+
+    results: list[dict] = []
+    with sync_playwright() as playwright:
+        context = launch_bot_browser(playwright, farm, entry)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            ensure_logged_in(page, context)
+            for group in groups:
+                gid = group.get("gid", "")
+                safe = re.sub(r"[^A-Za-z0-9_-]", "_", gid)[:40] or "group"
+                out = KW_SHOT_DIR / f"{safe}.png"
+                item = {"gid": gid, "shot": None, "private": None,
+                        "page_name": "", "error": ""}
+                try:
+                    page.goto(group["url"], wait_until="domcontentloaded",
+                              timeout=90_000)
+                    page.wait_for_timeout(4_000)
+                    item["page_name"] = re.sub(
+                        r"\s*\|\s*Facebook\s*$", "", page.title()).strip()
+                    # ป้าย "กลุ่มส่วนตัว/สาธารณะ" อยู่ช่วงหัวหน้าเพจ — อ่านจาก
+                    # ข้อความจริงบนจอ ไม่เดา DOM (กติกาโปรเจกต์)
+                    body = page.evaluate(
+                        "() => (document.body ? document.body.innerText : '')"
+                        ".slice(0, 6000)")
+                    item["private"] = (
+                        True if PRIVATE_LABEL_RE.search(body)
+                        else False if PUBLIC_LABEL_RE.search(body) else None)
+                    page.screenshot(path=str(out))
+                    if out.is_file():
+                        item["shot"] = str(out)
+                    if item["private"] is None:
+                        log(f"  หน้าไม่บอกสถานะกลุ่มชัด ({gid}) — ปฏิบัติเหมือนสาธารณะ")
+                except Exception as error:
+                    item["error"] = f"{type(error).__name__}: {error}"
+                    log(f"  ตรวจกลุ่ม {gid} ไม่สำเร็จ: {item['error']}")
+                results.append(item)
+        finally:
+            context.close()
+    return results
+
+
+def inspect_group(url: str, gid: str, log=print) -> dict:
+    """ตรวจ+ถ่ายรูปกลุ่มเดียว — เปลือกบางของ inspect_groups (โค้ดเก่ายังเรียกได้)"""
+    return inspect_groups([{"gid": gid, "url": url}], log=log)[0]
+
+
+# ป้ายเมนู/ปุ่มตอนออกจากกลุ่ม (รับสองภาษาเหมือนตอนเข้าร่วม)
+LEAVE_ITEM_LABEL = re.compile(r"ออกจากกลุ่ม|Leave group|Leave Group", re.I)
+
+
+def leave_group(url: str, log=print) -> dict:
+    """ให้ Bot10 ออกจากกลุ่ม Facebook — คืน {status, name}
+
+    status: left (ออกสำเร็จ) · not-member (ไม่ได้เป็นสมาชิกอยู่แล้ว)
+            · stuck (เป็นสมาชิกแต่หาปุ่มออกไม่เจอ — ต้องออกเองในแอป)
+    ลำดับจริงบนหน้า: ปุ่ม "เข้าร่วมแล้ว/Joined" → เมนู "ออกจากกลุ่ม" → ยืนยัน
+    """
+    config = load_config()
+    farm = ProfileFarm(DATA_DIR)
+    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        context = launch_bot_browser(playwright, farm, entry)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            ensure_logged_in(page, context)
+            page.goto(url, wait_until="domcontentloaded", timeout=90_000)
+            page.wait_for_timeout(5_000)
+            name = re.sub(r"\s*\|\s*Facebook\s*$", "", page.title()).strip()
+
+            if _join_state(page) in ("can-join", "pending"):
+                log("ไม่ได้เป็นสมาชิกกลุ่มนี้ — ไม่ต้องออก")
+                return {"status": "not-member", "name": name}
+
+            menu = page.get_by_role("button", name=MEMBER_LABEL)
+            if not menu.count():
+                return {"status": "not-member", "name": name}
+            menu.first.click()
+            page.wait_for_timeout(1_500)
+
+            item = page.get_by_role("menuitem", name=LEAVE_ITEM_LABEL)
+            if not item.count():
+                item = page.get_by_text(LEAVE_ITEM_LABEL)
+            if not item.count():
+                log("เปิดเมนูแล้วแต่ไม่เจอ 'ออกจากกลุ่ม'")
+                return {"status": "stuck", "name": name}
+            item.first.click()
+            page.wait_for_timeout(1_500)
+
+            # กล่องยืนยัน — ปุ่มออกจากกลุ่มอีกครั้ง (บางธีมไม่มีกล่อง ก็ข้ามได้)
+            confirm = page.get_by_role("button", name=LEAVE_ITEM_LABEL)
+            if confirm.count():
+                confirm.first.click()
+                page.wait_for_timeout(2_500)
+
+            page.reload(wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(3_000)
+            left = _join_state(page) in ("can-join", "pending")
+            log("ออกจากกลุ่มสำเร็จ" if left else "กดออกแล้วแต่ยังเห็นเป็นสมาชิกอยู่")
+            return {"status": "left" if left else "stuck", "name": name}
+        finally:
+            context.close()
+
+
 # ---------------------------------------------------------------------- main
 
 def run(groups_limit: int = 0, scrolls: int = 0, use_telegram: bool = True,
@@ -956,7 +1293,8 @@ def main() -> int:
         print(f"\n{group['name'] or group['share_url']}"
               + (f"  ⚠ {group['error']}" if group.get("error") else ""))
         for post in top:
-            print(f"  ❤️ {post['likes']:,}  {post['url']}")
+            vw = f"  👁 {post['views']:,}" if post.get("views", 0) else ""
+            print(f"  ❤️ {post['likes']:,}{vw}  {post['url']}")
     return 0
 
 

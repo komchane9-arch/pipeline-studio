@@ -271,7 +271,8 @@ def _remember(data: dict, entry: dict) -> None:
 # ------------------------------------------------------------- คำสั่งหลัก
 
 def claim(path: str, chat: str, why: str = "", session: str = "",
-          minutes: int = HOLD_MINUTES, force: bool = False) -> dict:
+          minutes: int = HOLD_MINUTES, force: bool = False,
+          kind: str = "") -> dict:
     """ขอสิทธิ์แก้ไฟล์ — ได้เลย หรือถูกต่อคิว
 
     คืน dict ที่มี `granted` บอกผล และ `holder` / `position` ประกอบ
@@ -291,6 +292,7 @@ def claim(path: str, chat: str, why: str = "", session: str = "",
             # เจ้าของเดิมขอซ้ำ = ต่ออายุ ไม่ใช่ชน
             holder["expires"] = _stamp(_now() + timedelta(minutes=minutes))
             holder["why"] = why or holder.get("why", "")
+            holder["kind"] = kind or holder.get("kind", "")
             holder.pop("granted_from_queue", None)
             result.update(granted=True, renewed=True, claim=holder, file=rel)
             return
@@ -302,7 +304,7 @@ def claim(path: str, chat: str, why: str = "", session: str = "",
                 position = waiting.index(already) + 1
             else:
                 waiting.append({"chat": chat, "session": session, "why": why,
-                                "at": _stamp(_now())})
+                                "kind": kind, "at": _stamp(_now())})
                 position = len(waiting)
             result.update(granted=False, holder=holder, position=position, file=rel)
             return
@@ -312,7 +314,9 @@ def claim(path: str, chat: str, why: str = "", session: str = "",
         started = _now()
         # ไม่ล้างคิวทิ้ง — คนที่รออยู่ยังต้องได้คิวตามลำดับเดิมหลังเราปล่อย
         data["claims"][rel] = {
-            "chat": chat, "session": session, "why": why,
+            # kind = "fix" งานซ่อมของพัง / "feat" งานเพิ่มของใหม่ / "" ไม่ระบุ
+            # เจ้าหน้าที่คิว (dispatcher.py) ใช้ค่านี้ตัดสินว่าใครแซงใครได้
+            "chat": chat, "session": session, "why": why, "kind": kind,
             "since": _stamp(started),
             "expires": _stamp(started + timedelta(minutes=minutes)),
             "base_commit": base_commit,
@@ -545,6 +549,8 @@ def main(argv: list[str] | None = None) -> int:
     p_claim.add_argument("--minutes", type=int, default=HOLD_MINUTES)
     p_claim.add_argument("--force", action="store_true",
                          help="แย่งมาเลย ใช้เมื่อแน่ใจว่าคนถือทิ้งไปแล้ว")
+    p_claim.add_argument("--kind", default="", choices=["", "fix", "feat"],
+                         help="fix = ซ่อมของพัง (แซงงาน feat ได้) / feat = เพิ่มของใหม่")
 
     p_release = sub.add_parser("release", help="คืนสิทธิ์ + ดูว่าต้องแจ้งใครต่อ")
     add_common(p_release)
@@ -592,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "claim":
         try:
             out = claim(args.file, args.chat, args.why, args.session,
-                        args.minutes, args.force)
+                        args.minutes, args.force, args.kind)
         except ClaimError as error:
             print(f"❌ {error}")
             return 2

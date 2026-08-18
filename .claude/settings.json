@@ -3,5 +3,19 @@
     "allow": [
       "Bash(adb *)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/project/2.Auto gen Video/8.pipeline studio/dispatcher.py\" guard",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
   }
 }

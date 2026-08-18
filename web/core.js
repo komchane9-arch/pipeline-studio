@@ -46,6 +46,9 @@ document.querySelectorAll(".tab").forEach((tab) => {
     document.querySelectorAll(".tab-area").forEach((area) => {
       area.hidden = area.id !== `tab-${tab.dataset.tab}`;
     });
+    // กล่อง log ของแท็บที่เพิ่งเปิดยังไม่เคยถูกถาม (รอบก่อนๆ ข้ามไปเพราะถูกซ่อนอยู่)
+    // ถ้าไม่เติมตรงนี้จะเห็นกล่องว่างค้างได้ถึง 3 วินาที
+    pollLogs();
   });
 });
 
@@ -593,10 +596,24 @@ $("#farmMaxSave").addEventListener("click", async () => {
 // =============================================================== log
 const LOG_TABS = ["input", "gems", "gen_pic", "gen_video", "judge", "release", "publish"];
 
+// **ถามเฉพาะกล่องที่คนกำลังมองอยู่จริง**
+// ของเดิมยิงครบทั้ง 7 กล่องทุก 3 วินาทีไม่ว่าจะเปิดค้างไว้ที่แท็บไหน วัดบนหน้าเว็บ
+// จริงได้ 147 request/นาที จากทั้งหมด 177 — และตอนที่วัด แท็บที่เปิดอยู่คือ
+// "สตอรีบอร์ด" ซึ่งไม่มีกล่อง log สักกล่อง แปลว่าเสียเปล่าทั้ง 147 ในจังหวะนั้น
+// เรื่องนี้หนักขึ้นตั้งแต่เปิดใช้ผ่าน Tailscale เพราะกินเน็ต 5G ตลอดเวลาแม้ปิดจอทิ้งไว้
+//
+// จังหวะตอนกำลังดูอยู่ยังเป็น 3 วินาทีเท่าเดิม — ไม่ได้แลกความสดของ log ไปกับอะไรเลย
+export function onScreen(el) {
+  // offsetParent เป็น null เมื่อตัวมันเองหรือบรรพบุรุษถูกซ่อน ครอบคลุมทั้ง [hidden]
+  // ของแท็บและ display:none ที่อาจมาจากที่อื่น — เช็คที่ผลลัพธ์จริงบนจอ ไม่ใช่เดาจาก id
+  return !!el && el.offsetParent !== null;
+}
+
 export async function pollLogs() {
+  if (document.hidden) return;   // สลับไปแท็บอื่นของเบราว์เซอร์ / ปิดจอมือถือ
   for (const tab of LOG_TABS) {
     const box = document.querySelector(`#log-${tab}`);
-    if (!box) continue;
+    if (!onScreen(box)) continue;
     try {
       const payload = await api(`/api/logs/${tab}`);
       const text = (payload.lines || []).join("\n");
@@ -734,6 +751,7 @@ function healthChip(ok, label, detail = "") {
 }
 
 export async function pollHealth() {
+  if (document.hidden) return;   // ไม่มีคนดูแถบสถานะ ก็ไม่ต้องถาม
   const strip = $("#healthStrip");
   if (!strip) return;
   const chips = [];
@@ -787,6 +805,14 @@ export async function pollHealth() {
 }
 
 window.setInterval(pollHealth, HEALTH_EVERY_MS);
+
+// กลับมาที่แท็บนี้เมื่อไรให้เห็นของสดทันที ไม่ต้องรอครบรอบ — ถ้าไม่มีบรรทัดนี้
+// การหยุดถามตอนซ่อนจะกลายเป็น "กลับมาแล้วเห็นข้อมูลค้าง" ซึ่งแย่กว่าเดิม
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  pollLogs();
+  pollHealth();
+});
 
 async function testKeys() {
   // ไฟสถานะ = ยิงเรียกจริง ไม่ใช่แค่เช็คว่ามีไฟล์ key

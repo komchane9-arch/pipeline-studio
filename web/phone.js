@@ -1,6 +1,6 @@
 /* จอมือถือ: สตรีม H.264 · แตะ/ลาก · ปุ่มลัด · ลิงก์คอม↔มือถือ · ส่งคลิป · Wi-Fi · อนุญาตอุปกรณ์ */
 
-import { $, api, hooks } from "./core.js";
+import { $, api, hooks, onScreen } from "./core.js";
 
 // ========================================================== จอมือถือ (A)
 export const deviceSelect = $("#deviceSelect");
@@ -467,8 +467,12 @@ $("#bridgeOpen").addEventListener("click", async () => {
   }
 });
 
-// ลิงก์ใหม่จากมือถือควรโผล่เองโดยไม่ต้องกดรีเฟรช
-window.setInterval(loadLinks, 5000);
+// ลิงก์ใหม่จากมือถือควรโผล่เองโดยไม่ต้องกดรีเฟรช — แต่เฉพาะตอนกล่องอยู่บนจอจริง
+// (12 request/นาที ที่เดิมยิงทิ้งตลอดแม้เปิดค้างไว้แท็บอื่น)
+window.setInterval(() => {
+  if (document.hidden || !onScreen($("#linkInbox"))) return;
+  loadLinks();
+}, 5000);
 
 // ------------------------------------- ส่งคลิปเข้ามือถือ + เปิดแอปโพสต์
 const clipNote = $("#clipNote");

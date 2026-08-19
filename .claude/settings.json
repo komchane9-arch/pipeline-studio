@@ -16,6 +16,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/project/2.Auto gen Video/8.pipeline studio/orders.py\" catch",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }

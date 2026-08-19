@@ -219,6 +219,30 @@ def guard(raw: str) -> int:
 
     session = str(payload.get("session_id") or "")
     me = name_for(session)
+    # ---- ชั้นที่ 1: ข้อพิพาทระดับ "คำสั่ง" ต้องตัดสินก่อนถึงจะแตะไฟล์ได้ ----
+    # ล็อกไฟล์กันได้แค่ "สองคนเขียนทับกัน" แต่กันไม่ได้เลยเวลาเจ้าของสั่งสองแชท
+    # ให้ทำสิ่งที่สวนทางกัน ตรงนั้นต้องมีคนชี้ขาดก่อน ไม่ใช่แค่เข้าคิว
+    #
+    # import ตรงนี้ไม่ใช่บนหัวไฟล์ เพราะ orders.py import dispatcher อยู่แล้ว
+    # ถ้า import กลับบนหัวจะวนกันตายตั้งแต่โหลดโมดูล
+    try:
+        import orders
+        dispute = orders.pending(session, rel)
+    except Exception:              # noqa: BLE001 - สมุดคำสั่งพังห้ามลามมาบล็อกการแก้ไฟล์
+        dispute = None
+    if dispute:
+        other = (dispute.get("with") or [{}])[0]
+        print(chr(10).join([
+            "🛑 " + rel + " ติดข้อพิพาทที่ยังไม่มีใครตัดสิน — แก้ไม่ได้ตอนนี้",
+            '   ชนกับ "' + str(other.get("chat")) + '" ที่ถูกสั่งให้: '
+            + str(other.get("text") or "")[:110],
+            "",
+            "   เจ้าของโปรเจกต์สั่งไว้แล้วว่ากรณีนี้ให้เรียกเจ้าหน้าที่เองอัตโนมัติ:",
+            '   เรียก Agent tool ด้วย subagent_type="dispatcher" เดี๋ยวนี้',
+            "   ให้มันตอบว่าสองคำสั่งนี้รวมกันได้หรือขัดกันเอง แล้วสั่งปลดล็อกด้วย",
+            '     python orders.py resolve --session ' + session + ' --note "คำตัดสิน"',
+        ]), file=sys.stderr)
+        return 2
     holder = peek(rel)
 
     if holder is None:

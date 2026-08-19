@@ -366,6 +366,28 @@ def done(rel: str, me: str, note: str) -> int:
     return 0
 
 
+def _read_stdin() -> str:
+    """อ่าน stdin เป็น UTF-8 ตรงๆ ไม่ผ่าน locale ของเครื่อง
+
+    Windows ตั้ง encoding ของ stdin ตาม ANSI codepage (cp874/cp1252) เมื่อไม่ได้ตั้ง
+    PYTHONIOENCODING ไว้ — hook ของ Claude Code เรียก python ตรงๆ จึงไม่มีตัวแปรนั้น
+    ผลคือข้อความไทยที่ผู้ใช้พิมพ์กลายเป็นขยะตั้งแต่ตอนอ่าน ก่อนถึงโค้ดเราด้วยซ้ำ
+
+    เจอจริง 19 ส.ค. 2026 บนกระดานสรุปงาน:
+        ที่พิมพ์  "ทำเป็น dash board สวยๆหน่อย"
+        ที่เก็บได้ "à¸—à¸³à¹€à¸›à¹‡à¸™ dash board à¸ªà¸§à¸¢à¹†"
+
+    อ่านเป็น bytes แล้ว decode เองจึงไม่ขึ้นกับ locale ของเครื่องเลย
+    """
+    try:
+        return sys.stdin.buffer.read().decode("utf-8", errors="replace")
+    except Exception:              # noqa: BLE001 - stdin แปลกๆ ห้ามทำให้ hook ล้ม
+        try:
+            return sys.stdin.read()
+        except Exception:          # noqa: BLE001
+            return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="เจ้าหน้าที่คิว — ตัดสินว่าแชทไหนได้แก้ไฟล์ไหนก่อน")
@@ -394,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "guard":
         try:
-            return guard(sys.stdin.read())
+            return guard(_read_stdin())
         except Exception as error:          # noqa: BLE001 - ด่านห้ามล้มแล้วบล็อก
             print(f"(เจ้าหน้าที่คิวมีปัญหา จึงปล่อยผ่าน: {error})", file=sys.stderr)
             return 0

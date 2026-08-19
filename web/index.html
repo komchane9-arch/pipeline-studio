@@ -13,6 +13,12 @@
       <!-- แถบสถานะ: เห็นว่าอะไรตายก่อนจะไปเจอตอนสั่งงานแล้วเงียบ
            เนื้อในเติมจาก core.js (pollHealth) ทุก 15 วินาที -->
       <div id="healthStrip" class="health-strip" aria-live="polite"></div>
+      <!-- กระดานสรุปงาน: หน้าแยกที่สร้างใหม่เองทุกเช้า 08:00 (workboard.py)
+           เปิดแท็บใหม่เพราะเป็นคนละหน้า ไม่ใช่แท็บในแอป — ปิดทิ้งแล้วงานที่ทำค้างไว้
+           ในแอปไม่หาย -->
+      <a id="openBoard" class="board-link" href="/static/board/index.html"
+         target="_blank" rel="noreferrer"
+         title="กระดานสรุปงาน — สร้างใหม่ทุกเช้า 08:00">📋 <span>สรุปงาน</span></a>
       <button id="openSettings" class="gear-button" type="button" aria-label="ตั้งค่า">⚙</button>
     </header>
 

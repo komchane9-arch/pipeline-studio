@@ -848,6 +848,24 @@ body {
 }
 .topbar strong { font-variation-settings: "opsz" 28, "wght" 700; font-size: 17px; }
 .topbar-note { color: var(--ink-2); font-size: 13px; opacity: 1; }
+/* ปุ่มไปกระดานสรุปงาน — อยู่แถวเดียวกับชื่อแอป ชิดขวา ก่อนปุ่มตั้งค่า
+   ใช้ทรงแคปซูลแบบเดียวกับปุ่มตั้งค่า (พื้นเทาจาง systemGray fill) จะได้เป็นชุดเดียวกัน */
+.board-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 13px;
+  border-radius: var(--r-pill);
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.board-link:hover { background: rgba(120, 120, 128, 0.20); }
+
 .gear-button {
   width: 34px; height: 34px;
   display: grid; place-items: center;
@@ -1239,6 +1257,9 @@ button:disabled { opacity: 0.5; }
   .topbar { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
   /* คำโปรยกินที่ flex:1 ทำให้แถบสถานะถูกบีบจนตกบรรทัด — จอแคบไม่ต้องมีก็ได้ */
   .topbar-note { display: none; }
+  /* จอแคบ: เหลือแค่ไอคอน — ตัวหนังสือกินที่จนแถบหัวตกบรรทัด */
+  .board-link span { display: none; }
+  .board-link { padding: 0 10px; }
   .health-strip { order: 3; width: 100%; }
 
   .layout { padding: 10px; gap: 10px; }

@@ -37,4 +37,4 @@ desktop.ini
 .idea/
 
 # หน้าสรุปงานที่สร้างใหม่ทุกเช้า — เป็นผลลัพธ์ ไม่ใช่ซอร์ส
-web/workboard.html
+web/board/

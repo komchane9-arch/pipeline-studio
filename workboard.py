@@ -35,8 +35,21 @@ import orders
 import studio_shared
 
 BASE_DIR = Path(__file__).resolve().parent
-OUT_HTML = BASE_DIR / "web" / "workboard.html"
+# **ต้องอยู่ในโฟลเดอร์ย่อย ห้ามวางไว้ชั้นบนสุดของ web/**
+# app.py คิดเวอร์ชันแอปจาก sha1 ของไฟล์ .html/.js/.css ทุกตัวใน web/ ชั้นบนสุด
+# ไฟล์นี้ถูกเขียนใหม่ทุกวัน เนื้อไม่เหมือนเดิมสักครั้ง ถ้าวางไว้ชั้นบนสุดเวอร์ชันแอปจะ
+# เปลี่ยนทุกเช้า แล้วผู้ใช้จะเจอแบนเนอร์ "หน้าเว็บกับเซิร์ฟเวอร์เป็นคนละรุ่น" ทุกวัน
+# ทั้งที่ไม่มีใครแก้โค้ดอะไรเลย (เกิดจริงแล้ว 19 ส.ค. 2026)
+# glob("*.*") ของ app.py ไม่ไล่โฟลเดอร์ย่อย — โฟลเดอร์ย่อยจึงปลอดภัยถาวร
+OUT_HTML = BASE_DIR / "web" / "board" / "index.html"
 TODO_FILE = studio_shared.DATA_DIR / "todo.json"
+
+# กันพลาดซ้ำด้วยตัวเอง ไม่ใช่พึ่งให้คนจำกติกาได้ — ถ้าวันหนึ่งมีใครย้ายไฟล์ผลลัพธ์
+# กลับไปไว้ชั้นบนสุดของ web/ ให้ตายตรงนี้เลย ดีกว่าไปโผล่เป็นแบนเนอร์ผิดรุ่นทุกเช้า
+if OUT_HTML.parent == BASE_DIR / "web":
+    raise SystemExit(
+        "workboard.py: ห้ามเขียนผลลัพธ์ไว้ที่ web/ ชั้นบนสุด — app.py คิดเวอร์ชันแอป"
+        " จากไฟล์ตรงนั้น เวอร์ชันจะเปลี่ยนทุกวัน ให้ใช้โฟลเดอร์ย่อยเช่น web/board/")
 
 # ของค้างไม่ commit ที่เก่ากว่านี้ = ควรสะสางแล้ว
 STALE_DAYS = 2
@@ -299,120 +312,257 @@ def to_text(d: dict) -> str:
 
 
 # ------------------------------------------------------------ แสดงผลเว็บ
-
 def _esc(text) -> str:
     return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+# หน้านี้ยืมภาษาออกแบบมาจาก web/styles.css ของแอปหลัก (โทน iOS grouped list) เพื่อให้
+# รู้สึกเป็นของชุดเดียวกัน ไม่ใช่หน้าแปลกปลอมที่ถูกแปะเข้ามา:
+#   · พื้น #f2f2f7 · การ์ดขาวมุมมน 14px · เส้นคั่นบางร่นจากซ้าย · เงาอ่อนมาก
+#   · SF Pro VF ตามด้วย Leelawadee UI — **ห้ามตัดฟอนต์ไทยออก** SF Pro ไม่มีอักษรไทย
+#     ถ้าไม่มีตัวสำรอง สระกับวรรณยุกต์จะลอยผิดตำแหน่งทั้งหน้า
+#   · แอปหลักเป็นโหมดสว่างอย่างเดียว หน้านี้จึงไม่ทำโหมดมืด จะได้ไม่ขัดกันเอง
+_CSS = """
+@font-face { font-family:"SF Pro VF"; src:url("/static/fonts/SFPro.ttf") format("truetype-variations");
+             font-weight:1 1000; font-style:normal; font-display:swap; }
+:root{
+  --bg:#f2f2f7; --panel:#fff; --ink:#000; --ink-2:#3c3c43; --ink-3:#8e8e93;
+  --sep:rgba(60,60,67,.29); --line:rgba(0,0,0,.10);
+  --green:#34c759; --red:#ff3b30; --orange:#ff9500; --blue:#0088ff; --purple:#af52de;
+  --r:14px; --shadow:0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+}
+*{box-sizing:border-box}
+body{margin:0; padding:22px 18px 40px; background:var(--bg); color:var(--ink);
+     font-family:"SF Pro VF","Leelawadee UI",-apple-system,"Segoe UI",sans-serif;
+     font-size:15px; line-height:22px; -webkit-font-smoothing:antialiased;}
+.page{max-width:1080px; margin:0 auto}
+
+/* ---------- หัวหน้า ---------- */
+.top{display:flex; align-items:flex-start; justify-content:space-between; gap:16px;
+     flex-wrap:wrap; margin-bottom:20px}
+h1{font-size:28px; line-height:34px; font-weight:700; margin:0; letter-spacing:-.4px}
+.sub{color:var(--ink-3); font-size:13px; line-height:18px; margin-top:3px}
+.pill{display:inline-flex; align-items:center; gap:7px; padding:9px 15px; border-radius:980px;
+      font-size:14px; font-weight:600; white-space:nowrap}
+.pill .dot{width:9px; height:9px; border-radius:50%; background:currentColor; flex:none}
+.pill.good{background:rgba(52,199,89,.14); color:#1a7f43}
+.pill.warn{background:rgba(255,149,0,.16); color:#a35b00}
+.pill.bad {background:rgba(255,59,48,.14); color:#c02626}
+
+/* ---------- ตัวเลขใหญ่ ---------- */
+.kpis{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px;
+      margin-bottom:20px}
+.kpi{background:var(--panel); border-radius:var(--r); box-shadow:var(--shadow); padding:16px 18px}
+.kpi .n{font-size:34px; line-height:40px; font-weight:700; letter-spacing:-1px;
+        font-variant-numeric:tabular-nums}
+.kpi .k{font-size:13px; line-height:18px; color:var(--ink-3); margin-top:2px}
+.kpi .s{font-size:12px; line-height:17px; color:var(--ink-3); margin-top:6px}
+.kpi.hot .n{color:var(--red)} .kpi.mid .n{color:var(--orange)} .kpi.calm .n{color:var(--green)}
+
+/* ---------- การ์ด ---------- */
+.grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:14px}
+.card{background:var(--panel); border-radius:var(--r); box-shadow:var(--shadow);
+      overflow:hidden; margin-bottom:14px}
+.card h2{font-size:13px; line-height:18px; font-weight:600; color:var(--ink-3);
+         margin:0; padding:14px 18px 8px; letter-spacing:.2px}
+.card.alert{background:linear-gradient(180deg,#fff8ec,#fff)}
+.card.alert h2{color:#a35b00}
+.row{display:flex; gap:12px; padding:11px 18px; align-items:flex-start;
+     border-top:.5px solid var(--sep)}
+.row:first-of-type{border-top:none}
+.row .grow{flex:1; min-width:0}
+.row .val{color:var(--ink-2); white-space:nowrap; font-variant-numeric:tabular-nums}
+.name{font-weight:600}
+.muted{color:var(--ink-3); font-size:13px; line-height:18px}
+.mono{font-family:ui-monospace,Consolas,monospace; font-size:12.5px; line-height:18px;
+      word-break:break-all}
+.empty{padding:16px 18px; color:var(--ink-3)}
+
+/* ---------- ชิ้นเล็ก ---------- */
+.mark{width:22px; flex:none; text-align:center; font-size:15px; line-height:22px}
+.tag{display:inline-block; font-size:11px; line-height:16px; padding:1px 8px; border-radius:980px;
+     margin-left:7px; vertical-align:1px; font-weight:600}
+.tag.quiet{background:rgba(142,142,147,.18); color:#5c5c60}
+.tag.clash{background:rgba(255,59,48,.14); color:#c02626}
+.dotline{display:flex; align-items:center; gap:8px}
+.sdot{width:9px; height:9px; border-radius:50%; flex:none}
+.ok .sdot{background:var(--green)} .no .sdot{background:var(--red)}
+.ok .val{color:#1a7f43} .no .val{color:#c02626; font-weight:600}
+
+/* ---------- แถบสัดส่วน ---------- */
+.bar{display:flex; height:12px; border-radius:980px; overflow:hidden; margin:2px 18px 12px;
+     background:rgba(120,120,128,.12)}
+.bar i{display:block; height:100%}
+.legend{display:flex; flex-wrap:wrap; gap:14px; padding:0 18px 12px; font-size:12.5px;
+        color:var(--ink-2)}
+.legend span{display:inline-flex; align-items:center; gap:6px}
+.legend i{width:9px; height:9px; border-radius:3px; display:inline-block}
+
+@media (max-width:560px){
+  body{padding:16px 12px 32px}
+  h1{font-size:24px; line-height:30px}
+  .kpi .n{font-size:28px; line-height:34px}
+  .row{padding:10px 14px} .card h2{padding:12px 14px 6px}
+  .bar,.legend{margin-left:14px; margin-right:14px; padding-left:0; padding-right:0}
+}
+"""
+
+# เตือนเองเมื่อหน้านี้เก่าเกินหนึ่งวัน — ตัวตั้งเวลาอาจถูกปิดหรือเครื่องไม่ได้เปิดตอน 08:00
+# ถ้าไม่มีตัวนี้ หน้าที่ค้างจะดูเหมือนข้อมูลสดทุกประการ ซึ่งอันตรายกว่าไม่มีหน้าเลย
+_JS = """
+(function(){
+  var born = new Date(document.body.dataset.born);
+  var hours = (Date.now() - born.getTime()) / 3600000;
+  if (hours > 26) {
+    var b = document.createElement('div');
+    b.className = 'card alert';
+    b.innerHTML = '<h2>ข้อมูลนี้เก่าแล้ว</h2><div class="row"><span class="mark">!</span>'
+      + '<div class="grow">สร้างไว้เมื่อ ' + hours.toFixed(0) + ' ชั่วโมงก่อน '
+      + 'แต่ควรสร้างใหม่ทุกวัน 08:00 — ตัวตั้งเวลาอาจไม่ทำงาน<div class="muted mono">'
+      + 'powershell -Command "Get-ScheduledTaskInfo -TaskName PipelineStudio-Workboard"'
+      + '</div></div></div>';
+    document.querySelector('.page').insertBefore(b, document.querySelector('.kpis'));
+  }
+})();
+"""
+
+LANE_COLORS = {"post": "#0088ff", "คลิป/วิดีโอ": "#af52de", "ส่วนกลาง": "#ff9500",
+               "อื่นๆ": "#8e8e93"}
+
+
 def to_html(d: dict) -> str:
-    def card(title, body, tone="") -> str:
-        return f'<section class="card {tone}"><h2>{title}</h2>{body}</section>'
+    def card(title, inner, tone="") -> str:
+        return f'<section class="card {tone}"><h2>{title}</h2>{inner}</section>'
 
-    problems = "".join(f"<li>{_esc(p)}</li>" for p in d["problems"])
-    problems_html = (f"<ul class='warn'>{problems}</ul>" if problems
-                     else "<p class='ok'>ไม่มีอะไรค้างที่ต้องรีบ</p>")
+    def row(mark, main, value="") -> str:
+        right = f'<div class="val">{value}</div>' if value else ""
+        return f'<div class="row"><span class="mark">{mark}</span><div class="grow">{main}</div>{right}</div>'
 
-    todo_html = "".join(
-        f"<li>{_esc(t['text'])}" + (f" <span class='who'>{_esc(t['who'])}</span>" if t.get("who") else "") + "</li>"
-        for t in d["todo"]) or "<li class='muted'>ยังไม่มีงานจดไว้</li>"
+    # ---------- ป้ายสถานะรวม ----------
+    broken = not d["post_up"] or not d["clip_up"]
+    if broken:
+        pill, word = "bad", "ระบบมีปัญหา"
+    elif d["problems"]:
+        pill, word = "warn", f"ต้องลงมือ {len(d['problems'])} เรื่อง"
+    else:
+        pill, word = "good", "ทุกอย่างปกติ"
 
-    rows = []
-    for w in d["working"]:
-        files = ", ".join(w["files"][:5]) or "ยังไม่ได้จับไฟล์ไหน"
-        badge = "<span class='badge quiet'>เงียบนานแล้ว</span>" if w["quiet"] else ""
-        badge += "<span class='badge clash'>ติดข้อพิพาท</span>" if w["clash"] else ""
-        rows.append(
-            f"<tr><td><b>{_esc(w['chat'])}</b>{badge}<div class='muted'>{_esc(w['session'])}</div></td>"
-            f"<td>{_esc(w['text'][:160] or '(ยังไม่มีคำสั่งชัดเจน)')}</td>"
-            f"<td class='mono'>{_esc(files)}</td>"
-            f"<td class='nowrap'>{_esc(_ago(w['moved']))}</td></tr>")
-    working_html = ("<table><thead><tr><th>แชท</th><th>ถูกสั่งให้ทำ</th><th>ไฟล์</th>"
-                    "<th>ขยับล่าสุด</th></tr></thead><tbody>"
-                    + ("".join(rows) or "<tr><td colspan=4 class='muted'>ไม่มีแชทไหนมีงานค้าง</td></tr>")
-                    + "</tbody></table>")
-
-    lanes = []
-    for lane, items in sorted(d["dirty"].items(), key=lambda kv: -len(kv[1])):
-        newest = max((r["touched"] for r in items if r["touched"]), default=None)
-        names = " · ".join(_esc(r["file"]) for r in items[:8])
-        more = f" <span class='muted'>+อีก {len(items) - 8}</span>" if len(items) > 8 else ""
-        lanes.append(f"<tr><td><b>{_esc(lane)}</b></td><td class='nowrap'>{len(items)} ไฟล์</td>"
-                     f"<td class='nowrap'>{_esc(_ago(newest))}</td>"
-                     f"<td class='mono small'>{names}{more}</td></tr>")
-    dirty_html = (f"<p>รวม <b>{d['dirty_total']}</b> ไฟล์</p><table><thead><tr><th>สาย</th>"
-                  "<th>จำนวน</th><th>ล่าสุด</th><th>ไฟล์</th></tr></thead><tbody>"
-                  + ("".join(lanes) or "<tr><td colspan=4 class='muted'>สะอาด</td></tr>")
-                  + "</tbody></table>")
-
-    sys_rows = [
-        ("เว็บ 8866", "ปกติ" if d["post_up"] else "ต่อไม่ได้", d["post_up"]),
-        ("คลิป 8877", "ปกติ" if d["clip_up"] else "ต่อไม่ได้", d["clip_up"]),
-        ("โพสต์กำลังรัน", ("ใช่" if d["post_running"] else "ไม่") if d["post_up"] else "-", True),
-        ("งานคลิปยังไม่จบ", str(d["clip_open"]) if d["clip_up"] else "-", True),
-        ("รอคุณกดอนุมัติ", str(len(d["clip_waiting"])), not d["clip_waiting"]),
-        ("มือถือต่ออยู่", ", ".join(d["phones"]) or "ไม่มี", bool(d["phones"])),
-        ("ไฟล์ที่มีคนถือ", str(len(d["claims"])), True),
-        ("แก้โดยไม่จอง", str(len(d["loose"])), not d["loose"]),
+    # ---------- ตัวเลขใหญ่ ----------
+    quiet_n = sum(1 for w in d["working"] if w["quiet"])
+    wait_n = len(d["clip_waiting"])
+    old_txt = f"เก่าสุด {_ago(d['dirty_oldest'])}" if d["dirty_oldest"] else "ไม่มีของค้าง"
+    oldest_wait = min((w["since"] for w in d["clip_waiting"] if w["since"]), default=None)
+    kpis = [
+        ("hot" if d["dirty_total"] > 20 else "mid" if d["dirty_total"] else "calm",
+         d["dirty_total"], "ไฟล์ค้างไม่ commit", old_txt),
+        ("hot" if wait_n else "calm", wait_n, "คลิปรอคุณกดอนุมัติ",
+         f"ค้างมา {_ago(oldest_wait)}" if oldest_wait else "ไม่มีค้าง"),
+        ("calm" if d["working"] and not quiet_n else "mid", len(d["working"]),
+         "แชทที่มีงานเปิด", f"เงียบนานแล้ว {quiet_n}" if quiet_n else "ขยับกันอยู่"),
+        ("calm" if d["phones"] else "hot", len(d["phones"]), "มือถือที่ต่ออยู่",
+         " · ".join(d["phones"]) or "งานโพสต์รันไม่ได้"),
     ]
-    sys_html = "<table><tbody>" + "".join(
-        f"<tr><td>{_esc(k)}</td><td class='{'ok' if good else 'bad'}'>{_esc(v)}</td></tr>"
-        for k, v, good in sys_rows) + "</tbody></table>"
+    kpi_html = "".join(
+        f'<div class="kpi {tone}"><div class="n">{n}</div><div class="k">{_esc(k)}</div>'
+        f'<div class="s">{_esc(s)}</div></div>' for tone, n, k, s in kpis)
 
-    commits_html = "<ul class='mono small'>" + "".join(
-        f"<li>{_esc(c)}</li>" for c in d["commits"][:8]) + "</ul>"
+    # ---------- ต้องลงมือ ----------
+    alert_html = ""
+    if d["problems"]:
+        inner = "".join(row("!", _esc(p)) for p in d["problems"])
+        alert_html = card("ต้องลงมือ", inner, "alert")
+
+    # ---------- งานที่จดไว้ ----------
+    if d["todo"]:
+        inner = "".join(
+            row("○", f'{_esc(t["text"])}'
+                     + (f'<span class="tag quiet">{_esc(t["who"])}</span>' if t.get("who") else ""))
+            for t in d["todo"])
+    else:
+        inner = '<div class="empty">ยังไม่มีงานจดไว้</div>'
+    todo_html = card(f"งานที่จดไว้ · {len(d['todo'])} ข้อ", inner)
+
+    # ---------- แชทที่กำลังทำอยู่ ----------
+    if d["working"]:
+        parts = []
+        for w in d["working"]:
+            tags = ('<span class="tag quiet">เงียบนานแล้ว</span>' if w["quiet"] else "") \
+                 + ('<span class="tag clash">ติดข้อพิพาท</span>' if w["clash"] else "")
+            files = " · ".join(w["files"][:4]) or "ยังไม่ได้จับไฟล์ไหน"
+            body = (f'<div class="name">{_esc(w["chat"])}{tags}</div>'
+                    f'<div>{_esc(w["text"][:130] or "(ยังไม่มีคำสั่งชัดเจน)")}</div>'
+                    f'<div class="muted mono">{_esc(files)}</div>')
+            parts.append(row("👤" if not w["quiet"] else "💤", body, _ago(w["moved"])))
+        inner = "".join(parts)
+    else:
+        inner = '<div class="empty">ไม่มีแชทไหนมีงานค้าง</div>'
+    working_html = card("แชทที่กำลังทำอยู่", inner)
+
+    # ---------- ของค้าง ----------
+    lanes = sorted(d["dirty"].items(), key=lambda kv: -len(kv[1]))
+    total = max(d["dirty_total"], 1)
+    bar = "".join(f'<i style="width:{len(v) / total * 100:.1f}%;'
+                  f'background:{LANE_COLORS.get(k, "#8e8e93")}"></i>' for k, v in lanes)
+    legend = "".join(f'<span><i style="background:{LANE_COLORS.get(k, "#8e8e93")}"></i>'
+                     f'{_esc(k)} {len(v)}</span>' for k, v in lanes)
+    lane_rows = []
+    for lane, items in lanes:
+        newest = max((r["touched"] for r in items if r["touched"]), default=None)
+        names = " · ".join(_esc(r["file"]) for r in items[:6])
+        more = f" +อีก {len(items) - 6}" if len(items) > 6 else ""
+        lane_rows.append(row(
+            "•", f'<div class="name">{_esc(lane)} · {len(items)} ไฟล์</div>'
+                 f'<div class="muted mono">{names}{more}</div>', _ago(newest)))
+    inner = ((f'<div class="bar">{bar}</div><div class="legend">{legend}</div>'
+              + "".join(lane_rows)) if lanes else '<div class="empty">สะอาด ไม่มีของค้าง</div>')
+    dirty_html = card(f"ของค้างยังไม่ commit · {d['dirty_total']} ไฟล์", inner)
+
+    # ---------- ระบบ ----------
+    checks = [
+        ("เซิร์ฟเวอร์หน้าเว็บ 8866", "ปกติ" if d["post_up"] else "ต่อไม่ได้", d["post_up"]),
+        ("เซิร์ฟเวอร์คลิป 8877", "ปกติ" if d["clip_up"] else "ต่อไม่ได้", d["clip_up"]),
+        ("งานโพสต์กำลังรัน", ("ใช่" if d["post_running"] else "ไม่") if d["post_up"] else "—", True),
+        ("งานคลิปที่ยังไม่จบ", str(d["clip_open"]) if d["clip_up"] else "—", True),
+        ("รอคุณกดอนุมัติ", str(wait_n), wait_n == 0),
+        ("ไฟล์ที่มีคนถืออยู่", str(len(d["claims"])), True),
+        ("แก้อยู่โดยไม่ได้จอง", str(len(d["loose"])), not d["loose"]),
+    ]
+    inner = "".join(
+        f'<div class="row {"ok" if good else "no"}"><span class="mark"></span>'
+        f'<div class="grow dotline"><i class="sdot"></i>{_esc(label)}</div>'
+        f'<div class="val">{_esc(value)}</div></div>' for label, value, good in checks)
+    system_html = card("ระบบ", inner)
+
+    # ---------- commit ----------
+    parts = []
+    for line in d["commits"][:7]:
+        sha, _, msg = line.partition(" ")
+        parts.append(row("", f'<span class="mono">{_esc(sha)}</span> {_esc(msg)}'))
+    commits_html = card("commit ล่าสุด", "".join(parts) or '<div class="empty">ไม่มี</div>')
 
     return f"""<!doctype html>
 <html lang="th"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>กระดานสรุปงาน — Pipeline Studio</title>
-<style>
-:root {{ --bg:#f6f7f9; --fg:#1b1d21; --card:#fff; --line:#e3e6ea; --muted:#6b7280;
-         --ok:#1a7f43; --bad:#c02626; --warn:#fff6e5; --warnline:#e0a33a; }}
-@media (prefers-color-scheme: dark) {{
-  :root {{ --bg:#15171a; --fg:#e8eaed; --card:#1e2126; --line:#2f343b; --muted:#9aa3ad;
-           --ok:#4ade80; --bad:#f87171; --warn:#33291a; --warnline:#b7791f; }} }}
-* {{ box-sizing:border-box }}
-body {{ margin:0; padding:18px; background:var(--bg); color:var(--fg);
-        font:15px/1.6 "Segoe UI",system-ui,sans-serif; }}
-header {{ max-width:1100px; margin:0 auto 16px; }}
-h1 {{ font-size:21px; margin:0 0 4px; }}
-.stamp {{ color:var(--muted); font-size:13px; }}
-.wrap {{ max-width:1100px; margin:0 auto; display:grid; gap:14px; }}
-.card {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }}
-.card h2 {{ font-size:15px; margin:0 0 10px; }}
-.card.alert {{ background:var(--warn); border-color:var(--warnline); }}
-table {{ width:100%; border-collapse:collapse; }}
-th,td {{ text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }}
-th {{ color:var(--muted); font-weight:600; font-size:13px; }}
-tr:last-child td {{ border-bottom:0 }}
-ul {{ margin:0; padding-left:20px }}
-ul.warn li {{ margin:4px 0 }}
-.mono {{ font-family:Consolas,monospace; font-size:12.5px }}
-.small {{ font-size:12px }}
-.muted {{ color:var(--muted) }}
-.ok {{ color:var(--ok) }} .bad {{ color:var(--bad); font-weight:600 }}
-.nowrap {{ white-space:nowrap }}
-.badge {{ font-size:11px; padding:1px 6px; border-radius:6px; margin-left:6px;
-          border:1px solid var(--warnline); background:var(--warn) }}
-.who {{ color:var(--muted); font-size:12px }}
-@media (max-width:640px) {{ .mono {{ font-size:11px }} body {{ padding:10px }} }}
-</style></head>
-<body>
-<header>
-  <h1>กระดานสรุปงาน</h1>
-  <div class="stamp">อัปเดตล่าสุด {d['at']:%d/%m/%Y %H:%M} น. · อัปเดตเองทุกวัน 08:00</div>
-</header>
-<div class="wrap">
-  {card("ต้องลงมือ", problems_html, "alert" if d["problems"] else "")}
-  {card("งานที่จดไว้", f"<ul>{todo_html}</ul>")}
-  {card("แชทที่กำลังทำอยู่", working_html)}
-  {card("ของค้างยังไม่ commit", dirty_html)}
-  {card("ระบบ", sys_html)}
-  {card("commit ล่าสุด", commits_html)}
+<style>{_CSS}</style></head>
+<body data-born="{d['at'].isoformat()}">
+<div class="page">
+  <div class="top">
+    <div>
+      <h1>กระดานสรุปงาน</h1>
+      <div class="sub">อัปเดตล่าสุด {d['at']:%d/%m/%Y %H:%M} น. · สร้างใหม่เองทุกวัน 08:00</div>
+    </div>
+    <div class="pill {pill}"><span class="dot"></span>{word}</div>
+  </div>
+  <div class="kpis">{kpi_html}</div>
+  {alert_html}
+  <div class="grid">
+    <div>{todo_html}{system_html}</div>
+    <div>{working_html}{dirty_html}{commits_html}</div>
+  </div>
 </div>
+<script>{_JS}</script>
 </body></html>"""
-
-
 def render(quiet: bool = False) -> int:
     data = collect()
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
@@ -420,7 +570,7 @@ def render(quiet: bool = False) -> int:
     if not quiet:
         print(to_text(data))
         print("")
-        print("หน้าเว็บ: http://localhost:8866/static/workboard.html")
+        print("หน้าเว็บ: http://localhost:8866/static/board/index.html")
     return 0
 
 

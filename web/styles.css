@@ -848,6 +848,25 @@ body {
 }
 .topbar strong { font-variation-settings: "opsz" 28, "wght" 700; font-size: 17px; }
 .topbar-note { color: var(--ink-2); font-size: 13px; opacity: 1; }
+/* กล่องแก้แคปชัน — พับเก็บไว้ ไม่ให้แย่งที่จอมือถือตอนไม่ได้ใช้ */
+.caption-box {
+  border: 0.5px solid var(--separator);
+  border-radius: var(--r-card);
+  padding: 8px 10px;
+  background: var(--shade);
+}
+.caption-box summary { cursor: pointer; font-weight: 600; }
+.caption-box textarea {
+  width: 100%;
+  margin: 6px 0;
+  resize: vertical;
+  border-radius: var(--r-field);
+  border: 0.5px solid var(--separator);
+  padding: 8px;
+  font: inherit;
+}
+.caption-keys { margin-top: 6px; }
+
 /* ปุ่มไปกระดานสรุปงาน — อยู่แถวเดียวกับชื่อแอป ชิดขวา ก่อนปุ่มตั้งค่า
    ใช้ทรงแคปซูลแบบเดียวกับปุ่มตั้งค่า (พื้นเทาจาง systemGray fill) จะได้เป็นชุดเดียวกัน */
 .board-link {

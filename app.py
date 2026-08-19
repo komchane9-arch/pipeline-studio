@@ -1878,6 +1878,73 @@ async def phone_touch(request: Request) -> dict:
     return await asyncio.to_thread(send)
 
 
+@app.post("/api/phone/key")
+async def phone_key(request: Request) -> dict:
+    """กดปุ่มบนมือถือ — ทางที่แม่นกว่าการลากนิ้วเสมอ
+
+    วางตัวชี้ข้อความด้วยการลากนิ้วต้องอาศัยภาพที่ทันนิ้ว ซึ่งผ่านสายไม่มีวันเท่า
+    จอจริง ส่วนปุ่มเลื่อนทีละตัวอักษร **แม่น 100% ไม่ว่าภาพจะช้าแค่ไหน**
+    """
+    payload = await request.json()
+    name = str(payload.get("key", "")).strip()
+    if name not in scrcpy_control.KEYCODES:
+        raise HTTPException(status_code=400, detail=f"ไม่รู้จักปุ่ม “{name}”")
+    serial = await asyncio.to_thread(clean_serial, str(payload.get("serial", "")), True)
+    keycode = scrcpy_control.KEYCODES[name]
+    meta = scrcpy_control.META_CTRL if payload.get("ctrl") else 0
+    repeat = max(1, min(int(payload.get("repeat", 1) or 1), 50))
+
+    def press() -> dict:
+        if scrcpy_control.is_available():
+            try:
+                session = scrcpy_control._get_or_open(ADB, serial)
+                for _ in range(repeat):
+                    session.send_key(keycode, meta)
+                return {"ok": True, "realtime": True}
+            except scrcpy_control.ScrcpyUnavailable:
+                pass
+        # ทางถอย: ช้ากว่ามาก (วัดจริง ~155 ms/ครั้ง) และสั่ง CTRL ร่วมไม่ได้
+        if meta:
+            raise HTTPException(status_code=503,
+                                detail="ต้องใช้ scrcpy ถึงจะกดปุ่มพร้อม Ctrl ได้")
+        for _ in range(repeat):
+            run_adb("-s", serial, "shell", "input", "keyevent", str(keycode))
+        return {"ok": True, "realtime": False}
+
+    return await asyncio.to_thread(press)
+
+
+@app.post("/api/phone/caption")
+async def phone_caption(request: Request) -> dict:
+    """ใส่ข้อความลงช่องที่โฟกัสอยู่บนมือถือ
+
+    `replace=True` คือเลือกทั้งหมดแล้วทับ — ทางที่ทำให้ **ไม่ต้องกดค้างแล้วลาก
+    ตัวชี้ให้ตรงตำแหน่งอีกเลย** ซึ่งเป็นงานที่ทำผ่านสายแล้วทรมานที่สุด
+
+    ผู้ใช้ต้องแตะช่องบนจอให้โฟกัสก่อน — เราไม่เดาตำแหน่งช่องให้ เพราะเดาผิด
+    แล้วข้อความจะไปโผล่ผิดที่ ซึ่งแย่กว่าไม่ทำอะไรเลย
+    """
+    payload = await request.json()
+    text = str(payload.get("text", ""))
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="ยังไม่ได้พิมพ์ข้อความ")
+    serial = await asyncio.to_thread(clean_serial, str(payload.get("serial", "")), True)
+    replace = bool(payload.get("replace", True))
+
+    def send() -> dict:
+        if not scrcpy_control.is_available():
+            raise HTTPException(status_code=503,
+                                detail="ต้องใช้ scrcpy — ข้อความไทยส่งทาง input text ไม่ได้")
+        try:
+            session = scrcpy_control._get_or_open(ADB, serial)
+            how = session.replace_all(text) if replace else session.type_text(text)
+        except scrcpy_control.ScrcpyUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"ok": True, "how": how, "chars": len(text)}
+
+    return await asyncio.to_thread(send)
+
+
 @app.websocket("/ws/phone/input")
 async def phone_input_socket(websocket: WebSocket, serial: str) -> None:
     """ช่องส่งการแตะ/ลากแบบต่อค้าง

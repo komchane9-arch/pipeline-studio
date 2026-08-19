@@ -467,6 +467,50 @@ $("#bridgeOpen").addEventListener("click", async () => {
   }
 });
 
+// ---------------------------------------- แก้แคปชันโดยไม่ต้องลากตัวชี้
+// วางตัวชี้ด้วยการลากนิ้วผ่านสายต้องอาศัยภาพที่ทันนิ้ว ซึ่งผ่าน ADB ไม่มีวันเท่าจอจริง
+// (วัดจริง 19 ส.ค. 2026: ภาพนิ่ง screencap 414 ms/เฟรม = เพดาน 2.4 fps)
+// ปุ่มพวกนี้เลื่อนทีละตัวอักษรผ่าน scrcpy จึงแม่นเสมอไม่ว่าภาพจะช้าแค่ไหน
+const captionNote = $("#captionNote");
+
+async function captionCall(url, body) {
+  if (!deviceSelect.value) {
+    captionNote.textContent = "เลือกมือถือก่อน";
+    return null;
+  }
+  try {
+    return await api(url, {
+      method: "POST",
+      body: JSON.stringify({ serial: deviceSelect.value, ...body }),
+    });
+  } catch (error) {
+    captionNote.textContent = error.message;
+    return null;
+  }
+}
+
+for (const button of document.querySelectorAll("[data-caret]")) {
+  button.addEventListener("click", async () => {
+    const key = button.dataset.caret;
+    const done = await captionCall("/api/phone/key", { key });
+    if (done) captionNote.textContent = "";
+  });
+}
+
+$("#captionReplace").addEventListener("click", async () => {
+  const text = $("#captionText").value;
+  if (!text.trim()) { captionNote.textContent = "ยังไม่ได้พิมพ์แคปชัน"; return; }
+  const done = await captionCall("/api/phone/caption", { text, replace: true });
+  if (done) captionNote.textContent = `ทับแล้ว ${done.chars} ตัวอักษร (${done.how})`;
+});
+
+$("#captionInsert").addEventListener("click", async () => {
+  const text = $("#captionText").value;
+  if (!text.trim()) { captionNote.textContent = "ยังไม่ได้พิมพ์แคปชัน"; return; }
+  const done = await captionCall("/api/phone/caption", { text, replace: false });
+  if (done) captionNote.textContent = `แทรกแล้ว ${done.chars} ตัวอักษร (${done.how})`;
+});
+
 // ลิงก์ใหม่จากมือถือควรโผล่เองโดยไม่ต้องกดรีเฟรช — แต่เฉพาะตอนกล่องอยู่บนจอจริง
 // (12 request/นาที ที่เดิมยิงทิ้งตลอดแม้เปิดค้างไว้แท็บอื่น)
 window.setInterval(() => {

@@ -44,6 +44,8 @@ CONNECT_TIMEOUT_SECONDS = 8.0
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # ชนิดข้อความและ action ตามสเปกของ scrcpy 4.x
+CONTROL_MSG_INJECT_KEYCODE = 0
+CONTROL_MSG_INJECT_TEXT = 1
 CONTROL_MSG_INJECT_TOUCH_EVENT = 2
 # ชนิดข้อความของ scrcpy 4.x — ตั้งคลิปบอร์ดบนมือถือ (ใช้ส่งลิงก์จากคอมไปมือถือ)
 CONTROL_MSG_SET_CLIPBOARD = 9
@@ -59,6 +61,22 @@ TOUCH_ACTIONS = {"DOWN": 0, "UP": 1, "MOVE": 2, "CANCEL": 3}
 # นิ้วจำลอง (ไม่ใช่เมาส์) เพื่อให้แอปมองเห็นเป็นการแตะจอจริง
 POINTER_ID_GENERIC_FINGER = -2
 PRESSURE_MAX = 0xFFFF
+MAX_TEXT_BYTES = 300           # เพดานของ INJECT_TEXT ฝั่ง scrcpy
+
+# ---- ปุ่มกด: ทางที่แม่นกว่าการลากนิ้วเสมอ ----
+# ลากตัวชี้ข้อความให้ตรงตำแหน่งต้องอาศัยภาพที่ทันนิ้ว ซึ่งไม่มีวันเท่าจอจริง
+# ส่วนการกดปุ่มเลื่อนทีละตัวอักษร **แม่น 100% ไม่ว่าภาพจะช้าแค่ไหน**
+KEY_ACTION_DOWN = 0
+KEY_ACTION_UP = 1
+META_NONE = 0
+META_SHIFT = 0x1
+META_CTRL = 0x1000
+KEYCODES = {
+    "ซ้าย": 21, "ขวา": 22, "ขึ้น": 19, "ลง": 20,
+    "ต้นบรรทัด": 122, "ท้ายบรรทัด": 123,
+    "ลบ": 67, "ลบหน้า": 112, "enter": 66, "a": 29,
+    "back": 4, "home": 3, "แท็บ": 61,
+}
 
 
 class ScrcpyUnavailable(RuntimeError):
@@ -255,6 +273,63 @@ class _Session:
             0,  # buttons — เช่นกัน
         )
         sock.sendall(message)
+
+    def send_key(self, keycode: int, meta: int = 0, repeat: int = 0) -> None:
+        """กดปุ่มหนึ่งครั้ง (กดลง + ปล่อย)
+
+        ส่งทั้ง DOWN และ UP ในนัดเดียว เพราะแอปจำนวนมากรอ UP ถึงจะถือว่ากดจริง
+        ส่งแต่ DOWN แล้วค้างไว้ = ปุ่มค้าง แล้วตัวอักษรจะรัวไม่หยุด
+        """
+        sock = self.sock
+        if sock is None:
+            raise ScrcpyUnavailable("ยังไม่ได้เปิดเซสชัน scrcpy")
+        for action in (KEY_ACTION_DOWN, KEY_ACTION_UP):
+            sock.sendall(struct.pack(
+                ">BBiii", CONTROL_MSG_INJECT_KEYCODE, action, keycode, repeat, meta))
+
+    def send_text(self, text: str) -> None:
+        """พิมพ์ข้อความลงช่องที่โฟกัสอยู่ — **ASCII เท่านั้น**
+
+        ⚠️ ภาษาไทยส่งทางนี้แล้ว **ไม่มีอะไรเกิดขึ้นเลย และไม่มี error ด้วย**
+        (วัดกับมือถือจริง 19 ส.ค. 2026: ส่ง "กขค" แล้วช่องยังว่าง ส่ง "X" แล้วโผล่)
+        เพราะ scrcpy แปลงตัวอักษรเป็นปุ่มผ่าน KeyCharacterMap ซึ่งไม่มีผังภาษาไทย
+
+        อย่าเรียกตัวนี้ตรงๆ ถ้าไม่มั่นใจว่าข้อความเป็น ASCII — ให้ใช้ `type_text()`
+        ที่เลือกทางให้เอง ไม่งั้นจะเจออาการ "สั่งแล้วเงียบ" ซึ่งไล่หายาก
+        """
+        sock = self.sock
+        if sock is None:
+            raise ScrcpyUnavailable("ยังไม่ได้เปิดเซสชัน scrcpy")
+        if not text.isascii():
+            raise ScrcpyUnavailable(
+                "INJECT_TEXT รับได้เฉพาะ ASCII — ข้อความไทย/อีโมจิต้องวางผ่านคลิปบอร์ด")
+        payload = text.encode("utf-8")
+        if len(payload) > MAX_TEXT_BYTES:
+            raise ScrcpyUnavailable(
+                f"ข้อความยาว {len(payload)} ไบต์ เกินเพดาน {MAX_TEXT_BYTES} — ให้วางผ่านคลิปบอร์ดแทน")
+        sock.sendall(struct.pack(">BI", CONTROL_MSG_INJECT_TEXT, len(payload)) + payload)
+
+    def type_text(self, text: str) -> str:
+        """พิมพ์ข้อความโดยเลือกทางให้เอง — คืนชื่อทางที่ใช้จริง
+
+        ASCII สั้นๆ ไปทาง INJECT_TEXT (ไม่ไปยุ่งกับคลิปบอร์ดของผู้ใช้)
+        นอกนั้นไปทางคลิปบอร์ด ซึ่งรับไทยและอีโมจิได้ครบ
+        """
+        if text.isascii() and len(text.encode("utf-8")) <= MAX_TEXT_BYTES:
+            self.send_text(text)
+            return "พิมพ์ตรง"
+        self.set_clipboard(text, paste=True)
+        return "วางผ่านคลิปบอร์ด"
+
+    def replace_all(self, text: str) -> str:
+        """เลือกทั้งหมดแล้วทับด้วยข้อความใหม่ — ทางที่ไม่ต้องลากนิ้วเลย
+
+        CTRL+A แล้ววาง แม่นเสมอไม่ว่าภาพจะช้าแค่ไหน ต่างจากการกดค้าง+ลากตัวชี้
+        ซึ่งต้องอาศัยภาพที่ทันนิ้วถึงจะวางตำแหน่งถูก
+        """
+        self.send_key(KEYCODES["a"], META_CTRL)
+        time.sleep(0.25)                  # ให้แอปทันเลือกก่อนวางทับ
+        return self.type_text(text)
 
     def set_clipboard(self, text: str, paste: bool = False) -> None:
         """ตั้งคลิปบอร์ดบนมือถือ (paste=True คือวางลงช่องที่โฟกัสอยู่ให้เลย)

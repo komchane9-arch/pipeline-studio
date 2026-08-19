@@ -60,6 +60,29 @@
                   title="ปิด ADBKeyboard กลับไปใช้คีย์บอร์ดปกติของมือถือ">คืนคีย์บอร์ด</button>
         </div>
 
+        <!-- แก้แคปชันโดยไม่ต้องลากตัวชี้
+             วางตัวชี้ด้วยการลากนิ้วผ่านสายต้องอาศัยภาพที่ทันนิ้ว ซึ่งไม่มีวันเท่าจอจริง
+             ปุ่มเลื่อนทีละตัวอักษรแม่น 100% ไม่ว่าภาพจะช้าแค่ไหน -->
+        <details class="caption-box">
+          <summary>แก้แคปชันบนมือถือ</summary>
+          <p class="note">แตะช่องข้อความบนจอให้ขึ้นคีย์บอร์ดก่อน แล้วค่อยกดปุ่มด้านล่าง</p>
+          <textarea id="captionText" rows="3"
+                    placeholder="แคปชันใหม่ — ไทยและอีโมจิได้ครบ ไม่ต้องสลับคีย์บอร์ด"></textarea>
+          <div class="inline-row">
+            <button id="captionReplace" type="button">ทับทั้งหมด</button>
+            <button id="captionInsert" class="ghost" type="button">แทรกตรงตัวชี้</button>
+          </div>
+          <div class="key-grid caption-keys" role="group" aria-label="เลื่อนตัวชี้ข้อความ">
+            <button type="button" data-caret="ต้นบรรทัด">⤒ ต้น</button>
+            <button type="button" data-caret="ซ้าย">◀ ซ้าย</button>
+            <button type="button" data-caret="ขวา">ขวา ▶</button>
+            <button type="button" data-caret="ท้ายบรรทัด">ท้าย ⤓</button>
+            <button type="button" data-caret="ลบ">⌫ ลบ</button>
+            <button type="button" data-caret="ลบหน้า">ลบหน้า ⌦</button>
+          </div>
+          <span id="captionNote" class="note" aria-live="polite"></span>
+        </details>
+
         <details class="block">
           <summary>ลิงก์ คอม ↔ มือถือ</summary>
           <div class="block-body">

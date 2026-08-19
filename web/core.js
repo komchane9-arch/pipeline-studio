@@ -791,8 +791,11 @@ export async function pollHealth() {
     const jump = document.createElement("button");
     jump.type = "button";
     jump.className = "health-chip waiting";
-    jump.textContent = `⏳ รอตัดสิน ${waiting}`;
-    jump.title = "กดเพื่อไปแท็บสตอรีบอร์ด";
+    // ตัวเลขนี้คือ "งานที่ยังไม่จบ" (clip_jobs.waiting = งานที่ stage ยังเปิดอยู่)
+    // ไม่ใช่ "งานที่รอคนกดอนุมัติ" ซึ่งมักน้อยกว่ามาก — ป้ายเดิมเขียนว่า "รอตัดสิน"
+    // ทำให้เข้าใจว่ามีงานรอกดเป็นสิบทั้งที่จริงรอกดใบเดียว
+    jump.textContent = `⏳ คลิปค้าง ${waiting}`;
+    jump.title = "งานคลิปที่ยังไม่จบ — กดเพื่อไปแท็บสตอรีบอร์ด";
     jump.addEventListener("click", () => {
       const tab = document.querySelector('.tab[data-tab="story"]');
       if (tab) tab.click();

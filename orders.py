@@ -100,8 +100,21 @@ def held_by(chat: str) -> list[str]:
     return sorted(rel for rel, held in claims.items() if held.get("chat") == chat)
 
 
+# ข้อความที่ระบบยัดเข้ามาเอง ไม่ใช่คำสั่งจากเจ้าของ — ถ้าปล่อยให้จด หัวข้องานจะ
+# กลายเป็น "<task-notification>..." ซึ่งอ่านไม่รู้เรื่องและทำให้กระดานสรุปเพี้ยน
+_SYSTEM_MARKS = ("<task-notification", "<system-reminder", "<local-command",
+                 "<command-name", "<user-prompt-submit-hook")
+
+
+def _is_system(text: str) -> bool:
+    head = (text or "").strip()[:400].lower()
+    return any(mark in head for mark in _SYSTEM_MARKS)
+
+
 def _is_ack(text: str) -> bool:
     plain = (text or "").strip().strip("?!.ๆ ").lower()
+    if _is_system(plain):
+        return True
     return len(plain) < MIN_ORDER_CHARS or plain in ACK_WORDS
 
 

@@ -43,6 +43,17 @@ BASE_DIR = Path(__file__).resolve().parent
 # glob("*.*") ของ app.py ไม่ไล่โฟลเดอร์ย่อย — โฟลเดอร์ย่อยจึงปลอดภัยถาวร
 OUT_HTML = BASE_DIR / "web" / "board" / "index.html"
 TODO_FILE = studio_shared.DATA_DIR / "todo.json"
+MISSIONS_FILE = studio_shared.DATA_DIR / "missions.json"
+# หน้าแยกสำหรับดูของค้างทั้งหมด — บนกระดานหลักโชว์แค่ย่อ ไม่งั้นยาวจนกลบเรื่องอื่น
+OUT_DIRTY = BASE_DIR / "web" / "board" / "dirty.html"
+
+# แผนงานประจำเดือนของเจ้าของโปรเจกต์ (Master plan) — ตั้งต้นจากที่เขาเขียนไว้เอง
+# ตัวเลขเป้ากับที่ทำได้ต้องกรอกเอง ระบบไม่รู้จัก Reels/IG/Youtube/Shopee
+# จึงไม่เดาให้ เพราะกราฟที่เดาตัวเลขเองอันตรายกว่ากราฟว่าง
+DEFAULT_MISSIONS = [
+    "Social media", "FB Reels", "Adboost", "IG", "Youtube",
+    "Spaylater / Shopeefood / ท่องเที่ยว",
+]
 
 # กันพลาดซ้ำด้วยตัวเอง ไม่ใช่พึ่งให้คนจำกติกาได้ — ถ้าวันหนึ่งมีใครย้ายไฟล์ผลลัพธ์
 # กลับไปไว้ชั้นบนสุดของ web/ ให้ตายตรงนี้เลย ดีกว่าไปโผล่เป็นแบนเนอร์ผิดรุ่นทุกเช้า
@@ -130,6 +141,55 @@ def todo_done(number: int) -> int:
 
     studio_shared.update_json(TODO_FILE, change, default=[], label="ปิดงานค้าง")
     print(("ปิดแล้ว: " + hit["text"]) if hit["text"] else "ไม่พบข้อ " + str(number))
+    return 0
+
+
+def missions() -> dict:
+    """แผนเดือนนี้ — ไม่มีไฟล์ก็สร้างโครงจากรายการตั้งต้นให้เลย"""
+    data = studio_shared.read_json(MISSIONS_FILE, None)
+    if not isinstance(data, dict) or not isinstance(data.get("missions"), list):
+        return {"month": datetime.now().strftime("%Y-%m"),
+                "title": f"Master plan {datetime.now():%B %Y}",
+                "missions": [{"name": n, "target": 0, "done": 0, "note": ""}
+                             for n in DEFAULT_MISSIONS]}
+    return data
+
+
+def mission_set(name: str, target=None, done=None, note=None) -> int:
+    """ตั้งเป้า/อัปเดตความคืบหน้าของ mission หนึ่งข้อ (จับชื่อแบบมีคำนี้อยู่ก็พอ)"""
+    hit = {"name": ""}
+
+    def change(data):
+        if not isinstance(data.get("missions"), list) or not data["missions"]:
+            data.clear()
+            data.update(missions())
+        for row in data["missions"]:
+            if name.lower() in row["name"].lower():
+                if target is not None:
+                    row["target"] = target
+                if done is not None:
+                    row["done"] = done
+                if note is not None:
+                    row["note"] = note
+                row["updated"] = datetime.now().isoformat(timespec="seconds")
+                hit["name"] = row["name"]
+                return
+
+    studio_shared.update_json(MISSIONS_FILE, change, default={}, label="ตั้งค่า mission")
+    if hit["name"]:
+        print(f"อัปเดตแล้ว: {hit['name']}")
+    else:
+        print(f"ไม่พบ mission ที่มีคำว่า “{name}” — ดูรายชื่อด้วย mission list")
+    return 0
+
+
+def mission_list() -> int:
+    plan = missions()
+    print(plan.get("title", "แผนเดือนนี้"))
+    for i, row in enumerate(plan["missions"], 1):
+        target, done = row.get("target", 0), row.get("done", 0)
+        bar = "ยังไม่ตั้งเป้า" if not target else f"{done}/{target} ({done / target * 100:.0f}%)"
+        print(f"  {i}. {row['name']:38s} {bar}")
     return 0
 
 
@@ -253,6 +313,7 @@ def collect() -> dict:
 
     # ---- งานที่ต้องทำด้วยมือ ----
     out["todo"] = [t for t in todos() if not t.get("done")]
+    out["plan"] = missions()
     return out
 
 
@@ -398,6 +459,24 @@ h1{font-size:28px; line-height:34px; font-weight:700; margin:0; letter-spacing:-
 .legend span{display:inline-flex; align-items:center; gap:6px}
 .legend i{width:9px; height:9px; border-radius:3px; display:inline-block}
 
+/* ---------- กราฟแผนประจำเดือน ---------- */
+.mission{display:grid; grid-template-columns:minmax(120px,190px) 1fr auto; gap:10px 12px;
+         align-items:center; padding:10px 18px 14px}
+.mission .m-name{font-weight:600; font-size:14px}
+.mission .m-track{height:18px; border-radius:980px; background:rgba(120,120,128,.14);
+                  overflow:hidden}
+.mission .m-fill{height:100%; border-radius:980px}
+.mission .m-num{font-size:13px; color:var(--ink-2); white-space:nowrap;
+                font-variant-numeric:tabular-nums}
+.mission .m-none{color:var(--ink-3); font-size:12.5px}
+.plan-head{display:flex; justify-content:flex-end; padding:0 18px 2px}
+.plan-head .sum{font-size:13px; color:var(--ink-3); font-variant-numeric:tabular-nums}
+.linkbtn{display:inline-block; font-size:12.5px; font-weight:600; text-decoration:none;
+         padding:4px 12px; border-radius:980px; background:rgba(120,120,128,.14);
+         color:var(--ink-2); float:right; margin-top:-3px}
+.linkbtn:hover{background:rgba(120,120,128,.22)}
+@media (max-width:560px){ .mission{grid-template-columns:1fr; gap:4px} }
+
 @media (max-width:560px){
   body{padding:16px 12px 32px}
   h1{font-size:24px; line-height:30px}
@@ -515,7 +594,44 @@ def to_html(d: dict) -> str:
                  f'<div class="muted mono">{names}{more}</div>', _ago(newest)))
     inner = ((f'<div class="bar">{bar}</div><div class="legend">{legend}</div>'
               + "".join(lane_rows)) if lanes else '<div class="empty">สะอาด ไม่มีของค้าง</div>')
-    dirty_html = card(f"ของค้างยังไม่ commit · {d['dirty_total']} ไฟล์", inner)
+    dirty_html = card(
+        f"ของค้างยังไม่ commit · {d['dirty_total']} ไฟล์"
+        '<a class="linkbtn" href="dirty.html" target="_blank" rel="noreferrer">ดูทั้งหมด →</a>',
+        inner)
+
+    # ---------- แผนประจำเดือน (Master plan) ----------
+    plan = d.get("plan") or {}
+    plan_rows = plan.get("missions") or []
+    tone = ["#0088ff", "#34c759", "#af52de", "#ff9500", "#5ac8fa", "#ff2d55"]
+    bars = []
+    # ห้ามตั้งชื่อตัวแปรนี้ว่า row — จะไปบังฟังก์ชัน row() ที่ประกาศไว้บนสุดของ to_html
+    # แล้วการ์ด commit ด้านล่างจะพังด้วย TypeError (เจอจริง 20 ส.ค. 2026)
+    for i, m in enumerate(plan_rows):
+        target = int(m.get("target") or 0)
+        done = int(m.get("done") or 0)
+        if target > 0:
+            pct = max(0.0, min(done / target * 100, 100.0))
+            right = f"{done}/{target} · {pct:.0f}%"
+            fill = (f'<div class="m-fill" style="width:{pct:.1f}%;'
+                    f'background:{tone[i % len(tone)]}"></div>')
+        else:
+            right = '<span class="m-none">ยังไม่ตั้งเป้า</span>'
+            fill = ""
+        bars.append(f'<div class="m-name">{_esc(m.get("name", "?"))}</div>'
+                    f'<div class="m-track">{fill}</div>'
+                    f'<div class="m-num">{right}</div>')
+    aimed = [r for r in plan_rows if int(r.get("target") or 0) > 0]
+    if aimed:
+        got = sum(min(int(r.get("done") or 0), int(r["target"])) for r in aimed)
+        want = sum(int(r["target"]) for r in aimed)
+        summary = f"รวม {got}/{want} · {got / want * 100:.0f}%"
+    else:
+        summary = "ยังไม่ได้ตั้งเป้าสักข้อ"
+    plan_html = card(
+        _esc(plan.get("title") or "แผนประจำเดือน"),
+        (f'<div class="plan-head"><span class="sum">{_esc(summary)}</span></div>'
+         f'<div class="mission">{"".join(bars)}</div>')
+        if bars else '<div class="empty">ยังไม่มีแผน</div>')
 
     # ---------- ระบบ ----------
     checks = [
@@ -555,6 +671,7 @@ def to_html(d: dict) -> str:
     <div class="pill {pill}"><span class="dot"></span>{word}</div>
   </div>
   <div class="kpis">{kpi_html}</div>
+  {plan_html}
   {alert_html}
   <div class="grid">
     <div>{todo_html}{system_html}</div>
@@ -563,10 +680,43 @@ def to_html(d: dict) -> str:
 </div>
 <script>{_JS}</script>
 </body></html>"""
+def to_dirty_html(d):
+    """หน้าแยกสำหรับดูของค้างทั้งหมด
+
+    บนกระดานหลักโชว์แค่ 6 ไฟล์แรกต่อสาย เพราะ 40+ ไฟล์จะกลบเรื่องอื่นจนหมด
+    ใครอยากเห็นครบค่อยกดมาหน้านี้ — แยกหน้าดีกว่าให้หน้าหลักยาวเป็นหางว่าว
+    """
+    blocks = []
+    for lane, items in sorted(d["dirty"].items(), key=lambda kv: -len(kv[1])):
+        rows = []
+        for r in sorted(items, key=lambda r: r["touched"] or datetime.min, reverse=True):
+            tag = '<span class="tag quiet">ไฟล์ใหม่</span>' if r["new"] else ""
+            rows.append('<div class="row"><span class="mark">.</span>'
+                        '<div class="grow mono">' + _esc(r["file"]) + tag + '</div>'
+                        '<div class="val">' + _esc(_ago(r["touched"])) + '</div></div>')
+        blocks.append('<section class="card"><h2>' + _esc(lane) + ' &middot; '
+                      + str(len(items)) + ' ไฟล์</h2>' + "".join(rows) + '</section>')
+
+    head = ('<!doctype html><html lang="th"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>ของค้างยังไม่ commit — Pipeline Studio</title><style>'
+            + _CSS + '</style></head><body><div class="page"><div class="top"><div>'
+            '<h1>ของค้างยังไม่ commit</h1><div class="sub">รวม '
+            + str(d["dirty_total"]) + ' ไฟล์ &middot; เก่าสุด ' + _ago(d["dirty_oldest"])
+            + ' &middot; ข้อมูล ณ ' + format(d["at"], "%d/%m/%Y %H:%M")
+            + ' น.</div></div><a class="pill warn" href="index.html" '
+            'style="text-decoration:none">&larr; กลับกระดาน</a></div>')
+    body = "".join(blocks) or ('<section class="card"><div class="empty">'
+                               'สะอาด ไม่มีของค้าง</div></section>')
+    return head + body + "</div></body></html>"
+
+
+
 def render(quiet: bool = False) -> int:
     data = collect()
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
     OUT_HTML.write_text(to_html(data), encoding="utf-8", newline="\n")
+    OUT_DIRTY.write_text(to_dirty_html(data), encoding="utf-8", newline=chr(10))
     if not quiet:
         print(to_text(data))
         print("")
@@ -588,11 +738,25 @@ def main(argv=None) -> int:
     p_done = sub.add_parser("done", help="ปิดงานที่จดไว้ (ใส่เลขข้อจากกระดาน)")
     p_done.add_argument("number", type=int)
 
+    p_m = sub.add_parser("mission", help="ดู/ตั้งเป้าแผนประจำเดือน")
+    p_m.add_argument("action", choices=["list", "set"])
+    p_m.add_argument("name", nargs="?", default="", help="ชื่อ mission (พิมพ์บางส่วนพอ)")
+    p_m.add_argument("--target", type=int, default=None, help="เป้าของเดือนนี้")
+    p_m.add_argument("--done", type=int, default=None, help="ทำไปแล้วเท่าไร")
+    p_m.add_argument("--note", default=None)
+
     args = parser.parse_args(argv)
     if args.command == "add":
         return todo_add(args.text, args.who)
     if args.command == "done":
         return todo_done(args.number)
+    if args.command == "mission":
+        if args.action == "list":
+            return mission_list()
+        if not args.name:
+            print("ต้องบอกชื่อ mission ด้วย เช่น: mission set Reels --target 20")
+            return 2
+        return mission_set(args.name, args.target, args.done, args.note)
     return render(quiet=getattr(args, "quiet", False))
 
 

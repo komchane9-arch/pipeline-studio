@@ -2095,6 +2095,18 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 process.kill()
+        # **ต้องฆ่าตัวที่รันอยู่บนมือถือด้วย** — `terminate()` ข้างบนฆ่าได้แค่ `adb`
+        # ฝั่งคอม ส่วน `screenrecord` บนเครื่องยังวิ่งต่อจนครบ 175 วินาทีของมันเอง
+        # โค้ดเดิมมี pkill แค่ตอน "เริ่ม" สตรีม จึงดูเหมือนปกติเวลาเปิดดูใหม่
+        # แต่ถ้าปิดหน้าเว็บแล้วไม่เปิดอีก ตัวบนมือถือจะค้างกินตัวเข้ารหัสเงียบๆ
+        # (วัดจริง 20 ส.ค. 2026: ปิด socket แล้วยังเหลือ screenrecord ค้างบนเครื่อง
+        #  ของค้างแบบนี้เคยทำภาพแรกช้าจาก 0.5 วิ เป็น 25 วิ)
+        try:
+            await asyncio.to_thread(
+                lambda: run_adb("-s", cleaned, "shell", "pkill -f screenrecord", timeout=8)
+            )
+        except Exception:              # noqa: BLE001 - เก็บกวาดล้มไม่ควรทำ endpoint พัง
+            pass
 
 
 @app.post("/api/phone/key")

@@ -50,9 +50,27 @@ OUT_DIRTY = BASE_DIR / "web" / "board" / "dirty.html"
 # แผนงานประจำเดือนของเจ้าของโปรเจกต์ (Master plan) — ตั้งต้นจากที่เขาเขียนไว้เอง
 # ตัวเลขเป้ากับที่ทำได้ต้องกรอกเอง ระบบไม่รู้จัก Reels/IG/Youtube/Shopee
 # จึงไม่เดาให้ เพราะกราฟที่เดาตัวเลขเองอันตรายกว่ากราฟว่าง
+# ตัวเลขทั้งหมดถอดมาจากแชทแผนเดือนใน C:\project\4.daily (1 ส.ค. 2026)
+# **มีสองชุดเสมอ** — `target` คือเพดานสูงสุด ส่วน `base` คือเป้าฐานที่การันตีได้
+# แชทต้นทางเตือนเองว่าเป้าสูงสุด "ทำคนเดียวไม่ได้จริงทางกายภาพ ต้องมีทีม"
+# กราฟจึงขีดเส้นเป้าฐานไว้บนแท่งด้วย ไม่ใช่โชว์แต่เพดานแล้วให้เข้าใจผิดว่าใกล้ถึง
 DEFAULT_MISSIONS = [
-    "Social media", "FB Reels", "Adboost", "IG", "Youtube",
-    "Spaylater / Shopeefood / ท่องเที่ยว",
+    {"name": "1. Social media", "target": 1250000, "base": 650000, "unit": "฿",
+     "note": "Extra Comm · โบนัส 82,500"},
+    {"name": "2. FB Reels", "target": 150, "base": 80, "unit": "คลิป",
+     "note": "คลิปผ่านเกณฑ์ · โบนัส 15,000"},
+    {"name": "3. AdBoost", "target": 10000, "base": 0, "unit": "฿",
+     "note": "แพ็ก TikTok (ผ่าน Decision Gate) · คืน ~18,000"},
+    {"name": "4. Instagram", "target": 1000, "base": 0, "unit": "followers",
+     "note": "→ monetize 3 บัญชี"},
+    {"name": "5. YouTube", "target": 500, "base": 0, "unit": "subs",
+     "note": "3M วิวเป็น stretch · เงินจริงเริ่ม ก.ย.-ต.ค."},
+    {"name": "6. ShopeeFood", "target": 3000, "base": 125, "unit": "ออเดอร์",
+     "note": "เพดานยากสุด ~100-200/วันช่วงท้าย · โบนัส 8,000"},
+    {"name": "7. SPayLater", "target": 100, "base": 0, "unit": "คน",
+     "note": "ต้องปิดก่อน 27 ส.ค. · โบนัส 10,100"},
+    {"name": "8. ท่องเที่ยว/ดูหนัง", "target": 10, "base": 0, "unit": "อันดับ",
+     "note": "Top 10 กระดาน · คุมไม่ได้ 100%"},
 ]
 
 # กันพลาดซ้ำด้วยตัวเอง ไม่ใช่พึ่งให้คนจำกติกาได้ — ถ้าวันหนึ่งมีใครย้ายไฟล์ผลลัพธ์
@@ -150,8 +168,7 @@ def missions() -> dict:
     if not isinstance(data, dict) or not isinstance(data.get("missions"), list):
         return {"month": datetime.now().strftime("%Y-%m"),
                 "title": f"Master plan {datetime.now():%B %Y}",
-                "missions": [{"name": n, "target": 0, "done": 0, "note": ""}
-                             for n in DEFAULT_MISSIONS]}
+                "missions": [{**m, "done": 0} for m in DEFAULT_MISSIONS]}
     return data
 
 
@@ -186,10 +203,14 @@ def mission_set(name: str, target=None, done=None, note=None) -> int:
 def mission_list() -> int:
     plan = missions()
     print(plan.get("title", "แผนเดือนนี้"))
-    for i, row in enumerate(plan["missions"], 1):
+    for row in plan["missions"]:
         target, done = row.get("target", 0), row.get("done", 0)
-        bar = "ยังไม่ตั้งเป้า" if not target else f"{done}/{target} ({done / target * 100:.0f}%)"
-        print(f"  {i}. {row['name']:38s} {bar}")
+        unit = row.get("unit", "")
+        base = row.get("base") or 0
+        bar = "ยังไม่ตั้งเป้า" if not target else (
+            f"{done:,}/{target:,} {unit} ({done / target * 100:.0f}%)"
+            + (f"  · เป้าฐาน {base:,}" if base else ""))
+        print(f"  {row['name']:24s} {bar}")
     return 0
 
 
@@ -466,6 +487,9 @@ h1{font-size:28px; line-height:34px; font-weight:700; margin:0; letter-spacing:-
 .mission .m-track{height:18px; border-radius:980px; background:rgba(120,120,128,.14);
                   overflow:hidden}
 .mission .m-fill{height:100%; border-radius:980px}
+.mission .m-track{position:relative}
+.mission .m-base{position:absolute; top:-2px; bottom:-2px; width:2px;
+                 background:var(--ink-3); opacity:.65}
 .mission .m-num{font-size:13px; color:var(--ink-2); white-space:nowrap;
                 font-variant-numeric:tabular-nums}
 .mission .m-none{color:var(--ink-3); font-size:12.5px}
@@ -609,22 +633,37 @@ def to_html(d: dict) -> str:
     for i, m in enumerate(plan_rows):
         target = int(m.get("target") or 0)
         done = int(m.get("done") or 0)
+        unit = m.get("unit", "")
+        base = int(m.get("base") or 0)
         if target > 0:
             pct = max(0.0, min(done / target * 100, 100.0))
-            right = f"{done}/{target} · {pct:.0f}%"
+            right = f"{done:,}/{target:,} {unit} · {pct:.0f}%"
             fill = (f'<div class="m-fill" style="width:{pct:.1f}%;'
                     f'background:{tone[i % len(tone)]}"></div>')
+            if 0 < base < target:
+                # ขีดเส้นเป้าฐานไว้ให้เห็นว่า "แค่ไหนถึงเรียกว่าปลอดภัย"
+                fill += (f'<div class="m-base" style="left:{base / target * 100:.1f}%" '
+                         f'title="เป้าฐาน {base:,} {unit}"></div>')
         else:
             right = '<span class="m-none">ยังไม่ตั้งเป้า</span>'
             fill = ""
-        bars.append(f'<div class="m-name">{_esc(m.get("name", "?"))}</div>'
+        note = m.get("note") or ""
+        bars.append(f'<div class="m-name">{_esc(m.get("name", "?"))}'
+                    + (f'<div class="muted">{_esc(note)}</div>' if note else "")
+                    + '</div>'
                     f'<div class="m-track">{fill}</div>'
                     f'<div class="m-num">{right}</div>')
+    # **ห้ามบวกข้ามมิชชั่น** แต่ละข้อคนละหน่วยกัน (บาท · คลิป · followers · ออเดอร์)
+    # เอามารวมกันได้ตัวเลขที่ไม่มีความหมายอะไรเลย — เคยโชว์ "รวม 0/1264760" มาแล้ว
+    # นับเป็น "กี่ข้อถึงเป้า" แทน ซึ่งเทียบกันได้จริง
     aimed = [r for r in plan_rows if int(r.get("target") or 0) > 0]
     if aimed:
-        got = sum(min(int(r.get("done") or 0), int(r["target"])) for r in aimed)
-        want = sum(int(r["target"]) for r in aimed)
-        summary = f"รวม {got}/{want} · {got / want * 100:.0f}%"
+        hit = sum(1 for r in aimed
+                  if int(r.get("done") or 0) >= int(r["target"]))
+        safe = sum(1 for r in aimed
+                   if int(r.get("base") or 0) and int(r.get("done") or 0) >= int(r["base"]))
+        summary = (f"ถึงเป้าสูงสุด {hit}/{len(aimed)} ข้อ"
+                   + (f" · ผ่านเป้าฐาน {safe} ข้อ" if safe else ""))
     else:
         summary = "ยังไม่ได้ตั้งเป้าสักข้อ"
     plan_html = card(

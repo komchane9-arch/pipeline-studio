@@ -565,13 +565,23 @@ class JobStore:
 
 
 class PostRunner:
-    """รันงานโพสต์ทีละงานใน thread แยก
+    """รันงานโพสต์ทีละงานใน thread แยก — **หนึ่งตัวต่อมือถือหนึ่งเครื่อง**
 
-    ต้องกันงานซ้อนกันเอง: มือถือเครื่องเดียว ถ้าสองงานยิง ADB พร้อมกัน
-    ทั้งคู่จะกดผิดหน้าจอกันหมด (งานที่สองเปิดกลุ่มทับงานแรกที่กำลังพิมพ์อยู่)
+    ต้องกันงานซ้อนกันบนเครื่องเดียวกัน: จอมีจอเดียว ถ้าสองงานยิง ADB ใส่เครื่อง
+    เดียวกันพร้อมกัน ทั้งคู่จะกดผิดหน้าจอกันหมด (งานที่สองเปิดกลุ่มทับงานแรก
+    ที่กำลังพิมพ์อยู่)
+
+    แต่ **คนละเครื่องไม่ต้องรอกัน** — ของเดิมมีตัวรันตัวเดียวทั้งระบบ พอเสียบ
+    เครื่องที่สองแล้วสั่งงาน จะโดนตีกลับว่า "กำลังโพสต์งานอื่นอยู่" ทั้งที่เครื่องนั้น
+    ว่างสนิท ตอนนี้ `RunnerPool` แจกตัวรันคนละตัวให้แต่ละ serial
+
+    **ห้ามสร้าง `PostRunner()` ขึ้นมาลอยๆ** ให้ขอผ่าน pool เสมอ ไม่งั้นสองที่จะ
+    ได้ตัวรันคนละตัวสำหรับเครื่องเดียวกัน แล้วด่านกันงานซ้อนจะมองไม่เห็นกัน —
+    กลับไปเป็นบั๊กเดิมที่แย่กว่าเดิม เพราะคราวนี้ไม่มีอะไรบอกว่าชนกัน
     """
 
-    def __init__(self) -> None:
+    def __init__(self, serial: str = "") -> None:
+        self.serial = serial
         self.thread: threading.Thread | None = None
         self.job_id = ""
         self.stop_flag = threading.Event()
@@ -798,6 +808,79 @@ class PostRunner:
                 on_done(results, error_text)
             except Exception as error:
                 on_log(f"สรุปผลไม่สำเร็จ: {error}")
+
+
+class RunnerPool:
+    """หัวหน้างานโพสต์คนละคนต่อมือถือหนึ่งเครื่อง — รองรับกี่เครื่องก็ได้
+
+    **ตั้งใจไม่มี `.busy` กับ `.job_id`** ทั้งที่ของเดิมมี เพราะสองชื่อนั้นแปลว่า
+    "เครื่องเดียวของระบบยุ่งอยู่ไหม / กำลังทำงานอะไร" ซึ่งเป็นคำถามที่ตอบไม่ได้
+    อีกแล้วเมื่อมีหลายเครื่อง ถ้าเก็บชื่อเดิมไว้แล้วให้แปลว่า "เครื่องไหนก็ได้"
+    โค้ดเก่าจะยังคอมไพล์ผ่านและ **ทำงานผิดเงียบๆ**: เครื่อง A โพสต์อยู่ แล้วสั่ง
+    เครื่อง B จะโดนตีกลับว่าไม่ว่าง ทั้งที่ B ว่าง
+
+    ยอมให้โค้ดเก่าล้มด้วย AttributeError ตรงจุดดีกว่า — ล้มเสียงดังหาที่แก้ได้
+    ใน 5 วินาที ส่วนทำงานผิดเงียบๆ ใช้เวลาเป็นวันกว่าจะรู้ตัว
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._runners: dict[str, PostRunner] = {}
+
+    def for_device(self, serial: str) -> PostRunner:
+        """หัวหน้างานของเครื่องนี้ — ยังไม่มีก็ตั้งให้ (เครื่องที่ 3, 4, ... ก็ได้)"""
+        serial = str(serial or "").strip()
+        if not serial:
+            raise AutoPostError("ต้องระบุว่าจะสั่งงานมือถือเครื่องไหน")
+        with self._lock:
+            runner = self._runners.get(serial)
+            if runner is None:
+                runner = self._runners[serial] = PostRunner(serial)
+            return runner
+
+    def busy_on(self, serial: str) -> bool:
+        """เครื่องนี้ยุ่งอยู่ไหม — คำถามที่ต้องถามก่อนสั่งงานทุกครั้ง"""
+        with self._lock:
+            runner = self._runners.get(str(serial or "").strip())
+        return bool(runner and runner.busy)
+
+    def any_busy(self) -> bool:
+        """มีเครื่องไหนยุ่งอยู่บ้างไหม — **ใช้โชว์เท่านั้น ห้ามเอาไปกั้นงาน**
+
+        ชื่อยาวและอ่านแล้วสะดุดโดยตั้งใจ ใครเผลอเอาไปใช้กั้นงานจะเห็นได้จาก
+        ชื่อเลยว่าผิด — ต้องใช้ `busy_on(serial)` เสมอ
+        """
+        return bool(self.running())
+
+    def running(self) -> dict:
+        """{serial: job_id} เฉพาะเครื่องที่กำลังทำงานอยู่"""
+        with self._lock:
+            pairs = list(self._runners.items())
+        return {serial: r.job_id for serial, r in pairs if r.busy and r.job_id}
+
+    def job_running(self, job_id: str) -> str:
+        """งานนี้กำลังรันอยู่บนเครื่องไหน — คืน "" ถ้าไม่มีเครื่องไหนทำอยู่
+
+        แทนสำนวนเดิม `fb_runner.busy and fb_runner.job_id == job_id` ซึ่งตอนนี้
+        ตอบผิดทันทีที่มีสองเครื่อง (งานอยู่บนเครื่อง B แต่ไปถามเครื่องเดียวที่มี)
+        """
+        job_id = str(job_id or "").strip()
+        return next((s for s, j in self.running().items() if j == job_id), "")
+
+    def stop_job(self, job_id: str) -> str:
+        """สั่งหยุดงานนี้ไม่ว่าอยู่เครื่องไหน — คืน serial ที่สั่งไป ("" = ไม่เจอ)"""
+        serial = self.job_running(job_id)
+        if serial and self.for_device(serial).stop():
+            return serial
+        return ""
+
+    def stop_all(self) -> list[tuple[str, str]]:
+        """สั่งหยุดทุกเครื่อง — คืน [(serial, job_id), ...] ที่สั่งไปจริง"""
+        out = []
+        for serial, job_id in self.running().items():
+            if self.for_device(serial).stop():
+                out.append((serial, job_id))
+        return out
 
 
 def result_line(entry: dict, label: Callable[[str], str]) -> str:

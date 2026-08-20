@@ -49,6 +49,7 @@ from fastapi.staticfiles import StaticFiles
 
 import access_control
 import bot_profiles
+import devices as device_book
 import studio_shared
 import fb_auto_post
 import fb_backup
@@ -1425,13 +1426,51 @@ async def publish_flow_run(request: Request) -> dict:
 # ---------------------------------------------------------------- จอมือถือ (A)
 
 
+def _device_rows() -> list[dict]:
+    """รายชื่อมือถือที่หน้าเว็บใช้ได้เลย — ทะเบียนผสมกับสถานะสายตอนนี้
+
+    ต้องรวมสองอย่าง เพราะแต่ละอย่างรู้คนละครึ่ง: ทะเบียนรู้ว่า "เครื่องนี้ชื่ออะไร
+    เปิดใช้ไหม รับสายไหน" ส่วน adb รู้ว่า "ตอนนี้เสียบอยู่ไหม" เครื่องที่ถอดสาย
+    ต้องยังโผล่ในรายการพร้อมป้ายว่าไม่ได้เสียบ ไม่ใช่หายไปเฉยๆ จนผู้ใช้นึกว่า
+    ค่าที่ตั้งไว้หายด้วย
+    """
+    try:
+        live = list_devices()
+    except RuntimeError as error:
+        append_log("publish", f"อ่านรายชื่อมือถือไม่ได้: {error}")
+        live = []
+    device_book.sync(live)                 # เครื่องใหม่เข้าทะเบียนแบบปิดไว้ก่อน
+    state = {d["serial"]: d for d in live}
+    rows = []
+    for entry in device_book.listing():
+        serial = entry["serial"]
+        seen = state.get(serial, {})
+        rows.append({
+            **entry,
+            "custom_name": entry.get("name", ""),   # ชื่อเดิมที่หน้าเว็บเก่าใช้
+            "label": device_book.label(serial),
+            "model": seen.get("model") or entry.get("model", ""),
+            "state": seen.get("state", "offline"),
+            "ready": bool(seen.get("ready")),
+            "note": seen.get("note", "" if seen else "ไม่ได้เสียบอยู่"),
+            "is_default": serial == device_book.default_serial(),
+            "holder": phone_gate.held_by(serial),
+            "job": fb_runner.running().get(serial, ""),
+        })
+    return rows
+
+
 @app.get("/api/devices")
 async def devices() -> dict:
-    found = await asyncio.to_thread(list_devices)
-    names = load_config().get("device_names", {})
-    for device in found:
-        device["custom_name"] = names.get(device["serial"], "")
-    return {"ok": True, "devices": found}
+    rows = await asyncio.to_thread(_device_rows)
+    return {
+        "ok": True,
+        "devices": rows,
+        "lanes": device_book.LANES,
+        "default_serial": device_book.default_serial(),
+        # หน้าเว็บใช้ตัวนี้ตัดสินว่าจะวางกี่จอ — ล้อตามเครื่องที่เปิดใช้จริง
+        "enabled": [d["serial"] for d in rows if d["enabled"]],
+    }
 
 
 @app.post("/api/device-name")
@@ -1440,13 +1479,76 @@ async def set_device_name(request: Request) -> dict:
     payload = await request.json()
     serial = clean_serial(str(payload.get("serial", "")))
     name = str(payload.get("name", "")).strip()[:40]
-    config = load_config()
-    if name:
-        config.setdefault("device_names", {})[serial] = name
-    else:
-        config.get("device_names", {}).pop(serial, None)   # ชื่อว่าง = ลบชื่อเล่นทิ้ง
-    save_config(config)
+    # เขียนลงทะเบียนเป็นหลัก — ตัวทะเบียนสะท้อนกลับไป config.device_names ให้เอง
+    # เพื่อให้ `fb_limits` กับหน้าเว็บเก่าที่ยังอ่านที่นั่นไม่พังตาม
+    await asyncio.to_thread(device_book.upsert, serial, name=name)
     return {"ok": True, "serial": serial, "name": name}
+
+
+@app.post("/api/device")
+async def save_device(request: Request) -> dict:
+    """แก้ทะเบียนมือถือหนึ่งเครื่อง — เปิด/ปิด · สายงาน · บัญชี · ตัวหลัก
+
+    ส่งมาเฉพาะฟิลด์ที่จะแก้ ตัวที่ไม่ส่งจะไม่ถูกแตะ — หน้าตั้งค่าของแต่ละจอ
+    จึงบันทึกทีละช่องได้โดยไม่กลบค่าที่จออื่นเพิ่งบันทึกไป
+    """
+    payload = await request.json()
+    serial = clean_serial(str(payload.get("serial", "")))
+    fields = {}
+    for key in ("name", "account", "bot_profile", "note"):
+        if key in payload:
+            fields[key] = str(payload.get(key) or "").strip()[:120]
+    if "enabled" in payload:
+        fields["enabled"] = bool(payload["enabled"])
+    if "lanes" in payload:
+        lanes = payload.get("lanes") or []
+        fields["lanes"] = [str(x) for x in lanes if str(x) in device_book.LANES]
+
+    def apply() -> dict:
+        entry = (device_book.set_enabled(serial, fields.pop("enabled"))
+                 if "enabled" in fields else device_book.get(serial))
+        if fields:
+            entry = device_book.upsert(serial, **fields)
+        if payload.get("make_default"):
+            device_book.set_default(serial)
+        return entry or {}
+
+    try:
+        entry = await asyncio.to_thread(apply)
+    except device_book.DeviceError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, "device": entry, "default_serial": device_book.default_serial()}
+
+
+@app.post("/api/device/copy-settings")
+async def copy_device_settings(request: Request) -> dict:
+    """ปุ่ม "โหลดค่าจากเครื่องอื่น" — ก๊อปค่าตั้งข้ามจอ ไม่ก๊อปตัวตน"""
+    payload = await request.json()
+    source = clean_serial(str(payload.get("source", "")))
+    target = clean_serial(str(payload.get("target", "")))
+    keys = [str(k) for k in (payload.get("keys") or [])] or None
+    try:
+        merged = await asyncio.to_thread(
+            device_book.copy_settings, source, target, keys
+        )
+    except device_book.DeviceError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, "settings": merged,
+            "note": f"โหลดค่าจาก {device_book.label(source)} มาแล้ว"}
+
+
+@app.post("/api/device/forget")
+async def forget_device(request: Request) -> dict:
+    """ปุ่ม − ลบจอ — เอาเครื่องออกจากทะเบียน (เสียบใหม่ก็กลับมาแบบปิดไว้)"""
+    payload = await request.json()
+    serial = clean_serial(str(payload.get("serial", "")))
+    if fb_runner.busy_on(serial) or phone_gate.held_by(serial):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{device_book.label(serial)} กำลังทำงานอยู่ — หยุดงานก่อนค่อยลบ",
+        )
+    gone = await asyncio.to_thread(device_book.remove, serial)
+    return {"ok": True, "removed": gone}
 
 
 @app.post("/api/pick-file")
@@ -2111,8 +2213,18 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
 
             if buffer:
                 await websocket.send_bytes(bytes(buffer))
-            process.wait(timeout=2)
-            process = None
+            # ทางนี้เขียนไว้ตอนมีแต่ `screenrecord` ซึ่งจบเองทุก 175 วินาทีแล้ว
+            # วนกลับไปเปิดใหม่ พอเพิ่มทาง scrcpy เข้ามา `process` เป็น None
+            # แต่บรรทัดนี้ยังเรียก `.wait()` ตรงๆ — หลุดเป็น AttributeError ที่
+            # `except` ข้างล่างไม่ได้จับ ผลคือ socket ตายแล้วหน้าเว็บถอยไปใช้
+            # ภาพนิ่ง **โดยไม่มีใครรู้ว่าทำไม** (เจอในบันทึกเซิร์ฟเวอร์ 21 ส.ค.)
+            #
+            # ทางถอยที่กลบความผิดพลาดของตัวเองไว้ อันตรายกว่าไม่มีทางถอยเลย
+            if process is not None:
+                process.wait(timeout=2)
+                process = None
+            elif video is None or not video.alive:
+                break              # ช่อง scrcpy ตายแล้ว เปิดใหม่ในลูปเดิมไม่ได้
             await asyncio.sleep(0.15)
     except (WebSocketDisconnect, ConnectionError, RuntimeError):
         return
@@ -3705,9 +3817,9 @@ async def decide_approval(approval_id: str, request: Request) -> dict:
 #   โพสต์ลงกลุ่มแล้วเรียกคืนไม่ได้ และผิดกลุ่มทีเดียวโดนเตะออกจากกลุ่มได้เลย
 #   จะให้ยิงทันทีที่ส่งรูปก็ทำได้ แต่ต้องเปิด auto_start เอง
 
-fb_groups = fb_auto_post.GroupStore(DATA_DIR / "fb_groups.json")
-fb_jobs = fb_auto_post.JobStore(DATA_DIR / "fb_jobs.json")
-fb_runner = fb_auto_post.PostRunner()
+fb_groups = fb_auto_post.GroupStore(studio_shared.post_file("fb_groups.json"))
+fb_jobs = fb_auto_post.JobStore(studio_shared.post_file("fb_jobs.json"))
+fb_runner = fb_auto_post.RunnerPool()
 
 # กลุ่มที่ผู้ใช้เคยโพสต์จริงมาแล้ว — ใส่ให้ตั้งแต่แรกจะได้ไม่ต้องพิมพ์ใหม่
 # ลบทิ้งได้ตามปกติ และจะเติมให้ครั้งเดียวตอนไฟล์ยังไม่มีเท่านั้น
@@ -3762,26 +3874,45 @@ def _fb_settings() -> dict:
     return load_config().get("facebook") or {}
 
 
-def _fb_gap_range() -> tuple[float, float]:
-    settings = _fb_settings()
+def _fb_gap_range(serial: str = "") -> tuple[float, float]:
+    """เว้นระยะระหว่างกลุ่มของ**เครื่องนั้น** — ไม่ส่ง serial มาก็ได้ค่ากลาง
+
+    ต้องแยกรายเครื่องเพราะแต่ละเครื่องคนละบัญชี บัญชีที่เพิ่งโดนเตือนสแปมต้อง
+    เว้นห่างกว่าบัญชีที่ยังสะอาด — บังคับให้ทั้งสองเครื่องใช้ค่าเดียวกันแปลว่า
+    ต้องเลือกระหว่าง "ช้าทั้งคู่" กับ "เสี่ยงทั้งคู่"
+    """
+    settings = device_book.settings(serial) if serial else _fb_settings()
     low = float(settings.get("gap_min", 15) or 15)
     high = float(settings.get("gap_max", 20) or 20)
     return (min(low, high), max(low, high))
 
 
-def _fb_serial() -> str:
-    """เครื่องที่จะใช้โพสต์ — ที่ตั้งไว้ก่อน ถ้าไม่ได้ตั้งใช้เครื่องแรกที่พร้อม"""
-    wanted = str(_fb_settings().get("serial", "")).strip()
+def _fb_serial(serial: str = "", *, allow_default: bool = True) -> str:
+    """เครื่องที่จะใช้โพสต์ — ถามทะเบียนมือถือเป็นหลัก
+
+    ของเดิม "ไม่ได้ตั้งไว้ก็หยิบเครื่องแรกที่พร้อม" ซึ่งเป็นการ**เดา** พอเสียบเครื่อง
+    ที่สองเข้ามา ลำดับของ `adb devices` เปลี่ยนเมื่อไรก็โพสต์ลงบัญชีผิดเครื่องทันที
+    โดยไม่มีอะไรเตือน — ความเสียหายแบบนั้นกู้คืนไม่ได้
+
+    ตอนนี้ให้ทะเบียนเป็นคนตอบ: บอก serial มาก็ใช้ตัวนั้น · ไม่บอกแล้วมีเครื่อง
+    เปิดใช้เครื่องเดียวก็ใช้เครื่องนั้น · มีหลายเครื่องจะถอยไปใช้ "เครื่องตัวหลัก"
+    ที่ผู้ใช้ตั้งไว้เอง (ไม่ใช่เดา) · ไม่มีตัวหลักด้วยก็ปฏิเสธพร้อมบอกชื่อทุกเครื่อง
+    ให้เลือก
+
+    ยังตรวจว่าเครื่องนั้นเสียบอยู่จริงไหมเหมือนเดิม — ทะเบียนรู้ว่า "ควรใช้เครื่องไหน"
+    แต่ไม่รู้ว่า "ตอนนี้สายหลุดหรือเปล่า"
+    """
+    try:
+        picked = device_book.resolve(serial, lane="post", allow_default=allow_default)
+    except device_book.DeviceError as error:
+        raise fb_auto_post.AutoPostError(str(error)) from error
     ready = [d["serial"] for d in list_devices() if d["ready"]]
-    if wanted:
-        if wanted not in ready:
-            raise fb_auto_post.AutoPostError(
-                f"มือถือ {wanted} ที่ตั้งไว้ไม่ได้เชื่อมต่ออยู่"
-            )
-        return wanted
-    if not ready:
-        raise fb_auto_post.AutoPostError("ไม่มีมือถือเชื่อมต่ออยู่ — เสียบสายแล้วลองใหม่")
-    return ready[0]
+    if picked not in ready:
+        raise fb_auto_post.AutoPostError(
+            f"มือถือ {device_book.label(picked)} ไม่ได้เชื่อมต่ออยู่ — "
+            "เสียบสายแล้วกดรีเฟรชรายการอุปกรณ์"
+        )
+    return picked
 
 
 def _fb_telegram() -> tuple[str, str]:
@@ -3847,7 +3978,7 @@ def _fb_card(job: dict) -> tuple[str, dict | None]:
     if job["status"] not in fb_auto_post.OPEN_STATUSES:
         # งานที่ปิดไปแล้วอาจยัง "ตามเก็บ" อยู่บนมือถือ (สถานะเป็น done แต่ตัวรันทำงานอยู่)
         # ต้องมีปุ่มหยุดให้กด ไม่งั้นผู้ใช้กดยกเลิกไม่ได้เลยทั้งที่มือถือยังทำงาน
-        if fb_runner.busy and fb_runner.job_id == job["id"]:
+        if fb_runner.job_running(job["id"]):
             return "\n".join(lines), {"inline_keyboard": [[
                 {"text": "⏹ หยุดงานที่กำลังทำ", "callback_data": f"fb:x:{job['id']}"},
             ]]}
@@ -3958,10 +4089,13 @@ def _fb_cancel_job(job_id: str) -> str:
     job = fb_jobs.get(job_id)
     if job is None:
         return "ไม่พบงานนี้"
-    running = fb_runner.busy and fb_runner.job_id == job_id
     fb_jobs.update(job_id, status=fb_auto_post.STATUS_CANCELLED)
-    if running and fb_runner.stop():
-        append_log("publish", f"[{job_id}] ผู้ใช้สั่งยกเลิก — สั่งหยุดตัวรันแล้ว")
+    # หยุดงานนี้ไม่ว่ามันไปรันอยู่บนเครื่องไหน — ของเดิมถามตัวรันตัวเดียวของระบบ
+    # ซึ่งพอมีหลายเครื่องจะตอบว่า "ไม่ได้ทำงานนี้อยู่" แล้วมือถือก็โพสต์ต่อเงียบๆ
+    stopped = fb_runner.stop_job(job_id)
+    if stopped:
+        append_log("publish", f"[{job_id}] ผู้ใช้สั่งยกเลิก — "
+                              f"สั่งหยุดตัวรันบน {device_book.label(stopped)} แล้ว")
         return "ยกเลิกแล้ว — หยุดหลังกลุ่มที่กำลังทำอยู่จบ"
     append_log("publish", f"[{job_id}] ยกเลิกงาน")
     return "ยกเลิกงานแล้ว"
@@ -4465,17 +4599,9 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         next((j for j in fb_jobs.listing() if j.get("results")), None)
     if job is None:
         return f"ไม่พบงาน {job_id}" if job_id else "ยังไม่มีงานที่โพสต์ไปแล้ว"
-    if not phone_is_free():
-        if queued:
-            return PHONE_WAIT_NOTE
-        place = _phone_wait_add("followup", job["id"], job.get("chat_id", ""))
-        if place < 0:
-            return f"คิวรอจอเต็ม ({PHONE_WAITLIST_LIMIT} งาน)"
-        holder = phone_gate.held_by() or f"งานโพสต์ {fb_runner.job_id}"
-        return (
-            f"📥 ตามเก็บ {job['id']} เข้าคิวรอจอแล้ว — คิวที่ {place or 1}\n"
-            f"<i>ตอนนี้ {telegram_bot._escape(holder)} ใช้จออยู่</i>"
-        )
+    serial, note = _fb_gate("followup", job, queued, str(job.get("serial") or ""))
+    if note:
+        return note
     # ข้ามกลุ่มที่ "ครบแล้ว" — ไม่ใช่ไล่ทุกกลุ่มที่โพสต์สำเร็จ
     #
     # รอบโพสต์ทำถูกใจ/คอมเมนต์/เก็บลิงก์ให้เสร็จได้เลยถ้ากลุ่มนั้นไม่ต้องรออนุมัติ
@@ -4507,10 +4633,6 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
             return (f"✅ งาน {job['id']} ครบแล้วทั้ง {done} กลุ่ม — ถูกใจ คอมเมนต์ "
                     "และลิงก์เก็บครบตั้งแต่รอบโพสต์ ไม่ต้องตามเก็บ")
         return "งานล่าสุดไม่มีกลุ่มที่โพสต์สำเร็จ"
-    try:
-        serial = _fb_serial()
-    except fb_auto_post.AutoPostError as error:
-        return str(error)
 
     job_id = job["id"]
     chat_id = job.get("chat_id", "")
@@ -4574,7 +4696,7 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         )
 
     try:
-        fb_runner.start_followup(
+        fb_runner.for_device(serial).start_followup(
             job_id=job_id, adb=ADB, serial=serial, caption=job["caption"],
             targets=targets, comment=comment, on_log=on_log,
             on_result=on_result, on_done=on_done, comment_images=comment_shots,
@@ -4601,17 +4723,9 @@ def _fb_collect(job_id: str = "", queued: bool = False) -> str:
         next((j for j in fb_jobs.listing() if j.get("results")), None)
     if job is None:
         return f"ไม่พบงาน {job_id}" if job_id else "ยังไม่มีงานที่โพสต์ไปแล้ว"
-    if not phone_is_free():
-        if queued:
-            return PHONE_WAIT_NOTE
-        place = _phone_wait_add("collect", job["id"], job.get("chat_id", ""))
-        if place < 0:
-            return f"คิวรอจอเต็ม ({PHONE_WAITLIST_LIMIT} งาน)"
-        holder = phone_gate.held_by() or f"งานโพสต์ {fb_runner.job_id}"
-        return (
-            f"📥 เก็บยอด {job['id']} เข้าคิวรอจอแล้ว — คิวที่ {place or 1}\n"
-            f"<i>ตอนนี้ {telegram_bot._escape(holder)} ใช้จออยู่</i>"
-        )
+    serial, note = _fb_gate("collect", job, queued, str(job.get("serial") or ""))
+    if note:
+        return note
     # เก็บทุกกลุ่มที่โพสต์ขึ้นแล้ว — ไม่กรองว่ามีลิงก์ไหม เพราะกลุ่มที่ยังไม่มีลิงก์
     # ก็ยังเข้าถึงได้ทางแจ้งเตือน/ฟีด และจะได้เก็บลิงก์ติดมือกลับมาด้วยเลย
     targets = [
@@ -4621,10 +4735,6 @@ def _fb_collect(job_id: str = "", queued: bool = False) -> str:
     ]
     if not targets:
         return f"งาน {job['id']} ไม่มีกลุ่มที่โพสต์สำเร็จ"
-    try:
-        serial = _fb_serial()
-    except fb_auto_post.AutoPostError as error:
-        return str(error)
 
     job_id = job["id"]
     chat_id = job.get("chat_id", "")
@@ -4650,7 +4760,7 @@ def _fb_collect(job_id: str = "", queued: bool = False) -> str:
                    f"[{job_id}·เก็บยอด] จบ — อ่านได้ {read}/{len(results)} กลุ่ม")
 
     try:
-        fb_runner.start_collect(
+        fb_runner.for_device(serial).start_collect(
             job_id=job_id, adb=ADB, serial=serial, caption=job["caption"],
             targets=targets, on_log=on_log, on_result=on_result,
             on_done=on_done, clipboard=_fb_clipboard(serial),
@@ -4678,17 +4788,9 @@ def _fb_fiximage(job_id: str = "", queued: bool = False) -> str:
         return f"ไม่พบงาน {job_id}" if job_id else "ยังไม่มีงานที่โพสต์ไปแล้ว"
     if not (job.get("images") or job.get("image")):
         return f"งาน {job['id']} ไม่มีรูป — ไม่มีอะไรให้แก้"
-    if not phone_is_free():
-        if queued:
-            return PHONE_WAIT_NOTE
-        place = _phone_wait_add("fiximage", job["id"], job.get("chat_id", ""))
-        if place < 0:
-            return f"คิวรอจอเต็ม ({PHONE_WAITLIST_LIMIT} งาน)"
-        holder = phone_gate.held_by() or f"งานโพสต์ {fb_runner.job_id}"
-        return (
-            f"📥 แก้รูป {job['id']} เข้าคิวรอจอแล้ว — คิวที่ {place or 1}\n"
-            f"<i>ตอนนี้ {telegram_bot._escape(holder)} ใช้จออยู่</i>"
-        )
+    serial, note = _fb_gate("fiximage", job, queued, str(job.get("serial") or ""))
+    if note:
+        return note
     targets = [
         {"group_id": r["group_id"], "name": fb_groups.label(r["group_id"]),
          "link": r.get("link", ""), "post_id": r.get("post_id", "")}
@@ -4697,10 +4799,6 @@ def _fb_fiximage(job_id: str = "", queued: bool = False) -> str:
     if not targets:
         return (f"งาน {job['id']} ยังไม่มีกลุ่มที่เก็บลิงก์ไว้ — "
                 "สั่ง /followup เก็บลิงก์ก่อนแล้วค่อยแก้รูป")
-    try:
-        serial = _fb_serial()
-    except fb_auto_post.AutoPostError as error:
-        return str(error)
 
     job_id = job["id"]
     chat_id = job.get("chat_id", "")
@@ -4728,7 +4826,7 @@ def _fb_fiximage(job_id: str = "", queued: bool = False) -> str:
                    f"[{job_id}·แก้รูป] จบ — สำเร็จ {fixed}/{len(results)} กลุ่ม")
 
     try:
-        fb_runner.start_fiximage(
+        fb_runner.for_device(serial).start_fiximage(
             job_id=job_id, adb=ADB, serial=serial, caption=job["caption"],
             targets=targets, images=images, on_log=on_log,
             on_result=on_result, on_done=on_done,
@@ -4759,11 +4857,12 @@ def _fb_followup_delay(results: list[dict]) -> float:
     return AUTO_FOLLOWUP_DELAY if visible else AUTO_FOLLOWUP_SLOW_DELAY
 
 
-def _fb_auto_followup(job_id: str, delay: float = AUTO_FOLLOWUP_DELAY) -> None:
+def _fb_auto_followup(job_id: str, delay: float = AUTO_FOLLOWUP_DELAY,
+                      serial: str = "") -> None:
     """ต่อสายไป "หาโพสต์จากแจ้งเตือน" ทันทีที่รอบโพสต์จบ
 
-    ทำไมต้องแยกเธรด: on_done ถูกเรียกจากในเธรดของตัวรันเอง ตอนนั้น
-    fb_runner.busy ยังเป็น True อยู่ สั่ง start_followup ตรงๆ จะโดนตีกลับว่า
+    ทำไมต้องแยกเธรด: on_done ถูกเรียกจากในเธรดของตัวรันเอง ตอนนั้นตัวรัน
+    **ของเครื่องนั้น** ยังนับว่ายุ่งอยู่ สั่ง start_followup ตรงๆ จะโดนตีกลับว่า
     "กำลังทำงานอยู่" จึงต้องรอให้เธรดเดิมปล่อยก่อน
 
     ทำไมต้องหน่วงก่อน: กลุ่มส่วนใหญ่ต้องรอผู้ดูแลอนุมัติ ยิงทันทีที่โพสต์เสร็จ
@@ -4771,9 +4870,9 @@ def _fb_auto_followup(job_id: str, delay: float = AUTO_FOLLOWUP_DELAY) -> None:
     """
     def worker() -> None:
         deadline = time.time() + 180
-        while fb_runner.busy and time.time() < deadline:
+        while fb_runner.busy_on(serial) and time.time() < deadline:
             time.sleep(2.0)
-        if fb_runner.busy:
+        if fb_runner.busy_on(serial):
             append_log("publish", f"[{job_id}] ตัวรันยังไม่ว่าง — ข้ามการตามเก็บอัตโนมัติ")
             return
         time.sleep(delay)
@@ -4963,35 +5062,50 @@ def claude_inbox_mark_read(channel: str = "") -> int:
 
 
 class PhoneGate:
-    """คุมสิทธิ์ใช้จอมือถือ — มีได้เจ้าเดียวในเวลาเดียว
+    """คุมสิทธิ์ใช้จอมือถือ — **หนึ่งใบต่อหนึ่งเครื่อง** เจ้าเดียวต่อเครื่อง
 
-    มือถือมีจอเดียว ถ้างานโพสต์กับ Claude CLI สั่ง ADB พร้อมกันจะแตะทับกัน
-    เละทั้งคู่: กำลังพิมพ์แคปชันอยู่แล้วอีกฝั่งกด Back หรือ force-stop แอป
+    มือถือเครื่องหนึ่งมีจอเดียว ถ้างานโพสต์กับ Claude CLI สั่ง ADB ใส่เครื่อง
+    เดียวกันพร้อมกันจะแตะทับกันเละทั้งคู่: กำลังพิมพ์แคปชันอยู่แล้วอีกฝั่งกด Back
+    หรือ force-stop แอป
 
-    ออกแบบให้ไม่สมมาตรเพื่อกันเดดล็อก:
-      · งานโพสต์/ตามเก็บ ใช้ `fb_runner.busy` เป็นตัวบอกว่าตัวเองยุ่ง (ของเดิม)
-      · Claude ต้อง**รอให้ fb_runner ว่างก่อน** แล้วค่อยจองประตูนี้
-      · งานโพสต์เช็คว่าประตูถูกจองอยู่ไหม ถ้าใช่ = ไม่เริ่ม
-    ทั้งสองฝั่งจึงไม่มีทางรอกันวนไปมา
+    **ของเดิมมีประตูใบเดียวทั้งระบบ** พอเครื่องแรกเข้าไปแล้ว เครื่องที่สองยืนรอ
+    ข้างนอกทั้งที่จอตัวเองว่างสนิท — ต้นเหตุใหญ่ที่สุดที่ทำให้สั่งสองเครื่องพร้อมกัน
+    ไม่ได้ ตอนนี้แจกกุญแจแยกรายเครื่อง จำนวนเครื่องเท่าไรก็ได้
+
+    ออกแบบให้ไม่สมมาตรเพื่อกันเดดล็อก (เหมือนเดิม แต่คิดแยกรายเครื่อง):
+      · งานโพสต์ของเครื่องนั้น ใช้ `fb_runner.busy_on(serial)` บอกว่าตัวเองยุ่ง
+      · Claude ต้อง**รอให้งานโพสต์ของเครื่องนั้นว่างก่อน** แล้วค่อยจองประตู
+      · งานโพสต์เช็คว่าประตูของเครื่องนั้นถูกจองอยู่ไหม ถ้าใช่ = ไม่เริ่ม
+    ทั้งสองฝั่งจึงไม่มีทางรอกันวนไปมา และการรอของเครื่อง A ไม่ลามไปหยุดเครื่อง B
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self.owner = ""
-        self.since = 0.0
+        self._held: dict[str, tuple[str, float]] = {}   # serial -> (เจ้าของ, เวลา)
 
-    def try_take(self, owner: str) -> bool:
+    @staticmethod
+    def _key(serial: str) -> str:
+        key = str(serial or "").strip()
+        if not key:
+            # ห้ามให้ผ่านแบบเงียบ — ประตูที่ไม่รู้ว่าเป็นของเครื่องไหน คือประตูใบเดียว
+            # ทั้งระบบกลับมาอีกครั้ง ซึ่งคือบั๊กที่กำลังแก้อยู่พอดี
+            raise ValueError("phone_gate ต้องระบุ serial ของมือถือ")
+        return key
+
+    def try_take(self, owner: str, serial: str) -> bool:
+        key = self._key(serial)
         with self._lock:
-            if self.owner:
+            if self._held.get(key):
                 return False
-            self.owner, self.since = owner, time.time()
+            self._held[key] = (owner, time.time())
             return True
 
-    def wait_take(self, owner: str, timeout: float = 900.0) -> bool:
-        """รอจนจอว่างแล้วจอง — คืน False ถ้ารอเกินเวลา"""
+    def wait_take(self, owner: str, serial: str, timeout: float = 900.0) -> bool:
+        """รอจนจอ**เครื่องนั้น**ว่างแล้วจอง — คืน False ถ้ารอเกินเวลา"""
+        key = self._key(serial)
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if not fb_runner.busy and self.try_take(owner):
+            if not fb_runner.busy_on(key) and self.try_take(owner, key):
                 return True
             time.sleep(3.0)
         return False
@@ -5027,8 +5141,13 @@ _waitlist_lock = threading.Lock()
 PHONE_WAITLIST_LIMIT = 10
 
 
-def phone_is_free() -> bool:
-    return not phone_gate.held_by() and not fb_runner.busy
+def phone_is_free(serial: str) -> bool:
+    """จอ**เครื่องนี้**ว่างไหม — ต้องถามแยกรายเครื่องเสมอ
+
+    ของเดิมถามว่า "จอว่างไหม" ลอยๆ ซึ่งพอมีสองเครื่องแปลว่า "ทุกเครื่องว่างพร้อมกัน
+    ไหม" งานบนเครื่อง B เลยเริ่มไม่ได้ตราบใดที่เครื่อง A ยังทำงานอยู่
+    """
+    return not phone_gate.held_by(serial) and not fb_runner.busy_on(serial)
 
 
 def phone_waitlist() -> list[dict]:
@@ -5036,24 +5155,95 @@ def phone_waitlist() -> list[dict]:
         return list(_phone_waitlist)
 
 
-def _phone_wait_add(kind: str, job_id: str, chat_id: str = "") -> int:
-    """ต่อคิวรอจอ คืนลำดับที่ (0 = มีอยู่ในคิวแล้ว · -1 = คิวเต็ม)"""
+def _phone_wait_add(kind: str, job_id: str, chat_id: str = "", serial: str = "") -> int:
+    """ต่อคิวรอจอ**เครื่องนั้น** คืนลำดับที่ (0 = มีอยู่ในคิวแล้ว · -1 = คิวเต็ม)
+
+    ลำดับที่นับเฉพาะคิวของเครื่องเดียวกัน — บอกผู้ใช้ว่า "คิวที่ 3" ทั้งที่สองคิวแรก
+    เป็นของอีกเครื่องซึ่งไม่เกี่ยวกันเลย จะทำให้เขานั่งรอเก้อ
+    """
+    serial = str(serial or "").strip()
     with _waitlist_lock:
         for item in _phone_waitlist:
-            if item["kind"] == kind and item["job_id"] == job_id:
+            if (item["kind"] == kind and item["job_id"] == job_id
+                    and item.get("serial", "") == serial):
                 return 0
         if len(_phone_waitlist) >= PHONE_WAITLIST_LIMIT:
             return -1
-        _phone_waitlist.append({"kind": kind, "job_id": job_id, "chat_id": chat_id})
-        return len(_phone_waitlist)
+        _phone_waitlist.append({"kind": kind, "job_id": job_id,
+                                "chat_id": chat_id, "serial": serial})
+        return sum(1 for i in _phone_waitlist if i.get("serial", "") == serial)
+
+
+def _any_phone_free() -> bool:
+    """มีเครื่องไหนว่างบ้างไหม — ด่านหยาบก่อนงานเบื้องหลังจะลงมือ
+
+    งานเบื้องหลัง (ไล่โพสต์ที่ยังไม่ขึ้น · ล้างเครื่อง) ไม่ได้ผูกกับเครื่องใดเครื่องหนึ่ง
+    ตั้งแต่ต้น ถามว่า "ทุกเครื่องว่างไหม" จะไม่ได้ลงมือเลยเมื่อมีหลายเครื่อง
+    ส่วนขั้นลงมือจริงยังจองประตูรายเครื่องอยู่ดี ตรงนี้แค่กันไม่ให้เสียเวลาเปล่า
+    """
+    return any(phone_is_free(s) for s in device_book.enabled_serials())
+
+
+# ชื่อไทยของแต่ละแบบงานที่ต้องใช้จอ — ใช้ทั้งในคิวและข้อความตอบกลับ
+PHONE_JOB_NAMES = {"post": "", "followup": "ตามเก็บ", "collect": "เก็บยอด",
+                   "fiximage": "แก้รูป"}
+
+
+def _fb_gate(kind: str, job: dict, queued: bool, serial: str = "") -> tuple[str, str]:
+    """ด่านเดียวก่อนสั่งงานมือถือ — คืน (เครื่องที่จะใช้, ข้อความที่ต้องตอบกลับ)
+
+    ข้อความว่าง = ผ่านด่าน เริ่มงานได้เลย
+
+    รวมของเดิมสี่ก้อนที่เขียนซ้ำกันคำต่อคำ (โพสต์ · ตามเก็บ · เก็บยอด · แก้รูป)
+    ไว้ที่เดียว เพราะทั้งสี่ต้องเปลี่ยนพร้อมกันทุกครั้งที่กติกาเรื่องจอเปลี่ยน —
+    ของเดิมแก้ไปสามที่ลืมที่หนึ่งเมื่อไรก็ได้บั๊กที่หาไม่เจอทันที
+
+    **ต้องรู้ว่าเครื่องไหนก่อนถามว่าจอว่างไหม** ของเดิมถามว่า "จอว่างไหม" ลอยๆ
+    แล้วค่อยไปเลือกเครื่องทีหลัง พอมีสองเครื่องคำถามนั้นจึงกลายเป็น "ทุกเครื่อง
+    ว่างพร้อมกันไหม" ซึ่งตอบว่าไม่ว่างเกือบตลอดเวลา
+    """
+    try:
+        picked = _fb_serial(serial)
+    except fb_auto_post.AutoPostError as error:
+        return "", str(error)
+    if phone_is_free(picked):
+        return picked, ""
+    if queued:
+        return picked, PHONE_WAIT_NOTE      # ตัวเดินคิวจะคืนกลับหัวคิวเอง
+    place = _phone_wait_add(kind, job["id"], job.get("chat_id", ""), picked)
+    if place < 0:
+        return picked, f"คิวรอจอเต็ม ({PHONE_WAITLIST_LIMIT} งาน)"
+    what = PHONE_JOB_NAMES.get(kind, kind)
+    holder = (phone_gate.held_by(picked)
+              or f"งานโพสต์ {fb_runner.running().get(picked, '')}".strip())
+    return picked, (
+        f"📥 {(what + ' ') if what else ''}{job['id']} เข้าคิวรอเครื่อง "
+        f"{telegram_bot._escape(device_book.label(picked))} แล้ว — คิวที่ {place or 1}\n"
+        f"<i>ตอนนี้ {telegram_bot._escape(holder)} ใช้เครื่องนั้นอยู่ · "
+        f"ว่างเมื่อไรจะเริ่มให้เอง</i>"
+    )
 
 
 def _phone_wait_pump() -> None:
-    """จอว่างแล้วหยิบงานแรกในคิวมาเริ่ม — เรียกจากลูปตัวตั้งเวลาทุก 20 วินาที"""
+    """จอว่างแล้วหยิบงานแรกในคิว**ของเครื่องนั้น**มาเริ่ม — เรียกทุก 20 วินาที
+
+    เดินคิวทีละเครื่อง ไม่ใช่ทีละคิวรวม เพราะงานหัวคิวอาจรอเครื่อง A อยู่ ส่วน
+    เครื่อง B ว่าง — ของเดิมจะหยุดทั้งคิวเพราะหัวคิวยังไปไม่ได้ กลายเป็นเครื่อง
+    ที่ว่างอยู่นั่งเฉยๆ ทั้งที่มีงานรอ
+    """
     with _waitlist_lock:
-        if not _phone_waitlist or not phone_is_free():
+        # รายการที่ไม่มี serial แปลว่ามีคนเรียก `_phone_wait_add` แบบเก่า — ทิ้ง
+        # แล้วบอกให้เห็น ห้ามปล่อยให้มันไปทำ `phone_is_free("")` ระเบิดในลูป
+        # ตัวตั้งเวลา เพราะ except ก้อนนอกจะกลืนไว้แล้วคิวจะค้างเงียบตลอดกาล
+        orphan = [i for i in _phone_waitlist if not i.get("serial")]
+        for bad in orphan:
+            _phone_waitlist.remove(bad)
+            append_log("publish", f"[{bad.get('job_id')}] คิวรอจอไม่ได้บอกว่าเครื่องไหน "
+                                  f"— ทิ้งรายการนี้ ({bad.get('kind')})")
+        item = next((i for i in _phone_waitlist if phone_is_free(i["serial"])), None)
+        if item is None:
             return
-        item = _phone_waitlist.pop(0)
+        _phone_waitlist.remove(item)
     kind, job_id, chat_id = item["kind"], item["job_id"], item["chat_id"]
     append_log("publish", f"[{job_id}] จอว่างแล้ว — เริ่มงานที่รอคิวไว้ ({kind})")
     if kind == "followup":
@@ -5106,19 +5296,30 @@ def _claude_pump() -> None:
         chat_id, label, prompt = item["chat_id"], item["label"], item["prompt"]
         # รอจนจอมือถือว่างก่อน — Claude สั่ง ADB ได้เหมือนกัน ถ้าชนกับงานโพสต์
         # จะแตะทับกันเละทั้งคู่ (กำลังพิมพ์แคปชันอยู่แล้วอีกฝั่ง force-stop แอป)
-        if fb_runner.busy:
-            _fb_say(chat_id, f"⏳ รองานโพสต์ที่ทำอยู่ให้จบก่อน แล้วจะเริ่ม: "
-                             f"{telegram_bot._escape(label)}")
-        if not phone_gate.wait_take("claude"):
+        #
+        # จองเฉพาะเครื่องที่ Claude จะไปแตะ ไม่ใช่จองยกเซ็ต — เครื่องอื่นทำงาน
+        # ของตัวเองต่อได้ตามปกติระหว่างที่ Claude ทำงานอยู่บนเครื่องนี้
+        try:
+            phone = _fb_serial()
+        except fb_auto_post.AutoPostError as error:
             _fb_say(chat_id, f"⚠️ {telegram_bot._escape(label)} — "
-                             f"รอจอมือถือว่างเกิน 15 นาที ยกเลิกงานนี้")
+                             f"{telegram_bot._escape(str(error))}")
+            append_log("input", f"Claude [{label[:30]}] ไม่รู้ว่าจะใช้เครื่องไหน: {error}")
+            continue
+        phone_name = telegram_bot._escape(device_book.label(phone))
+        if fb_runner.busy_on(phone):
+            _fb_say(chat_id, f"⏳ รองานโพสต์บน {phone_name} ให้จบก่อน แล้วจะเริ่ม: "
+                             f"{telegram_bot._escape(label)}")
+        if not phone_gate.wait_take("claude", phone):
+            _fb_say(chat_id, f"⚠️ {telegram_bot._escape(label)} — "
+                             f"รอจอ {phone_name} ว่างเกิน 15 นาที ยกเลิกงานนี้")
             append_log("input", f"Claude [{label[:30]}] รอจอไม่ว่าง — ข้าม")
             continue
         _fb_say(chat_id, f"▶️ เริ่ม: {telegram_bot._escape(label)}")
         try:
             ok, reply = claude_run(prompt)
         finally:
-            phone_gate.give_back("claude")
+            phone_gate.give_back("claude", phone)
         append_log("input", f"Claude [{label[:30]}] {'สำเร็จ' if ok else 'ล้ม'}: {reply[:90]}")
         head = f"🤖 <b>{telegram_bot._escape(label)}</b>" if ok else \
                f"⚠️ <b>{telegram_bot._escape(label)} — ทำไม่สำเร็จ</b>"
@@ -5166,13 +5367,18 @@ def _fb_claude_menu() -> tuple[str, dict | None]:
         "",
         "เลือกงานที่ต้องการ — แต่ละงานเป็นคำสั่งที่กำหนดไว้แล้ว อ่านอย่างเดียว ไม่แก้ไฟล์",
     ]
-    holder = phone_gate.held_by()
-    if holder:
-        lines += ["", f"📱 จอมือถือ: <b>{holder}</b> ใช้อยู่ "
-                      f"({phone_gate.held_for() / 60:.0f} นาที)"]
-    elif fb_runner.busy:
-        lines += ["", f"📱 จอมือถือ: งานโพสต์ <b>{fb_runner.job_id}</b> ใช้อยู่ "
-                      "— Claude จะรอจนจบ"]
+    # โชว์ทีละเครื่อง — บอกว่า "จอไม่ว่าง" ลอยๆ ตอนมีหลายเครื่องทำให้เข้าใจผิด
+    # ว่าทั้งชุดติดหมด ทั้งที่ติดแค่เครื่องเดียว
+    busy_lines = []
+    for serial, owner in phone_gate.holders().items():
+        busy_lines.append(f"📱 {device_book.label(serial)}: <b>{owner}</b> ใช้อยู่ "
+                          f"({phone_gate.held_for(serial) / 60:.0f} นาที)")
+    for serial, job_id in fb_runner.running().items():
+        if serial not in phone_gate.holders():
+            busy_lines.append(f"📱 {device_book.label(serial)}: งานโพสต์ "
+                              f"<b>{job_id}</b> ใช้อยู่ — Claude จะรอจนจบ")
+    if busy_lines:
+        lines += [""] + busy_lines
     running, pending = claude_queue_state()
     if running or pending:
         lines += ["", "<b>สถานะคิว</b> — ทำทีละงาน"]
@@ -5299,7 +5505,16 @@ def _fb_scheduler() -> None:
                 #
                 # ถ้าล้างเวลาไปก่อนแล้วถูกปฏิเสธ งานที่ตั้งเวลาไว้จะหายเงียบ
                 # ผู้ใช้ตั้งโพสต์ 6 โมงเช้าแล้วไม่มีอะไรเกิดขึ้นโดยไม่รู้สาเหตุ
-                if phone_gate.held_by():
+                #
+                # ต้องถามถึง**เครื่องของงานนี้** ไม่ใช่ "มีเครื่องไหนถูกจองไหม"
+                # ไม่งั้นงานบนเครื่อง B จะถูกเลื่อนทุกครั้งที่เครื่อง A ยุ่ง
+                # และถ้ายังตอบไม่ได้ว่าจะใช้เครื่องไหน (ยังไม่เลือก / ถอดสายอยู่)
+                # ก็ต้องเลื่อนเหมือนกัน ห้ามล้างเวลาทิ้งเด็ดขาด
+                try:
+                    _job_phone = _fb_serial(str(job.get("serial") or ""))
+                except fb_auto_post.AutoPostError:
+                    _job_phone = ""
+                if not _job_phone or phone_gate.held_by(_job_phone):
                     if job["id"] not in _deferred_jobs:
                         _deferred_jobs.add(job["id"])
                         append_log(
@@ -5595,7 +5810,10 @@ def _fb_status_text() -> str:
 
     lines.append("")
     lines.append("🔧 <b>เครื่อง</b>")
-    lines.append("   งานที่กำลังทำ: " + ("มี" if fb_runner.busy else "ไม่มี"))
+    live = fb_runner.running()
+    lines.append("   งานที่กำลังทำ: " + (
+        " · ".join(f"{device_book.label(s)} → {j}" for s, j in live.items())
+        if live else "ไม่มี"))
     try:
         lines.append(f"   มือถือ: {_fb_serial()} พร้อม")
     except fb_auto_post.AutoPostError as error:
@@ -5952,9 +6170,12 @@ def _telegram_command(chat_id: str, text: str) -> bool:
         # ซึ่งไม่เข้าเงื่อนไขข้างบนเลย แต่ผู้ใช้สั่งยกเลิก = ต้องหยุดมือถือด้วย
         # (เจอจริง 11 ส.ค.: กดยกเลิกตอนรอบตามเก็บรันอยู่แล้วไม่มีอะไรเกิดขึ้น
         #  เพราะการ์ดของงาน done ไม่มีปุ่ม และ /cancel ก็มองไม่เห็นงานนี้)
-        halted = fb_runner.stop()
-        if halted and fb_runner.job_id:
-            append_log("publish", f"[{fb_runner.job_id}] ผู้ใช้สั่งยกเลิก — สั่งหยุดตัวรัน")
+        # หยุดให้ครบทุกเครื่อง ไม่ใช่แค่เครื่องเดียว — ผู้ใช้พิมพ์ /cancel
+        # แปลว่า "หยุดทั้งหมด" ถ้าหยุดไปเครื่องเดียวอีกเครื่องจะโพสต์ต่อเงียบๆ
+        halted = fb_runner.stop_all()
+        for _serial, _job in halted:
+            append_log("publish", f"[{_job}] ผู้ใช้สั่งยกเลิก — "
+                                  f"สั่งหยุดตัวรันบน {device_book.label(_serial)}")
         _fb_say(
             chat_id,
             (f"ยกเลิกแล้ว {len(targets)} งาน" if targets else "ไม่มีงานค้างในคิว")
@@ -5965,8 +6186,9 @@ def _telegram_command(chat_id: str, text: str) -> bool:
     if command == "/stop":
         _fb_say(
             chat_id,
-            "สั่งหยุดแล้ว — จะหยุดหลังกลุ่มที่กำลังทำอยู่จบ" if fb_runner.stop()
-            else "ตอนนี้ไม่มีงานกำลังโพสต์อยู่",
+            (lambda done: f"สั่งหยุดแล้ว {len(done)} เครื่อง — "
+                          "จะหยุดหลังกลุ่มที่กำลังทำอยู่จบ" if done
+                          else "ตอนนี้ไม่มีงานกำลังโพสต์อยู่")(fb_runner.stop_all()),
         )
         return True
     return False
@@ -6106,6 +6328,32 @@ def _telegram_callback(chat_id: str, data: str, callback: dict) -> str:
 # --------------------------------------------------------------- ลงมือโพสต์
 
 
+def _fb_warn_comment_quota(job: dict, groups: list[str], serial: str = "") -> str:
+    """เตือนถ้าโควตาคอมเมนต์ไม่พอสำหรับงานนี้ — เตือนอย่างเดียว ไม่ห้ามโพสต์
+
+    **ต้องรับ serial ของเครื่องที่จะโพสต์จริง** โควตาคอมเมนต์นับแยกรายบัญชี และ
+    หนึ่งเครื่อง = หนึ่งบัญชี ถ้าไปหยิบเครื่องตัวหลักมาเสมอ เครื่องที่สองจะถูกเตือน
+    ด้วยโควตาของเครื่องแรก — เตือนผิดคนทั้งสองทาง (ห้ามทั้งที่ยังมีโควตา หรือ
+    ปล่อยผ่านทั้งที่เต็มแล้ว)
+    """
+    per_post = len(_fb_comments(job))
+    if not per_post:
+        return ""
+    account = str(serial or "").strip()
+    if not account:
+        try:
+            account = _fb_serial()
+        except fb_auto_post.AutoPostError:
+            account = ""
+    note = fb_comment_guard.plan_shortfall(len(groups) * per_post, account=account)
+    if not note:
+        return ""
+    append_log("publish", f"[{job['id']}] {note}")
+    _fb_say(job.get("chat_id", ""), note + "\n<i>เติมทีหลังได้ด้วย "
+            f"<code>/followup {job['id']}</code></i>")
+    return note
+
+
 def _fb_run_job(job_id: str, queued: bool = False) -> str:
     """ตรวจความพร้อมแล้วสั่งรัน — คืนข้อความบอกผลการสั่ง (ว่าง = เริ่มแล้ว)"""
     job = fb_jobs.get(job_id)
@@ -6113,19 +6361,11 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
         return "ไม่พบงานนี้"
     if job["status"] == fb_auto_post.STATUS_RUNNING:
         return "งานนี้กำลังโพสต์อยู่แล้ว"
-    # จอมือถือมีเจ้าเดียว — ไม่ว่างก็เข้าคิวรอ ไม่ปฏิเสธทิ้ง
-    if not phone_is_free():
-        if queued:
-            return PHONE_WAIT_NOTE          # ตัวเดินคิวจะคืนกลับหัวคิวเอง
-        place = _phone_wait_add("post", job_id, job.get("chat_id", ""))
-        if place < 0:
-            return f"คิวรอจอเต็ม ({PHONE_WAITLIST_LIMIT} งาน)"
-        holder = phone_gate.held_by() or f"งานโพสต์ {fb_runner.job_id}"
-        return (
-            f"📥 เข้าคิวรอจอแล้ว — คิวที่ {place or 1}\n"
-            f"<i>ตอนนี้ {telegram_bot._escape(holder)} ใช้จออยู่ · "
-            f"จอว่างเมื่อไรจะเริ่มให้เอง</i>"
-        )
+    # จอของเครื่องนั้นมีเจ้าเดียว — ไม่ว่างก็เข้าคิวรอ ไม่ปฏิเสธทิ้ง
+    # (คิวแยกรายเครื่อง งานของเครื่องที่ว่างจึงไม่ต้องรอคิวของเครื่องที่ยุ่ง)
+    serial, note = _fb_gate("post", job, queued, str(job.get("serial") or ""))
+    if note:
+        return note
     if not job.get("caption", "").strip():
         return "ยังไม่มีแคปชัน"
     images = [Path(p) for p in (job.get("images") or [job.get("image", "")]) if p]
@@ -6136,6 +6376,8 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
     groups = [g for g in (job.get("groups") or []) if g]
     if not groups:
         return "ยังไม่ได้เลือกกลุ่มสักกลุ่ม"
+    # เตือนเรื่องโควตาคอมเมนต์ **ก่อนออกตัว** ไม่ใช่ไปตันทีละกลุ่มกลางทาง
+    _fb_warn_comment_quota(job, groups, serial)
     if len(groups) > fb_auto_post.MAX_GROUPS_PER_POST:
         # โพสต์รัวหลายกลุ่มเกินไปเข้าข่ายสแปม — กันที่นี่อีกชั้นเผื่อเลือกมาเกิน
         return (
@@ -6143,12 +6385,20 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
             f"{fb_auto_post.MAX_GROUPS_PER_POST} กลุ่ม เอาออกก่อน"
         )
 
-    try:
-        serial = _fb_serial()
-    except fb_auto_post.AutoPostError as error:
-        return str(error)
-
     chat_id = job.get("chat_id", "")
+
+    # เตือนถ้าเพิ่งโพสต์กลุ่มเดิมไปไม่นาน — โพสต์ถี่คือทางตรงสู่การโดนตีธงสแปม
+    #
+    # **เตือนอย่างเดียว ไม่ห้าม** เพราะบางทีตั้งใจโพสต์ซ้ำจริง (แก้รูปผิดแล้วลงใหม่)
+    # การข้ามกลุ่มให้เองเงียบๆ จะกลายเป็น "โพสต์ไม่ครบโดยไม่มีใครรู้" ซึ่งแย่กว่า
+    duplicate = fb_preflight.check_duplicate(
+        fb_jobs.listing(), groups, label=fb_groups.label, skip_job=job_id,
+    )
+    if not duplicate.ok:
+        append_log("publish", f"[{job_id}] เตือนโพสต์ซ้ำ — {duplicate.detail}")
+        _fb_say(chat_id, f"⚠️ <b>เพิ่งโพสต์กลุ่มนี้ไปไม่นาน</b>\n"
+                         f"{telegram_bot._escape(duplicate.detail)}\n"
+                         f"<i>โพสต์ถี่เกินเสี่ยงโดนตีธง — เริ่มให้ตามที่สั่ง</i>")
 
     def on_log(line: str) -> None:
         append_log("publish", f"[{job_id}] {line}")
@@ -6186,7 +6436,7 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
             _fb_show_card(current)
         summary = fb_auto_post.summarize(results, fb_groups.label)
         posted = sum(1 for r in results if r.get("posted"))
-        chain = bool(posted) and not fb_runner.stop_flag.is_set()
+        chain = bool(posted) and not fb_runner.for_device(serial).stop_flag.is_set()
         delay = _fb_followup_delay(results)
         held = delay > AUTO_FOLLOWUP_DELAY      # ไม่เห็นโพสต์เลย = รออนุมัติ
         _fb_say(chat_id, f"🏁 <b>งาน {job_id} จบแล้ว</b>\n{summary}" + (
@@ -6203,7 +6453,7 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
         # แม่นกว่ามาก จึงต่อสายไปทำต่อให้เลย ไม่ต้องรอผู้ใช้พิมพ์ /followup
         # ผู้ใช้สั่งหยุด/ยกเลิกไว้ = ไม่ต่อ
         if chain:
-            _fb_auto_followup(job_id, delay)
+            _fb_auto_followup(job_id, delay, serial)
 
     class Clipboard:
         """อ่าน/เขียนคลิปบอร์ดมือถือผ่านช่อง scrcpy เดิมที่มีอยู่แล้ว
@@ -6226,9 +6476,9 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
             return scrcpy_control.get_clipboard(ADB, serial)
 
     try:
-        fb_runner.start(
+        fb_runner.for_device(serial).start(
             job={**job, "groups": groups}, adb=ADB, serial=serial, image=image,
-            gap_range=_fb_gap_range(), on_log=on_log, on_result=on_result,
+            gap_range=_fb_gap_range(serial), on_log=on_log, on_result=on_result,
             on_done=on_done, clipboard=Clipboard,
             # ส่งเป็นฟังก์ชัน ไม่ใช่ค่าคงที่ — ผู้ใช้พิมพ์ /comment กลางคันได้
             comment=lambda: _fb_comments(fb_jobs.get(job_id) or {}),
@@ -6280,8 +6530,12 @@ async def fb_list_groups() -> dict:
         "gap_min": settings.get("gap_min", 15),
         "gap_max": settings.get("gap_max", 20),
         "auto_start": bool(settings.get("auto_start")),
+        # ค่าตั้งต้นเปิด — ไม่ได้ตั้งไว้ต้องแปลว่า "เปิด" ไม่ใช่ "ปิด"
+        "phone_clean": bool(settings.get("phone_clean", True)),
+        "screen_saver": bool(settings.get("screen_saver", True)),
         "serial": settings.get("serial", ""),
-        "running": fb_runner.busy,
+        "running": fb_runner.any_busy(),
+        "running_on": fb_runner.running(),
     }
 
 
@@ -6366,20 +6620,50 @@ async def fb_followup(request: Request) -> dict:
 
 @app.post("/api/fb/settings")
 async def fb_save_settings(request: Request) -> dict:
+    """บันทึกค่าตั้งสายโพสต์ — ส่ง `serial` มาด้วย = บันทึกให้เครื่องนั้นเครื่องเดียว
+
+    ไม่ส่ง serial = แก้ค่ากลางของระบบ ซึ่งเครื่องที่ยังไม่ได้ตั้งค่าเองจะใช้ตาม
+    เครื่องที่ตั้งค่าเองไว้แล้วจะไม่ถูกกระทบ — เป็นกติกาเดียวกับที่ `devices.settings()`
+    ใช้ ทำให้เพิ่มค่าตั้งใหม่ทีหลังแยกรายเครื่องได้เองโดยไม่ต้องแก้ตรงนี้อีก
+    """
     payload = await request.json()
+    serial = str(payload.get("serial") or "").strip()
+    changes: dict = {}
+    if "gap_min" in payload:
+        changes["gap_min"] = max(5, int(payload.get("gap_min") or 15))
+    if "gap_max" in payload:
+        changes["gap_max"] = max(5, int(payload.get("gap_max") or 20))
+    for key in ("auto_start", "phone_clean", "screen_saver"):
+        if key in payload:
+            changes[key] = bool(payload[key])
+
+    if serial and payload.get("per_device"):
+        # ค่าของเครื่องเดียว — ต้องเทียบเว้นระยะกับค่าที่เครื่องนั้นใช้จริง
+        # ไม่ใช่ค่ากลาง ไม่งั้นตั้งขั้นต่ำ 30 บนเครื่องที่ขั้นสูงเป็น 20 แล้วผ่านไปได้
+        merged = {**device_book.settings(serial), **changes}
+        if merged.get("gap_min", 15) > merged.get("gap_max", 20):
+            changes["gap_max"] = merged["gap_min"]
+        try:
+            live = await asyncio.to_thread(device_book.set_settings, serial, changes)
+        except device_book.DeviceError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "serial": serial, **live}
+
     config = load_config()
     settings = config.get("facebook") or {}
-    if "gap_min" in payload:
-        settings["gap_min"] = max(5, int(payload.get("gap_min") or 15))
-    if "gap_max" in payload:
-        settings["gap_max"] = max(5, int(payload.get("gap_max") or 20))
+    settings.update(changes)
     # เว้นระยะขั้นต่ำต้องไม่มากกว่าขั้นสูง ไม่งั้นสุ่มค่าไม่ได้
     if settings.get("gap_min", 15) > settings.get("gap_max", 20):
         settings["gap_max"] = settings["gap_min"]
-    if "auto_start" in payload:
-        settings["auto_start"] = bool(payload["auto_start"])
     if "serial" in payload:
-        settings["serial"] = str(payload["serial"]).strip()
+        # ของเดิมเก็บ "เครื่องตัวหลัก" ไว้ที่นี่ — ย้ายไปเป็นของทะเบียนแล้ว แต่ยัง
+        # เขียนค่าเดิมไว้ด้วยจนกว่าจะแน่ใจว่าไม่มีใครอ่านที่เก่าอยู่
+        settings["serial"] = serial
+        if serial:
+            try:
+                await asyncio.to_thread(device_book.set_default, serial)
+            except device_book.DeviceError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
     config["facebook"] = settings
     save_config(config)
     return {"ok": True, **settings}
@@ -6390,7 +6674,8 @@ async def fb_list_jobs() -> dict:
     jobs = fb_jobs.listing()[:10]
     return {
         "ok": True,
-        "running": fb_runner.busy,
+        "running": fb_runner.any_busy(),
+        "running_on": fb_runner.running(),
         "jobs": [
             {
                 **job,

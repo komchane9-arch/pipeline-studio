@@ -2031,11 +2031,29 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
     )
     await asyncio.sleep(0.4)
 
+    # ---- ทางหลัก: ช่องวิดีโอของ scrcpy ----
+    # `screenrecord` เป็นเครื่องมือ "อัดวิดีโอ" ไม่ใช่ "มิเรอร์" มันบัฟเฟอร์เพื่อให้ไฟล์สวย
+    # และมีเพดาน 175 วินาทีต้องรีสตาร์ตเรื่อยๆ ส่วน scrcpy ออกแบบมาเพื่อมิเรอร์โดยตรง
+    # วัดจริง 20 ส.ค. 2026 เครื่องเดียวกัน: เฟรมแรก 1,166 ms -> 84 ms (เร็วกว่า 14 เท่า)
+    # เปิดไม่ได้ก็ถอยไป screenrecord เหมือนเดิม ไม่ปล่อยให้จอดำ
+    video = None
+    if scrcpy_control.is_available():
+        try:
+            video = await asyncio.to_thread(
+                scrcpy_control.open_video, ADB, cleaned, 1024, 30)
+            print(f"[stream] scrcpy พร้อม {video.width}x{video.height}", flush=True)
+        except scrcpy_control.ScrcpyUnavailable as error:
+            # app.py ไม่มี logger — เขียนลง stdout ซึ่ง restart_studio ต่อเข้า
+            # data/server.log ไว้แล้ว (เคยพลาดเรียก logger ตรงนี้จน endpoint พังทั้งตัว)
+            print(f"[stream] เปิดช่องวิดีโอ scrcpy ไม่ได้ ถอยไป screenrecord: {error}",
+                  flush=True)
+            video = None
+
     receive_task = asyncio.create_task(websocket.receive())
     process: subprocess.Popen | None = None
     try:
         while True:
-            process = subprocess.Popen(
+            process = None if video is not None else subprocess.Popen(
                 [
                     ADB, "-s", cleaned, "exec-out", "screenrecord",
                     "--output-format=h264", *size_arguments,
@@ -2044,19 +2062,25 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            if process.stdout is None:
-                raise RuntimeError("เปิดสตรีมหน้าจอไม่สำเร็จ")
+            if video is not None:
+                # scrcpy คืนมาเป็นแพ็กเก็ตที่ตัดหัวออกแล้ว เป็น Annex-B ล้วน
+                # จึงป้อนเข้าตรรกะตัด NAL ข้างล่างได้เหมือนกันเป๊ะ ไม่ต้องแก้อะไรต่อ
+                def read_available() -> bytes:
+                    return video.read_available()
+            else:
+                if process.stdout is None:
+                    raise RuntimeError("เปิดสตรีมหน้าจอไม่สำเร็จ")
 
-            # อ่านเท่าที่มีจริง ไม่รอจนครบบล็อก — จอที่นิ่งข้อมูลไหลทีละน้อย
-            # ถ้ารอครบ 16KB คีย์เฟรมแรกจะค้างใน pipe หลายวินาทีก่อนโผล่
-            # (อาการที่เจอจริง: ได้แค่ SPS+PPS 27 ไบต์แล้วเงียบ)
-            stream_fd = process.stdout.fileno()
+                # อ่านเท่าที่มีจริง ไม่รอจนครบบล็อก — จอที่นิ่งข้อมูลไหลทีละน้อย
+                # ถ้ารอครบ 16KB คีย์เฟรมแรกจะค้างใน pipe หลายวินาทีก่อนโผล่
+                # (อาการที่เจอจริง: ได้แค่ SPS+PPS 27 ไบต์แล้วเงียบ)
+                stream_fd = process.stdout.fileno()
 
-            def read_available() -> bytes:
-                try:
-                    return os.read(stream_fd, 16384)
-                except OSError:
-                    return b""
+                def read_available() -> bytes:
+                    try:
+                        return os.read(stream_fd, 16384)
+                    except OSError:
+                        return b""
 
             buffer = bytearray()
             while True:
@@ -2069,6 +2093,11 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
                     return
                 chunk = read_task.result()
                 if not chunk:
+                    # ช่อง scrcpy: ว่างเปล่าแปลว่า "จอยังไม่ขยับ" ไม่ใช่ "ช่องปิด"
+                    # ตีความผิดตรงนี้จะกลายเป็นวนเปิดสตรีมใหม่ไม่หยุด ซึ่งเป็นบั๊ก
+                    # เดียวกับที่เพิ่งไล่แก้ใน screenrecord
+                    if video is not None and video.alive:
+                        continue
                     break
                 buffer.extend(chunk)
                 # ส่งทีละ NAL — ฝั่งหน้าเว็บป้อนเข้า VideoDecoder ได้ทันที
@@ -2089,6 +2118,8 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
         return
     finally:
         receive_task.cancel()
+        if video is not None:
+            await asyncio.to_thread(video.close)
         if process is not None and process.poll() is None:
             process.terminate()
             try:

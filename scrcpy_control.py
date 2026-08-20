@@ -449,6 +449,194 @@ _sessions: dict[str, _Session] = {}
 _registry_lock = threading.Lock()
 
 
+# ---------------------------------------------------------------- วิดีโอ
+# **แยกเซสชันจากช่องควบคุมโดยตั้งใจ** ถ้าเปิด video=true บนเซิร์ฟเวอร์ตัวเดียวกับที่ใช้
+# ฉีดนิ้วอยู่ ลำดับ socket จะเปลี่ยน (วิดีโอกลายเป็น socket แรก → handshake ย้ายที่)
+# แล้วนิ้วที่ใช้งานได้ดีอยู่จะพังไปด้วย แยกกันแล้ววิดีโอล่มก็ยังกดจอได้ปกติ
+#
+# **รูปแบบข้อมูลถอดจากของจริง ไม่ได้เดา** (มือถือ 7a95129e · 20 ส.ค. 2026):
+#
+#     68 32 36 34 | 80 00 00 00 | 00 00 00 d8 | 00 00 01 e0
+#     'h264'        ยังไม่รู้ใช้ทำอะไร  กว้าง 216      สูง 480      <- หัว 16 ไบต์
+#     40 00 .. 00 | 00 00 00 1f | 00 00 00 01 67 ...
+#     PTS+ธง 8 ไบต์  ยาว 31        Annex-B จริง (SPS)   <- แพ็กเก็ต หัว 12 ไบต์
+#
+# รอบแรกเดาว่าหัวเป็น 12 ไบต์แบบ codec+w+h แล้วได้ขนาด 2147483648x324 ซึ่งเป็นไปไม่ได้
+# จึงดัมป์ไบต์ดิบดูก่อนแทนการเดาต่อ
+VIDEO_HEADER_BYTES = 16
+PACKET_HEADER_BYTES = 12
+MAX_PACKET_BYTES = 8 * 1024 * 1024      # กันหลุดเฟรมแล้วอ่านขยะเป็นความยาว
+
+
+class VideoStream:
+    """ช่องวิดีโอ H.264 จาก scrcpy — คืนไบต์ Annex-B ล้วน ตัดหัวแพ็กเก็ตออกให้แล้ว
+
+    ตั้งใจให้ `read_available()` มีหน้าตาเหมือนการอ่าน pipe ของ `screenrecord`
+    ผู้เรียกจึงสลับต้นทางได้โดยไม่ต้องแก้ตรรกะตัดสินใจ NAL ที่ทำงานอยู่แล้ว
+    """
+
+    def __init__(self, adb_executable: str, serial: str, max_size: int = 0,
+                 max_fps: int = 0) -> None:
+        self.adb_executable = adb_executable
+        self.serial = serial
+        self.max_size = max_size
+        self.max_fps = max_fps
+        # ต้องใช้สูตรเดียวกับช่องควบคุมข้างบน — ฝั่ง Java อ่านด้วย Integer.parseInt(..,16)
+        # ซึ่งเป็น signed 32 บิต ค่าที่เกิน 0x7fffffff จะโยน NumberFormatException ทิ้ง
+        # ตั้งแต่เริ่ม (เขียน token_hex(4) ตอนแรกแล้วพังราวครึ่งหนึ่งของครั้งที่สุ่ม)
+        self.scid = f"{secrets.randbelow(0x80000000):08x}"
+        self.port = _free_local_port()
+        self.process: subprocess.Popen | None = None
+        self.sock: socket.socket | None = None
+        self.width = 0
+        self.height = 0
+        self.alive = True
+
+    def _adb(self, *arguments: str, timeout: float = 20.0):
+        return subprocess.run(
+            [self.adb_executable, "-s", self.serial, *arguments],
+            capture_output=True, timeout=timeout, creationflags=NO_WINDOW)
+
+    def open(self) -> None:
+        if not SCRCPY_JAR.exists():
+            raise ScrcpyUnavailable(f"ไม่พบไฟล์ {SCRCPY_JAR.name}")
+        self._adb("push", str(SCRCPY_JAR), JAR_ON_DEVICE, timeout=90)
+        # ตัวเข้ารหัสมีชุดเดียว — screenrecord ค้างอยู่แล้ว scrcpy จะเปิดไม่ขึ้น
+        # (เจอจริงตอนหยั่งโปรโตคอล: ต่อ socket ได้แต่ไม่มีเฟรมมาเลยจนหมดเวลา)
+        self._adb("shell", "pkill -f screenrecord", timeout=10)
+        result = self._adb("forward", f"tcp:{self.port}",
+                           f"localabstract:scrcpy_{self.scid}")
+        if result.returncode != 0:
+            raise ScrcpyUnavailable("ตั้ง adb forward สำหรับวิดีโอไม่สำเร็จ")
+
+        options = [
+            self.adb_executable, "-s", self.serial, "shell",
+            f"CLASSPATH={JAR_ON_DEVICE}", "app_process", "/",
+            "com.genymobile.scrcpy.Server", SCRCPY_SERVER_VERSION,
+            f"scid={self.scid}", "log_level=error",
+            "video=true", "audio=false", "control=false",
+            "tunnel_forward=true", "cleanup=false", "power_on=false",
+            "video_codec=h264",
+        ]
+        if self.max_size:
+            options.append(f"max_size={self.max_size}")
+        if self.max_fps:
+            options.append(f"max_fps={self.max_fps}")
+        self.process = subprocess.Popen(options, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT,
+                                        creationflags=NO_WINDOW)
+        try:
+            self._connect()
+        except ScrcpyUnavailable:
+            self.close()
+            raise
+
+    def _connect(self) -> None:
+        deadline = time.monotonic() + CONNECT_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                sock = socket.create_connection(("127.0.0.1", self.port), timeout=2.0)
+                sock.settimeout(2.5)
+                if sock.recv(1) == b"\x00":
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    self.sock = sock
+                    _Session._read_exactly(sock, DEVICE_NAME_FIELD_LENGTH)
+                    self._read_codec_header()
+                    return
+                sock.close()
+            except OSError:
+                pass
+            if self.process is not None and self.process.poll() is not None:
+                # ต้องเอาข้อความจากฝั่งมือถือมาด้วย ไม่งั้นได้แค่ "ไม่สำเร็จ" ซึ่งไล่ต่อไม่ได้
+                note = "(ไม่มีข้อความ)"
+                try:
+                    if self.process.stdout is not None:
+                        raw = self.process.stdout.read() or b""
+                        note = raw.decode("utf-8", errors="replace").strip() or note
+                except (OSError, ValueError):
+                    pass
+                raise ScrcpyUnavailable(
+                    "scrcpy-server (วิดีโอ) หยุดทำงานตั้งแต่เริ่ม: " + note[:400])
+            time.sleep(0.15)
+        raise ScrcpyUnavailable("ต่อช่องวิดีโอของ scrcpy ไม่สำเร็จ (หมดเวลา)")
+
+    def _read_codec_header(self) -> None:
+        head = _Session._read_exactly(self.sock, VIDEO_HEADER_BYTES)
+        codec = head[:4]
+        if codec != b"h264":
+            raise ScrcpyUnavailable(
+                f"ได้ codec {codec!r} ซึ่งฝั่งหน้าเว็บถอดไม่ได้ (รองรับเฉพาะ h264)")
+        self.width = int.from_bytes(head[8:12], "big")
+        self.height = int.from_bytes(head[12:16], "big")
+        # ขนาดที่อ่านไม่ออกแปลว่าตีความหัวผิด — ดังกว่าปล่อยให้ภาพเพี้ยนเงียบๆ
+        if not (0 < self.width <= 8192 and 0 < self.height <= 8192):
+            raise ScrcpyUnavailable(
+                f"หัววิดีโอให้ขนาด {self.width}x{self.height} ซึ่งเป็นไปไม่ได้"
+                " — รูปแบบข้อมูลของ scrcpy อาจเปลี่ยน")
+
+    def read_available(self) -> bytes:
+        """อ่านหนึ่งแพ็กเก็ต คืนเฉพาะเนื้อ Annex-B (ตัดหัว 12 ไบต์ทิ้ง)
+
+        **หมดเวลากับช่องปิดไม่ใช่เรื่องเดียวกัน** จอที่นิ่งอยู่ไม่มีเฟรมใหม่ให้เข้ารหัส
+        เลย (วัดจริง: จอนิ่งได้ 1.4 แพ็กเก็ต/วินาที) ถ้าตีความว่าปิดแล้วไปเปิดใหม่
+        จะกลายเป็นวนเปิดสตรีมไม่หยุด — ซึ่งเป็นบั๊กเดียวกับที่เพิ่งไล่แก้ใน screenrecord
+
+        คืน b"" ได้สองกรณี ให้ผู้เรียกดู `alive` ประกอบ:
+          alive=True   ยังไม่มีเฟรมใหม่ ให้เรียกซ้ำ
+          alive=False  ช่องปิดจริง ต้องเลิก
+        """
+        sock = self.sock
+        if sock is None:
+            self.alive = False
+            return b""
+        try:
+            header = _Session._read_exactly(sock, PACKET_HEADER_BYTES)
+        except TimeoutError:
+            return b""                      # จอนิ่ง ยังไม่ตาย
+        except (ScrcpyUnavailable, OSError):
+            self.alive = False
+            return b""
+        size = int.from_bytes(header[8:12], "big")
+        if not (0 < size <= MAX_PACKET_BYTES):
+            # หลุดจังหวะแล้ว อ่านต่อไปได้แต่ขยะ — หยุดดีกว่าส่งภาพเสียให้หน้าเว็บ
+            logger.error("scrcpy วิดีโอ: ความยาวแพ็กเก็ตผิดปกติ %d ไบต์", size)
+            self.alive = False
+            return b""
+        try:
+            return _Session._read_exactly(sock, size)
+        except (TimeoutError, ScrcpyUnavailable, OSError):
+            # ขาดกลางแพ็กเก็ต = จังหวะเสียแล้ว อ่านต่อได้แต่ขยะ
+            self.alive = False
+            return b""
+
+    def close(self) -> None:
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            self.sock = None
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+        self.process = None
+        try:
+            self._adb("forward", "--remove", f"tcp:{self.port}", timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        # ฆ่าตัวบนมือถือด้วย — terminate() ข้างบนฆ่าได้แค่ adb ฝั่งคอม
+        try:
+            self._adb("shell", f"pkill -f scid={self.scid}", timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def open_video(adb_executable: str, serial: str, max_size: int = 0,
+               max_fps: int = 0) -> VideoStream:
+    stream = VideoStream(adb_executable, serial, max_size, max_fps)
+    stream.open()
+    return stream
+
+
 def is_available() -> bool:
     """มีไฟล์ jar ให้ใช้หรือไม่ (ไม่ได้แปลว่ามือถือจะรองรับ)"""
     return SCRCPY_JAR.is_file()

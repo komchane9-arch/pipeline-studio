@@ -440,7 +440,10 @@ def probe_product(link: str, dump_to: Path | None = None, log: Callable[[str], N
                 user_data_dir=str(studio_shared.BROWSER_PROFILE),
                 channel="chrome",
                 headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
+                args=["--disable-blink-features=AutomationControlled",
+                      # ปิดเสียง — บอทอ่านจากภาพบนจอ ไม่เคยใช้เสียง แต่คลิป
+                      # TikTok เล่นเองเสียงดังใส่ผู้ใช้ (แจ้งเอง 21 ส.ค. 2026)
+                      "--mute-audio"],
             )
             try:
                 page = context.pages[0] if context.pages else context.new_page()
@@ -605,7 +608,10 @@ def fetch_product(link: str, out_dir: Path, log: Callable[[str], None] = print) 
                 user_data_dir=str(studio_shared.BROWSER_PROFILE),
                 channel="chrome",
                 headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
+                args=["--disable-blink-features=AutomationControlled",
+                      # ปิดเสียง — บอทอ่านจากภาพบนจอ ไม่เคยใช้เสียง แต่คลิป
+                      # TikTok เล่นเองเสียงดังใส่ผู้ใช้ (แจ้งเอง 21 ส.ค. 2026)
+                      "--mute-audio"],
             )
             try:
                 page = context.pages[0] if context.pages else context.new_page()

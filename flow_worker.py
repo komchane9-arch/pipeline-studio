@@ -522,6 +522,8 @@ def open_browser(playwright, hidden: bool = False):
     profile_dir.mkdir(parents=True, exist_ok=True)
     args = [
         "--disable-blink-features=AutomationControlled",
+        # ปิดเสียง — คลิปที่ Flow เจนเสร็จเล่นตัวอย่างเองพร้อมเสียง
+        "--mute-audio",
         # บังคับโฟลเดอร์โปรไฟล์ให้ชัด ไม่ปล่อยให้ Chrome เลือกเองจาก Local State
         #
         # เจอจริง: โปรไฟล์บอทก๊อป Local State ของเครื่องต้นทางมาทั้งก้อน ซึ่งมี

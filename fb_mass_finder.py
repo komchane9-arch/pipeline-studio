@@ -225,6 +225,8 @@ def _open_persistent(playwright, farm: ProfileFarm, entry: dict):
         no_viewport=True,
         args=[
             "--disable-blink-features=AutomationControlled",
+            # ปิดเสียง — คลิปในฟีดเล่นเองตอนเลื่อนหา เสียงดังใส่ผู้ใช้ทั้งวัน
+            "--mute-audio",
             "--profile-directory=Default",
             "--no-first-run",
             "--no-default-browser-check",

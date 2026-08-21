@@ -186,6 +186,7 @@ class PhoneScreen {
         if (this.canvas.width !== frame.displayWidth) {
           this.canvas.width = frame.displayWidth;
           this.canvas.height = frame.displayHeight;
+          this.fitViewer(frame.displayWidth, frame.displayHeight);
         }
         this.context.drawImage(frame, 0, 0);
         frame.close();
@@ -256,6 +257,7 @@ class PhoneScreen {
     const probe = new Image();
     probe.onload = () => {
       if (!this.live) return;
+      this.fitViewer(probe.naturalWidth, probe.naturalHeight);
       this.image.src = probe.src;
       this.image.hidden = false;
       this.canvas.hidden = true;
@@ -297,6 +299,24 @@ class PhoneScreen {
       this.touchSocket = null;
     }
     this.hold = null;
+  }
+
+  /**
+   * ปรับกรอบให้เท่าสัดส่วนจอจริงของเครื่องนั้น
+   *
+   * เดิม CSS ตั้งไว้ตายตัวที่ 9:19 ซึ่งไม่ตรงกับเครื่องไหนเลย — REDMI 15C
+   * เป็น 720x1600 และ Xiaomi 11T pro เป็น 1080x2400 ทั้งคู่คือ 9:20 ภาพจึงมี
+   * ขอบดำคาดบนล่างตลอด และกรอบไม่เท่าจอจริง
+   *
+   * **ห้ามกลับไปตั้งเป็นเลขตายตัวอีก** (กติกาข้อ 8) เสียบเครื่องรุ่นใหม่ที่จอ
+   * สัดส่วนอื่นเมื่อไร ค่าตายตัวจะผิดทันทีโดยไม่มีอะไรฟ้อง — อ่านจากภาพจริง
+   * ที่เครื่องส่งมาเท่านั้น
+   */
+  fitViewer(width, height) {
+    if (!this.viewer || !width || !height) return;
+    const ratio = `${width} / ${height}`;
+    if (this.viewer.style.aspectRatio === ratio) return;
+    this.viewer.style.aspectRatio = ratio;
   }
 
   /** ภาพที่กำลังแสดงอยู่ (canvas สตรีม หรือ img ภาพนิ่ง) */

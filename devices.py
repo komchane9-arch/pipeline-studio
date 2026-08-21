@@ -370,6 +370,53 @@ def enabled_serials(lane: str = "") -> list[str]:
     return out
 
 
+def account(serial: str) -> str:
+    """บัญชีที่ล็อกอินอยู่บนเครื่องนี้ — ว่าง = ยังไม่ได้ผูก"""
+    device = load()["devices"].get(str(serial or "").strip()) or {}
+    return str(device.get("account") or "").strip()
+
+
+def accounts() -> dict:
+    """{ชื่อบัญชี: serial} ของทุกเครื่องที่เปิดใช้และผูกบัญชีไว้แล้ว"""
+    data = load()
+    out: dict[str, list[str]] = {}
+    for serial, device in data["devices"].items():
+        if not device.get("enabled"):
+            continue
+        name = str(device.get("account") or "").strip()
+        if name:
+            out.setdefault(name, []).append(serial)
+    return out
+
+
+def device_for_account(name: str) -> str:
+    """บัญชีนี้อยู่เครื่องไหน — **หนึ่งเครื่องต่อหนึ่งไอดี** (เจ้าของสั่ง 21 ส.ค. 2569)
+
+    ตอบไม่ได้แน่ชัดต้องโยน error พร้อมบอกทางแก้ ห้ามหยิบเครื่องแรกมาใช้ —
+    โพสต์ลงบัญชีผิดกู้คืนไม่ได้ ส่วนงานไม่เริ่มพร้อมเหตุผลเสียแค่เวลากดใหม่
+
+    เจอสองเครื่องผูกบัญชีเดียวกัน = ตั้งค่าผิด ต้องบอกให้รู้ทันที ไม่ใช่เลือกให้เอง
+    แล้วปล่อยให้ไปเจอตอนโพสต์ซ้ำสองเครื่อง
+    """
+    wanted = str(name or "").strip()
+    if not wanted:
+        raise DeviceError("ต้องบอกชื่อบัญชีที่จะโพสต์")
+    book = accounts()
+    found = book.get(wanted) or []
+    if not found:
+        known = " · ".join(sorted(book)) or "ยังไม่มีเครื่องไหนผูกบัญชีไว้เลย"
+        raise DeviceUnknown(
+            f"ไม่รู้ว่าบัญชี '{wanted}' อยู่เครื่องไหน — ผูกด้วย\n"
+            f"    python devices.py account <serial> \"{wanted}\"\n"
+            f"บัญชีที่ผูกไว้แล้ว: {known}")
+    if len(found) > 1:
+        where = " · ".join(f"{label(s)} [{s}]" for s in found)
+        raise DeviceError(
+            f"บัญชี '{wanted}' ถูกผูกไว้ {len(found)} เครื่อง ซึ่งผิดกติกา "
+            f"หนึ่งเครื่องต่อหนึ่งไอดี: {where}")
+    return found[0]
+
+
 def resolve(serial: str = "", lane: str = "", *, allow_default: bool = False) -> str:
     """ตอบว่า "จะสั่งงานเครื่องไหน" — ห้ามเดาเองเมื่อมีให้เลือกหลายเครื่อง
 
@@ -710,6 +757,10 @@ def _print_list() -> int:
         print(f"     serial {serial} · {device['model'] or 'ไม่รู้รุ่น'} · {plug}")
         print(f"     สายงาน: {lanes} · ค่าตั้งเฉพาะเครื่อง {len(device['settings'])} ค่า"
               + (f" · เห็นล่าสุด {device['seen_at']}" if device["seen_at"] else ""))
+        # บัญชีต้องเห็นทุกครั้งที่ดูรายการ — "โพสต์ลงบัญชีผิด" กู้ไม่ได้
+        # ถ้าไม่โชว์ตรงนี้ คนตั้งค่าจะไม่มีทางรู้ว่าเครื่องไหนยังไม่ได้ผูก
+        bound = str(device.get("account") or "").strip()
+        print(f"     บัญชี: {bound or '⚠️ ยังไม่ได้ผูก — งานที่ระบุบัญชีจะไม่ยิงใส่เครื่องนี้'}")
     return 0
 
 
@@ -730,6 +781,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("lane", help="มอบหมายสายงาน (คั่นด้วยจุลภาค · ว่าง = ทุกสาย)")
     p.add_argument("serial")
     p.add_argument("lanes")
+    p = sub.add_parser("account", help="ผูกบัญชีที่ล็อกอินบนเครื่องนี้ (หนึ่งเครื่อง = หนึ่งไอดี)")
+    p.add_argument("serial")
+    p.add_argument("name")
     p = sub.add_parser("copy", help="ก๊อปค่าตั้งจากเครื่องหนึ่งไปอีกเครื่อง")
     p.add_argument("source")
     p.add_argument("target")
@@ -767,6 +821,20 @@ def main(argv: list[str] | None = None) -> int:
             upsert(args.serial, lanes=lanes)
             print(f"{label(args.serial)} รับสาย: "
                   + (", ".join(LANES.get(x, x) for x in lanes) or "ทุกสาย"))
+            return 0
+        if args.command == "account":
+            wanted = args.name.strip()[:60]
+            # กันผูกบัญชีเดียวกันสองเครื่องตั้งแต่ตอนตั้งค่า ไม่ใช่ไปเจอตอนโพสต์
+            clash = [s for s in (accounts().get(wanted) or []) if s != args.serial]
+            if clash:
+                where = " · ".join(f"{label(s)} [{s}]" for s in clash)
+                raise DeviceError(
+                    f"บัญชี '{wanted}' ผูกอยู่กับ {where} แล้ว — "
+                    f"หนึ่งเครื่องต่อหนึ่งไอดี ถ้าย้ายเครื่องให้ล้างของเดิมก่อนด้วย\n"
+                    f"    python devices.py account {clash[0]} \"\"")
+            upsert(args.serial, account=wanted)
+            print(f"ผูก {label(args.serial)} เข้ากับบัญชี "
+                  + (f"'{wanted}'" if wanted else "— (ล้างการผูกแล้ว)"))
             return 0
         if args.command == "copy":
             merged = copy_settings(args.source, args.target)

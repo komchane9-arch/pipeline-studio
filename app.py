@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import base64
+import contextlib
 import ctypes
 import dataclasses
 import json
@@ -1633,6 +1634,8 @@ async def screen(serial: str) -> Response:
     จนสตรีมช้าจาก 0.5 วิเป็น 25 วิ ภาพนิ่งพอสำหรับดูสถานะ + เทรนตำแหน่ง
     """
     cleaned = await asyncio.to_thread(clean_serial, serial, True)
+    # ทางนี้ก็คือ "มีคนกำลังดูจอ" เหมือนกัน — ต้องกันตัวดูแลจอไม่ให้ดับจอใส่
+    _watching_ping(cleaned)
 
     def capture() -> bytes:
         # เคลียร์ screenrecord ที่อาจค้างจากโปรเจกต์เดิม/scrcpy ครั้งเดียวต่อเครื่อง
@@ -2146,6 +2149,42 @@ async def phone_input_socket(websocket: WebSocket, serial: str) -> None:
                 pass
 
 
+# ---------------------------------------------- ใครกำลังดูจอเครื่องไหนอยู่
+#
+# **ทำไมต้องจด** ตัวดูแลจอ (`_screen_pump_one`) เช็คก่อนดับจอไว้ 5 ชั้น — งานโพสต์ ·
+# งานตั้งเวลา · ล็อกไฟล์ · ประตูจอ · เวลาที่มือถือไม่ถูกแตะ — แต่**ไม่มีชั้นไหน
+# รู้เลยว่ามีคนนั่งดูจออยู่ผ่านหน้าเว็บ** เพราะการนั่งดูเฉยๆ ไม่ได้แตะจอ มือถือจึง
+# นับว่าไม่มีคนใช้ แล้วดับจอใส่หน้าคนที่กำลังดูอยู่ทุก 3 นาที
+# (เห็นในบันทึกคืน 22 ส.ค. 2569: "ดับจอมือถือแล้ว" ซ้ำๆ ตลอดคืน)
+#
+# จดทั้งสองทางที่หน้าเว็บใช้ดูจอ — ท่อวิดีโอ และการถ่ายรูปทีละใบ
+_watching: dict[str, float] = {}
+_watching_lock = threading.Lock()
+WATCHING_GRACE_SECONDS = 12.0     # ไม่มีสัญญาณเกินเท่านี้ = เลิกดูแล้ว
+MAX_STREAM_REVIVALS = 5           # ปลุกช่องวิดีโอคืนได้กี่ครั้งก่อนยอมแพ้
+
+
+def _watching_start(serial: str) -> None:
+    with _watching_lock:
+        _watching[serial] = time.time()
+
+
+def _watching_ping(serial: str) -> None:
+    """ทางถ่ายรูปทีละใบไม่มีการเชื่อมต่อค้างไว้ — ต่ออายุทุกครั้งที่ขอภาพ"""
+    _watching_start(serial)
+
+
+def _watching_stop(serial: str) -> None:
+    with _watching_lock:
+        _watching.pop(serial, None)
+
+
+def someone_watching(serial: str) -> bool:
+    with _watching_lock:
+        last = _watching.get(serial, 0.0)
+    return (time.time() - last) < WATCHING_GRACE_SECONDS
+
+
 @app.websocket("/ws/phone/stream")
 async def phone_stream(websocket: WebSocket, serial: str) -> None:
     """สตรีมหน้าจอ H.264 หน่วงต่ำ — ฝั่งหน้าเว็บถอดด้วย WebCodecs"""
@@ -2198,6 +2237,8 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
 
     receive_task = asyncio.create_task(websocket.receive())
     process: subprocess.Popen | None = None
+    revivals = 0
+    _watching_start(cleaned)
     try:
         while True:
             process = None if video is not None else subprocess.Popen(
@@ -2246,8 +2287,35 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
                     if video is not None and video.alive:
                         continue
                     break
+                if video is not None:
+                    # ---- ทาง scrcpy: ส่งทันที ห้ามกั๊กก้อนสุดท้ายไว้ ----
+                    #
+                    # **บั๊กที่แก้อยู่ตรงนี้** ของเดิมใช้เงื่อนไข `len(starts) >= 2`
+                    # คือจะยอมส่งภาพที่ i ก็ต่อเมื่อ *หัวของภาพที่ i+1* มาถึงแล้ว
+                    # ผลคือภาพล่าสุดค้างอยู่ในเซิร์ฟเวอร์เสมอ — ผู้ใช้กดปุ่มบนหน้าเว็บ
+                    # มือถือทำทันที แต่ภาพผลลัพธ์ไม่ถูกส่งจนกว่าจอจะขยับอีกครั้ง
+                    # และจอที่นิ่งส่งภาพแค่ ~1.4 ใบ/วินาที (ตัวเลขจาก read_available)
+                    # = หน่วงได้เป็นวินาที ทั้งที่ท่อว่างและเร็วอยู่แล้ว
+                    #
+                    # `read_available()` ของ scrcpy คืน **แพ็กเก็ตสมบูรณ์ทีละก้อน**
+                    # (รู้ความยาวจากหัวแพ็กเก็ต) จึงตัด NAL ได้ครบทุกก้อนรวมก้อน
+                    # สุดท้าย ไม่ต้องรออะไรทั้งนั้น
+                    #
+                    # ยังตัดทีละ NAL เหมือนเดิมเพราะฝั่งหน้าเว็บแยก SPS/PPS/ภาพ
+                    # ด้วยไบต์แรกของแต่ละข้อความ ถ้าส่งรวมก้อนเดียวจะแยกไม่ออก
+                    starts = h264_start_codes(chunk)
+                    if not starts:
+                        await websocket.send_bytes(bytes(chunk))
+                    for index, (position, _) in enumerate(starts):
+                        end = (starts[index + 1][0] if index + 1 < len(starts)
+                               else len(chunk))
+                        await websocket.send_bytes(bytes(chunk[position:end]))
+                    continue
+
+                # ---- ทาง screenrecord (ทางถอย): เป็นสายไบต์ล้วน ----
+                # ทางนี้ไม่มีขอบเขตแพ็กเก็ตให้ยึด จึงยังต้องเห็นหัวของก้อนถัดไป
+                # ก่อนถึงจะรู้ว่าก้อนนี้จบตรงไหน — กั๊กหนึ่งก้อนเป็นราคาที่เลี่ยงไม่ได้
                 buffer.extend(chunk)
-                # ส่งทีละ NAL — ฝั่งหน้าเว็บป้อนเข้า VideoDecoder ได้ทันที
                 starts = h264_start_codes(buffer)
                 while len(starts) >= 2:
                     position = starts[0][0]
@@ -2269,11 +2337,31 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
                 process.wait(timeout=2)
                 process = None
             elif video is None or not video.alive:
-                break              # ช่อง scrcpy ตายแล้ว เปิดใหม่ในลูปเดิมไม่ได้
+                # **ห้ามเงียบ** ของเดิม break ทิ้งเฉยๆ หน้าเว็บเลยตกไปใช้ภาพนิ่ง
+                # ถาวรโดยไม่มีใครรู้ว่าเพราะอะไร (ภาพนิ่งช้ากว่าท่อวิดีโอ ~9 เท่า:
+                # วัดจริง 1,500 ms/ภาพ เทียบกับ 169 ms) — ต้องบอกให้รู้เสมอ
+                print(f"[stream] ช่องวิดีโอของ {cleaned} ปิดตัว "
+                      f"(ปลุกคืนมาแล้ว {revivals} ครั้ง)", flush=True)
+                if revivals >= MAX_STREAM_REVIVALS:
+                    print(f"[stream] ปลุกครบ {revivals} ครั้งแล้วยังไม่อยู่ — ยอมแพ้",
+                          flush=True)
+                    break
+                revivals += 1
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(video.close)
+                try:
+                    video = await asyncio.to_thread(
+                        scrcpy_control.open_video, ADB, cleaned, 1024, 30)
+                    print(f"[stream] ปลุกช่องวิดีโอคืนแล้ว (ครั้งที่ {revivals}) "
+                          f"{video.width}x{video.height}", flush=True)
+                except scrcpy_control.ScrcpyUnavailable as error:
+                    print(f"[stream] ปลุกช่องวิดีโอไม่ขึ้น: {error}", flush=True)
+                    break
             await asyncio.sleep(0.15)
     except (WebSocketDisconnect, ConnectionError, RuntimeError):
         return
     finally:
+        _watching_stop(cleaned)
         receive_task.cancel()
         if video is not None:
             await asyncio.to_thread(video.close)
@@ -6382,6 +6470,11 @@ def _screen_pump_one(serial: str, now: datetime) -> str:
         return "ปลุกล่วงหน้า"
 
     # 2) จะดับได้ต้องว่างจริงทุกด้าน — งานของ app.py · บอทคนละโปรเซส · นิ้วผู้ใช้
+    #    **และต้องไม่มีคนนั่งดูจออยู่** ชั้นนี้เพิ่ง 22 ส.ค. 2569 เพราะของเดิม
+    #    เช็คครบทุกอย่างยกเว้นเรื่องนี้ คนดูจอผ่านหน้าเว็บจึงโดนดับจอใส่ทุก 3 นาที
+    #    (การนั่งดูไม่ได้แตะจอ มือถือเลยนับว่าไม่มีคนใช้)
+    if someone_watching(serial):
+        return ""
     if not phone_is_free(serial):
         return ""
     if _job_due_within(fb_screen.KEEP_AWAKE_BEFORE, now):

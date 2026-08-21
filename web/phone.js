@@ -28,6 +28,13 @@ let deviceRows = [];                // คำตอบล่าสุดขอ�
 let focused = "";
 
 const supportsWebCodecs = typeof window.VideoDecoder === "function";
+// หลุดแล้วต่อใหม่กี่ครั้งก่อนยอมถอยไปภาพนิ่ง — มีเพดานเสมอ ห้ามวนไม่จบ
+const STREAM_RETRIES = 3;
+// ตกไปใช้ภาพนิ่งแล้ว ยังลองกลับมาใช้ท่อเร็วทุกกี่มิลลิวินาที
+const STREAM_RECOVER_MS = 15000;
+// ภาพนิ่ง: ถ่ายหนึ่งใบใช้ ~600 ms อยู่แล้ว รออีก 900 ms คือเสียเปล่า
+// (ของเดิมรวมเป็น ~1,500 ms/ภาพ) เหลือ 120 ms พอกัน ADB ไม่ให้อ่วม
+const POLL_GAP_MS = 120;
 const MOVE_INTERVAL_MS = 8;         // ~120 event/วินาที เท่านิ้วจริง
 
 function labelOf(serial) {
@@ -138,15 +145,21 @@ class PhoneScreen {
       this.say(error.message);
     }
     if (!this.live) return;         // ผู้ใช้กดปิดระหว่างรอ
+    this.streamTries = 0;
     if (supportsWebCodecs) this.startStream();
     else {
-      this.say(`${this.note.textContent} · เบราว์เซอร์ไม่รองรับ WebCodecs ใช้ภาพนิ่ง`);
+      // **ต้องบอกให้ชัดว่าทำไม** ภาพนิ่งช้ากว่าท่อวิดีโอราว 9 เท่า
+      // (วัดจริง 22 ส.ค. 2569: ท่อวิดีโอ 169 ms/ภาพ · ภาพนิ่ง ~1,500 ms/ภาพ)
+      // ถ้าตกมาทางนี้เงียบๆ ผู้ใช้จะนึกว่าระบบพังทั้งที่แค่เลือกทางผิด
+      this.say("⚠️ เบราว์เซอร์นี้ใช้ท่อวิดีโอไม่ได้ (ไม่มี WebCodecs) — "
+        + "ใช้ภาพนิ่งซึ่งช้ากว่ามาก · เปิดหน้านี้ผ่าน http://127.0.0.1:8866 จะใช้ท่อเร็วได้");
       this.startPolling();
     }
   }
 
   stop() {
     this.live = false;
+    this.clearRecover();
     this.toggle.textContent = "เริ่มดูจอ";
     this.card.classList.remove("is-live");
     if (this.timer) window.clearTimeout(this.timer);
@@ -193,10 +206,25 @@ class PhoneScreen {
         this.canvas.hidden = false;
         this.image.hidden = true;
         this.placeholder.hidden = true;
+        // ภาพมาถึงแล้ว = ท่อใช้ได้จริง ล้างตัวนับความพยายามทิ้ง ไม่งั้นครั้งหน้า
+        // ที่หลุดจะเหลือโควตาต่อใหม่ไม่ครบ
+        this.streamTries = 0;
+        this.clearRecover();
       },
-      error: () => { this.waitingKeyFrame = true; },
+      error: (issue) => {
+        this.waitingKeyFrame = true;
+        this.say(`ตัวถอดรหัสภาพสะดุด: ${issue && issue.message ? issue.message : issue}`);
+      },
     });
-    this.decoder.configure({ codec: "avc1.42E01E", optimizeForLatency: true });
+    try {
+      this.decoder.configure({ codec: "avc1.42E01E", optimizeForLatency: true });
+    } catch (issue) {
+      // **ห้ามล้มเงียบ** ถ้า configure พังแล้วไม่มีใครบอก หน้าเว็บจะค้างจอเปล่า
+      // โดยไม่มีทั้งภาพและข้อความ ซึ่งไล่สาเหตุไม่ได้เลย
+      this.say(`⚠️ เบราว์เซอร์ตั้งค่าตัวถอดรหัสไม่ได้ (${issue.message}) — ใช้ภาพนิ่งแทน`);
+      this.startPolling();
+      return;
+    }
 
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     this.socket = new WebSocket(
@@ -244,9 +272,20 @@ class PhoneScreen {
         this.waitingKeyFrame = true;
       }
     };
-    this.socket.onclose = () => {
+    this.socket.onclose = (event) => {
       if (!this.live) return;                 // ผู้ใช้กดหยุดเอง
-      this.say("สตรีมหลุด — ถอยไปใช้ภาพนิ่ง");
+      // **ของเดิมตกไปใช้ภาพนิ่งถาวร แล้วไม่ลองกลับมาอีกเลย** หลุดครั้งเดียว
+      // = ช้าไปตลอดจนกว่าจะปิดหน้าเว็บแล้วเปิดใหม่เอง ซึ่งผู้ใช้ไม่มีทางรู้
+      this.streamTries = (this.streamTries || 0) + 1;
+      if (this.streamTries <= STREAM_RETRIES) {
+        this.say(`สตรีมหลุด (รหัส ${event.code}${event.reason ? " " + event.reason : ""})`
+          + ` — ต่อใหม่ครั้งที่ ${this.streamTries}`);
+        window.setTimeout(() => { if (this.live) this.startStream(); },
+          300 * this.streamTries);
+        return;
+      }
+      this.say(`⚠️ สตรีมหลุดซ้ำ ${this.streamTries} ครั้ง (รหัสล่าสุด ${event.code})`
+        + " — ใช้ภาพนิ่งชั่วคราว จะลองท่อเร็วใหม่เรื่อยๆ");
       this.startPolling();
     };
   }
@@ -263,7 +302,7 @@ class PhoneScreen {
       this.canvas.hidden = true;
       this.placeholder.hidden = true;
       // เฟรมถัดไปหลังเฟรมนี้โหลดเสร็จ — ไม่ยิงถี่เกินให้ ADB อ่วม
-      this.timer = window.setTimeout(() => this.refreshFrame(), 900);
+      this.timer = window.setTimeout(() => this.refreshFrame(), POLL_GAP_MS);
     };
     probe.onerror = () => {
       this.say("อ่านหน้าจอไม่ได้ — เช็คสาย/สิทธิ์ debugging");
@@ -275,6 +314,21 @@ class PhoneScreen {
   startPolling() {
     if (this.timer) window.clearTimeout(this.timer);
     this.refreshFrame();
+    // **ห้ามยอมแพ้ถาวร** ภาพนิ่งเป็นทางประคองไว้ไม่ให้จอดำ ไม่ใช่ทางที่ควรอยู่
+    // ยาว — ลองกลับไปใช้ท่อเร็วเรื่อยๆ เผื่อสาเหตุที่ทำให้หลุดหายไปแล้ว
+    if (!supportsWebCodecs || this.recoverTimer) return;
+    this.recoverTimer = window.setInterval(() => {
+      if (!this.live) { this.clearRecover(); return; }
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) return;
+      this.streamTries = 0;
+      this.say("ลองกลับไปใช้ท่อเร็วอีกครั้ง…");
+      this.startStream();
+    }, STREAM_RECOVER_MS);
+  }
+
+  clearRecover() {
+    if (this.recoverTimer) window.clearInterval(this.recoverTimer);
+    this.recoverTimer = null;
   }
 
   // ------------------------------------------ แตะ/กดค้าง/ลาก (แยกรายจอ)

@@ -25,25 +25,77 @@
     <main class="layout">
       <!-- (A) ซ้าย: Device no. + จอมือถือ -->
       <section class="phone-panel">
+        <!-- จอมือถือหลายเครื่องพร้อมกัน
+             จำนวนจอล้อตามเครื่องที่ "เปิดใช้" ในทะเบียน เสียบเครื่องที่ 3 แล้ว
+             เปิดใช้ จอที่ 3 ขึ้นเอง ปุ่ม ＋ / − ไว้เพิ่ม-ลดด้วยมือเมื่อไม่อยากดูครบ
+             `Device no.` ยังอยู่และแปลว่า "จอที่กำลังโฟกัส" — หน้า Publish
+             อ่านค่านี้ไปใช้เทรนตำแหน่ง ถอดทิ้งเมื่อไรหน้านั้นพังทั้งหน้า -->
         <div class="device-row">
           <label for="deviceSelect">Device no.</label>
           <select id="deviceSelect"><option value="">กำลังค้นหา…</option></select>
-          <button id="renameDevice" class="ghost" type="button" title="ตั้งชื่อเครื่องนี้">✎</button>
+          <button id="addScreen" class="ghost" type="button" title="เพิ่มจอ">＋</button>
+          <button id="removeScreen" class="ghost" type="button" title="ลดจอ">−</button>
+          <span id="screenCount" class="note">0/0 จอ</span>
           <button id="refreshDevices" class="ghost" type="button">รีเฟรช</button>
         </div>
-        <div id="phoneViewer" class="phone-viewer">
-          <canvas id="phoneCanvas" hidden></canvas>
-          <img id="phoneScreen" alt="หน้าจอมือถือ" hidden />
-          <div id="phonePlaceholder" class="phone-placeholder">
-            เลือกมือถือแล้วกด “เริ่มดูจอ”
-          </div>
-          <span id="phoneHint" class="phone-hint" hidden>คลิกเพื่อแตะ · กดค้างได้ · ลากเพื่อปัด</span>
+        <div id="phoneScreens" class="phone-screens"></div>
+        <div id="screensEmpty" class="phone-placeholder" hidden>
+          ยังไม่มีจอเปิดอยู่ — กด ＋ เพิ่มจอ หรือเปิดใช้มือถือจากปุ่ม ⚙ บนหัวจอ
         </div>
         <div class="phone-actions">
-          <button id="startScreen" class="primary" type="button" disabled>เริ่มดูจอ</button>
-          <button id="stopScreen" class="ghost" type="button" disabled>หยุด</button>
+          <span class="phone-hint">คลิกเพื่อแตะ · กดค้างได้ · ลากเพื่อปัด · คลิกจอไหน = เลือกจอนั้น</span>
           <span id="phoneNote" class="note" aria-live="polite"></span>
         </div>
+
+        <!-- ตั้งค่าแยกรายจอ — เปิดจากปุ่ม ⚙ บนหัวจอแต่ละใบ -->
+        <dialog id="screenSettings" class="screen-settings">
+          <form method="dialog">
+            <h3 id="screenSettingsTitle">ตั้งค่าจอ</h3>
+            <p class="note">serial <code id="screenSettingsSerial"></code></p>
+
+            <label>ชื่อเล่น <input name="name" type="text" maxlength="40" /></label>
+            <label>บัญชีที่ล็อกอินบนเครื่องนี้
+              <input name="account" type="text" maxlength="60" /></label>
+
+            <label class="check"><input name="enabled" type="checkbox" />
+              เปิดใช้เครื่องนี้ (ปิดไว้ = ระบบจะไม่สั่งงานเครื่องนี้เลย)</label>
+            <label class="check"><input name="make_default" type="checkbox" />
+              ตั้งเป็นเครื่องตัวหลัก (ใช้เมื่อคำสั่งไม่ได้ระบุเครื่อง)</label>
+
+            <fieldset>
+              <legend>รับงานสายไหนบ้าง <span class="note">(ไม่ติ๊กเลย = รับทุกสาย)</span></legend>
+              <label class="check"><input name="lane" type="checkbox" value="post" /> โพสต์กลุ่ม</label>
+              <label class="check"><input name="lane" type="checkbox" value="engage" /> ตามยอด/ตอบคอมเมนต์</label>
+              <label class="check"><input name="lane" type="checkbox" value="mass" /> หาโพสต์แมส</label>
+              <label class="check"><input name="lane" type="checkbox" value="clip" /> คลิป</label>
+            </fieldset>
+
+            <fieldset>
+              <legend>ค่าเฉพาะเครื่องนี้</legend>
+              <div class="inline-row">
+                <label>เว้นระยะต่ำสุด (วินาที)
+                  <input name="gap_min" type="number" min="5" max="600" /></label>
+                <label>สูงสุด <input name="gap_max" type="number" min="5" max="600" /></label>
+              </div>
+              <label class="check"><input name="screen_saver" type="checkbox" /> ดับจอเองตอนไม่มีใครใช้</label>
+              <label class="check"><input name="phone_clean" type="checkbox" /> ล้างเครื่องประจำวัน</label>
+              <label class="check"><input name="auto_start" type="checkbox" /> เริ่มงานเองเมื่อถึงเวลา</label>
+            </fieldset>
+
+            <div class="inline-row">
+              <label for="copyFrom">โหลดค่าจากเครื่องอื่น</label>
+              <select id="copyFrom"></select>
+              <button id="copySettings" class="ghost" type="button">โหลดมาใส่</button>
+            </div>
+            <p class="note" id="screenSettingsNote" aria-live="polite"></p>
+
+            <div class="inline-row">
+              <button id="saveScreenSettings" class="primary" type="submit">บันทึก</button>
+              <button id="closeScreenSettings" class="ghost" type="button">ปิด</button>
+              <button id="forgetScreen" class="ghost danger" type="button">เอาออกจากทะเบียน</button>
+            </div>
+          </form>
+        </dialog>
 
         <div class="key-grid" role="group" aria-label="ปุ่มควบคุมมือถือ">
           <button type="button" data-key="BACK">← ย้อนกลับ</button>

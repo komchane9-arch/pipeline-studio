@@ -3,342 +3,625 @@
 import { $, api, hooks, onScreen } from "./core.js";
 
 // ========================================================== จอมือถือ (A)
+//
+// **หลายจอพร้อมกัน** ของเดิมมีจอเดียวทั้งหน้า: canvas ใบเดียว · socket ตัวเดียว ·
+// decoder ตัวเดียว สลับเครื่องทีก็ปิดของเก่าทิ้ง พอมีมือถือสองเครื่องจึงดูพร้อมกัน
+// ไม่ได้เลย ตอนนี้ทุกอย่างย้ายเข้า `PhoneScreen` ซึ่งมีของครบชุดเป็นของตัวเอง
+// จะเปิดกี่จอก็ได้ ไม่มีที่ไหนผูกกับเลข 1 หรือ 2
+//
+// จำนวนจอ**ล้อตามเครื่องที่เปิดใช้จริง** เสียบเครื่องที่สามแล้วเปิดใช้ จอที่สาม
+// ขึ้นเอง ส่วนปุ่ม ＋ / − ไว้เพิ่ม-ลดด้วยมือเมื่ออยากดูไม่ครบทุกเครื่อง
+//
+// `#deviceSelect` ยังอยู่เหมือนเดิมและแปลว่า "จอที่กำลังโฟกัส" — หน้า Publish
+// (post.js) อ่านค่านี้อยู่ 20 กว่าที่ ถ้าถอดทิ้งการเทรนตำแหน่งจะพังทั้งหน้า
 export const deviceSelect = $("#deviceSelect");
-const phoneScreen = $("#phoneScreen");
-const phoneCanvas = $("#phoneCanvas");
-const placeholder = $("#phonePlaceholder");
+const screensBox = $("#phoneScreens");
 const phoneNote = $("#phoneNote");
-let screenTimer = null;
 
-// ---- สตรีม H.264 หน่วงต่ำ (ยกจากโปรเจกต์เดิม)
-// ถอดด้วย WebCodecs ในเบราว์เซอร์ — เบราว์เซอร์ที่ไม่รองรับถอยไปภาพนิ่ง
-let streamSocket = null;
-let decoder = null;
-let canvasContext = null;
-let waitingKeyFrame = true;
-let frameCounter = 0;
+// ตัวดักการแตะจอ — ฝั่ง Publish (post.js) เป็นคนตั้ง ไฟล์นี้เป็นคนเรียกตอนมีคนแตะจอ
+// เก็บเป็น property ของ object เพราะ ESM ห้ามไฟล์อื่นเขียนทับ "ตัวแปร" ที่ import มา
+export const touchIntercept = { fn: null };
+
+const screens = new Map();          // serial -> PhoneScreen
+const dismissed = new Set();        // จอที่ผู้ใช้กดปิดเอง — ห้ามเปิดคืนให้เอง
+let deviceRows = [];                // คำตอบล่าสุดของ /api/devices
+let focused = "";
 
 const supportsWebCodecs = typeof window.VideoDecoder === "function";
+const MOVE_INTERVAL_MS = 8;         // ~120 event/วินาที เท่านิ้วจริง
 
-function closeStream() {
-  if (streamSocket) {
-    streamSocket.onclose = null;
-    streamSocket.close();
-    streamSocket = null;
-  }
-  if (decoder && decoder.state !== "closed") {
-    try { decoder.close(); } catch { /* ปิดซ้ำไม่เป็นไร */ }
-  }
-  decoder = null;
-  waitingKeyFrame = true;
+function labelOf(serial) {
+  const row = deviceRows.find((d) => d.serial === serial);
+  return row ? (row.label || row.serial) : serial;
 }
 
-function startStream(serial) {
-  closeStream();
-  canvasContext = canvasContext || phoneCanvas.getContext("2d");
-  decoder = new VideoDecoder({
-    output: (frame) => {
-      if (phoneCanvas.width !== frame.displayWidth) {
-        phoneCanvas.width = frame.displayWidth;
-        phoneCanvas.height = frame.displayHeight;
-      }
-      canvasContext.drawImage(frame, 0, 0);
-      frame.close();
-      phoneCanvas.hidden = false;
-      phoneScreen.hidden = true;
-      placeholder.hidden = true;
-      $("#phoneHint").hidden = false;
-    },
-    error: () => { waitingKeyFrame = true; },
-  });
-  decoder.configure({ codec: "avc1.42E01E", optimizeForLatency: true });
+/** จอหนึ่งใบ — มี socket · decoder · canvas · ช่องแตะ เป็นของตัวเองครบชุด */
+class PhoneScreen {
+  constructor(serial) {
+    this.serial = serial;
+    this.socket = null;
+    this.decoder = null;
+    this.context = null;
+    this.waitingKeyFrame = true;
+    this.frameCounter = 0;
+    this.timer = null;
+    this.touchSocket = null;
+    this.hold = null;
+    this.lastMove = 0;
+    this.live = false;
+    this.build();
+  }
 
-  const protocol = location.protocol === "https:" ? "wss" : "ws";
-  streamSocket = new WebSocket(
-    `${protocol}://${location.host}/ws/phone/stream?serial=${encodeURIComponent(serial)}`,
-  );
-  streamSocket.binaryType = "arraybuffer";
-  // เซิร์ฟเวอร์ส่งมาทีละ NAL แต่ VideoDecoder ต้องได้ "ทั้งเฟรม" ต่อ chunk
-  // ป้อน SPS เดี่ยวๆ = decoder error แล้วปิดตัวทันที (อาการที่เจอจริง: ภาพไม่ขึ้นเลย)
-  // จึงเก็บ SPS/PPS ไว้แล้วแปะหน้า IDR เป็นคีย์เฟรมก้อนเดียว
-  let sps = null;
-  let pps = null;
-  streamSocket.onmessage = (event) => {
-    if (typeof event.data === "string") {
-      phoneNote.textContent = JSON.parse(event.data).error || "";
+  build() {
+    const card = document.createElement("article");
+    card.className = "screen-card";
+    card.dataset.serial = this.serial;
+    card.innerHTML = `
+      <header class="screen-head">
+        <span class="screen-dot" aria-hidden="true"></span>
+        <span class="screen-name"></span>
+        <button class="ghost screen-cog" type="button" title="ตั้งค่าเฉพาะจอนี้">⚙</button>
+        <button class="ghost screen-close" type="button" title="ปิดจอนี้">✕</button>
+      </header>
+      <div class="screen-viewer">
+        <canvas hidden></canvas>
+        <img hidden alt="หน้าจอมือถือ" />
+        <div class="phone-placeholder">กำลังเปิด…</div>
+      </div>
+      <div class="screen-foot">
+        <button class="ghost screen-toggle" type="button">หยุด</button>
+        <span class="note screen-note" aria-live="polite"></span>
+      </div>`;
+    this.card = card;
+    this.canvas = card.querySelector("canvas");
+    this.image = card.querySelector("img");
+    this.placeholder = card.querySelector(".phone-placeholder");
+    this.viewer = card.querySelector(".screen-viewer");
+    this.note = card.querySelector(".screen-note");
+    this.nameBox = card.querySelector(".screen-name");
+    this.toggle = card.querySelector(".screen-toggle");
+
+    card.addEventListener("pointerdown", () => focus(this.serial), true);
+    card.querySelector(".screen-close").addEventListener("click", (event) => {
+      event.stopPropagation();
+      dismissed.add(this.serial);
+      removeScreen(this.serial);
+    });
+    card.querySelector(".screen-cog").addEventListener("click", (event) => {
+      event.stopPropagation();
+      openScreenSettings(this.serial);
+    });
+    this.toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (this.live) this.stop();
+      else this.start();
+    });
+    this.bindTouch();
+    this.rename();
+    screensBox.append(card);
+  }
+
+  rename() {
+    const row = deviceRows.find((d) => d.serial === this.serial);
+    this.nameBox.textContent = labelOf(this.serial);
+    const busy = row && (row.holder || row.job);
+    this.card.classList.toggle("is-busy", Boolean(busy));
+    this.card.title = busy
+      ? `${labelOf(this.serial)} — ${row.holder || "งานโพสต์ " + row.job} ใช้อยู่`
+      : labelOf(this.serial);
+  }
+
+  say(text) {
+    this.note.textContent = text;
+  }
+
+  // ------------------------------------------------------------- เปิด/ปิดจอ
+  async start() {
+    if (this.live) return;
+    this.live = true;
+    this.toggle.textContent = "หยุด";
+    this.card.classList.add("is-live");
+    this.say("กำลังเปิด…");
+    // เปิดช่องแตะเรียลไทม์ล่วงหน้า — push scrcpy-server กินเวลาหลักวินาที
+    // ถ้าไปทำตอนแตะครั้งแรกผู้ใช้จะรู้สึกว่าคลิกแรกหน่วง
+    try {
+      const session = await api("/api/phone/session", {
+        method: "POST",
+        body: JSON.stringify({ serial: this.serial }),
+      });
+      this.realtime = session.realtime;
+      this.say(session.realtime
+        ? "แตะเรียลไทม์พร้อม (กดค้าง/ลากได้)"
+        : `แตะทีละครั้ง — ${session.reason || "ไม่มีช่องเรียลไทม์"}`);
+      if (session.realtime) this.openTouchSocket();
+    } catch (error) {
+      this.say(error.message);
+    }
+    if (!this.live) return;         // ผู้ใช้กดปิดระหว่างรอ
+    if (supportsWebCodecs) this.startStream();
+    else {
+      this.say(`${this.note.textContent} · เบราว์เซอร์ไม่รองรับ WebCodecs ใช้ภาพนิ่ง`);
+      this.startPolling();
+    }
+  }
+
+  stop() {
+    this.live = false;
+    this.toggle.textContent = "เริ่มดูจอ";
+    this.card.classList.remove("is-live");
+    if (this.timer) window.clearTimeout(this.timer);
+    this.timer = null;
+    this.closeStream();
+    this.closeTouchSocket();
+    this.canvas.hidden = true;
+    this.image.hidden = true;
+    this.placeholder.hidden = false;
+    this.placeholder.textContent = "หยุดอยู่ — กด “เริ่มดูจอ”";
+  }
+
+  destroy() {
+    this.stop();
+    this.card.remove();
+  }
+
+  // --------------------------------------------------- สตรีม H.264 หน่วงต่ำ
+  closeStream() {
+    if (this.socket) {
+      this.socket.onclose = null;
+      this.socket.close();
+      this.socket = null;
+    }
+    if (this.decoder && this.decoder.state !== "closed") {
+      try { this.decoder.close(); } catch { /* ปิดซ้ำไม่เป็นไร */ }
+    }
+    this.decoder = null;
+    this.waitingKeyFrame = true;
+  }
+
+  startStream() {
+    this.closeStream();
+    this.context = this.context || this.canvas.getContext("2d");
+    this.decoder = new VideoDecoder({
+      output: (frame) => {
+        if (this.canvas.width !== frame.displayWidth) {
+          this.canvas.width = frame.displayWidth;
+          this.canvas.height = frame.displayHeight;
+        }
+        this.context.drawImage(frame, 0, 0);
+        frame.close();
+        this.canvas.hidden = false;
+        this.image.hidden = true;
+        this.placeholder.hidden = true;
+      },
+      error: () => { this.waitingKeyFrame = true; },
+    });
+    this.decoder.configure({ codec: "avc1.42E01E", optimizeForLatency: true });
+
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    this.socket = new WebSocket(
+      `${protocol}://${location.host}/ws/phone/stream`
+      + `?serial=${encodeURIComponent(this.serial)}`,
+    );
+    this.socket.binaryType = "arraybuffer";
+    // เซิร์ฟเวอร์ส่งมาทีละ NAL แต่ VideoDecoder ต้องได้ "ทั้งเฟรม" ต่อ chunk
+    // ป้อน SPS เดี่ยวๆ = decoder error แล้วปิดตัวทันที (เจอจริง: ภาพไม่ขึ้นเลย)
+    // จึงเก็บ SPS/PPS ไว้แล้วแปะหน้า IDR เป็นคีย์เฟรมก้อนเดียว
+    let sps = null;
+    let pps = null;
+    this.socket.onmessage = (event) => {
+      if (typeof event.data === "string") {
+        this.say(JSON.parse(event.data).error || "");
+        return;
+      }
+      const data = new Uint8Array(event.data);
+      const nalType = data[4] & 0x1f;
+      if (nalType === 7) { sps = data; return; }
+      if (nalType === 8) { pps = data; return; }
+      if (!this.decoder || this.decoder.state !== "configured") return;
+
+      let chunkData = data;
+      let type = "delta";
+      if (nalType === 5) {
+        type = "key";
+        if (sps && pps) {
+          chunkData = new Uint8Array(sps.length + pps.length + data.length);
+          chunkData.set(sps, 0);
+          chunkData.set(pps, sps.length);
+          chunkData.set(data, sps.length + pps.length);
+        }
+        this.waitingKeyFrame = false;
+      } else if (this.waitingKeyFrame || nalType !== 1) {
+        return;   // ยังไม่เจอคีย์เฟรม หรือเป็น NAL ที่ไม่ใช่ภาพ (SEI/AUD)
+      }
+      try {
+        this.decoder.decode(new EncodedVideoChunk({
+          type,
+          timestamp: (this.frameCounter += 1) * 16666,   // ต้องเพิ่มขึ้นเรื่อยๆ
+          data: chunkData,
+        }));
+      } catch {
+        this.waitingKeyFrame = true;
+      }
+    };
+    this.socket.onclose = () => {
+      if (!this.live) return;                 // ผู้ใช้กดหยุดเอง
+      this.say("สตรีมหลุด — ถอยไปใช้ภาพนิ่ง");
+      this.startPolling();
+    };
+  }
+
+  // ------------------------------------------------------ ภาพนิ่ง (ทางถอย)
+  refreshFrame() {
+    if (!this.live) return;
+    const probe = new Image();
+    probe.onload = () => {
+      if (!this.live) return;
+      this.image.src = probe.src;
+      this.image.hidden = false;
+      this.canvas.hidden = true;
+      this.placeholder.hidden = true;
+      // เฟรมถัดไปหลังเฟรมนี้โหลดเสร็จ — ไม่ยิงถี่เกินให้ ADB อ่วม
+      this.timer = window.setTimeout(() => this.refreshFrame(), 900);
+    };
+    probe.onerror = () => {
+      this.say("อ่านหน้าจอไม่ได้ — เช็คสาย/สิทธิ์ debugging");
+      this.stop();
+    };
+    probe.src = `/api/screen?serial=${encodeURIComponent(this.serial)}&t=${Date.now()}`;
+  }
+
+  startPolling() {
+    if (this.timer) window.clearTimeout(this.timer);
+    this.refreshFrame();
+  }
+
+  // ------------------------------------------ แตะ/กดค้าง/ลาก (แยกรายจอ)
+  openTouchSocket() {
+    this.closeTouchSocket();
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    this.touchSocket = new WebSocket(
+      `${protocol}://${location.host}/ws/phone/input`
+      + `?serial=${encodeURIComponent(this.serial)}`,
+    );
+    this.touchSocket.onmessage = (event) => {
+      const payload = JSON.parse(event.data || "{}");
+      if (payload.error) this.say(payload.error);
+    };
+    this.touchSocket.onclose = () => { this.touchSocket = null; };
+  }
+
+  closeTouchSocket() {
+    if (this.touchSocket) {
+      this.touchSocket.onclose = null;
+      this.touchSocket.close();
+      this.touchSocket = null;
+    }
+    this.hold = null;
+  }
+
+  /** ภาพที่กำลังแสดงอยู่ (canvas สตรีม หรือ img ภาพนิ่ง) */
+  surface() {
+    return this.canvas.hidden ? this.image : this.canvas;
+  }
+
+  pointFrom(event) {
+    const surface = this.surface();
+    const width = surface === this.canvas ? surface.width : surface.naturalWidth;
+    const height = surface === this.canvas ? surface.height : surface.naturalHeight;
+    const rect = surface.getBoundingClientRect();
+    if (!width || !height || !rect.width || !rect.height) return null;
+    // ภาพ object-fit:contain — พื้นที่จริงของภาพเล็กกว่ากรอบ ต้องหักขอบดำออก
+    const scale = Math.min(rect.width / width, rect.height / height);
+    if (!Number.isFinite(scale) || scale <= 0) return null;
+    const offsetX = rect.left + (rect.width - width * scale) / 2;
+    const offsetY = rect.top + (rect.height - height * scale) / 2;
+    const x = Math.round((event.clientX - offsetX) / scale);
+    const y = Math.round((event.clientY - offsetY) / scale);
+    if (x < 0 || y < 0 || x >= width || y >= height) return null;
+    return { x, y, source_width: width, source_height: height };
+  }
+
+  async sendTouch(action, point) {
+    const body = { serial: this.serial, action, ...point };
+    // ช่อง WebSocket เร็วกว่ามาก — ยิง HTTP ทีละ event ได้แค่ ~50 ครั้ง/วินาที
+    if (this.touchSocket && this.touchSocket.readyState === WebSocket.OPEN) {
+      this.touchSocket.send(JSON.stringify(body));
       return;
     }
-    const data = new Uint8Array(event.data);
-    const nalType = data[4] & 0x1f;
-    if (nalType === 7) { sps = data; return; }
-    if (nalType === 8) { pps = data; return; }
-    if (!decoder || decoder.state !== "configured") return;
-
-    let chunkData = data;
-    let type = "delta";
-    if (nalType === 5) {
-      type = "key";
-      if (sps && pps) {
-        chunkData = new Uint8Array(sps.length + pps.length + data.length);
-        chunkData.set(sps, 0);
-        chunkData.set(pps, sps.length);
-        chunkData.set(data, sps.length + pps.length);
-      }
-      waitingKeyFrame = false;
-    } else if (waitingKeyFrame || nalType !== 1) {
-      return;   // ยังไม่เจอคีย์เฟรม หรือเป็น NAL ที่ไม่ใช่ภาพ (SEI/AUD)
-    }
     try {
-      decoder.decode(new EncodedVideoChunk({
-        type,
-        timestamp: (frameCounter += 1) * 16666,   // ต้องเพิ่มขึ้นเรื่อยๆ
-        data: chunkData,
-      }));
-    } catch {
-      waitingKeyFrame = true;
+      const payload = await api("/api/phone/touch", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (payload.supported === false) {
+        this.say("เครื่องนี้กดค้างไม่ได้ (ต้อง Android 10 ขึ้นไป)");
+      }
+    } catch (error) {
+      this.say(error.message);
     }
-  };
-  streamSocket.onclose = () => {
-    if ($("#stopScreen").disabled) return;   // ผู้ใช้กดหยุดเอง
-    phoneNote.textContent = "สตรีมหลุด — ถอยไปใช้ภาพนิ่ง";
-    startPolling();
-  };
+  }
+
+  bindTouch() {
+    const viewer = this.viewer;
+    viewer.addEventListener("pointerdown", async (event) => {
+      if (!this.live) return;
+      const point = this.pointFrom(event);
+      if (!point) return;
+      event.preventDefault();
+      focus(this.serial);
+      // โหมดเทรนตำแหน่ง: เก็บพิกัดอย่างเดียว ไม่ส่งไปเครื่องจริง
+      if (typeof touchIntercept.fn === "function") {
+        touchIntercept.fn(point);
+        return;
+      }
+      viewer.setPointerCapture(event.pointerId);
+      this.hold = { point, moved: false };
+      await this.sendTouch("DOWN", point);
+    });
+
+    viewer.addEventListener("pointermove", async (event) => {
+      if (!this.hold) return;
+      const now = performance.now();
+      if (now - this.lastMove < MOVE_INTERVAL_MS) return;
+      const point = this.pointFrom(event);
+      if (!point) return;
+      this.lastMove = now;
+      this.hold.moved = true;
+      this.hold.point = point;    // จำจุดล่าสุดไว้ใช้ตอนปล่อยนอกกรอบ
+      await this.sendTouch("MOVE", point);
+    });
+
+    const release = async (event) => {
+      if (!this.hold) return;
+      const held = this.hold;
+      this.hold = null;
+      // ปล่อยนอกภาพ → ใช้จุดสุดท้ายที่ยังอยู่ในกรอบ ไม่ใช่จุดเริ่ม
+      const point = this.pointFrom(event) || held.point;
+      try { viewer.releasePointerCapture(event.pointerId); } catch { /* ปล่อยแล้ว */ }
+      await this.sendTouch("UP", point);
+    };
+    viewer.addEventListener("pointerup", release);
+    viewer.addEventListener("pointercancel", release);
+  }
 }
+
+// ปิดแท็บระหว่างกดค้าง — ปล่อยนิ้วทุกจอก่อน ไม่งั้นมือถือค้างจนกว่า watchdog จะทำงาน
+window.addEventListener("pagehide", () => {
+  for (const screen of screens.values()) {
+    if (screen.hold) screen.sendTouch("UP", screen.hold.point);
+    screen.closeTouchSocket();
+  }
+});
+
+// ------------------------------------------------------------ จัดการชุดจอ
+
+function focus(serial) {
+  if (!serial || focused === serial) return;
+  focused = serial;
+  deviceSelect.value = serial;
+  for (const [key, screen] of screens) {
+    screen.card.classList.toggle("is-focused", key === serial);
+  }
+}
+
+function addScreen(serial, { autoStart = true } = {}) {
+  if (!serial || screens.has(serial)) return screens.get(serial);
+  dismissed.delete(serial);
+  const screen = new PhoneScreen(serial);
+  screens.set(serial, screen);
+  if (!focused) focus(serial);
+  syncCount();
+  if (autoStart) screen.start();
+  return screen;
+}
+
+function removeScreen(serial) {
+  const screen = screens.get(serial);
+  if (!screen) return;
+  screen.destroy();
+  screens.delete(serial);
+  if (focused === serial) {
+    focused = "";
+    focus([...screens.keys()][0] || "");
+  }
+  syncCount();
+}
+
+function syncCount() {
+  const shown = screens.size;
+  const total = deviceRows.filter((d) => d.enabled).length;
+  screensBox.classList.toggle("many", shown > 1);
+  screensBox.dataset.count = String(shown);
+  $("#screenCount").textContent = `${shown}/${total} จอ`;
+  $("#removeScreen").disabled = shown === 0;
+  $("#addScreen").disabled = shown >= total;
+  $("#screensEmpty").hidden = shown > 0;
+}
+
+/** เปิดจอให้ครบตามเครื่องที่เปิดใช้จริง — เพิ่มเครื่องที่ 3 ก็ได้จอที่ 3 เอง */
+function syncScreens() {
+  const enabled = deviceRows.filter((d) => d.enabled).map((d) => d.serial);
+  for (const serial of enabled) {
+    if (!screens.has(serial) && !dismissed.has(serial)) addScreen(serial);
+  }
+  for (const serial of [...screens.keys()]) {
+    // เครื่องที่ถูกปิดใช้/ถอดออกจากทะเบียนแล้ว ต้องเก็บจอทิ้งด้วย ไม่งั้นจะเหลือ
+    // จอค้างที่สตรีมไปหาเครื่องที่ไม่มีอยู่แล้ว แล้วขึ้น error รัวๆ
+    if (!enabled.includes(serial)) removeScreen(serial);
+  }
+  for (const screen of screens.values()) screen.rename();
+  syncCount();
+}
+
+$("#addScreen").addEventListener("click", () => {
+  const next = deviceRows.find(
+    (d) => d.enabled && !screens.has(d.serial),
+  );
+  if (!next) {
+    phoneNote.textContent = "เปิดครบทุกเครื่องที่เปิดใช้แล้ว — "
+      + "อยากได้อีกจอต้องเปิดใช้เครื่องเพิ่มในหน้าตั้งค่า";
+    return;
+  }
+  addScreen(next.serial);
+});
+
+$("#removeScreen").addEventListener("click", () => {
+  const target = focused || [...screens.keys()].pop();
+  if (target) {
+    dismissed.add(target);
+    removeScreen(target);
+  }
+});
+
+$("#refreshDevices").addEventListener("click", () => loadDevices());
+deviceSelect.addEventListener("change", () => focus(deviceSelect.value));
 
 export async function loadDevices() {
   try {
     const payload = await api("/api/devices");
-    const devices = payload.devices || [];
+    deviceRows = payload.devices || [];
     deviceSelect.replaceChildren(
-      ...(devices.length
-        ? devices.map((device) => {
+      ...(deviceRows.length
+        ? deviceRows.map((device) => {
             const option = document.createElement("option");
             option.value = device.serial;
             // ชื่อที่ผู้ใช้ตั้งมาก่อนชื่อรุ่น — ตั้งไว้เพื่อให้จำเครื่องออก
-            option.textContent =
-              `${device.custom_name || device.model || device.serial} · ${device.serial}`;
+            // ต่อท้ายด้วยสถานะจริง เครื่องที่ถอดสายจะได้ไม่ดูเหมือนพร้อมใช้
+            const mark = device.enabled ? "" : " · ปิดใช้";
+            const plug = device.ready ? "" : " · ไม่ได้เสียบ";
+            option.textContent = `${device.label}${mark}${plug}`;
+            option.disabled = !device.enabled || !device.ready;
             return option;
           })
         : [new Option("ไม่พบมือถือ — เสียบสายแล้วกดรีเฟรช", "")]),
     );
-    $("#startScreen").disabled = !deviceSelect.value;
+    syncScreens();
+    if (focused) deviceSelect.value = focused;
   } catch (error) {
     phoneNote.textContent = error.message;
   }
 }
 
-$("#renameDevice").addEventListener("click", async () => {
-  if (!deviceSelect.value) {
-    phoneNote.textContent = "เลือกมือถือก่อน";
-    return;
-  }
-  const current = deviceSelect.selectedOptions[0]?.textContent.split(" · ")[0] || "";
-  const name = window.prompt("ตั้งชื่อเครื่องนี้ (เว้นว่าง = ลบชื่อ)", current);
-  if (name === null) return;
-  try {
-    await api("/api/device-name", {
-      method: "POST",
-      body: JSON.stringify({ serial: deviceSelect.value, name }),
-    });
-    const keep = deviceSelect.value;
-    await loadDevices();
-    deviceSelect.value = keep;
-    phoneNote.textContent = name.trim() ? `ตั้งชื่อ "${name.trim()}" แล้ว` : "ลบชื่อแล้ว";
-  } catch (error) {
-    phoneNote.textContent = error.message;
-  }
-});
+// ------------------------------------------------ ตั้งค่าแยกรายจอ (ปุ่ม ⚙)
 
-function refreshFrame() {
-  if (!deviceSelect.value) return;
-  const image = new Image();
-  image.onload = () => {
-    phoneScreen.src = image.src;
-    phoneScreen.hidden = false;
-    phoneCanvas.hidden = true;
-    placeholder.hidden = true;
-    $("#phoneHint").hidden = false;
-    // เฟรมถัดไปหลังเฟรมนี้โหลดเสร็จ — ไม่ยิงถี่เกินให้ ADB อ่วม
-    screenTimer = window.setTimeout(refreshFrame, 900);
-  };
-  image.onerror = () => {
-    phoneNote.textContent = "อ่านหน้าจอไม่ได้ — เช็คสาย/สิทธิ์ debugging";
-    stopScreen();
-  };
-  image.src = `/api/screen?serial=${encodeURIComponent(deviceSelect.value)}&t=${Date.now()}`;
+const settingsBox = $("#screenSettings");
+let settingsSerial = "";
+
+function settingsField(name) {
+  return settingsBox.querySelector(`[name="${name}"]`);
 }
 
-function startPolling() {
-  if (screenTimer) window.clearTimeout(screenTimer);
-  refreshFrame();
-}
+async function openScreenSettings(serial) {
+  settingsSerial = serial;
+  const row = deviceRows.find((d) => d.serial === serial) || {};
+  $("#screenSettingsTitle").textContent = `ตั้งค่า ${labelOf(serial)}`;
+  $("#screenSettingsSerial").textContent = serial;
+  settingsField("name").value = row.name || "";
+  settingsField("account").value = row.account || "";
+  settingsField("enabled").checked = Boolean(row.enabled);
+  settingsField("make_default").checked = Boolean(row.is_default);
+  settingsBox.querySelectorAll("[name='lane']").forEach((box) => {
+    box.checked = (row.lanes || []).includes(box.value);
+  });
+  // ค่าที่ใช้จริงของเครื่องนี้ = ค่ากลางซ้อนด้วยค่าที่เครื่องนี้ตั้งเอง
+  const live = row.settings || {};
+  const base = deviceRows.find((d) => d.is_default)?.settings || {};
+  settingsField("gap_min").value = live.gap_min ?? base.gap_min ?? 15;
+  settingsField("gap_max").value = live.gap_max ?? base.gap_max ?? 20;
+  settingsField("screen_saver").checked = live.screen_saver !== false;
+  settingsField("phone_clean").checked = live.phone_clean !== false;
+  settingsField("auto_start").checked = Boolean(live.auto_start);
 
-function stopScreen() {
-  if (screenTimer) window.clearTimeout(screenTimer);
-  screenTimer = null;
-  closeStream();
-  closeTouchSocket();
-  $("#startScreen").disabled = !deviceSelect.value;
-  $("#stopScreen").disabled = true;
-}
-
-$("#startScreen").addEventListener("click", async () => {
-  const serial = deviceSelect.value;
-  if (!serial) return;
-  $("#startScreen").disabled = true;
-  $("#stopScreen").disabled = false;
-  phoneNote.textContent = "กำลังเปิด…";
-  // เปิดช่องแตะเรียลไทม์ล่วงหน้า — push scrcpy-server กินเวลาหลักวินาที
-  // ถ้าไปทำตอนแตะครั้งแรกผู้ใช้จะรู้สึกว่าคลิกแรกหน่วง
-  try {
-    const session = await api("/api/phone/session", {
-      method: "POST",
-      body: JSON.stringify({ serial }),
-    });
-    realtimeTouch = session.realtime;
-    phoneNote.textContent = session.realtime
-      ? "แตะแบบเรียลไทม์พร้อม (กดค้าง/ลากได้)"
-      : `แตะทีละครั้ง — ${session.reason || "ไม่มีช่องเรียลไทม์"}`;
-    if (session.realtime) openTouchSocket(serial);
-  } catch (error) {
-    phoneNote.textContent = error.message;
-  }
-  if (supportsWebCodecs) startStream(serial);
-  else {
-    phoneNote.textContent += " · เบราว์เซอร์ไม่รองรับ WebCodecs ใช้ภาพนิ่ง";
-    startPolling();
-  }
-});
-$("#stopScreen").addEventListener("click", stopScreen);
-$("#refreshDevices").addEventListener("click", loadDevices);
-deviceSelect.addEventListener("change", () => {
-  stopScreen();
-  $("#startScreen").disabled = !deviceSelect.value;
-});
-
-// ---------------------------------------------- แตะ/กดค้าง/ลาก (ยกจากของเดิม)
-// ตัวดักการแตะจอ — ฝั่ง Publish (post.js) เป็นคนตั้ง ไฟล์นี้เป็นคนเรียกตอนมีคนแตะจอ
-// เก็บเป็น property ของ object เพราะ ESM ห้ามไฟล์อื่นเขียนทับ "ตัวแปร" ที่ import มา
-export const touchIntercept = { fn: null };   // Publish ใช้ดักตอนเทรนตำแหน่ง
-let realtimeTouch = false;
-let touchSocket = null;
-let holdState = null;
-let lastMoveSent = 0;
-const MOVE_INTERVAL_MS = 8;     // ~120 event/วินาที เท่านิ้วจริง
-
-function openTouchSocket(serial) {
-  closeTouchSocket();
-  const protocol = location.protocol === "https:" ? "wss" : "ws";
-  touchSocket = new WebSocket(
-    `${protocol}://${location.host}/ws/phone/input?serial=${encodeURIComponent(serial)}`,
+  const others = deviceRows.filter((d) => d.serial !== serial);
+  $("#copyFrom").replaceChildren(
+    ...(others.length
+      ? others.map((d) => new Option(d.label, d.serial))
+      : [new Option("ไม่มีเครื่องอื่นให้ก๊อป", "")]),
   );
-  touchSocket.onmessage = (event) => {
-    const payload = JSON.parse(event.data || "{}");
-    if (payload.error) phoneNote.textContent = payload.error;
-  };
-  touchSocket.onclose = () => { touchSocket = null; };
+  $("#copyFrom").disabled = others.length === 0;
+  $("#copySettings").disabled = others.length === 0;
+  $("#screenSettingsNote").textContent = "";
+  settingsBox.showModal();
 }
 
-function closeTouchSocket() {
-  if (touchSocket) {
-    touchSocket.onclose = null;
-    touchSocket.close();
-    touchSocket = null;
-  }
-  holdState = null;
-}
-
-/** ภาพที่กำลังแสดงอยู่ (canvas สตรีม หรือ img ภาพนิ่ง) */
-function activeSurface() {
-  return phoneCanvas.hidden ? phoneScreen : phoneCanvas;
-}
-
-function pointFrom(event) {
-  const surface = activeSurface();
-  const width = surface === phoneCanvas ? surface.width : surface.naturalWidth;
-  const height = surface === phoneCanvas ? surface.height : surface.naturalHeight;
-  const rect = surface.getBoundingClientRect();
-  if (!width || !height || !rect.width || !rect.height) return null;
-  // ภาพ object-fit:contain — พื้นที่จริงของภาพเล็กกว่ากรอบ ต้องหักขอบดำออก
-  const scale = Math.min(rect.width / width, rect.height / height);
-  if (!Number.isFinite(scale) || scale <= 0) return null;
-  const drawnW = width * scale;
-  const drawnH = height * scale;
-  const offsetX = rect.left + (rect.width - drawnW) / 2;
-  const offsetY = rect.top + (rect.height - drawnH) / 2;
-  const x = Math.round((event.clientX - offsetX) / scale);
-  const y = Math.round((event.clientY - offsetY) / scale);
-  if (x < 0 || y < 0 || x >= width || y >= height) return null;
-  return { x, y, source_width: width, source_height: height };
-}
-
-async function sendTouch(action, point) {
-  const body = { serial: deviceSelect.value, action, ...point };
-  // ช่อง WebSocket เร็วกว่ามาก — ยิง HTTP ทีละ event ได้แค่ ~50 ครั้ง/วินาที
-  if (touchSocket && touchSocket.readyState === WebSocket.OPEN) {
-    touchSocket.send(JSON.stringify(body));
-    return;
-  }
+$("#copySettings").addEventListener("click", async () => {
+  const source = $("#copyFrom").value;
+  if (!source || !settingsSerial) return;
   try {
-    const payload = await api("/api/phone/touch", {
+    const payload = await api("/api/device/copy-settings", {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({ source, target: settingsSerial }),
     });
-    if (payload.supported === false) {
-      phoneNote.textContent = "เครื่องนี้กดค้างไม่ได้ (ต้อง Android 10 ขึ้นไป)";
-    }
+    // เอาค่าที่ก๊อปมาเติมลงช่องให้เห็นทันที — ก๊อปแล้วช่องยังเป็นค่าเก่า
+    // ผู้ใช้จะนึกว่าปุ่มไม่ทำงาน แล้วกดซ้ำ
+    const live = payload.settings || {};
+    settingsField("gap_min").value = live.gap_min ?? 15;
+    settingsField("gap_max").value = live.gap_max ?? 20;
+    settingsField("screen_saver").checked = live.screen_saver !== false;
+    settingsField("phone_clean").checked = live.phone_clean !== false;
+    settingsField("auto_start").checked = Boolean(live.auto_start);
+    $("#screenSettingsNote").textContent = payload.note
+      + " (ชื่อ · บัญชี · สายงาน ไม่ถูกก๊อปตามมา)";
+    await loadDevices();
   } catch (error) {
-    phoneNote.textContent = error.message;
+    $("#screenSettingsNote").textContent = error.message;
   }
-}
+});
 
-const viewer = $("#phoneViewer");
-
-viewer.addEventListener("pointerdown", async (event) => {
-  if ($("#stopScreen").disabled) return;      // ยังไม่ได้เปิดจอ
-  const point = pointFrom(event);
-  if (!point) return;
+$("#saveScreenSettings").addEventListener("click", async (event) => {
   event.preventDefault();
-
-  // โหมดเทรนตำแหน่ง: เก็บพิกัดอย่างเดียว ไม่ส่งไปเครื่องจริง
-  if (typeof touchIntercept.fn === "function") {
-    touchIntercept.fn(point);
-    return;
+  if (!settingsSerial) return;
+  const lanes = [...settingsBox.querySelectorAll("[name='lane']:checked")]
+    .map((box) => box.value);
+  try {
+    await api("/api/device", {
+      method: "POST",
+      body: JSON.stringify({
+        serial: settingsSerial,
+        name: settingsField("name").value.trim(),
+        account: settingsField("account").value.trim(),
+        enabled: settingsField("enabled").checked,
+        make_default: settingsField("make_default").checked,
+        lanes,
+      }),
+    });
+    await api("/api/fb/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        serial: settingsSerial,
+        per_device: true,
+        gap_min: Number(settingsField("gap_min").value) || 15,
+        gap_max: Number(settingsField("gap_max").value) || 20,
+        screen_saver: settingsField("screen_saver").checked,
+        phone_clean: settingsField("phone_clean").checked,
+        auto_start: settingsField("auto_start").checked,
+      }),
+    });
+    settingsBox.close();
+    await loadDevices();
+    phoneNote.textContent = `บันทึกค่าของ ${labelOf(settingsSerial)} แล้ว`;
+  } catch (error) {
+    $("#screenSettingsNote").textContent = error.message;
   }
-  viewer.setPointerCapture(event.pointerId);
-  holdState = { point, moved: false };
-  await sendTouch("DOWN", point);
 });
 
-viewer.addEventListener("pointermove", async (event) => {
-  if (!holdState) return;
-  const now = performance.now();
-  if (now - lastMoveSent < MOVE_INTERVAL_MS) return;
-  const point = pointFrom(event);
-  if (!point) return;
-  lastMoveSent = now;
-  holdState.moved = true;
-  holdState.point = point;      // จำจุดล่าสุดไว้ใช้ตอนปล่อยนอกกรอบ
-  await sendTouch("MOVE", point);
+$("#forgetScreen").addEventListener("click", async () => {
+  if (!settingsSerial) return;
+  if (!window.confirm(`เอา ${labelOf(settingsSerial)} ออกจากทะเบียน?\n`
+      + "ค่าที่ตั้งไว้จะหาย เสียบใหม่จะกลับมาแบบปิดไว้")) return;
+  try {
+    await api("/api/device/forget", {
+      method: "POST",
+      body: JSON.stringify({ serial: settingsSerial }),
+    });
+    settingsBox.close();
+    await loadDevices();
+  } catch (error) {
+    $("#screenSettingsNote").textContent = error.message;
+  }
 });
 
-async function releaseTouch(event) {
-  if (!holdState) return;
-  const held = holdState;
-  holdState = null;
-  // ปล่อยนอกภาพ → ใช้จุดสุดท้ายที่ยังอยู่ในกรอบ ไม่ใช่จุดเริ่ม
-  const point = pointFrom(event) || held.point;
-  try { viewer.releasePointerCapture(event.pointerId); } catch { /* ปล่อยไปแล้ว */ }
-  await sendTouch("UP", point);
-}
-
-viewer.addEventListener("pointerup", releaseTouch);
-viewer.addEventListener("pointercancel", releaseTouch);
-// ปิดแท็บระหว่างกดค้าง — ปล่อยนิ้วก่อน ไม่งั้นมือถือค้างจนกว่า watchdog จะทำงาน
-window.addEventListener("pagehide", () => {
-  if (holdState) sendTouch("UP", holdState.point);
-  closeTouchSocket();
-});
+$("#closeScreenSettings").addEventListener("click", () => settingsBox.close());
 
 // ---- ปุ่มลัด + พิมพ์ข้อความ
 document.querySelectorAll("[data-key]").forEach((button) => {

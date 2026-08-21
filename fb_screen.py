@@ -1,0 +1,206 @@
+"""ดับจอมือถือตอนไม่มีงาน แล้วปลุกก่อนงานเริ่ม
+
+**ทำไมต้องมี — วัดของจริง 18 ส.ค. 2026 เครื่อง 7a95129e**
+
+    stay_on_while_plugged_in = 15    เสียบชาร์จแล้ว "ห้ามจอดับ" ทุกแบบ
+    จอเปิดค้างมาแล้ว                  2 วัน 14 ชั่วโมง ไม่ดับเลยสักครั้ง
+    อุณหภูมิแบต                       50.0 °C
+    แบตเตอรี่                          15% ทั้งที่เสียบ AC อยู่
+
+เป็นวงจรที่กัดตัวเอง: จอเปิดตลอด → ร้อน → ระบบหรี่กระแสชาร์จเพื่อกันแบตพัง →
+แบตค้างต่ำทั้งที่เสียบอยู่ → ยิ่งทำงานยิ่งร้อน  เกิน 45 °C ค้างนานๆ แบตเสื่อมถาวร
+
+**ทำได้เพราะเครื่องนี้ไม่มีรหัสล็อกหน้าจอ** (`lockscreen.password_type = null`
+· `strongAuthRequired = 0`) ปลุกแล้วปัดทีเดียวใช้ได้เลย  ถ้าวันไหนตั้ง PIN ขึ้นมา
+`wake()` จะปลุกได้แต่ผ่านล็อกไม่ได้ — จึง **ยืนยันด้วย uiautomator ว่าแตะจอได้จริง**
+ไม่ใช่เชื่อแค่ว่า mWakefulness=Awake (จอสว่างแต่ติดหน้าล็อกก็ Awake เหมือนกัน)
+
+**เวลาที่ใช้ วัดกับเครื่องจริงแล้ว**  ดับจอ 1.35 วิ · ปลุกจอ 1.33 วิ
+
+ไฟล์นี้ฉีดคำสั่งเข้ามาจากข้างนอกได้ (`shell`) จึงทดสอบได้โดยไม่แตะ ADB จริง
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import time
+
+import studio_shared
+
+# ไม่มีงานและไม่มีใครแตะเครื่องนานเท่านี้ (วินาที) = ดับจอ
+IDLE_SECONDS = 180
+# ปลุกจอล่วงหน้าก่อนงานตั้งเวลาจะเริ่ม (วินาที)
+PREWAKE_SECONDS = 60
+# ห้ามดับถ้ามีงานตั้งเวลาจะถึงภายในเท่านี้ (วินาที) — ดับแล้วปลุกทันทีคือเสียเปล่า
+KEEP_AWAKE_BEFORE = 300
+CMD_TIMEOUT = 20.0
+
+# แอปที่สั่งปิดถาวร — ของผู้ใช้ที่ไม่เกี่ยวกับงานโพสต์แต่ค้างกินแรมอยู่เบื้องหลัง
+# (วัดเมื่อ 18 ส.ค.: Netflix 238 MB · Line 284 MB · ChatGPT 152 MB ·
+#  Bolt ผู้โดยสาร 152 MB · Bolt คนขับ 139 MB · Notion 153 MB รวมราว 1.1 GB)
+IDLE_APPS = (
+    "com.netflix.mediaclient",
+    "jp.naver.line.android",
+    "com.openai.chatgpt",
+    "ee.mtakso.client",
+    "ee.mtakso.driver",
+    "notion.id",
+)
+
+_WAKE_RE = re.compile(r"mWakefulness=(\w+)")
+# ต้องยึด `^\s*lastUserActivityTime=` ให้แน่น — ในผลเดียวกันมี
+# `lastUserActivityTimeNoChangeLights=` กับ `mLastUserActivityTime(excludingAttention)=`
+# ปนอยู่ด้วย จับผิดตัวแล้วจะได้เวลาที่ไม่ใช่การแตะจอจริง
+_IDLE_RE = re.compile(r"^\s*lastUserActivityTime=\d+\s*\((\d+) ms ago\)", re.M)
+
+
+def make_shell(serial: str, adb: str = "adb"):
+    def call(command: str) -> str:
+        done = subprocess.run(
+            [adb, "-s", serial, "shell", command],
+            capture_output=True, timeout=CMD_TIMEOUT,
+            creationflags=studio_shared.NO_WINDOW,
+        )
+        return done.stdout.decode("utf-8", errors="replace")
+    return call
+
+
+# ------------------------------------------------------------------ อ่านสถานะ
+
+def wakefulness(shell) -> str:
+    """Awake · Dozing · Asleep · "" ถ้าอ่านไม่ออก"""
+    try:
+        found = _WAKE_RE.search(shell("dumpsys power | grep mWakefulness="))
+    except Exception:
+        return ""
+    return found.group(1) if found else ""
+
+
+def is_awake(shell) -> bool:
+    return wakefulness(shell) == "Awake"
+
+
+def idle_seconds(shell) -> float:
+    """ไม่มีการแตะจอมากี่วินาทีแล้ว — อ่านไม่ออกคืน -1
+
+    ตัวนี้นับ **ทั้งนิ้วผู้ใช้และ `input tap` ของบอท** เพราะทั้งคู่เป็น input event
+    เหมือนกันในสายตาของ PowerManager — จึงใช้ตัวเดียวคุมได้ทั้งสองเรื่อง
+    ไม่ต้องแยกนับว่า "บอทใช้อยู่ไหม" กับ "ผู้ใช้ถือเครื่องอยู่ไหม"
+    """
+    try:
+        found = _IDLE_RE.search(shell("dumpsys power"))
+    except Exception:
+        return -1.0
+    return int(found.group(1)) / 1000.0 if found else -1.0
+
+
+def can_touch(shell) -> bool:
+    """แตะจอได้จริงไหม — จอสว่างแต่ติดหน้าล็อกจะอ่าน UI ไม่ได้"""
+    try:
+        return "<hierarchy" in shell(
+            "uiautomator dump /sdcard/wake-probe.xml >/dev/null 2>&1; "
+            "cat /sdcard/wake-probe.xml 2>/dev/null | head -c 200"
+        )
+    except Exception:
+        return False
+
+
+# ------------------------------------------------------------------ สั่งงาน
+
+def wake(shell, log=None, tries: int = 2) -> bool:
+    """ปลุกจอ + ปัดหน้าล็อกออก แล้ว**ยืนยันว่าแตะจอได้จริง**
+
+    ยืนยันสำคัญกว่าการสั่ง — ถ้าปลุกไม่ขึ้นแล้วปล่อยงานเดินต่อ บอทจะไล่กด
+    พิกัดบนจอที่ดับอยู่ครบทุกขั้นแล้วรายงานว่า "โพสต์แล้ว" ทั้งที่ไม่มีอะไรเกิดขึ้น
+    """
+    say = log or (lambda _: None)
+    # ทางลัดตอนจอเปิดอยู่แล้ว — เสีย 1 คำสั่ง (~0.1 วิ) แล้วจบ
+    #
+    # ห้ามยิง keyevent มั่วตอนจอเปิดอยู่ ทางนี้ถูกเรียกทุกครั้งที่สร้าง Phone
+    # ซึ่งเกิดกลางงานได้ การกดปุ่มแทรกตอนแอปกำลังเปิดหน้าอื่นค้างไว้คือทำงานพัง
+    try:
+        if is_awake(shell):
+            return True
+    except Exception:
+        pass
+    for attempt in range(1, tries + 1):
+        try:
+            if not is_awake(shell):
+                shell("input keyevent 224")        # KEYCODE_WAKEUP (ไม่ใช่ 26 ที่สลับไปมา)
+                time.sleep(1.2)
+            shell("input keyevent 82")             # ปัดหน้าล็อกออก (เครื่องนี้ไม่มี PIN)
+            time.sleep(0.6)
+            if can_touch(shell):
+                if attempt > 1:
+                    say(f"  ปลุกจอสำเร็จรอบที่ {attempt}")
+                return True
+        except Exception as error:
+            say(f"  ปลุกจอไม่สำเร็จ: {error}")
+        time.sleep(0.8)
+    say("  ⚠️ ปลุกจอไม่ขึ้น — จออาจติดหน้าล็อกที่ต้องใส่รหัส")
+    return False
+
+
+def sleep_screen(shell, log=None) -> bool:
+    """ดับจอ — คืน True เมื่อยืนยันแล้วว่าดับจริง"""
+    say = log or (lambda _: None)
+    try:
+        mode = wakefulness(shell)
+        # **อ่านไม่ออก ≠ ดับอยู่แล้ว** — ถ้าเหมารวมกัน ADB หลุดจะถูกรายงานว่า
+        # "ดับจอสำเร็จ" ทั้งที่จอยังสว่างค้างอยู่ แล้วไม่มีใครรู้ว่าไม่ได้ดับจริง
+        if not mode:
+            say("  อ่านสถานะจอไม่ได้ — ยังไม่สั่งดับ")
+            return False
+        if mode != "Awake":
+            return True                            # ดับอยู่แล้ว ไม่ต้องสั่งซ้ำ
+        shell("input keyevent 223")                # KEYCODE_SLEEP
+        time.sleep(1.2)
+        done = not is_awake(shell)
+        say("  ดับจอมือถือแล้ว" if done else "  สั่งดับจอแล้วแต่จอยังสว่างอยู่")
+        return done
+    except Exception as error:
+        say(f"  ดับจอไม่สำเร็จ: {error}")
+        return False
+
+
+def disable_stay_on(shell, log=None) -> bool:
+    """เลิก "เสียบชาร์จแล้วห้ามจอดับ" — ไม่ปิดตัวนี้ ดับไปเดี๋ยวก็ติดกลับมาเอง"""
+    say = log or (lambda _: None)
+    try:
+        now = (shell("settings get global stay_on_while_plugged_in") or "").strip()
+        if now in ("0", "null", ""):
+            return True
+        shell("settings put global stay_on_while_plugged_in 0")
+        say(f"  ปิดค่า stay_on_while_plugged_in (เดิม {now}) แล้ว")
+        return True
+    except Exception as error:
+        say(f"  ปิด stay_on_while_plugged_in ไม่สำเร็จ: {error}")
+        return False
+
+
+def stop_idle_apps(shell, log=None, packages=IDLE_APPS) -> list[str]:
+    """ปิดแอปของผู้ใช้ที่ค้างกินแรมอยู่ — คืนรายชื่อที่สั่งสำเร็จ"""
+    say = log or (lambda _: None)
+    done = []
+    for package in packages:
+        try:
+            shell(f"am force-stop {package}")
+            done.append(package)
+        except Exception as error:
+            say(f"  ปิด {package} ไม่สำเร็จ: {error}")
+    if done:
+        say(f"  ปิดแอปที่ไม่เกี่ยวกับงาน {len(done)} ตัว")
+    return done
+
+
+def status_text(shell) -> str:
+    """สรุปสถานะจอไว้แปะใน /health"""
+    mode = wakefulness(shell) or "?"
+    idle = idle_seconds(shell)
+    label = {"Awake": "🔆 จอเปิดอยู่", "Dozing": "🌙 จอดับอยู่",
+             "Asleep": "🌙 จอดับอยู่"}.get(mode, f"❓ อ่านไม่ออก ({mode})")
+    if idle < 0:
+        return f"📱 <b>จอมือถือ</b>\n   {label}"
+    return (f"📱 <b>จอมือถือ</b>\n   {label} · ไม่มีใครแตะมา "
+            f"{idle / 60:.0f} นาที (ดับเมื่อครบ {IDLE_SECONDS // 60} นาที)")

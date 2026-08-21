@@ -32,6 +32,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import fb_posts_parse
 import studio_shared
 import telegram_bot
 from bot_profiles import ProfileFarm, FarmError
@@ -359,7 +360,9 @@ def scan_group(page, share_url: str, scrolls: int, log, enough=None) -> dict:
     (เจอมาแล้ว: ฆ่ารันเต็มทั้งรอบ เหลือแต่ EPIPE ของ node driver)
     handler จึงทำแค่จด response ลง list แล้วค่อยอ่านตัวหนังสือนอก handler
     """
-    bucket: dict[str, dict] = {}
+    # ตัวแกะเดียวกับ /test — อ่านโครงสร้าง JSON จริง ไม่ใช่วัดระยะตัวอักษร
+    # (เหตุผลเต็มอยู่ที่ _collect_deep — harvest() นับไลค์ต่ำกว่าจริงหลายร้อยเท่า)
+    parser = fb_posts_parse.FeedParser()
     pending: list = []
 
     def on_response(response):
@@ -370,10 +373,14 @@ def scan_group(page, share_url: str, scrolls: int, log, enough=None) -> dict:
         """อ่าน body ของ response ที่จดไว้ (เรียกจาก greenlet หลักเท่านั้น)"""
         for response in pending:
             try:
-                harvest(response.text(), bucket)
+                parser.add(response.text())
             except Exception:
                 pass   # body ถูกทิ้งไปแล้ว/ไม่ใช่ข้อความ — ข้ามตัวนั้นได้
         pending.clear()
+
+    def bucket_now() -> dict:
+        """โพสต์ที่เจอแล้วในรูปแบบเดิม — ให้ callback `enough` ใช้ได้เหมือนเดิม"""
+        return {p["id"]: p for p in parser.as_legacy()}
 
     page.on("response", on_response)
     try:
@@ -382,7 +389,6 @@ def scan_group(page, share_url: str, scrolls: int, log, enough=None) -> dict:
         canonical = page.url.split("?")[0]
         name = re.sub(r"\s*\|\s*Facebook\s*$", "", page.title()).strip()
         log(f"  เปิดแล้ว: {name or canonical}")
-        harvest(page.content(), bucket)          # โพสต์ชุดแรกฝังมากับ HTML
         drain()
 
         # ความลึก = scrolls (ปุ่มเดียวคุมความลึก ปรับผ่าน /set เลื่อน N)
@@ -391,18 +397,17 @@ def scan_group(page, share_url: str, scrolls: int, log, enough=None) -> dict:
         round_number = 0
         stop_reason = ""
         while round_number < scrolls:
-            if enough and enough(bucket):
+            if enough and enough(bucket_now()):
                 stop_reason = "ได้โพสต์ใหม่ครบโควตาแล้ว — หยุดเลื่อน"
                 break
             round_number += 1
-            before = len(bucket)
+            before = len(parser.posts)
             page.keyboard.press("End")
             page.wait_for_timeout(3_000)
             drain()
-            harvest(page.content(), bucket)
-            log(f"  เลื่อนรอบ {round_number}/{scrolls} — เจอแล้ว {len(bucket)} โพสต์")
+            log(f"  เลื่อนรอบ {round_number}/{scrolls} — เจอแล้ว {len(parser.posts)} โพสต์")
             # ฟีดไม่โหลดเพิ่ม IDLE_LIMIT รอบติด = ฟีดหมดจริง ไม่เผาเวลาต่อ
-            idle_rounds = idle_rounds + 1 if len(bucket) == before else 0
+            idle_rounds = idle_rounds + 1 if len(parser.posts) == before else 0
             if idle_rounds >= IDLE_LIMIT:
                 stop_reason = "ฟีดหมดแล้ว (โหลดไม่ขึ้นโพสต์ใหม่)"
                 break
@@ -415,7 +420,7 @@ def scan_group(page, share_url: str, scrolls: int, log, enough=None) -> dict:
         page.remove_listener("response", on_response)
 
     # เรียงตาม engagement รวม (ไลค์+คอมเมนต์+แชร์) — โพสต์แมสที่สุดอยู่บนสุด
-    posts = sorted(bucket.values(), key=lambda p: -engagement(p))
+    posts = sorted(parser.as_legacy(), key=lambda p: -engagement(p))
     result = {"share_url": share_url, "canonical": canonical, "name": name,
               "posts": posts, "error": ""}
     if not posts:
@@ -610,7 +615,16 @@ def _collect_deep(page, share_url: str, target: int, log) -> dict:
     ใช้ page ที่เปิดไว้แล้ว (เรียกวนหลายกลุ่มโดยไม่เปิด/ปิดเบราว์เซอร์ซ้ำ)
     ดักอ่าน GraphQL แบบเดียวกับ scan_group (จด response แล้ว drain นอก handler)
     """
-    bucket: dict[str, dict] = {}
+    # ใช้ตัวแกะแบบอ่านโครงสร้าง JSON จริง (fb_posts_parse) แทน harvest() เดิม
+    #
+    # ทำไมเปลี่ยน — พิสูจน์เทียบบนดัมพ์เดียวกัน 18 ส.ค. 2569:
+    #   โพสต์ 597810391561581 · harvest() ได้ไลค์ 3 · ตัวใหม่ได้ 2,438
+    #   Facebook เขียนเองในหน้าเว็บว่า "ถูกใจ: 2.3 พัน คน" → ตัวใหม่ถูก
+    # เพราะ harvest จับคู่ตัวเลขกับโพสต์ด้วย "ระยะใกล้สุดในข้อความ" มันจึงคว้า
+    # ยอดของคอมเมนต์/โพสต์ข้างเคียงมาใส่ ส่วนยอดจริงของ Facebook ถูกส่งแยกก้อน
+    # (deferred fragment) ที่ผูกกลับด้วย id เข้ารหัส base64 "feedback:<post_id>"
+    # ผลคือ engagement ที่ใช้ตัดสิน "กลุ่มมีชีวิต/ตาย" ต่ำกว่าจริงมาก
+    parser = fb_posts_parse.FeedParser()
     pending: list = []
 
     def on_response(response):
@@ -620,7 +634,7 @@ def _collect_deep(page, share_url: str, target: int, log) -> dict:
     def drain() -> None:
         for response in pending:
             try:
-                harvest(response.text(), bucket)
+                parser.add(response.text())
             except Exception:
                 pass
         pending.clear()
@@ -632,28 +646,26 @@ def _collect_deep(page, share_url: str, target: int, log) -> dict:
         canonical = page.url.split("?")[0]
         name = re.sub(r"\s*\|\s*Facebook\s*$", "", page.title()).strip()
         log(f"  เปิดแล้ว: {name or canonical}")
-        harvest(page.content(), bucket)
         drain()
 
         idle_rounds = 0
         for round_number in range(1, DEEP_MAX_SCROLLS + 1):
-            if len(bucket) >= target:
+            if len(parser.posts) >= target:
                 break
-            before = len(bucket)
+            before = len(parser.posts)
             page.keyboard.press("End")
             page.wait_for_timeout(3_000)
             drain()
-            harvest(page.content(), bucket)
             if round_number % 10 == 0:
-                log(f"  เลื่อน {round_number} รอบ — {len(bucket)} โพสต์")
-            idle_rounds = idle_rounds + 1 if len(bucket) == before else 0
+                log(f"  เลื่อน {round_number} รอบ — {len(parser.posts)} โพสต์")
+            idle_rounds = idle_rounds + 1 if len(parser.posts) == before else 0
             if idle_rounds >= IDLE_LIMIT:
-                log(f"  ฟีดหมดที่ {len(bucket)} โพสต์")
+                log(f"  ฟีดหมดที่ {len(parser.posts)} โพสต์")
                 break
     finally:
         page.remove_listener("response", on_response)
 
-    feed = list(bucket.values())         # ลำดับที่เห็นในฟีด (ใหม่→เก่า)
+    feed = parser.as_legacy()            # ลำดับที่เห็นในฟีด (ใหม่→เก่า)
     posts = sorted(feed, key=lambda p: -engagement(p))
     return {"share_url": share_url, "canonical": canonical, "name": name,
             "posts": posts, "feed": feed}
@@ -892,9 +904,14 @@ KW_STATE_FILE = DATA_DIR / "fb_kw_state.json"
 KW_MIN_MEMBERS = 100_000
 
 _KW_DEFAULT = {
+    "schema": 0,        # รุ่นของ state — 0 = ของเก่าที่ยังไม่ผ่าน migration
     "keyword": "",
     "min_members": KW_MIN_MEMBERS,
+    "max_members": 0,   # ขอบบนของช่วงสมาชิก (0 = ไม่จำกัด) — ใช้ทำ "แบนด์"
     "queue": [],        # กลุ่มที่เจอแล้วรอส่งให้เลือก [{gid, name, url, members}]
+    # คิวเจาะซ้ำ — **ต้องแยกจาก queue** เพราะ queue ถูกล้างทุกครั้งที่เปลี่ยน
+    # คำค้น (_kw_activate) ถ้าเอากลุ่มเจาะซ้ำไปไว้ในนั้นจะหายทั้งชุดโดยไม่มีใครรู้
+    "recheck_queue": [],
     "current": None,    # กลุ่มที่ส่งไปแล้วรอกด Approve/Reject (+message_id, shot)
     "decision": None,   # กลุ่มที่ test เสร็จแล้วรอกด Keep/Removed (+message_id)
     "sent": {},         # gid -> ข้อมูล เคยส่งให้ดูแล้ว (กันเสนอซ้ำทุกกรณี)
@@ -902,6 +919,7 @@ _KW_DEFAULT = {
     "approved": {},     # gid -> ข้อมูล ผู้ใช้รับ — ส่งเข้า /test แล้ว
     "private": {},      # gid -> ข้อมูล กลุ่มส่วนตัว — บันทึกแยก ไม่เสนอ (ดู /private)
     "depth": 0,         # เลื่อนหน้า search ไปแล้วกี่รอบ (ขุดต่อจากเดิมได้)
+    "dry": 0,           # ขุดแล้วไม่เจอของใหม่ติดกันกี่รอบ (ครบเกณฑ์ = exhausted)
     # โหมดอัตโนมัติเต็ม (ผู้ใช้สั่ง 14 ส.ค. 2569): search → test ทุกกลุ่ม >100k
     # → ตัดสินเอง (มีชีวิต→whitelist · ตาย→rejected · ก้ำกึ่ง→การ์ดให้ผู้ใช้กด)
     "pending": {},      # gid -> การ์ดก้ำกึ่งรอผู้ใช้ Approve/Reject (+message_id)
@@ -911,12 +929,43 @@ _KW_DEFAULT = {
     "whitelist": {},    # gid -> กลุ่มที่ผ่าน (มีชีวิต/ผู้ใช้กดรับ) พร้อม keyword+ตัวเลข
     "exhausted": False, # ขุดหน้า search จนไม่เจอของใหม่แล้ว (เคลียร์เมื่อเปลี่ยนคำค้น)
     "summary_sent": False,   # ส่งสรุปท้าย keyword ไปแล้วหรือยัง (กันส่งซ้ำ)
-    "keyword_queue": [],     # คำค้นที่ต่อคิวรอ — คำปัจจุบันสรุปจบแล้วค่อยเริ่มตัวถัดไป
-    "keywords_done": [],     # คำค้นที่เคยทำจบแล้ว — ใช้เตือนว่าพิมพ์ซ้ำ
+    # คิว/ประวัติเก็บเป็น "งาน" = {kw, lo, hi} (str เก่า = แบนด์ >100k ตามเดิม)
+    "keyword_queue": [],     # งานที่ต่อคิวรอ — งานปัจจุบันสรุปจบแล้วค่อยเริ่มตัวถัดไป
+    "keywords_done": [],     # งานที่เคยทำจบแล้ว — ใช้เตือนว่าพิมพ์ซ้ำ
     # ตัวนับของ keyword ปัจจุบัน — ใช้ทำสรุปตอนจบ
     "run": {"keyword": "", "tested": 0, "alive": 0, "dead": 0,
             "borderline": 0, "private": 0, "failed": []},
 }
+
+# ช่วงสมาชิกที่ผู้ใช้สั่งเก็บเพิ่ม (18 ส.ค. 2569) — (ล่าง, บน] ต่อกันไม่ทับกัน
+# 10k–50k · 50k–100k · >100k (ของเดิม) → กลุ่มหนึ่งตกอยู่แบนด์เดียวเสมอ
+KW_BANDS = [(10_000, 50_000), (50_000, 100_000)]
+
+
+def band_label(lo: int, hi: int) -> str:
+    """ป้ายช่วงสมาชิกอ่านง่าย — ใช้เป็นคีย์ประวัติ/หัวข้อสรุป/หมวด whitelist"""
+    def short(n: int) -> str:
+        return f"{n // 1000}k" if n % 1000 == 0 and n >= 1000 else f"{n:,}"
+    return f"{short(int(lo))}+" if not hi else f"{short(int(lo))}-{short(int(hi))}"
+
+
+def job_key(keyword: str, lo: int, hi: int) -> str:
+    """คีย์กันซ้ำของ "งาน" หนึ่งชิ้น = คำค้น + ช่วงสมาชิก
+
+    คำเดิมแต่คนละช่วง = คนละงาน (ต้องไม่ติดเตือน "ซ้ำ")
+    แบนด์ >100k ใช้คีย์เป็นคำค้นเปล่าๆ — ตรงกับประวัติเดิมที่เก็บเป็น str
+    """
+    if int(lo) == KW_MIN_MEMBERS and not int(hi or 0):
+        return keyword
+    return f"{keyword} [{band_label(lo, hi)}]"
+
+
+def as_job(item) -> dict:
+    """แปลงรายการคิว/ประวัติให้เป็น {kw, lo, hi} — รับของเก่าที่เป็น str ได้"""
+    if isinstance(item, dict):
+        return {"kw": item.get("kw", ""), "lo": int(item.get("lo") or KW_MIN_MEMBERS),
+                "hi": int(item.get("hi") or 0)}
+    return {"kw": str(item or ""), "lo": KW_MIN_MEMBERS, "hi": 0}
 
 # ป้ายสถานะกลุ่มบน Facebook — หน้า search โชว์ "สาธารณะ/ส่วนตัว · สมาชิก..."
 # ส่วนหน้ากลุ่มโชว์ "กลุ่มสาธารณะ/กลุ่มส่วนตัว" (รับสองภาษาตามกติกาโปรเจกต์)

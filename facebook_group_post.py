@@ -24,6 +24,9 @@ import threading
 import time
 from pathlib import Path
 
+import fb_comment_guard
+import fb_limits
+import fb_screen
 import studio_shared
 
 FB_PACKAGE = "com.facebook.katana"
@@ -50,6 +53,9 @@ COMPOSER_HINTS = ["เขียนอะไรสักหน่อย", "เข
 # (ตรวจจากหน้าจอจริงบน Facebook 2026) — ห้ามใส่ "รูปภาพ" เดี่ยวๆ เพราะไปชนกับ
 # "รูปภาพหน้าปกของกลุ่ม" ที่อยู่บนสุดของหน้า
 PHOTO_HINTS = ["แกลเลอรี", "Gallery", "รูปภาพ/วิดีโอ", "Photo/video"]
+# วนหาปุ่มแนบรูปกี่รอบก่อนยอมแพ้ (รอบละ 1.5 วินาที) — รวมแล้วรอได้ ~12 วินาที
+# พอๆ กับที่ขั้นหาช่องเขียนโพสต์รอได้ (15 วินาที) สองขั้นนี้ควรใจกว้างเท่ากัน
+PHOTO_BUTTON_TRIES = 8
 # รูปที่เพิ่งส่งเข้าเครื่องเป็นไฟล์ใหม่สุด จึงเป็น "รายการที่ 1" ในหน้าเลือกรูป
 FIRST_PHOTO_HINTS = ["รายการที่ 1", "item 1", "Item 1"]
 # แนบได้สูงสุดกี่ใบต่อโพสต์
@@ -207,6 +213,12 @@ class Phone:
         # ตัวนับกันชื่อไฟล์ซ้ำตอนส่งรูป + จำชื่อล่าสุดของแต่ละรูปไว้ลบใบเก่าทิ้ง
         self._push_seq = 0
         self._pushed: dict[str, str] = {}
+        # **ปลุกจอก่อนเสมอ** — ตรงนี้คือทางผ่านเดียวของทุกงานที่ขับแอป Facebook
+        # (งานโพสต์ · ตามเก็บ · เก็บยอด · แก้รูป · ลบโพสต์ · บอทตอบคอมเมนต์)
+        # คุมที่นี่ที่เดียวจึงครบทุกทาง ไม่ต้องไปไล่ใส่ทีละจุดแล้วลืมบางจุด
+        #
+        # จอเปิดอยู่แล้วเสียแค่คำสั่งเดียว (~0.1 วิ) จอดับอยู่เสีย ~1.3 วิ
+        fb_screen.wake(self.shell, log=self.log)
 
     def run(self, *args: str, timeout: float = 30) -> subprocess.CompletedProcess:
         # ซ่อนหน้าต่างคอนโซล — จุดนี้คือทางผ่านของคำสั่ง ADB **ทุกคำสั่ง**
@@ -1018,20 +1030,61 @@ def _as_photos(photos, count: int) -> list:
 # คอมเมนต์รัวเกินไปเข้าข่ายสแปม โดนจำกัดการมองเห็นหรือระงับบัญชีได้
 # นับแบบหน้าต่างเลื่อน (rolling window) ไม่ใช่รีเซ็ตทุกต้นชั่วโมง —
 # ไม่งั้นยิง 10 ครั้งท้ายชั่วโมงแล้วยิงอีก 10 ต้นชั่วโมงถัดไปได้ทันที
-COMMENT_LIMIT_PER_HOUR = 12
+#
+# **แบ่งเป็นเลน 18 ส.ค. 2026** ของเดิมเป็นถังใบเดียวใช้ร่วมกันทั้งสายโพสต์
+# (app.py → fb_auto_post) และสายตอบคอมเมนต์ (fb_engage) ผลคือ fb_engage ตอบ
+# รอบเดียว 5 ครั้งกินโควตาไป 42% แล้วงานโพสต์ที่ผู้ใช้สั่งเองเหลือแค่ 7 กลุ่ม
+# ในชั่วโมงนั้น โดยไม่มีใครรู้ตัวเพราะทั้งคู่เห็นตัวเลขเดียวกัน
+#
+# **แบ่ง ไม่ใช่แจกเพิ่ม** — สองสายนี้ใช้ **บัญชี Facebook เดียวกันบนมือถือเครื่อง
+# เดียวกัน** เพดานนี้เป็นเพดานของ *บัญชี* ไม่ใช่ของโปรเซส ถ้าให้เลนละ 12 เท่ากับ
+# ยิงจริง 24 ครั้ง/ชั่วโมงต่อบัญชีเดียว = เพิ่มความเสี่ยงโดนตีธงเป็นสองเท่าโดยที่
+# ตั้งใจจะแค่ "แยกกัน" — ผลรวมของทุกเลนจึงต้องไม่เกิน COMMENT_LIMIT_PER_HOUR
+# **ตัวเลขจริงอยู่ที่ fb_limits ตั้งแยกรายบัญชีได้** ค่าคงที่ตัวนี้เหลือไว้เป็น
+# ค่าตั้งต้นและเพื่อให้โค้ดเก่าที่อ้างชื่อนี้ยังทำงานได้ — อย่าเอาไปตัดสินใจใหม่
+COMMENT_LIMIT_PER_HOUR = fb_limits.DEFAULTS["per_hour"]
 COMMENT_WINDOW_SECONDS = 3600.0
-COMMENT_TIMES_FILE = Path(__file__).resolve().parent / "data" / "comment_times.json"
+DEFAULT_COMMENT_LANE = fb_limits.DEFAULT_LANE
+# **ต้องผ่าน studio_shared.DATA_DIR** ไม่ใช่ต่อ "data" เอง — ไม่งั้น
+# STUDIO_DATA_DIR ไม่มีผลกับไฟล์นี้ แล้วสนามทดสอบจะไปอ่าน/เขียนโควตา
+# ของจริง: เทสอ่านโควตาจริงจนผลเพี้ยน (เจอจริง 18 ส.ค.) และร้ายกว่านั้นคือ
+# **เทสเขียนทับโควตาจริง** = กินโควตาคอมเมนต์ของวันนั้นไปฟรีๆ โดยไม่มีใครรู้
+COMMENT_TIMES_FILE = studio_shared.post_file("comment_times.json")
+# **เลนละไฟล์ ไม่ใช่ไฟล์เดียวหลายคีย์**
+#
+# app.py รันค้างข้ามวันโดยถือโค้ดเก่าไว้ในหน่วยความจำ ถ้าเปลี่ยนไฟล์เดิมให้เป็น
+# รูปแบบใหม่ (dict แยกเลน) โค้ดเก่าที่ยังรันอยู่จะเขียนทับด้วยรูปแบบเดิม (list)
+# แล้วยอดของอีกเลนหายเงียบๆ โดยไม่มี error — แยกไฟล์แล้วโค้ดเก่าที่ไม่รู้จักเลน
+# ก็ยังทำงานถูกต้องต่อไปในเลน post ตามเดิม **ไม่ต้องรีสตาร์ต app.py**
+_COMMENT_LANE_FILES = {
+    "post": COMMENT_TIMES_FILE,
+    "reply": COMMENT_TIMES_FILE.with_name("comment_times_reply.json"),
+}
 _comment_lock = threading.Lock()
 
 
-def _comment_times() -> list[float]:
-    """เวลาที่คอมเมนต์สำเร็จภายในหน้าต่างล่าสุด (เก่ากว่านั้นตัดทิ้ง)
+def comment_lane_limit(lane: str = DEFAULT_COMMENT_LANE, account: str = "") -> int:
+    """ช่องสูงสุดของเลนนั้นสำหรับบัญชีนั้น — ตั้งได้ที่ fb_limits"""
+    return fb_limits.lane_limit(lane, account)
+
+
+def comment_limit_per_hour(account: str = "") -> int:
+    """เพดานรวมต่อชั่วโมงของบัญชีนั้น"""
+    return fb_limits.per_hour(account)
+
+
+def _lane_file(lane: str) -> Path:
+    return _COMMENT_LANE_FILES.get(lane, COMMENT_TIMES_FILE)
+
+
+def _comment_times(lane: str = DEFAULT_COMMENT_LANE) -> list[float]:
+    """เวลาที่คอมเมนต์สำเร็จ **ของเลนนั้น** ภายในหน้าต่างล่าสุด (เก่ากว่านั้นตัดทิ้ง)
 
     เก็บลงไฟล์เพราะรีสตาร์ตเซิร์ฟเวอร์บ่อย ถ้าเก็บในหน่วยความจำ
     รีสตาร์ตทีเดียวโควตาก็รีเซ็ตหมด ซึ่งทำให้เพดานไม่มีความหมาย
     """
     try:
-        raw = json.loads(COMMENT_TIMES_FILE.read_text(encoding="utf-8"))
+        raw = json.loads(_lane_file(lane).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
     if not isinstance(raw, list):
@@ -1040,27 +1093,60 @@ def _comment_times() -> list[float]:
     return sorted(float(x) for x in raw if isinstance(x, (int, float)) and x > edge)
 
 
-def comment_quota_left() -> int:
-    """คอมเมนต์ได้อีกกี่ครั้งในชั่วโมงนี้"""
-    return max(0, COMMENT_LIMIT_PER_HOUR - len(_comment_times()))
+def _all_comment_times() -> list[float]:
+    """เวลาที่คอมเมนต์สำเร็จของ **ทุกเลนรวมกัน** — ใช้คุมเพดานของบัญชี"""
+    merged: list[float] = []
+    for lane in _COMMENT_LANE_FILES:
+        merged.extend(_comment_times(lane))
+    return sorted(merged)
 
 
-def comment_quota_resets_in() -> float:
-    """อีกกี่วินาทีโควตาจะคืนมาหนึ่งช่อง (0 = ยังไม่เต็ม)"""
-    times = _comment_times()
-    if len(times) < COMMENT_LIMIT_PER_HOUR:
+def comment_quota_left(lane: str = DEFAULT_COMMENT_LANE, account: str = "") -> int:
+    """คอมเมนต์ได้อีกกี่ครั้งในชั่วโมงนี้ — ติดทั้งช่องของเลนและเพดานรวมของบัญชี
+
+    เอาค่าที่น้อยกว่าเสมอ: เลนเต็มก็ไปต่อไม่ได้ และต่อให้เลนตัวเองยังว่าง ถ้ารวม
+    ทุกเลนแตะเพดานบัญชีแล้วก็ต้องหยุด — ด่านหลังนี้กันกรณีตั้งช่องของเลนรวมกัน
+    เกินเพดานไว้ ซึ่งถ้าไม่มีจะกลายเป็นยิงเกินบัญชีโดยไม่มีใครทัดทาน
+
+    **ตัวนับยังเป็นถังรวมของทุกบัญชี** (ไฟล์เดียวต่อเลน) ส่วนเพดานแยกรายบัญชีแล้ว
+    ตอนนี้สายนี้มีมือถือเครื่องเดียว = บัญชีเดียว สองอย่างนี้จึงให้ผลเท่ากันเป๊ะ
+    วันที่เพิ่มเครื่องที่สอง ตัวนับรวมจะทำให้ **รัดกว่าความจริง** (นับคอมเมนต์ของ
+    อีกบัญชีเป็นของตัวเอง) ซึ่งเป็นทางที่ปลอดภัย ไม่ใช่ทางที่ยิงเกิน — แต่ต้องมา
+    แยกถังตอนนั้น ดู `fb_limits._slug()` ที่เตรียมชื่อไฟล์รายบัญชีไว้แล้ว
+    """
+    by_lane = comment_lane_limit(lane, account) - len(_comment_times(lane))
+    by_account = comment_limit_per_hour(account) - len(_all_comment_times())
+    return max(0, min(by_lane, by_account))
+
+
+def comment_quota_resets_in(lane: str = DEFAULT_COMMENT_LANE,
+                            account: str = "") -> float:
+    """อีกกี่วินาทีโควตาจะคืนมาหนึ่งช่อง (0 = ยังไม่เต็ม)
+
+    ดูจากด่านที่ตันอยู่จริง — ตันเพราะเลนเต็มก็รอคอมเมนต์เก่าสุด *ของเลนนั้น*
+    หลุดหน้าต่าง ตันเพราะเพดานบัญชีก็รอคอมเมนต์เก่าสุดของทุกเลนรวมกัน
+    """
+    if comment_quota_left(lane, account) > 0:
         return 0.0
-    return max(0.0, times[0] + COMMENT_WINDOW_SECONDS - time.time())
+    waits: list[float] = []
+    mine = _comment_times(lane)
+    if mine and len(mine) >= comment_lane_limit(lane, account):
+        waits.append(mine[0] + COMMENT_WINDOW_SECONDS - time.time())
+    everyone = _all_comment_times()
+    if everyone and len(everyone) >= comment_limit_per_hour(account):
+        waits.append(everyone[0] + COMMENT_WINDOW_SECONDS - time.time())
+    return max(0.0, min(waits)) if waits else 0.0
 
 
-def _note_comment_sent() -> None:
-    """บันทึกว่าเพิ่งคอมเมนต์สำเร็จหนึ่งครั้ง"""
+def _note_comment_sent(lane: str = DEFAULT_COMMENT_LANE) -> None:
+    """บันทึกว่าเพิ่งคอมเมนต์สำเร็จหนึ่งครั้ง **ในเลนนั้น**"""
+    path = _lane_file(lane)
     with _comment_lock:
-        times = _comment_times()
+        times = _comment_times(lane)
         times.append(time.time())
         try:
-            COMMENT_TIMES_FILE.parent.mkdir(parents=True, exist_ok=True)
-            COMMENT_TIMES_FILE.write_text(
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
                 json.dumps(times[-COMMENT_LIMIT_PER_HOUR * 4:]), encoding="utf-8"
             )
         except OSError:
@@ -1387,20 +1473,57 @@ def _attach_with_real_keyboard(phone: Phone, photo: Path) -> bool:
             time.sleep(1.5)
 
 
-def _write_comment(phone: Phone, text: str, photo: Path | None = None) -> bool:
-    """พิมพ์ + ส่งคอมเมนต์ในแผงที่เปิดอยู่ แล้วยืนยันว่าข้อความขึ้นจริง"""
+def _watch_for_block(phone: Phone, xml: str) -> bool:
+    """เจอข้อความบล็อกของ Facebook บนจอนี้ไหม — เจอแล้วสั่งพักทันที
+
+    ใช้กับทางล้มที่ **ยังไม่ได้กดส่ง** (หาช่องพิมพ์ไม่เจอ / หาปุ่มส่งไม่เจอ)
+    ทางพวกนี้ล้มได้จากเรื่องธรรมดาอย่างโพสต์ยังไม่ขึ้นหรือจอโหลดไม่ทัน จึง
+    **ไม่นับเข้าตัวนับล้มติดกัน** — ไม่งั้นโพสต์ที่ยังรออนุมัติ 3 กลุ่มติดจะทำให้
+    พักคอมเมนต์ทั้งระบบ 6 ชั่วโมงทั้งที่ไม่ได้โดนอะไรเลย
+    แต่ถ้า Facebook ขึ้นข้อความบล็อกมาตรงๆ ก็คือคำตอบแล้ว พักได้ทันที
+    """
+    if not fb_comment_guard.detect_block(xml):
+        return False
+    note = fb_comment_guard.note_failure(xml)
+    if note:
+        phone.log("  เจอข้อความบล็อกจาก Facebook บนจอ — สั่งพักคอมเมนต์แล้ว")
+    return True
+
+
+def _write_comment(phone: Phone, text: str, photo: Path | None = None,
+                   lane: str = DEFAULT_COMMENT_LANE) -> bool:
+    """พิมพ์ + ส่งคอมเมนต์ในแผงที่เปิดอยู่ แล้วยืนยันว่าข้อความขึ้นจริง
+
+    `lane` = ช่องโควตาที่จะหักและตรวจ ("post" งานโพสต์ · "reply" ตอบคอมเมนต์คนอื่น)
+    ค่าตั้งต้นเป็น "post" ตั้งใจให้ผู้เรียกเดิมทุกรายทำงานเหมือนเดิมทุกประการ
+    """
+    # โดนบล็อกอยู่ = ไม่ต้องลอง ทางผ่านเดียวที่ส่งคอมเมนต์จริง คุมที่นี่ที่เดียวพอ
+    #
+    # 16 ส.ค. 2026 คอมเมนต์ล้ม 32 ครั้งติดกัน 5 ชั่วโมงโดยไม่มีใครหยุด เพราะ
+    # ไม่มีด่านนี้ — แต่ละครั้งกินเวลาจอ ~2 นาที 20 วินาที รวมแล้วราว 75 นาที
+    # และการยิงซ้ำระหว่างโดนบล็อกยิ่งยืดเวลาบล็อกออกไป
+    # เพดานผูกกับ **เครื่อง** เพราะหนึ่งเครื่อง = หนึ่งบัญชีที่ล็อกอินค้างไว้
+    # และ Facebook ให้เพดานไม่เท่ากันในแต่ละบัญชี (ตั้งแยกได้ที่ fb_limits)
+    account = phone.serial
+    hold = fb_comment_guard.hold_reason(account=account)
+    if hold:
+        phone.log(f"  {hold} — ข้ามคอมเมนต์")
+        return False
     # เช็คเพดานก่อนลงมือ — ทางผ่านเดียวที่คอมเมนต์ถูกส่งจริง คุมที่นี่ที่เดียวพอ
     # เช็คก่อนพิมพ์/แนบรูป จะได้ไม่เสียเวลาทำงานเปล่าแล้วมาตันตอนกดส่ง
-    if comment_quota_left() <= 0:
-        wait = comment_quota_resets_in()
+    if comment_quota_left(lane, account) <= 0:
+        wait = comment_quota_resets_in(lane, account)
         phone.log(
-            f"  ครบเพดาน {COMMENT_LIMIT_PER_HOUR} คอมเมนต์/ชั่วโมงแล้ว — ข้ามไปก่อน "
-            f"(ว่างอีกช่องในอีก {wait / 60:.0f} นาที)"
+            f"  ครบเพดานเลน {lane} ({comment_lane_limit(lane, account)} "
+            f"คอมเมนต์/ชั่วโมง จากเพดานบัญชี {comment_limit_per_hour(account)}) "
+            f"แล้ว — ข้ามไปก่อน (ว่างอีกช่องในอีก {wait / 60:.0f} นาที)"
         )
         return False
-    field = phone.find(phone.dump(), COMMENT_FIELD_HINTS)
+    opened = phone.dump()
+    field = phone.find(opened, COMMENT_FIELD_HINTS)
     if field is None:
         phone.log("  ไม่พบช่องพิมพ์คอมเมนต์")
+        _watch_for_block(phone, opened)
         phone.back()
         return False
     phone.tap(field)
@@ -1418,13 +1541,16 @@ def _write_comment(phone: Phone, text: str, photo: Path | None = None) -> bool:
     time.sleep(1.5)
     # ต้องเห็นข้อความบนจอก่อนกดส่ง — broadcast ผ่านไม่ได้แปลว่าข้อความเข้าช่องจริง
     probe = text.strip()[:10]
-    if not screen_has(phone.dump(), probe):
+    typed = phone.dump()
+    if not screen_has(typed, probe):
         phone.log("  พิมพ์คอมเมนต์แล้วแต่ข้อความไม่ขึ้นบนจอ")
+        _watch_for_block(phone, typed)
         phone.back()
         return False
-    send = phone.find(phone.dump(), COMMENT_SEND_HINTS)
+    send = phone.find(typed, COMMENT_SEND_HINTS)
     if send is None:
         phone.log("  ไม่พบปุ่มส่งคอมเมนต์")
+        _watch_for_block(phone, typed)
         phone.back()
         return False
     phone.tap(send)
@@ -1438,9 +1564,11 @@ def _write_comment(phone: Phone, text: str, photo: Path | None = None) -> bool:
     # พ้นขอบจอ ตรวจจากจอเดียวจึงไม่เจอแล้วรายงานว่า "ยังไม่ขึ้น" ทั้งที่ขึ้นแล้ว
     # (เจอจริง 11 ส.ค. งาน p438217250: รายงานพลาด 4 จาก 5 กลุ่ม เปิดดูจริงมีครบ)
     live = False
+    last = ""
     for _ in range(COMMENT_POST_TRIES):
         time.sleep(3.5)
-        if _comment_is_live(phone.dump(), probe) or _comment_already_there(phone, probe):
+        last = phone.dump()
+        if _comment_is_live(last, probe) or _comment_already_there(phone, probe):
             live = True
             break
     # ยืนยันว่า "ขึ้นเป็นคอมเมนต์จริง" ไม่ใช่ข้อความค้างอยู่ในช่องพิมพ์
@@ -1452,10 +1580,18 @@ def _write_comment(phone: Phone, text: str, photo: Path | None = None) -> bool:
     # คอมเมนต์ที่ขึ้นจริงจะมีปุ่มประจำตัวตามมาด้วยเสมอ ("ตอบกลับความคิดเห็นของ …")
     if live:
         # นับเฉพาะที่ขึ้นจริง ไม่นับตอนกดส่งแล้วไม่ขึ้น — ไม่งั้นโควตาหมดฟรี
-        _note_comment_sent()
-        phone.log(f"  คอมเมนต์ขึ้นแล้ว (เหลือโควตาชั่วโมงนี้ {comment_quota_left()})")
+        _note_comment_sent(lane)
+        fb_comment_guard.note_success()
+        phone.log(f"  คอมเมนต์ขึ้นแล้ว (เลน {lane} เหลือชั่วโมงนี้ "
+                  f"{comment_quota_left(lane, account)} · วันนี้เหลือ "
+                  f"{fb_comment_guard.daily_left(account=account)})")
         return True
+    # กดส่งไปแล้วแต่ไม่ขึ้น = ทางล้มที่น่าสงสัยที่สุด นับเข้าตัวนับและเก็บจอไว้เป็น
+    # หลักฐานทุกครั้ง เพราะยังไม่เคยเห็นว่า Facebook ขึ้นข้อความว่าอะไรตอนบล็อก
     phone.log("  กดส่งแล้วแต่คอมเมนต์ยังไม่ขึ้น")
+    note = fb_comment_guard.note_failure(last)
+    if note:
+        phone.log("  ⛔ ล้มติดกันครบเกณฑ์ — สั่งพักคอมเมนต์ทั้งระบบแล้ว")
     return False
 
 
@@ -2563,6 +2699,31 @@ def format_stats(stats: dict) -> str:
             f"· 🔁 {show('shares')}")
 
 
+POST_FAIL_DIR = studio_shared.POST_EVIDENCE / "post_failures"
+
+
+def keep_failure_screen(phone: Phone, step: str) -> None:
+    """เก็บหน้าจอตอนขั้นตอนโพสต์ล้ม — ไว้ตอบทีหลังว่า "บนจอมีอะไรอยู่"
+
+    ทำไมต้องมี: 18 ส.ค. งาน p51955802 ล้มที่ขั้นแนบรูป แล้วไล่ย้อนไม่ได้เลยว่า
+    ตอนนั้นจอเป็นอะไร — กล่องถามฉบับร่างบัง? หน้ายังโหลดไม่เสร็จ? Facebook
+    เปลี่ยนหน้าจอ? สามอย่างนี้แก้คนละทางกันคนละเรื่อง แต่ไม่มีหลักฐานให้แยก
+    (ช่องโหว่แบบเดียวกับตอนคอมเมนต์โดนบล็อก 16 ส.ค. ซึ่งแก้ไปแล้วเฉพาะฝั่งคอมเมนต์)
+
+    ล้มเหลวตรงนี้ต้องไม่ทำให้งานล้มซ้ำซ้อน — เก็บไม่ได้ก็ปล่อยผ่านเงียบๆ
+    """
+    try:
+        xml = phone.dump()
+    except Exception:
+        return
+    try:
+        saved = fb_comment_guard.save_evidence(xml, directory=POST_FAIL_DIR)
+    except Exception:
+        return
+    if saved:
+        phone.log(f"  เก็บหน้าจอไว้แล้ว: {saved.name} ({step})")
+
+
 def post_to_group(
     phone: Phone, group_id: str, caption: str, dry_run: bool = False,
     clipboard=None, comment: str = "", photo_count: int = 1,
@@ -2580,8 +2741,24 @@ def post_to_group(
     time.sleep(3.0)
 
     phone.log("  แนบรูป")
+    # **ต้องวนรอ ไม่ใช่มองครั้งเดียว** — ของเดิมนอนรอตายตัว 3 วินาทีแล้ว dump
+    # ครั้งเดียว เจอก็เจอ ไม่เจอก็ล้มทันที ทั้งที่ขั้นก่อนหน้า (หาช่องเขียนโพสต์)
+    # วนรอได้ถึง 15 วินาที — สองขั้นติดกันใช้มาตรฐานคนละอย่าง
+    #
+    # เจอจริง 18 ส.ค. งาน p51955802 กลุ่มช้อปขั้นเทพ: หน้ากลุ่มโหลดช้ากว่าปกติ
+    # (กว่าจะเจอช่องเขียนโพสต์ก็กินไป 4 วินาทีแล้ว) พอถึงขั้นนี้จอยังไม่ทันวาด
+    # ปุ่มเสร็จ เลยล้มทั้งที่กลุ่มไม่มีอะไรผิด — กลุ่มเดียวกันนี้โพสต์ผ่านมา
+    # 11 ครั้งติดก่อนหน้านั้น และกลุ่มถัดไปที่ทำต่อทันทีก็ผ่านปกติ
     photo = phone.find(phone.dump(), PHOTO_HINTS)
     if photo is None:
+        for _ in range(PHOTO_BUTTON_TRIES):
+            time.sleep(1.5)
+            photo = phone.find(phone.dump(), PHOTO_HINTS)
+            if photo is not None:
+                phone.log("  (ปุ่มแนบรูปมาช้า — รอจนเจอแล้ว)")
+                break
+    if photo is None:
+        keep_failure_screen(phone, "ไม่พบปุ่มแนบรูป")
         raise PostError("ไม่พบปุ่มแนบรูปในหน้าเขียนโพสต์")
     phone.tap(photo)
     time.sleep(2.5)

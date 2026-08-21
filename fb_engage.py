@@ -43,10 +43,14 @@ import studio_shared
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = DATA_DIR / "fb_engage_config.json"
-STATS_FILE = DATA_DIR / "fb_post_stats.json"
-REPLIES_FILE = DATA_DIR / "fb_replies.json"
-JOBS_FILE = DATA_DIR / "fb_jobs.json"
+STATS_FILE = studio_shared.post_file("fb_post_stats.json")
+REPLIES_FILE = studio_shared.post_file("fb_replies.json")
+JOBS_FILE = studio_shared.post_file("fb_jobs.json")
 STUDIO_API = "http://127.0.0.1:8866"
+
+# ช่องโควตาคอมเมนต์ของสายนี้ — แยกขาดจากช่องของงานโพสต์ (ดู COMMENT_LANES ใน
+# facebook_group_post) งานเบื้องหลังห้ามกินโควตาของงานที่ผู้ใช้สั่งเอง
+REPLY_LANE = "reply"
 
 
 class EngageError(RuntimeError):
@@ -68,9 +72,16 @@ DEFAULT_CONFIG = {
     # ของเดิมเป็นช่องเดียว — เก็บไว้ให้ค่าที่ตั้งไว้แล้วไม่หาย อ่านผ่าน owner_list()
     "owner_name": "",
     # เก็บยอดซ้ำเมื่อผ่านไปกี่ชั่วโมง — ถี่กว่านี้เปลืองเวลาจอโดยไม่ได้ข้อมูลใหม่
-    "refresh_hours": 6,
+    #
+    # **ค่านี้กับ max_posts_per_round ต้องคิดคู่กันเสมอ** ของเดิมตั้ง 6 ชั่วโมง
+    # คู่กับ 8 โพสต์/รอบ ซึ่งวัดแล้วตามไม่ทันถึง 10 เท่า: โพสต์ที่ตามอยู่ 159 ใบ
+    # ต้องการ 159 × (24÷6) = 636 ครั้ง/วัน แต่ทำได้แค่ 8 × 8 รอบ = 64 ครั้ง/วัน
+    # ผลคือโพสต์ท้ายแถวไม่มีวันถูกอ่านเลยโดยไม่มีใครรู้ตัว — ดู capacity_check()
+    "refresh_hours": 24,
     # ต่อหนึ่งรอบเก็บยอดกี่โพสต์ — โพสต์ละราว 30-50 วินาที
-    "max_posts_per_round": 8,
+    # 20 ใบ ≈ 13 นาที/รอบ · 8 รอบ/วัน = 160 ครั้ง/วัน พอดีกับ 159 โพสต์ที่ตามอยู่
+    # และกินเวลาจอ 107 นาที/วัน (7.4%) ที่เหลือเป็นของสายโพสต์
+    "max_posts_per_round": 20,
     # นับคอมเมนต์เองเมื่อแอปไม่บอกตัวเลข (ช้าขึ้นราว 20 วินาที/โพสต์)
     "count_comments": True,
     # น้ำหนักคะแนน "แมส"
@@ -82,7 +93,9 @@ DEFAULT_CONFIG = {
     "mass_score": 30,
     # ── ฝั่งตอบกลับคอมเมนต์ ──
     "reply_enabled": False,          # ต้องเปิดเองเสมอ ไม่เปิดให้อัตโนมัติ
-    "max_replies_per_round": 5,
+    # ตั้งเท่าช่องของเลน reply พอดี — ตั้งเกินก็ไปตันที่ด่านโควตากลางรอบอยู่ดี
+    # แล้วอ่าน log งงว่าทำไมสั่ง 5 ได้ 4
+    "max_replies_per_round": 4,
     # ตอบตามคำที่เจอก่อน ถ้าไม่เข้าเงื่อนไขไหนค่อยใช้ replies
     "rules": [
         {"keywords": ["ราคา", "เท่าไหร่", "กี่บาท"],
@@ -200,17 +213,54 @@ def post_targets() -> list[dict]:
     return found
 
 
+# หนึ่งโพสต์ใช้เวลาจอกี่วินาที — จับของจริงได้ 30-50 วิ ใช้ค่ากลางในการประมาณ
+SECONDS_PER_POST = 40.0
+
+
+def capacity_check(config: dict, targets: int | None = None) -> dict:
+    """ตามทันไหม — เทียบ "ต้องอ่านกี่ครั้งต่อวัน" กับ "ทำได้กี่ครั้งต่อวัน"
+
+    **ทำไมต้องมี** ค่าเดิมตั้ง refresh_hours=6 คู่กับ max_posts_per_round=8
+    ขณะที่ตามอยู่ 159 โพสต์ = ต้องการ 636 ครั้ง/วัน แต่ทำได้ 64 ครั้ง/วัน
+    โพสต์ท้ายแถวจึงไม่มีวันถูกอ่านเลย และ **ไม่มีอะไรบอกให้รู้** เพราะทุกรอบ
+    รายงานว่า "อัปเดตสำเร็จ N โพสต์" เหมือนเดิมทุกครั้ง ความล้มเหลวชนิดนี้เงียบ
+    สนิท ตัวเลขนี้จึงต้องโผล่ใน /set ให้เห็นตลอด ไม่ใช่รอให้สงสัยแล้วค่อยคำนวณ
+
+    `targets` ใส่มาเองได้เพื่อให้เทสไม่ต้องมีไฟล์งานจริง
+    """
+    total = len(post_targets()) if targets is None else int(targets)
+    hours = max(0.1, float(config.get("refresh_hours") or 24))
+    per_round = max(1, int(config.get("max_posts_per_round") or 20))
+    every = max(15, int(config.get("auto_every_minutes") or 180))
+    rounds_per_day = (24 * 60) / every
+    demand = total * (24.0 / hours)
+    capacity = per_round * rounds_per_day
+    return {
+        "targets": total,
+        "demand_per_day": round(demand),
+        "capacity_per_day": round(capacity),
+        # ต้องการเป็นกี่เท่าของกำลัง — 1.0 = พอดี · 10.0 = ตามไม่ทัน 10 เท่า
+        "short_by": round(demand / capacity, 1) if capacity else None,
+        "keeps_up": capacity >= demand,
+        "screen_minutes_per_day": round(capacity * SECONDS_PER_POST / 60),
+    }
+
+
 # ------------------------------------------------------------ ด่านกันแย่งจอ
 
-def phone_busy_elsewhere() -> str:
-    """'' = จอว่าง · ข้อความ = มีงานอื่นใช้อยู่
+def phone_busy_elsewhere(serial: str = "") -> str:
+    """'' = จอว่าง · ข้อความ = มีงานอื่นใช้เครื่อง**นั้น**อยู่
 
     ถาม app.py เพราะงานโพสต์อยู่ในโปรเซสนั้น ล็อกไฟล์ยังกันไม่ถึง (app.py
     ยังไม่ได้ต่อสายเข้า phone_lock)
 
-    ⚠️ ข้อจำกัดที่รู้ตัว: ดูได้แค่ `fb_runner.busy` — ฝั่ง Claude CLI ที่จอง
-    `phone_gate` ไว้ยังไม่มี endpoint ให้ถาม ถ้าจะปิดช่องนี้ให้สนิทต้องเพิ่ม
-    endpoint ที่ app.py แล้วมาอ่านเพิ่ม
+    **ต้องส่ง serial มาด้วยเสมอ** ตั้งแต่ app.py แยกหัวหน้างานรายเครื่องแล้ว
+    `running` ในคำตอบแปลว่า "มีเครื่องไหนสักเครื่องยุ่งอยู่" ถ้าเอามาใช้ตรงๆ
+    บอทบนเครื่อง B จะหยุดทุกครั้งที่เครื่อง A โพสต์ ทั้งที่คนละเครื่องคนละบัญชี
+    จึงต้องดู `running_on` ซึ่งบอกเป็นราย serial แทน
+
+    app.py รุ่นเก่ายังไม่มี `running_on` — กรณีนั้นถอยไปใช้ `running` แบบเดิม
+    ระวังเกินไว้ดีกว่าปล่อยให้สองงานแตะจอเดียวกัน
 
     ต่อ app.py ไม่ได้ = ถือว่าว่าง เพราะบอทนี้ต้องทำงานได้แม้ Studio ปิดอยู่
     """
@@ -219,6 +269,9 @@ def phone_busy_elsewhere() -> str:
             data = json.load(page)
     except (OSError, ValueError):
         return ""
+    running_on = data.get("running_on")
+    if isinstance(running_on, dict) and serial:
+        return "สายโพสต์กำลังใช้เครื่องนี้อยู่" if running_on.get(serial) else ""
     return "สายโพสต์กำลังใช้จออยู่" if data.get("running") else ""
 
 
@@ -269,10 +322,10 @@ def refresh_stats(config: dict, log=print, stop=lambda: False,
     ไม่ใช่ยอดสะสมอย่างเดียว โพสต์เก่าที่ยอดสูงเพราะอยู่มานานไม่เท่ากับโพสต์ใหม่
     ที่พุ่งใน 6 ชั่วโมง
     """
-    busy = phone_busy_elsewhere()
+    serial = resolve_serial(config)
+    busy = phone_busy_elsewhere(serial)
     if busy:
         raise EngageError(f"ยังทำไม่ได้ — {busy}")
-    serial = resolve_serial(config)
     stats = load_stats()
     targets = post_targets()
     due = [t for t in targets if _due(stats.get(t["key"], {}),
@@ -283,14 +336,13 @@ def refresh_stats(config: dict, log=print, stop=lambda: False,
         return {"checked": 0, "updated": 0, "total": len(targets), "failed": 0}
 
     updated = failed = 0
-    phone = fb.Phone("adb", serial, log=log)
     log(f"เริ่มเก็บยอด {len(due)} โพสต์ (ทั้งหมดที่ตามอยู่ {len(targets)})")
     for index, target in enumerate(due, start=1):
         if stop():
             log("ผู้ใช้สั่งหยุด")
             break
         # ถามซ้ำทุกใบ — งานโพสต์สำคัญกว่า เจอเมื่อไรถอยทันที
-        busy = phone_busy_elsewhere()
+        busy = phone_busy_elsewhere(serial)
         if busy:
             log(f"{busy} — หยุดรอบนี้ไว้ก่อน ค่อยมาต่อรอบหน้า")
             break
@@ -305,6 +357,12 @@ def refresh_stats(config: dict, log=print, stop=lambda: False,
         # ถือยาว = งานโพสต์ที่ผู้ใช้สั่งจะรอเกิน PHONE_LOCK_WAIT (2 นาที) แล้วล้ม
         # ทั้งที่แค่ต้องรอเราจบโพสต์ปัจจุบัน — ปล่อยทุกใบทำให้รอไม่เกิน ~40 วินาที
         with studio_shared.phone_lock(serial, label=f"fb_engage เก็บยอด {target['key']}"):
+            # **สร้าง Phone ในล็อก ไม่ใช่ก่อนล็อก** — Phone.__init__ ยิง
+            # fb_screen.wake() ทันที ซึ่งเป็นคำสั่ง ADB ใส่เครื่องที่อีกฝั่งอาจ
+            # ถืออยู่ สร้างไว้ก่อนล็อก = แตะจอนอกเขตที่จองไว้ ต่อให้ wake() มี
+            # ทางลัดตอนจอเปิดอยู่แล้วก็ตาม จอที่ดับอยู่จะโดนยิง keyevent แทรก
+            # ต้นทุนที่ย้ายมาสร้างทุกใบคือคำสั่งอ่าน 1 ครั้ง (~0.1 วิ) เท่านั้น
+            phone = fb.Phone("adb", serial, log=log)
             fb.require_network(phone)
             if not fb.open_post_link(phone, target["link"], target["caption"],
                                      target["group_id"], target["post_id"]):
@@ -462,7 +520,7 @@ def reply_to_comment(phone: fb.Phone, comment: dict, text: str) -> bool:
         return False
     phone.tap(comment["reply"])
     time.sleep(2.5)
-    return fb._write_comment(phone, text)
+    return fb._write_comment(phone, text, lane=REPLY_LANE)
 
 
 def reply_round(config: dict, log=print, stop=lambda: False,
@@ -480,10 +538,10 @@ def reply_round(config: dict, log=print, stop=lambda: False,
             "ยังไม่ได้ตั้งชื่อบัญชีที่ใช้โพสต์ — สั่ง /owner <ชื่อ> ก่อน\n"
             "ไม่ตั้ง = แยกไม่ออกว่าคอมเมนต์ไหนของเราเอง แล้วบอทจะตอบตัวเองวนไม่จบ\n"
             "ใส่ได้หลายบัญชี คั่นด้วยจุลภาค เช่น /owner ชื่อ ก, ชื่อ ข")
-    busy = phone_busy_elsewhere()
+    serial = resolve_serial(config)
+    busy = phone_busy_elsewhere(serial)
     if busy:
         raise EngageError(f"ยังทำไม่ได้ — {busy}")
-    serial = resolve_serial(config)
 
     stats = load_stats()
     replied = load_replies()
@@ -498,14 +556,16 @@ def reply_round(config: dict, log=print, stop=lambda: False,
     sent = skipped = 0
     seen_posts = 0
 
-    phone = fb.Phone("adb", serial, log=log)
     for target in ranked:
         if stop() or sent >= cap:
             break
-        if fb.comment_quota_left() <= 0:
-            log(f"ครบเพดาน {fb.COMMENT_LIMIT_PER_HOUR} คอมเมนต์/ชั่วโมงแล้ว")
+        if fb.comment_quota_left(REPLY_LANE, serial) <= 0:
+            log(f"ครบช่องของเลนตอบกลับแล้ว "
+                f"({fb.comment_lane_limit(REPLY_LANE, serial)} คอมเมนต์/ชั่วโมง "
+                f"จากเพดานบัญชี {fb.comment_limit_per_hour(serial)}) "
+                f"— หยุดรอบนี้ ช่องของงานโพสต์ไม่ถูกแตะ")
             break
-        busy = phone_busy_elsewhere()
+        busy = phone_busy_elsewhere(serial)
         if busy:
             log(f"{busy} — หยุดรอบนี้ไว้ก่อน")
             break
@@ -517,6 +577,8 @@ def reply_round(config: dict, log=print, stop=lambda: False,
         # และถ้าโปรเซสนี้ตายกลางทาง คีย์บอร์ดจะค้างที่ ADBKeyboard จนผู้ใช้
         # พิมพ์เองไม่ได้ — คืนทุกใบจึงค้างได้อย่างมากใบเดียว
         with studio_shared.phone_lock(serial, label=f"fb_engage ตอบคอมเมนต์ {target['key']}"):
+            # สร้างในล็อกด้วยเหตุผลเดียวกับ refresh_stats — ปลุกจอคือคำสั่ง ADB
+            phone = fb.Phone("adb", serial, log=log)
             fb.require_network(phone)
             original_ime = phone.use_adb_keyboard()
             try:
@@ -562,4 +624,4 @@ def reply_round(config: dict, log=print, stop=lambda: False,
                     phone.restore_keyboard(original_ime)
                 _write_json(REPLIES_FILE, replied)
     return {"sent": sent, "skipped": skipped, "posts": seen_posts,
-            "quota_left": fb.comment_quota_left()}
+            "quota_left": fb.comment_quota_left(REPLY_LANE, serial)}

@@ -59,6 +59,11 @@ STAGE_DONE = "done"
 STAGE_FAILED = "failed"
 STAGE_CANCELLED = "cancelled"
 
+# ถังขยะของคิว — ลบแล้วยังกู้ได้ภายในกี่วัน และเก็บได้มากสุดกี่ใบ
+# ตั้งไว้ 7 วันเท่าถังขยะของฟาร์มโปรไฟล์บอท จะได้จำง่ายว่ากติกาเดียวกันทั้งระบบ
+TRASH_DAYS = 7
+TRASH_LIMIT = 200
+
 # สถานะที่ตัวรันหยิบไปทำได้ทันที — ที่เหลือคือรอผู้ใช้กด
 ACTIONABLE = {
     STAGE_QUEUED, STAGE_READY_STORYBOARD, STAGE_REVISING, STAGE_READY_FLOW,
@@ -246,11 +251,89 @@ class ClipQueue:
             self._save()
             return dict(self.jobs[b])
 
+    # ---------------------------------------------------------- ถังขยะ
+
+    def _trash_path(self) -> Path:
+        return self.path.with_name(self.path.stem + "_trash.json")
+
+    def _trash_load(self) -> list[dict]:
+        try:
+            return json.loads(self._trash_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
+    def _trash_save(self, items: list[dict]) -> None:
+        path = self._trash_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(".json.tmp")
+        temp.write_text(
+            json.dumps(items, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        temp.replace(path)
+
+    def _to_trash(self, jobs: list[dict], why: str) -> None:
+        """เก็บงานที่ถูกลบไว้ก่อน ไม่ทิ้งทันที
+
+        **ทำไม** 13 ส.ค. เคลียร์งาน failed ไป 8 ใบเพื่อล้างคิว แล้วภายหลังพบว่า
+        ใบหนึ่งล้มเพราะบั๊กของระบบเอง ไม่ใช่ของเสีย — แต่ตอนนั้นกู้กลับมาไม่ได้
+        สักใบเพราะ remove() ลบทิ้งจริง (ฟาร์มโปรไฟล์บอทมี _trash มาตั้งนานแล้ว
+        คิวคลิปกลับไม่มี)
+
+        เก็บ TRASH_DAYS วันแล้วค่อยหายเอง และจำกัดจำนวนไม่ให้ไฟล์โตไม่หยุด
+        """
+        if not jobs:
+            return
+        stamp = time.time()
+        items = self._trash_load()
+        for job in jobs:
+            entry = dict(job)
+            entry["_trashed_at"] = stamp
+            entry["_trashed_why"] = why
+            items.append(entry)
+        cutoff = stamp - TRASH_DAYS * 86400
+        items = [i for i in items if float(i.get("_trashed_at") or 0) >= cutoff]
+        self._trash_save(items[-TRASH_LIMIT:])
+
+    def trash(self) -> list[dict]:
+        """งานในถังขยะ ใหม่สุดขึ้นก่อน"""
+        return list(reversed(self._trash_load()))
+
+    def restore(self, job_id: str = "") -> dict:
+        """กู้งานจากถังขยะกลับเข้าคิว — ไม่ใส่ id = กู้ใบที่ลบล่าสุด
+
+        กู้กลับมาเป็นสถานะเดิมตอนถูกลบ ไม่ใช่เอาไปเข้าคิวทำใหม่ (จะเจนใหม่
+        ค่อยสั่ง retry ทีหลัง) — กู้แล้วเจนเองอัตโนมัติคือจ่ายเครดิตโดยไม่ได้สั่ง
+        """
+        with self.lock:
+            items = self._trash_load()
+            if not items:
+                raise ClipQueueError("ถังขยะว่าง ไม่มีอะไรให้กู้")
+            if job_id:
+                found = next(
+                    (i for i in range(len(items)) if items[i].get("id") == job_id), None
+                )
+                if found is None:
+                    raise ClipQueueError(f"ไม่พบงาน {job_id} ในถังขยะ")
+            else:
+                found = len(items) - 1
+            entry = items.pop(found)
+            if any(j["id"] == entry.get("id") for j in self.jobs):
+                raise ClipQueueError("งานนี้อยู่ในคิวอยู่แล้ว")
+            entry.pop("_trashed_at", None)
+            entry.pop("_trashed_why", None)
+            self.jobs.append(entry)
+            self._save()
+            self._trash_save(items)
+            return dict(entry)
+
     def remove(self, job_id: str) -> bool:
-        """ลบงานออกจากคิวถาวร — ใช้กับงานที่จบแล้วเท่านั้น
+        """เอางานออกจากคิว — ใช้กับงานที่จบแล้วเท่านั้น
 
         ไม่แตะโฟลเดอร์งานในดิสก์ ของที่ทำไว้ยังอยู่ครบและยังเปิดดูได้จาก
-        รายการ "งานที่เก็บไว้" — ลบตรงนี้คือลบแค่แถวในคิว
+        รายการ "งานที่เก็บไว้" — ตรงนี้คือเอาออกแค่แถวในคิว
+
+        และ**ไม่ทิ้งทันที** — ย้ายเข้าถังขยะไว้ก่อน กู้กลับได้ด้วย restore()
         """
         with self.lock:
             job = next((j for j in self.jobs if j["id"] == job_id), None)
@@ -258,6 +341,7 @@ class ClipQueue:
                 raise ClipQueueError(f"ไม่พบงาน {job_id}")
             if job.get("stage") in OPEN_STAGES:
                 raise ClipQueueError("งานนี้ยังไม่จบ — ยกเลิกก่อนถึงจะลบได้")
+            self._to_trash([job], "ลบจากคิว")
             self.jobs = [j for j in self.jobs if j["id"] != job_id]
             self._save()
             return True
@@ -270,6 +354,7 @@ class ClipQueue:
                 return 0
             drop = {id(j) for j in closed[: len(closed) - keep]}
             before = len(self.jobs)
+            self._to_trash([j for j in self.jobs if id(j) in drop], "ตัดคิวอัตโนมัติ")
             self.jobs = [j for j in self.jobs if id(j) not in drop]
             self._save()
             return before - len(self.jobs)

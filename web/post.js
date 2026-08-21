@@ -194,8 +194,28 @@ function setupPublishFlow() {
   let pfKinds = {};
   let pfVerify = {};
   let pfArmed = null;                 // ขั้นที่รอให้คลิกจอเพื่อจำพิกัด
+  // ขั้นที่กำลังรันอยู่ (เลขขั้น หรือ "all") — ตัวนี้คือสิ่งเดียวที่ทำให้ผู้ใช้เห็นว่า
+  // กดปุ่มติดแล้ว ระหว่างรอ API ซึ่งใช้เวลาจริง 6–15 วินาทีต่อขั้น
+  let pfRunning = null;
 
   const pfNote = (text) => { $("#pfNote").textContent = text; };
+
+  /** เขียนข้อความสถานะ **แล้วเลื่อนให้เห็นด้วย**
+   *
+   * `#pfNote` อยู่ **ใต้รายการ 28 ขั้น** ใน index.html กดปุ่มของขั้นต้นๆ แล้วข้อความ
+   * ไปโผล่นอกจอ ผู้ใช้จึงเห็นว่า "กดแล้วไม่มีอะไรเกิดขึ้น" ทั้งที่ระบบทำงานอยู่
+   *
+   * 18 ส.ค. 2026 ผู้ใช้แจ้งว่าปุ่ม ▶ ไม่ทำงาน — ตรวจแล้วปุ่มยิง API ได้ HTTP 200
+   * และมือถือขยับจริง (ขั้น 1 ใช้ 6.2 วิ · ขั้น 2 ใช้ 12.4 วิ) ปัญหาคือไม่มีอะไร
+   * ตอบสนองตรงที่สายตาอยู่ ไม่ใช่ปุ่มเสีย
+   */
+  const pfNoteSeen = (text) => {
+    pfNote(text);
+    try {
+      $("#pfNote").scrollIntoView({ block: "nearest", behavior: "smooth" });
+    } catch (error) { /* เบราว์เซอร์เก่าไม่รองรับ ไม่ใช่เรื่องคอขาดบาดตาย */ }
+  };
+
   const pfTarget = () => $("#pfTarget").value;
 
   function pfButton(label, title, onClick, className = "ghost") {
@@ -267,8 +287,25 @@ function setupPublishFlow() {
           pfButton("✕", "ลบขั้นนี้", () => pfRemove(step), "ghost danger"),
         );
 
+        // กำลังรันอยู่ = ล็อกปุ่มทุกอันในผัง เพราะเซิร์ฟเวอร์รับได้ทีละงาน
+        // (กดซ้ำได้แต่จะโดนตอบ 409 ซึ่งดูเหมือนพัง ทั้งที่ระบบทำงานถูกแล้ว)
+        if (pfRunning !== null) {
+          tools.querySelectorAll("button").forEach((button) => {
+            button.disabled = true;
+          });
+        }
+
         row.append(head, meta, tools);
-        if (step.result) {
+
+        // สถานะต้องขึ้น **ในแถวที่กด** ไม่ใช่ท้ายรายการ — ผู้ใช้มองอยู่ตรงนี้
+        if (pfRunning !== null && pfRunning === step.order) {
+          row.classList.add("running");
+          const busy = document.createElement("small");
+          busy.className = "note";
+          busy.textContent =
+            "⏳ กำลังสั่งมือถือทำขั้นนี้… (บางขั้นใช้เวลาถึง 15 วินาที)";
+          row.append(busy);
+        } else if (step.result) {
           const result = document.createElement("small");
           result.className = "note";
           result.textContent =
@@ -383,11 +420,19 @@ function setupPublishFlow() {
   }
 
   async function pfRun(only) {
-    if (!deviceSelect.value) { pfNote("เลือกมือถือก่อน"); return; }
+    // ข้อความเตือนพวกนี้ต้อง **เลื่อนให้เห็น** ไม่งั้นกดแล้วเงียบสนิท
+    // เหมือนปุ่มเสีย ทั้งที่ระบบแค่บอกว่ายังไม่ได้เลือกมือถือ
+    if (!deviceSelect.value) { pfNoteSeen("เลือกมือถือก่อน"); return; }
+    if (pfRunning !== null) { pfNoteSeen("กำลังรันอยู่ รอให้ขั้นก่อนหน้าจบก่อน"); return; }
     // รันทั้งผังจบที่ "กดโพสต์" ซึ่งเรียกคืนไม่ได้ — ต้องให้คนยืนยันก่อนเสมอ
     if (!only && !window.confirm(
       "รันทั้งผังบนมือถือจริง — ขั้นสุดท้ายคือกดโพสต์ ยืนยันไหม?",
     )) return;
+
+    // ตั้งสถานะ **แล้ววาดใหม่ทันที** ก่อนจะไปรอ API — ตรงนี้คือสิ่งที่หายไป
+    // ทำให้ผู้ใช้เห็นว่ากดไม่ติด ทั้งที่ระบบกำลังสั่งมือถืออยู่
+    pfRunning = only || "all";
+    pfRender();
     pfNote(only ? `กำลังทดลองขั้นที่ ${only}…` : "กำลังเดินผังทั้งชุด…");
     try {
       const data = await api("/api/publish/flow/run", {
@@ -399,15 +444,21 @@ function setupPublishFlow() {
       });
       const byId = new Map((data.results || []).map((item) => [item.step, item]));
       pfSteps = pfSteps.map((step) => ({ ...step, result: byId.get(step.id) || null }));
-      pfRender();
       const tags = (data.tags || []).map((tag) =>
         `#${tag.tag} ${tag.count === null ? "อ่านยอดไม่ได้" : tag.count.toLocaleString()}` +
         (tag.used ? " ✓" : " ✗")).join(" · ");
-      pfNote(
+      const ads = (data.ads_closed || []).length;
+      pfNoteSeen(
         `${data.ok ? "สำเร็จ" : "หยุดกลางทาง"} — ทำได้ ${data.done}/${data.total} ขั้น` +
+        (ads ? ` · ปิดโฆษณาที่เด้งแทรก ${ads} ครั้ง` : "") +
         (tags ? ` · แท็ก: ${tags}` : ""),
       );
-    } catch (error) { pfNote(error.message); }
+    } catch (error) { pfNoteSeen(error.message); }
+    finally {
+      // ต้องอยู่ใน finally — ล้มกลางทางแล้วปุ่มค้าง disabled ทั้งผังคือพังหนักกว่าเดิม
+      pfRunning = null;
+      pfRender();
+    }
   }
 
   // ----------------------------------------------------------- แฮชแท็ก
@@ -623,6 +674,11 @@ export async function loadFbGroups() {
     $("#fbGapMin").value = payload.gap_min;
     $("#fbGapMax").value = payload.gap_max;
     $("#fbAutoStart").checked = payload.auto_start;
+    // ไม่มีค่าส่งมา = ถือว่าเปิด — ค่าตั้งต้นของฟีเจอร์นี้คือเปิด ถ้าเขียนเป็น
+    // `!!payload.phone_clean` เฉยๆ เซิร์ฟเวอร์รุ่นเก่าที่ยังไม่ส่งค่านี้มาจะทำให้
+    // ปุ่มโชว์ว่าปิด แล้วผู้ใช้กดบันทึกทีเดียวคือปิดฟีเจอร์จริงโดยไม่ตั้งใจ
+    $("#fbPhoneClean").checked = payload.phone_clean !== false;
+    $("#fbScreenSaver").checked = payload.screen_saver !== false;
     // เตือนให้เห็นชัด — ไม่งั้นส่งงานเข้าบอทแล้วเงียบโดยไม่รู้สาเหตุ
     $("#fbNote").textContent = payload.bot_ready
       ? ""
@@ -788,10 +844,14 @@ $("#fbSettingsSave").addEventListener("click", async () => {
         gap_min: Number($("#fbGapMin").value),
         gap_max: Number($("#fbGapMax").value),
         auto_start: $("#fbAutoStart").checked,
+        phone_clean: $("#fbPhoneClean").checked,
+        screen_saver: $("#fbScreenSaver").checked,
       }),
     });
     $("#fbGapMin").value = payload.gap_min;
     $("#fbGapMax").value = payload.gap_max;
+    $("#fbPhoneClean").checked = payload.phone_clean !== false;
+    $("#fbScreenSaver").checked = payload.screen_saver !== false;
     $("#fbNote").textContent = "บันทึกค่าแล้ว";
   } catch (error) {
     $("#fbNote").textContent = error.message;

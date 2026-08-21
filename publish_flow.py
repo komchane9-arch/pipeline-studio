@@ -80,7 +80,11 @@ DEFAULT_VERIFY = {
     "open_app":     "app_frontmost",
     "tap":          "screen_changed",
     "type_text":    "field_has_text",
-    "paste_link":   "field_has_text",
+    # วางลิงก์ใช้ text_appears ไม่ใช่ field_has_text — field_has_text ตรวจแค่ 24
+    # ตัวแรกของสิ่งที่ "เราส่งไป" ซึ่งผ่านได้แม้แอปจะเอาไปแปะผิดช่อง ส่วน
+    # text_appears ให้ระบุ **ข้อความที่ต้องเห็นจริงบนจอ** ได้ตรงๆ
+    # (ขั้นในผังตั้งต้นระบุโดเมน Shopee ไว้ ซึ่งคงที่ทุกสินค้า)
+    "paste_link":   "text_appears",
     "type_hashtag": "tags_present",
     "popup":        "none",
     "key":          "screen_changed",
@@ -150,14 +154,21 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         _step("overlay_confirm", "กดเครื่องหมาย ✓ ของกล่องข้อความ"),
         _step("cover_confirm", "กด ✓ ยืนยันภาพปก", settle=2.0),
         _step("caption_field", "แตะช่องแคปชัน"),
-        _step("hashtag_type", "พิมพ์ # ตามลิสต์ (คัดตามยอดพูดถึง)", kind="type_hashtag"),
+        # ตรวจว่า **แท็กที่คัดมาแล้วอยู่บนจอครบจริง** ไม่ใช่แค่ "จอเปลี่ยน"
+        # พิมพ์แท็กแล้วแอปอาจกินไปบางตัว (ยาวเกิน / อักขระไม่รับ) ซึ่งจะเงียบสนิท
+        _step("hashtag_type", "พิมพ์ # ตามลิสต์ (คัดตามยอดพูดถึง)", kind="type_hashtag",
+              verify="tags_present"),
         _step("hashtag_confirm", "กดตกลง"),
         _step("product_open", "แตะเพื่อเพิ่มสินค้า", settle=2.0),
         # ผูกสินค้าด้วย **การวางลิงก์** ไม่ใช่ค้นหาชื่อ — ผู้ใช้ยืนยัน 11 ส.ค.
         # ค้นหาด้วยชื่อได้สินค้าผิดตัวง่ายมาก (ชื่อสินค้า Shopee ซ้ำกันทั้งตลาด)
         # ส่วนลิงก์ที่วางคือลิงก์ affiliate ตัวเดียวกับที่ส่งเข้ามาทาง Telegram
         _step("product_link_field", "แตะช่องวางลิงก์สินค้า"),
-        _step("link_paste", "วางลิงก์ Shopee", kind="paste_link"),
+        # ตรวจว่า **ลิงก์ไปอยู่บนจอจริง** โดยเกาะโดเมน Shopee ซึ่งคงที่ทุกสินค้า
+        # (ลิงก์ affiliate จริงหน้าตา https://s.shopee.co.th/xxxxxxxx)
+        # เกาะทั้งลิงก์ไม่ได้เพราะเปลี่ยนทุกงาน และแอปมักตัดท้ายด้วย …
+        _step("link_paste", "วางลิงก์ Shopee", kind="paste_link",
+              verify="text_appears", verify_text=r"shopee\.co\.th|shopee\.com"),
         _step("product_import", "กดนำเข้า", settle=2.5),
         _step("product_pick", "กดรายการสินค้าที่ค้นเจอ"),
         _step("product_add", "กดเพิ่ม", settle=2.0),
@@ -191,7 +202,11 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         _step("product_open", "กดเพิ่มสินค้า", find="เพิ่มสินค้า", settle=2.5),
         _step("custom_link", "กดสร้างลิงก์กำหนดเอง", settle=2.5),
         _step("url_field", "แตะช่อง URL", find="URL"),
-        _step("link_paste", "วางลิงก์ Shopee", kind="paste_link"),
+        # ตรวจว่า **ลิงก์ไปอยู่บนจอจริง** โดยเกาะโดเมน Shopee ซึ่งคงที่ทุกสินค้า
+        # (ลิงก์ affiliate จริงหน้าตา https://s.shopee.co.th/xxxxxxxx)
+        # เกาะทั้งลิงก์ไม่ได้เพราะเปลี่ยนทุกงาน และแอปมักตัดท้ายด้วย …
+        _step("link_paste", "วางลิงก์ Shopee", kind="paste_link",
+              verify="text_appears", verify_text=r"shopee\.co\.th|shopee\.com"),
         _step("save_1", "กดบันทึก (หน้าลิงก์)", find="บันทึก", settle=2.5),
         _step("save_2", "กดบันทึก (หน้าเพิ่มสินค้า)", find="บันทึก", settle=2.5),
         _step("scroll_to_ai", "เลื่อนลงมาด้านล่าง", kind="swipe", value="down"),
@@ -407,7 +422,17 @@ def dump_ui(run_adb: Callable[..., bytes]) -> str:
     return xml if "<node" in xml else ""
 
 
-FOCUS_RE = re.compile(r"mCurrentFocus=\S*\s+([\w.]+/[\w.$]+)")
+# รูปแบบจริงจากมือถือคือ  mCurrentFocus=Window{e36e918 u0 com.shopee.th/…Activity}
+# คือมีทั้งรหัสหน้าต่างและ user id คั่นก่อนถึงชื่อแอป **สองช่องว่าง** ไม่ใช่ช่องเดียว
+#
+# ของเดิมเขียนไว้ว่า `\S*\s+(pkg/Activity)` ซึ่งบังคับให้ชื่อแอปอยู่ถัดจากช่องว่างแรก
+# → **ไม่เคยจับได้เลยสักครั้ง** `foreground()` จึงคืนค่าว่างเสมอ ผลคือเวลาดูดผัง UI
+# ไม่ได้ ลายเซ็นสำรองกลายเป็น "หน้าจอ:" เท่ากันทุกครั้ง = ตัวตรวจตาบอด ทุกขั้นจะ
+# ฟ้อง "หน้าจอยังเหมือนเดิม" ทั้งที่กดติด (พิสูจน์กับเครื่องจริง 19 ส.ค. 2026)
+#
+# เกาะ `{…}` แล้วค่อยหาโทเคนที่มี `/` แบบเดียวกับ `frontmost_package` ซึ่งถูกอยู่แล้ว
+# หน้าต่างระบบที่ไม่มีชื่อแอป (เช่น NotificationShade) จะไม่ match = คืนค่าว่าง ถูกต้อง
+FOCUS_RE = re.compile(r"mCurrentFocus=\S*\{[^}]*?\s([\w.]+/[\w.$]+)")
 
 
 def foreground(run_adb: Callable[..., bytes]) -> str:
@@ -537,6 +562,116 @@ POPUP_DISMISS_PATTERNS = [
 ]
 
 
+# ------------------------------------------------- โฆษณาที่เด้งแทรกกลางผัง
+#
+# **ทำไมขั้น popup อย่างเดียวไม่พอ** ขั้น popup เป็นขั้นหนึ่งในผัง = ปิดได้เฉพาะ
+# ตำแหน่งที่วางไว้ แต่โฆษณา/โปรโมชันของ Shopee เด้งได้ทุกจังหวะ (โดยเฉพาะตอน
+# เพิ่งเปิดแอปและตอนสลับหน้า) เด้งมาคั่นตรงไหนก็บังปุ่มของขั้นนั้นจนทั้งผังหยุด
+#
+# ตัวนี้จึงทำงาน **ทุกขั้น** โดยไม่ต้องเพิ่มขั้นในผัง และไม่กินเวลาเพิ่ม เพราะ
+# ใช้ผัง UI ที่ run_step อ่านมาอยู่แล้วตอนจดลายเซ็นหน้าจอก่อนเริ่มขั้น
+
+# คำที่ยืนยันว่าสิ่งที่บังอยู่คือโฆษณาจริง ไม่ใช่หน้าจอปกติของผัง
+AD_MARKERS = [r"โฆษณา", r"ผู้สนับสนุน", r"Sponsored", r"Advertisement"]
+
+# ปุ่มปิด — เรียงจากเจาะจงไปกว้าง กดตัวที่เจาะจงก่อนเสมอ
+#
+# **ห้ามใส่คำที่ผังใช้จริง** เช่น "ตกลง" "ยอมรับ" "ถัดไป" เพราะถ้าเผลอกด
+# ระหว่างขั้นปกติจะกลายเป็นการกดยืนยันอะไรบางอย่างแทนผู้ใช้ ซึ่งร้ายกว่าโฆษณา
+# ที่ปิดไม่ได้ — ตัวปิดโฆษณาต้องปิดอย่างเดียว ห้ามตัดสินใจแทน
+AD_CLOSE_TEXTS = [
+    r"^ปิดโฆษณา$", r"^ข้ามโฆษณา$", r"^ไม่สนใจ$", r"^ไม่ ?ขอบคุณ$", r"^ไม่เอา$",
+    r"^ไว้ก่อน$", r"^ภายหลัง$", r"^ปิด$",
+    r"^Close ?ad$", r"^Skip ?ad$", r"^No,? ?thanks$", r"^Maybe later$",
+    r"^Dismiss$", r"^Close$",
+    r"^[×✕✖✗Xx]$",                      # กากบาทมุมกล่อง — ต้องเป็นตัวเดียวโดดๆ
+]
+
+# ป้ายกำกับของปุ่มปิดที่ไม่มีข้อความ (กากบาทที่เป็นรูปภาพ) — หาใน
+# resource-id / content-desc แทน เพราะปุ่มพวกนี้ text ว่างเปล่า
+AD_CLOSE_LABELS = ["ปิดโฆษณา", "close_ad", "ad_close", "btn_close", "ปิด", "close"]
+
+# ปิดซ้อนได้กี่ชั้นต่อหนึ่งขั้น — โฆษณาซ้อนกันสองสามชั้นเจอได้ แต่ถ้าปิดแล้ว
+# ยังโผล่ไม่หยุดแปลว่าเรากดผิดปุ่ม วนไม่รู้จบดีกว่าหยุดแล้วให้คนดู
+AD_DISMISS_MAX = 3
+
+
+def looks_like_ad(xml: str) -> bool:
+    """หน้าจอนี้มีโฆษณาบังอยู่ไหม — ดูจากคำที่บอกว่าเป็นโฆษณาเท่านั้น
+
+    เข้มไว้ก่อนโดยตั้งใจ: ถ้าเดาว่าเป็นโฆษณาผิด เราจะไปกดปุ่มปิดของหน้าจอปกติ
+    แล้วผังจะพังโดยไม่มีใครรู้ว่าเพราะอะไร
+    """
+    for pattern in AD_MARKERS:
+        if re.search(pattern, xml or "", re.I):
+            return True
+    return False
+
+
+def find_ad_close(xml: str) -> tuple[tuple[int, int], str] | None:
+    """หาปุ่มปิดโฆษณา คืน (พิกัด, คำอธิบายว่าเจอจากอะไร)"""
+    for pattern in AD_CLOSE_TEXTS:
+        point = find_node(xml, pattern)
+        if point:
+            return point, f"ปุ่มข้อความ {pattern}"
+    for label in AD_CLOSE_LABELS:
+        point = find_target(xml, label)
+        if point:
+            return point, f"ปุ่มที่มีป้าย \"{label}\""
+    return None
+
+
+def dismiss_ads(
+    context: "RunContext", xml: str = "", force: bool = False
+) -> list[str]:
+    """ปิดโฆษณาที่บังอยู่ คืนรายการสิ่งที่ปิดไป (ว่าง = ไม่มีอะไรให้ปิด)
+
+    force=True ใช้ตอน "ขั้นล้มเพราะหาปุ่มไม่เจอ" — ตอนนั้นไม่ต้องรอให้เจอคำว่า
+    โฆษณา เพราะมีอะไรบางอย่างบังอยู่แน่แล้ว แต่ยังกดได้เฉพาะปุ่มปิดเท่านั้น
+    """
+    if not getattr(context, "ad_guard", True):
+        return []
+    closed: list[str] = []
+    current = xml
+    for _ in range(AD_DISMISS_MAX):
+        if not current:
+            current = context.dump()
+        if not current:
+            break
+        if not force and not looks_like_ad(current):
+            break
+        found = find_ad_close(current)
+        if not found:
+            if force:
+                # หาปุ่มปิดไม่เจอทั้งที่ขั้นล้ม — พิมพ์ปุ่มที่มีบนจอออกมาให้ดู
+                #
+                # รายการ AD_CLOSE_TEXTS มาจากการคาดเดารูปแบบปุ่มปิดของ Shopee
+                # ยังไม่ได้ยืนยันกับโฆษณาตัวจริง ถ้าปุ่มจริงเขียนต่างจากที่เดาไว้
+                # ต้องเห็นข้อความจริงถึงจะเติมเข้ารายการได้ถูก — ไม่ใช่เดาซ้ำ
+                labels = []
+                for raw in ELEMENT_RE.findall(current):
+                    if _attr(raw, "clickable") != "true":
+                        continue
+                    name = (_attr(raw, "text") or _attr(raw, "content-desc")
+                            or _attr(raw, "resource-id").split("/")[-1])
+                    if name and name not in labels:
+                        labels.append(name[:24])
+                    if len(labels) >= 8:
+                        break
+                if labels:
+                    context.log("   หาปุ่มปิดไม่เจอ — ปุ่มที่กดได้บนจอตอนนี้: "
+                                + " · ".join(labels))
+            break
+        point, how = found
+        context.tap(*point)
+        time.sleep(0.8)
+        closed.append(how)
+        context.log(f"   ปิดโฆษณาที่บังอยู่ ({how})")
+        current = ""                    # อ่านจอใหม่ เผื่อมีซ้อนอีกชั้น
+        force = False                   # ชั้นถัดไปต้องยืนยันว่าเป็นโฆษณาจริง
+    return closed
+
+
 # ------------------------------------------------------------- บริบทการรัน
 
 
@@ -560,9 +695,27 @@ class RunContext:
     report: Callable[[Step, bool, str], None] = lambda step, ok, message: None
     # ผลการคัดแฮชแท็กจากหน้าจอจริง — เก็บไว้รายงานกลับเข้าแชท
     tag_results: list[dict] = field(default_factory=list)
+    # ปิดโฆษณาที่เด้งแทรกให้อัตโนมัติ — ปิดได้เผื่อต้องไล่บั๊กว่าใครกดปุ่มนั้น
+    ad_guard: bool = True
+    # โฆษณาที่ปิดไปแล้วทั้งรอบ — รายงานกลับเข้าแชท ไม่ปิดเงียบๆ
+    ads_closed: list[str] = field(default_factory=list)
+    # แอปที่ผังนี้ต้องอยู่ตลอดทาง — `run_flow` เติมให้เองจากขั้น open_app
+    # ใช้จับกรณี "จอเปลี่ยนแล้วก็จริง แต่หลุดไปแอปอื่น" ซึ่งเดิมนับว่าผ่าน
+    # เว้นว่าง = ไม่ตรวจ (ผังที่ตั้งใจข้ามแอปยังทำงานได้เหมือนเดิม)
+    app_package: str = ""
 
     def dump(self) -> str:
         return dump_ui(self.run_adb)
+
+    def read(self) -> tuple[str, str]:
+        """อ่านผังจอ **ครั้งเดียว** แล้วคืนทั้งผังและลายเซ็น
+
+        เดิม signature() อ่านผังมาแล้วทิ้งผังไป ตัวปิดโฆษณาจึงต้องอ่านซ้ำอีกรอบ
+        = เสียเวลา adb สองเท่าทุกขั้น (28 ขั้นก็ 28 รอบที่ไม่จำเป็น)
+        """
+        xml = self.dump()
+        return xml, (screen_signature(xml) if xml
+                     else "หน้าจอ:" + foreground(self.run_adb))
 
     def signature(self) -> str:
         """ลายเซ็นหน้าจอสำหรับเทียบว่า "เปลี่ยนไปแล้วหรือยัง"
@@ -597,11 +750,52 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
         if kind == "screen_changed":
             # ใช้ลายเซ็นแบบเดียวกับตอนก่อนกด (ถอยไปใช้ชื่อหน้าจอได้ถ้าอ่านผังไม่ได้)
             if context.signature() != before:
-                return "หน้าจอเปลี่ยนแล้ว"
-            last = "หน้าจอยังเหมือนเดิม"
+                # "จอเปลี่ยน" ตอบได้แค่ว่ามีอะไรเปลี่ยน ตอบไม่ได้ว่า**เปลี่ยนไปถูกที่ไหม**
+                #
+                # เจอจริง 19 ส.ค. 2026: กด "Live & Video" แล้ว Shopee เด้งหน้า
+                # "ยืนยันตัวตน" (WebPageActivity) — จอเปลี่ยนจริงจึงผ่าน แล้วอีก
+                # สองขั้นถัดไปก็แตะบนหน้าที่ไม่ใช่ต่อไปอีกโดยไม่มีใครรู้ กว่าจะตาย
+                # คือขั้นที่ 4 ทำให้ไล่บั๊กผิดจุดว่าขั้น 4 พัง ทั้งที่พังตั้งแต่ขั้น 2
+                #
+                # จึงเพิ่มสองด่านตรงนี้ ด่านละเรื่อง:
+                where = foreground(context.run_adb)          # "package/Activity"
+                landed = where.split("/")[0]
+
+                # ด่าน 1 — ห้ามหลุดออกจากแอปที่ผังกำลังเดินอยู่
+                # (เจอจริงเหมือนกัน: แตะแล้วโดนแบนเนอร์ Shopee เปิด Chrome ทิ้งไว้)
+                if context.app_package and landed and \
+                        not landed.startswith(context.app_package):
+                    raise StepError(
+                        f"หน้าจอเปลี่ยนก็จริง แต่หลุดออกจากแอป {context.app_package} "
+                        f"ไปที่ {where} — ขั้นนี้ไม่ได้พาไปหน้าที่ต้องการ")
+
+                # ด่าน 2 — ถ้าขั้นนี้บอกไว้ว่า "ต้องเห็นข้อความนี้" ก็ต้องเห็นจริง
+                # ตั้งได้จากปุ่ม ✎ ในหน้าเว็บ ไม่ต้องแก้โค้ด และไม่ตั้งก็ยังทำงาน
+                # เหมือนเดิมทุกประการ — เป็นการ**อัปเกรดทีละขั้นเท่าที่รู้จริง**
+                want = (step.verify_text or "").strip()
+                if want and not find_node(xml, want):
+                    last = f"หน้าจอเปลี่ยนแล้วแต่ยังไม่เจอ “{want}” (ตอนนี้อยู่ที่ {where})"
+                else:
+                    # บอกด้วยว่าไปโผล่หน้าไหน — log ที่บอกแค่ "เปลี่ยนแล้ว"
+                    # ไม่พอให้คนอ่านจับได้ว่าหลงทาง
+                    return f"หน้าจอเปลี่ยนแล้ว → {where or 'อ่านชื่อหน้าจอไม่ได้'}"
+            else:
+                last = "หน้าจอยังเหมือนเดิม"
 
         elif kind == "text_appears":
-            pattern = step.verify_text or "."
+            pattern = (step.verify_text or "").strip()
+            if not pattern and typed:
+                # ไม่ได้ระบุข้อความที่ต้องเห็น แต่ขั้นนี้พิมพ์/วางอะไรลงไป → ใช้สิ่งนั้น
+                #
+                # **สำคัญ** ของเดิมถอยไปใช้ "." ซึ่งเป็น regex ที่เจออะไรก็ผ่าน
+                # = ไม่ได้ตรวจอะไรเลยแต่รายงานว่าตรวจแล้ว ซึ่งแย่กว่าไม่ตรวจ
+                # เพราะทำให้คนเชื่อว่ามีด่านอยู่ ต้อง escape ด้วยเพราะลิงก์มี . และ ?
+                # ซึ่งเป็นอักขระพิเศษของ regex · ตัดที่ 24 ตัวเพราะแอปมักตัดท้ายด้วย …
+                pattern = re.escape(typed.strip()[:24])
+            if not pattern:
+                raise StepError(
+                    "ตั้งวิธีตรวจเป็น “มีข้อความนี้โผล่บนจอ” แต่ไม่ได้บอกว่าข้อความอะไร "
+                    "— ไปใส่ที่ปุ่ม ✎ ของขั้นนี้ หรือเปลี่ยนวิธีตรวจ")
             if find_node(xml, pattern):
                 return f"เจอข้อความที่รอ ({pattern})"
             last = f"ยังไม่เจอข้อความ {pattern}"
@@ -772,8 +966,15 @@ def locate(
 def run_step(context: RunContext, step: Step) -> str:
     """ทำหนึ่งขั้นแล้ว **ตรวจผล** คืนข้อความสรุป"""
     width, height = context.screen
-    before = context.signature()
+    xml, before = context.read()
     typed = ""
+
+    # โฆษณาเด้งมาบังก่อนขั้นนี้จะเริ่ม → ปิดก่อน แล้วอ่านจอใหม่
+    # ใช้ผัง xml ที่เพิ่งอ่านมา ไม่ยิง adb เพิ่ม
+    ad_notes = dismiss_ads(context, xml)
+    if ad_notes:
+        context.ads_closed.extend(ad_notes)
+        _, before = context.read()      # ลายเซ็น "ก่อนทำ" ต้องเป็นจอหลังปิดโฆษณา
 
     if step.kind == "open_app":
         package = step.value or SHOPEE_PACKAGE
@@ -856,7 +1057,8 @@ def run_step(context: RunContext, step: Step) -> str:
 
     time.sleep(step.settle)
     proof = verify_step(context, step, before, typed=typed)
-    return f"{summary} · ตรวจแล้ว: {proof}"
+    head = f"ปิดโฆษณา {len(ad_notes)} ชั้นก่อน · " if ad_notes else ""
+    return f"{head}{summary} · ตรวจแล้ว: {proof}"
 
 
 def run_flow(
@@ -868,6 +1070,15 @@ def run_flow(
     ถ้าดันทุรังต่อคือการแตะมั่วบนหน้าจอที่ไม่รู้ว่าเป็นอะไร ซึ่งอาจไปกดโพสต์จริง
     """
     steps = context.store.sequence(context.target)
+
+    # แอปที่ผังนี้ต้องอยู่ตลอดทาง — เอาจากขั้น open_app ของผังเอง ไม่ฮาร์ดโค้ด
+    # ผู้ใช้เปลี่ยนแอปปลายทางในผังได้ ตัวตรวจจะตามไปเอง
+    if not context.app_package:
+        for step in steps:
+            if step.kind == "open_app" and step.value:
+                context.app_package = step.value.strip()
+                break
+
     results: list[dict] = []
     done = 0
     for number, step in enumerate(steps, start=1):
@@ -883,6 +1094,27 @@ def run_flow(
             message, ok = str(error), False
         except Exception as error:                       # noqa: BLE001
             message, ok = f"{type(error).__name__}: {error}", False
+
+        if not ok:
+            # ล้มเพราะ "หาปุ่มไม่เจอ" มักแปลว่ามีอะไรบังอยู่ ไม่ใช่ปุ่มหายจริง
+            # ตรงนี้ยอมกดปุ่มปิดโดยไม่ต้องเจอคำว่าโฆษณาก่อน (force) เพราะรู้แล้วว่า
+            # หน้าจอไม่ใช่ที่ที่ควรเป็น — แต่ยังกดได้แค่ปุ่มปิดเท่านั้น
+            #
+            # **ลองซ้ำครั้งเดียว** ไม่วนซ้ำเรื่อยๆ เพราะถ้าปิดแล้วยังล้มอีก แปลว่า
+            # สาเหตุไม่ใช่โฆษณา การวนต่อคือการกดมั่วบนหน้าจอที่ไม่รู้จัก
+            closed = dismiss_ads(context, force=True)
+            if closed:
+                context.ads_closed.extend(closed)
+                context.log(f"   ปิดของที่บังอยู่แล้วลองขั้นนี้ใหม่: {step.name}")
+                try:
+                    message = run_step(context, step)
+                    ok = True
+                    message = f"ปิดโฆษณาแล้วทำซ้ำสำเร็จ · {message}"
+                except StepError as error:
+                    message = f"ปิดโฆษณาแล้วยังไม่ผ่าน: {error}"
+                except Exception as error:               # noqa: BLE001
+                    message = (f"ปิดโฆษณาแล้วยังไม่ผ่าน: "
+                               f"{type(error).__name__}: {error}")
 
         results.append({"step": step.id, "name": step.name, "ok": ok, "message": message})
         context.report(step, ok, message)
@@ -900,5 +1132,8 @@ def run_flow(
         "total": len(steps),
         "results": results,
         "tags": context.tag_results,
+        # ปิดโฆษณาไปกี่ครั้ง — รายงานออกไปเสมอ ไม่ปิดเงียบๆ ถ้าตัวเลขนี้พุ่งขึ้น
+        # แปลว่าแอปเปลี่ยนพฤติกรรม ควรรู้ก่อนที่ผังจะเริ่มพังเอง
+        "ads_closed": list(context.ads_closed),
         "ok": all(item["ok"] for item in results) if results else False,
     }

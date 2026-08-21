@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Callable
 
 import facebook_group_post
+import fb_preflight
 import studio_shared
 
 # รอสิทธิ์ใช้จอมือถือนานสุดกี่วินาทีก่อนยอมแพ้
@@ -211,16 +213,84 @@ def looks_like_group_link(text: str) -> bool:
 # --------------------------------------------------------------- ที่เก็บข้อมูล
 
 
+# ลองเขียนซ้ำกี่ครั้งเมื่อไฟล์ถูกโปรเซสอื่นเปิดค้างอยู่ (รอบละ WRITE_WAIT วินาที)
+#
+# บน Windows การ rename ทับไฟล์ที่โปรเซสอื่น "เปิดอ่านอยู่" จะล้มทันทีด้วย
+# WinError 5 — ตัวสำรองข้อมูลที่ zip ไฟล์ทั้งโฟลเดอร์ก็เข้าข่าย และตัวสแกน
+# ไวรัส/ตัวทำดัชนีของ Windows ก็เปิดไฟล์เองโดยไม่บอกใคร ของพวกนี้ถือไฟล์แค่
+# เสี้ยววินาที รอนิดเดียวก็ผ่าน — ล้มรอบเดียวแล้วยอมแพ้คือเสียงานทั้งใบฟรีๆ
+WRITE_TRIES = 12
+WRITE_WAIT = 0.15
+
+
+class _StoreLock:
+    """ล็อกสองชั้น — ในโปรเซส (เธรด) + ข้ามโปรเซส (ไฟล์ล็อก)
+
+    **ทำไมต้องมีชั้นที่สอง** ไฟล์งานถูกอ่าน-แก้-เขียนโดย **4 โปรเซส**
+    (app.py · fb_mass_bot · fb_engage_bot · clip_app) ล็อกเธรดกันได้แค่ในบ้าน
+    ตัวเอง พอสองโปรเซสอ่านพร้อมกันแล้วเขียนกลับคนละเวอร์ชัน ของที่เขียนทีหลัง
+    จะทับของก่อนหน้าหายเกลี้ยง (lost update)
+
+    เกิดจริง 19 ส.ค. 2026 งาน p112585553: โพสต์ขึ้นครบ 5 กลุ่มพร้อมลิงก์ครบ
+    แต่ผลในไฟล์เหลือ 0 กลุ่ม แล้วงานล้มทั้งใบด้วย WinError 5 ตอนบันทึกกลุ่ม
+    สุดท้าย — ระบบจึงเข้าใจว่าไม่เคยโพสต์ ซึ่งอันตรายกว่าโพสต์ไม่สำเร็จ
+    เพราะกดรันซ้ำเมื่อไรคือโพสต์ซ้ำจริงทั้ง 5 กลุ่ม
+
+    นับชั้นเอง ไม่พึ่งคุณสมบัติ reentrant ของ data_lock — เมธอดของ store
+    ซ้อนกันได้ (update เรียกภายใต้บล็อกของ add) และเราต้องถือไฟล์ล็อกใบเดียว
+    ตลอดทั้งชุด ไม่ใช่ขอ-คืนไปมาระหว่างกลาง
+    """
+
+    def __init__(self, name: str) -> None:
+        self._thread = threading.RLock()
+        self._name = name
+        self._depth = 0
+        self._file = None
+
+    def __enter__(self):
+        self._thread.acquire()
+        self._depth += 1
+        if self._depth == 1:
+            try:
+                holder = studio_shared.data_lock(
+                    self._name, timeout=20.0, poll=0.1, label="แก้ไฟล์งาน")
+                holder.__enter__()
+                self._file = holder
+            except Exception:
+                # ล็อกไฟล์มีปัญหาต้อง **ไม่หยุดงานโพสต์** — ยอมเสี่ยงชนกัน
+                # ดีกว่าทำให้ทั้งระบบเขียนอะไรไม่ได้เลย
+                self._file = None
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if self._depth == 1 and self._file is not None:
+            try:
+                self._file.__exit__(*exc)
+            except Exception:
+                pass
+            self._file = None
+        self._depth -= 1
+        self._thread.release()
+        return False
+
+
 class _JsonStore:
     """อ่าน/เขียนไฟล์ JSON ก้อนเดียวใต้ล็อก + เขียนแบบสลับไฟล์
 
     เขียนลง .tmp แล้วค่อย replace เพราะถ้าไฟฟ้าดับกลางเขียน ไฟล์เดิมยังอยู่ครบ
     (แพตเทิร์นเดียวกับ ApprovalStore ใน telegram_bot.py)
+
+    `lock` เป็นล็อกสองชั้น ทุกจุดที่เขียนอยู่ใต้ `with store.lock:` อยู่แล้ว
+    จึงกันข้ามโปรเซสได้ครบโดยไม่ต้องไล่แก้ทีละเมธอด
+
+    **การอ่านเฉยๆ ไม่ต้องล็อก** — `replace` เป็นการสลับไฟล์ทั้งใบในจังหวะเดียว
+    คนอ่านจึงเห็น "ของเก่าทั้งใบ" หรือ "ของใหม่ทั้งใบ" ไม่มีทางเห็นครึ่งๆ
+    และการอ่านเกิดหลายร้อยครั้งต่องาน ถ้าล็อกทุกครั้งจะช้าโดยไม่ได้อะไร
     """
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.lock = threading.RLock()
+        self.lock = _StoreLock(path.stem)
 
     def _read(self) -> list[dict]:
         try:
@@ -231,11 +301,22 @@ class _JsonStore:
 
     def _write(self, items: list[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".tmp")
+        # ชื่อ .tmp ต้องแยกตามโปรเซส+เธรด ไม่งั้นสองฝั่งเขียนไฟล์ชั่วคราวชื่อ
+        # เดียวกันทับกันเอง แล้วได้ JSON ที่ปนกันครึ่งๆ ก่อนถึงขั้น replace ด้วยซ้ำ
+        temporary = self.path.with_name(
+            f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         temporary.write_text(
             json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        temporary.replace(self.path)
+        for attempt in range(WRITE_TRIES):
+            try:
+                temporary.replace(self.path)
+                return
+            except OSError:
+                if attempt == WRITE_TRIES - 1:
+                    temporary.unlink(missing_ok=True)
+                    raise
+                time.sleep(WRITE_WAIT)
 
 
 class GroupStore:
@@ -597,7 +678,7 @@ class PostRunner:
         self.stop_flag.set()
         return True
 
-    def _phone(self, serial: str, what: str):
+    def _phone(self, serial: str, what: str, adb: str = "adb"):
         """ขอสิทธิ์ใช้จอมือถือ **เครื่องนั้น** — กันข้ามโปรเซส ไม่ใช่แค่ในโปรเซสนี้
 
         `PhoneGate` ใน app.py กันได้แค่งานโพสต์กับ Claude CLI ซึ่งอยู่โปรเซส
@@ -606,7 +687,21 @@ class PostRunner:
 
         ล็อกแยกรายเครื่อง (ระยะ 2.1) — งานบนมือถือคนละเครื่องจึงไม่ต้องรอกัน
         ตอนไม่มีใครแย่ง จะได้ล็อกทันที พฤติกรรมจึงเหมือนเดิมทุกประการ
+
+        **ตรวจความพร้อมก่อนขอล็อก** งานที่ล้มกลางคันแพงกว่างานที่ไม่ได้เริ่มมาก
+        (โพสต์ค้างครึ่งทางต้องมาไล่ /followup /fiximage เก็บกวาดเอง) ตรวจตรงนี้
+        จุดเดียวครอบทั้งสี่ทาง — โพสต์ · ตามเก็บ · เก็บยอด · แก้รูป
+
+        ไม่เช็คล็อก (`check_lock=False`) เพราะบรรทัดถัดไปขอล็อกเองอยู่แล้ว
+        ถ้าไม่ว่างจะได้ `PhoneBusy` พร้อมข้อความว่าใครถือ ซึ่งตรงกว่า
+
+        **ต้องส่ง `adb` ตัวเดียวกับที่งานใช้เข้ามาด้วย** ห้ามให้ด่านตรวจไปหยิบ
+        `adb` จาก PATH เอง — เครื่องนี้มี adb สองตัวคนละที่ (โปรเจกต์ใช้
+        `tools\\platform-tools\\adb.exe` ส่วน PATH ชี้ `C:\\adb\\adb.EXE`)
+        คนละรุ่นเจอกันเมื่อไรจะไล่ฆ่า adb server ของกันและกันจนสั่งมือถือไม่ได้
+        ทั้งเครื่อง — เคยเกิดมาแล้ว และจะยิ่งเจ็บถ้าเกิดกลางงานที่โพสต์ไปครึ่งทาง
         """
+        fb_preflight.guard(serial, what=what, adb=adb, check_lock=False)
         return studio_shared.phone_lock(serial, timeout=PHONE_LOCK_WAIT, label=what)
 
     def start(
@@ -667,7 +762,7 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"รอบตามเก็บ {self.job_id}"):
+            with self._phone(serial, f"รอบตามเก็บ {self.job_id}", adb):
                 results = facebook_group_post.followup_groups(
                     adb=adb, serial=serial, caption=caption, targets=targets,
                     comment=comment, log=on_log, stop=self.stop_flag.is_set,
@@ -717,7 +812,7 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"รอบเก็บยอด {self.job_id}"):
+            with self._phone(serial, f"รอบเก็บยอด {self.job_id}", adb):
                 results = facebook_group_post.collect_groups(
                     adb=adb, serial=serial, caption=caption, targets=targets,
                     log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
@@ -762,7 +857,7 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"รอบแก้รูป {self.job_id}"):
+            with self._phone(serial, f"รอบแก้รูป {self.job_id}", adb):
                 results = facebook_group_post.fix_images_groups(
                     adb=adb, serial=serial, caption=caption, targets=targets,
                     images=images, log=on_log, stop=self.stop_flag.is_set,
@@ -788,7 +883,7 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"งานโพสต์ {self.job_id}"):
+            with self._phone(serial, f"งานโพสต์ {self.job_id}", adb):
                 results = facebook_group_post.post_to_groups(
                     adb=adb, serial=serial, image=image, caption=job["caption"],
                     group_ids=job["groups"], gap_range=gap_range,

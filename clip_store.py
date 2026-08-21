@@ -82,6 +82,33 @@ def run_dir(root: Path, item_id: str) -> Path:
     return Path(root) / "shopee_products" / str(item_id)
 
 
+def _to_drive(root: Path, item_id: str) -> None:
+    """ยกงานขึ้น Google Drive ต่อทันทีที่เก็บลงเครื่องเสร็จ
+
+    เรียก **หลัง** เขียนดิสก์เสมอ ไม่ใช่เขียนแทน — ดิสก์ยังเป็นตัวหลักเพราะหน้าเว็บ
+    เสิร์ฟรูปจากที่นี่ และไดรฟ์ G: หายไปทั้งตัวได้ถ้าโปรแกรม Drive ไม่ทำงาน
+    (เหตุผลเต็มอยู่หัวไฟล์ clip_drive.py)
+
+    **ห้ามโยน exception ออกจากฟังก์ชันนี้เด็ดขาด** — ตัวเรียกคือ `save_storyboard`
+    กับ `save_video` ซึ่งเก็บของที่จ่ายเครดิตไปแล้ว ถ้า Drive มีปัญหาแล้วลาก
+    ให้การเก็บลงเครื่องล้มไปด้วย = จ่ายเครดิตฟรี `sync_run` คืน dict เสมอ
+    อยู่แล้ว ที่ครอบไว้อีกชั้นคือกันกรณีที่คาดไม่ถึงจริงๆ (เช่น import พัง)
+
+    ของที่ยกไม่ขึ้นไม่หายเงียบ — ตามเก็บทีหลังได้ด้วย `python clip_drive.py sync`
+    """
+    try:
+        import clip_drive
+        result = clip_drive.sync_run(root, item_id)
+        if not result.get("ok"):
+            print(f"  [Drive] ยังไม่ได้ยก {item_id} — {result.get('why')}", flush=True)
+    except ImportError:
+        return          # ถอดตัวยกขึ้น Drive ออกก็ยังเก็บลงเครื่องได้ตามปกติ
+    except Exception as error:
+        print(f"  [Drive] ยกขึ้นไม่สำเร็จ ({type(error).__name__}: {error}) — "
+              f"ของยังอยู่ในเครื่องครบ ตามเก็บด้วย `python clip_drive.py sync`",
+              flush=True)
+
+
 # ------------------------------------------------------------------ เขียน
 
 def save_product(root: Path, data: dict) -> Path:
@@ -219,6 +246,7 @@ def save_storyboard(root: Path, data: dict, result: dict) -> Path:
     _write_text(folder / STORYBOARD_REPLY_FILE, result.get("reply", ""))
     _write_text(folder / FLOW_REPLY_FILE, result.get("flow_reply", ""))
     _write_text(folder / SCRIPT_REPLY_FILE, result.get("script_reply", ""))
+    _to_drive(root, item_id)
     return folder
 
 
@@ -242,6 +270,7 @@ def save_video(root: Path, item_id: str, videos: list[Path], note: str = "") -> 
         "video_at": _now(),
     })
     _write_json(folder / RUN_FILE, run)
+    _to_drive(root, str(item_id))
     return folder
 
 
@@ -301,6 +330,7 @@ def mark_ready_to_post(root: Path, item_id: str) -> dict:
     run["caption"] = build_caption(run)
     run["approved_at"] = _now()
     _write_json(folder / RUN_FILE, run)
+    _to_drive(root, str(item_id))
     return run
 
 
@@ -323,6 +353,10 @@ def mark_posted(
     }
     run["publish"] = publish
     _write_json(folder / RUN_FILE, run)
+    # ยกขึ้น Drive ทันที — หมวด 4 บน Drive ("โพสต์ช่องทางไหน เวลาเท่าไร") มีข้อมูล
+    # ได้จากตรงนี้ที่เดียว ถ้าไม่ยกตรงนี้ ตารางการโพสต์จะค้างว่างจนกว่าจะมีคนสั่ง
+    # sync เอง ซึ่งไม่มีทางรู้ว่าต้องสั่งเมื่อไร
+    _to_drive(root, str(item_id))
     return run
 
 

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 import urllib.error
@@ -55,6 +56,33 @@ ACTION_EDIT = "edit"
 # คำนำหน้าที่จองไว้ให้ปุ่มของงานอื่น — เจอคำนำหน้าพวกนี้แล้วส่งต่อให้ on_callback
 # ไม่ต้องไปหาใน store ของคำขออนุมัติ (ซึ่งหาไม่เจอแล้วปุ่มจะหมุนค้าง)
 CALLBACK_PREFIXES = ("fb:", "clip:")
+
+
+TELEGRAM_HOSTS = ("api.telegram.org",)
+_real_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only_getaddrinfo(host, port, family=0, *args, **kwargs):
+    """บังคับให้ต่อ Telegram ผ่าน IPv4 เท่านั้น
+
+    **วัดจริง 13 ส.ค. บนเครื่องนี้**
+      api.telegram.org ผ่าน IPv6 → ต่อไม่ติด หมดเวลาที่ 21.02 วินาที
+      api.telegram.org ผ่าน IPv4 → ต่อได้ใน 0.21 วินาที
+
+    ชื่อนี้ตอบทั้ง IPv6 และ IPv4 และ Python ไล่ตามลำดับที่ได้มา = ลอง IPv6 ก่อน
+    เสมอ ทุกการเชื่อมต่อใหม่จึงทิ้งเวลาไป 21 วินาทีก่อนถอยมา IPv4 — นี่คือที่มา
+    ของ "หน่วงเป็นช่วงๆ ถึง 22.6 วินาที" ที่จดไว้ข้างบน ซึ่งตอนนั้นแก้ด้วยการ
+    เพิ่มส่วนเผื่อ timeout (แก้ที่อาการ) เพราะยังไม่รู้สาเหตุ
+
+    กรองเฉพาะโฮสต์ของ Telegram — ไม่ไปยุ่งกับ Shopee/Google/ที่อื่นในโปรเซส
+    ถ้าวันหนึ่งเครื่องนี้มี IPv6 ใช้ได้จริง โค้ดนี้ก็ยังทำงานถูก (Telegram มี IPv4)
+    """
+    if host in TELEGRAM_HOSTS:
+        family = socket.AF_INET
+    return _real_getaddrinfo(host, port, family, *args, **kwargs)
+
+
+socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 
 class TelegramError(RuntimeError):

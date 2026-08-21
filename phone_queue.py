@@ -100,6 +100,44 @@ _held: dict[str, int] = {}
 _held_lock = threading.Lock()
 
 
+def default_owner() -> str:
+    """ชื่อที่จะขึ้นบนกระดานถ้าคนเรียกไม่ได้บอกมา
+
+    ตั้ง PHONE_QUEUE_OWNER ให้ตรงกับชื่อแชท/งานเสมอ — ชื่อที่อ่านไม่รู้เรื่อง
+    บนกระดานเท่ากับไม่มีกระดาน คนดูต้องตอบได้ทันทีว่า "ใครถือจออยู่"
+    """
+    named = os.environ.get("PHONE_QUEUE_OWNER", "").strip()
+    if named:
+        return named
+    script = Path(sys.argv[0]).stem if sys.argv and sys.argv[0] else "ไม่ทราบชื่องาน"
+    return f"{script} (pid {os.getpid()})"
+
+
+def device_for_lane(lane: str) -> str:
+    """เครื่องที่รับงานสายนี้ — ไม่ชัดเจนต้องล้มเสียงดัง ห้ามเดาเด็ดขาด
+
+    ตามกติกาข้อ 8 ของโปรเจกต์: "โพสต์ลงบัญชีผิด" กู้คืนไม่ได้ ส่วน "งานไม่เริ่ม
+    พร้อมเหตุผล" เสียแค่เวลากดใหม่ — เพราะงั้นถ้าตอบไม่ได้แน่ชัดว่าเครื่องไหน
+    ต้องโยน error พร้อมบอกชื่อทุกเครื่องให้เลือก ไม่ใช่หยิบเครื่องแรกมาใช้
+    """
+    if str(BASE_DIR) not in sys.path:
+        sys.path.insert(0, str(BASE_DIR))
+    import devices                                              # noqa: PLC0415
+
+    serials = devices.enabled_serials(lane)
+    if not serials:
+        raise QueueError(
+            f"ยังไม่มีเครื่องไหนถูกตั้งให้รับงานสาย '{lane}' — "
+            f"ตั้งด้วย  python devices.py lane <serial> {lane}\n"
+            f"(เครื่องที่เปิดใช้อยู่ตอนนี้: "
+            f"{', '.join(devices.enabled_serials()) or 'ไม่มีเลย'})")
+    if len(serials) > 1:
+        names = " · ".join(f"{devices.label(s)} [{s}]" for s in serials)
+        raise QueueError(
+            f"สาย '{lane}' มีเครื่องรับงานมากกว่าหนึ่งเครื่อง ต้องระบุมาให้ชัด: {names}")
+    return serials[0]
+
+
 def holding(serial: str) -> int | None:
     """โปรเซสนี้ถือบัตรของเครื่องนี้อยู่ไหม — คืนเลขบัตรถ้าถืออยู่"""
     with _held_lock:

@@ -53,9 +53,13 @@ import devices as device_book
 import studio_shared
 import fb_auto_post
 import fb_backup
+import fb_comment_guard
 import fb_pending
+import fb_phone_clean
 import fb_preflight
+import fb_screen
 import fb_report
+import fb_routine
 import facebook_group_post
 import qr_code
 import telegram_bot
@@ -110,7 +114,8 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 CONFIG_FILE = DATA_DIR / "config.json"
 GEMINI_KEY_FILE = DATA_DIR / "gemini_api_key.bin"
 POSITION_DIR = DATA_DIR / "publish_positions"
-FB_POST_DIR = DATA_DIR / "fb_posts"          # รูปที่รับมาจาก Telegram
+FB_POST_DIR = studio_shared.POST_IMAGES      # รูปที่รับมาจาก Telegram
+                                             # (ย้ายไป Google Drive แล้ว)
 
 for directory in (DATA_DIR, LOG_DIR, UPLOAD_DIR, POSITION_DIR, FB_POST_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -1415,11 +1420,34 @@ async def publish_flow_run(request: Request) -> dict:
         result = await asyncio.to_thread(work)
     except publish_flow.StepError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    # โฆษณาที่ปิดไประหว่างทางต้องขึ้น log ด้วย — ถ้าตัวเลขนี้ค่อยๆ เพิ่ม แปลว่า
+    # แอปเริ่มยิงโฆษณาถี่ขึ้น ควรรู้ตั้งแต่ก่อนที่ผังจะพังเอง ไม่ใช่ปิดเงียบๆ
+    ads = result.get("ads_closed") or []
     append_log(
         "publish",
         f"[{target}] เดินผัง {result['done']}/{result['total']} ขั้น — "
-        f"{'สำเร็จ' if result['ok'] else 'ไม่สำเร็จ'}",
+        f"{'สำเร็จ' if result['ok'] else 'ไม่สำเร็จ'}"
+        + (f" · ปิดโฆษณาที่เด้งแทรก {len(ads)} ครั้ง" if ads else ""),
     )
+
+    # เขียนผลกลับลงงาน — **จุดนี้เคยขาดหายไปทั้งระบบ**
+    #
+    # ตรวจ 18 ส.ค. 2026: `clip_store.mark_posted()` เขียนไว้ครบตั้งแต่แรกแต่ไม่มีโค้ด
+    # ตัวไหนเรียกเลยสักที่ (grep ทั้งโปรเจกต์ได้ 0 ผลลัพธ์) ผลคือ run.json ทั้ง 17 ไฟล์
+    # มีคีย์ publish แค่ 3 ไฟล์ และทั้ง 6 รายการเป็น pending · posted_at ว่างเปล่า
+    # คือระบบไม่เคยรู้เลยว่าโพสต์อะไรไปแล้วบ้าง เดินผังซ้ำสินค้าเดิมก็ไม่มีอะไรเตือน
+    #
+    # ไม่บันทึกเมื่อสั่งเดินทีละขั้น (`only`) เพราะนั่นคือการไล่เทรนผัง ไม่ใช่โพสต์จริง
+    # บันทึกไปจะกลายเป็นประวัติเท็จซึ่งแย่กว่าไม่มีประวัติ
+    if item_id and not only:
+        note = ("" if result["ok"]
+                else f"เดินผังไม่จบ หยุดที่ขั้น {result['done']}/{result['total']}")
+        try:
+            await asyncio.to_thread(
+                clip_store.mark_posted, DATA_DIR, item_id, target, "", note)
+        except clip_store.ClipStoreError as error:
+            append_log("publish", f"[{target}] บันทึกผลการโพสต์ไม่ได้: {error}")
+
     return {"ok": True, **result}
 
 
@@ -1593,6 +1621,8 @@ async def pick_file(request: Request) -> dict:
 
 # เครื่องที่เคลียร์ screenrecord ค้างไปแล้ว (ทำครั้งเดียวต่อเครื่องต่อการรัน)
 _screenrecord_cleaned: set[str] = set()
+# ปลุกจอครั้งล่าสุดตอนดูจอผ่านหน้าเว็บ (serial → เวลา)
+_screen_view_at: dict[str, float] = {}
 
 
 @app.get("/api/screen")
@@ -1610,6 +1640,14 @@ async def screen(serial: str) -> Response:
         if cleaned not in _screenrecord_cleaned:
             run_adb("-s", cleaned, "shell", "pkill -f screenrecord", timeout=8)
             _screenrecord_cleaned.add(cleaned)
+        # ตั้งแต่มีตัวดับจออัตโนมัติ **ต้องปลุกก่อนถ่ายภาพจอ** ไม่งั้นผู้ใช้กด
+        # "เริ่มดูจอ" แล้วเห็นแต่สีดำ แล้วนึกว่าระบบพัง
+        #
+        # เช็คทุก 10 วินาทีพอ ไม่ใช่ทุกเฟรม — เฟรมรีเฟรชถี่กว่านั้นมาก
+        # ใส่ทุกเฟรมคือบวกคำสั่ง ADB เพิ่มอีกเท่าตัวโดยไม่ได้อะไร
+        if time.time() - _screen_view_at.get(cleaned, 0.0) > 10.0:
+            _screen_view_at[cleaned] = time.time()
+            fb_screen.wake(fb_screen.make_shell(cleaned, ADB))
         result = run_adb("-s", cleaned, "exec-out", "screencap", "-p", timeout=20)
         if result.returncode != 0:
             raise RuntimeError(adb_message(result))
@@ -2122,6 +2160,13 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
         await websocket.close(code=1008)
         return
 
+    # **ต้องปลุกจอก่อนสตรีม** — ตั้งแต่มีตัวดับจออัตโนมัติ ถ้าไม่ปลุก
+    # `screenrecord` จะได้แต่ภาพดำ ผู้ใช้กด "เริ่มดูจอ" แล้วเห็นจอว่างเปล่า
+    # แล้วนึกว่าระบบพัง (เจอจริงตอนเทสใน Chrome 18 ส.ค. — ครั้งแรกใส่ไว้แค่
+    # ทาง screencap ซึ่งเป็นทางสำรอง ไม่ใช่ทางที่หน้าเว็บใช้จริง)
+    await asyncio.to_thread(
+        lambda: fb_screen.wake(fb_screen.make_shell(cleaned, ADB))
+    )
     stream_size = await asyncio.to_thread(device_stream_size, cleaned)
     size_arguments = ["--size", stream_size] if stream_size else []
 
@@ -3190,6 +3235,58 @@ def ensure_mass_bot() -> bool:
         return False
 
 
+def _clip_alert(text: str) -> None:
+    """ส่งข่าวสถานะเข้าแชทสายคลิป — ส่งไม่ออกต้องไม่ทำให้ตัวเฝ้าตาย"""
+    token, chat_id = clip_channel()
+    if not token or not chat_id:
+        return
+    try:
+        telegram_bot.send_message(token, chat_id, text)
+    except Exception as error:                                  # noqa: BLE001
+        append_log("input", f"แจ้งสถานะเข้า Telegram ไม่ได้: {error}")
+
+
+def _clip_server_keeper() -> None:
+    """เฝ้าให้สายคลิป (8877) รันอยู่เสมอ **และบอกให้รู้ด้วย**
+
+    เดิม ensure_clip_server() ถูกเรียกครั้งเดียวตอนเปิดเครื่อง ถ้ามันตายทีหลัง
+    ไม่มีใครปลุกและไม่มีใครบอก — เกิดจริง 2 ครั้งในสัปดาห์เดียว ผู้ใช้รู้ตอน
+    พิมพ์คำสั่งแล้วบอทเงียบ ซึ่งกว่าจะบังเอิญไปสั่งก็ผ่านไปนาน
+
+    แจ้ง **เฉพาะตอนสถานะเปลี่ยน** ไม่ใช่ทุกนาที — เตือนที่ดังตลอดเวลาเท่ากับ
+    ไม่มีเตือน เดี๋ยวก็เลิกอ่านกัน
+    """
+    was_up = True                    # ตอน startup เพิ่งเรียก ensure_clip_server ไป
+    while True:
+        try:
+            if clip_server_up():
+                if not was_up:
+                    _clip_alert("✅ สายคลิปกลับมาทำงานแล้ว")
+                was_up = True
+            else:
+                append_log("input", "สายคลิป (8877) ไม่ตอบ — กำลังปลุกใหม่")
+                revived = ensure_clip_server()
+                if revived and clip_server_up():
+                    # ปลุกขึ้นแล้วค่อยบอก พร้อมบอกว่าเคยดับ จะได้ไปดู log ย้อนได้
+                    _clip_alert(
+                        "♻️ <b>สายคลิปเคยดับ — ปลุกกลับมาแล้ว</b>\n"
+                        "งานที่ค้างอยู่ในคิวยังอยู่ครบ · <code>/queue</code> ดูสถานะ\n"
+                        "สาเหตุการดับดูได้ที่ <code>data/clip_server.log</code>"
+                    )
+                    was_up = True
+                else:
+                    if was_up:      # บอกครั้งเดียวตอนเพิ่งพัง ไม่ย้ำทุกนาที
+                        _clip_alert(
+                            "🚨 <b>สายคลิปดับ และปลุกไม่ขึ้น</b>\n"
+                            "บอทเจนคลิปจะไม่ตอบจนกว่าจะแก้ — "
+                            "ดู <code>data/clip_server.log</code>"
+                        )
+                    was_up = False
+        except Exception as error:                              # noqa: BLE001
+            append_log("input", f"keeper สายคลิปผิดพลาด: {error}")
+        time.sleep(60)
+
+
 def _mass_bot_keeper() -> None:
     """เฝ้าให้ fb_mass_bot รันอยู่เสมอ — ตายเมื่อไรปลุกใหม่ใน ≤60 วิ"""
     while True:
@@ -3214,6 +3311,8 @@ async def _start_watcher() -> None:
     sync_extra_watchers()
     threading.Thread(target=_fb_scheduler, daemon=True).start()
     ensure_clip_server()
+    # เฝ้าสายคลิปต่อจากนี้ด้วย — เปิดครั้งเดียวตอน startup ไม่พอ มันตายทีหลังได้
+    threading.Thread(target=_clip_server_keeper, daemon=True).start()
     # บอทหาโพสต์แมสเป็นโปรเซสแยก (role mass) — ให้ app.py ปลุกและเฝ้าให้ฟื้นเอง
     threading.Thread(target=_mass_bot_keeper, daemon=True).start()
 
@@ -3863,7 +3962,7 @@ def _fb_reclaim_interrupted() -> None:
 
 
 def _fb_seed_groups() -> None:
-    if (DATA_DIR / "fb_groups.json").is_file():
+    if studio_shared.post_file("fb_groups.json").is_file():
         return
     for group_id, name in FB_SEED_GROUPS:
         fb_groups.add(group_id, name)
@@ -4223,11 +4322,25 @@ def _fb_repost_card() -> tuple[str, dict | None]:
             f"    {when} · 🖼{shots} · 💬{talk}{'📎' * bool(clips)} · "
             f"{FB_STATUS_LABEL.get(job['status'], job['status']).split(' —')[0]}"
         )
-        rows.append([{
-            "text": f"{order}. {head[:24]} · 🖼{shots} 💬{talk}",
-            "callback_data": f"fb:rp:{job['id']}",
-        }])
-    lines += ["", "กดแล้วจะได้<b>งานใหม่</b> ที่ลอกแคปชัน รูป และคอมเมนต์มาให้ครบ",
+        # สองปุ่มต่อแถว — ดูรูปก่อนตัดสินใจ แล้วค่อยกดทำซ้ำ
+        #
+        # แคปชันอย่างเดียวแยกไม่ออกว่าใบไหนเป็นใบไหน โพสต์ขายของหลายใบใช้ข้อความ
+        # คล้ายกันมาก ("แกรร 1 แถม 1 …") ตัวที่ต่างกันจริงคือรูป
+        rows.append([
+            {
+                "text": f"{order}. {head[:20]} · 💬{talk}",
+                "callback_data": f"fb:rp:{job['id']}",
+            },
+            {
+                "text": f"📷{shots}" + (f"+{clips}" if clips else ""),
+                "callback_data": f"fb:ri:{job['id']}",
+            },
+            {"text": "✏️", "callback_data": f"fb:ed:{job['id']}"},
+        ])
+    lines += ["", "กด <b>ชื่อโพสต์</b> = ได้<b>งานใหม่</b> ที่ลอกแคปชัน รูป "
+              "และคอมเมนต์มาให้ครบ",
+              "กด <b>📷</b> = ดูรูปของใบนั้นก่อน (ทั้งรูปในโพสต์และรูปในคอมเมนต์)",
+              "กด <b>✏️</b> = เอามาแก้ก่อนโพสต์ (แคปชัน · รูป · คอมเมนต์ · กลุ่ม)",
               "เลือกกลุ่มใหม่ได้ก่อนกด 🚀 · ของเดิมไม่ถูกแตะต้อง"]
     return "\n".join(lines), {"inline_keyboard": rows}
 
@@ -4434,11 +4547,21 @@ FB_HELP = (
     "• /moveset &lt;เลข&gt; &lt;ชื่อชุด&gt; — ย้ายทีละกลุ่ม\n"
     "• /setname &lt;เลข📦&gt; &lt;ชื่อใหม่&gt; — เปลี่ยนชื่อกลุ่มใหญ่\n"
     "  (หรือกดปุ่ม 📦 หน้าชื่อกลุ่มใน /groups เพื่อย้ายกลุ่มย่อยเข้า-ออก)\n"
-    "• /schedule &lt;เวลา&gt; — ตั้งเวลาโพสต์ (20:30 / 9/8 20:30 / +30)\n"
+    "• /schedule &lt;เวลา&gt; — ตั้งเวลาโพสต์ครั้งเดียว (20:30 / 9/8 20:30 / +30)\n"
+    "• /routine — โพสต์ประจำวัน: ตั้งเวลาไว้แล้วเอาโพสต์เก่ามาลงเองทุกวัน\n"
+    "• /edit &lt;รหัสงาน&gt; — เอางานเก่ามาแก้ก่อนโพสต์ (/edit รูป = เปลี่ยนรูป)\n"
     "• /followup — ตามเก็บ: เปิดโพสต์จากแจ้งเตือนแล้วกดถูกใจ/คอมเมนต์ให้\n"
     "• /collect — เก็บยอดถูกใจ/คอมเมนต์/แชร์ ของโพสต์ทุกกลุ่ม\n"
     "• /fiximage — แก้รูปของโพสต์ที่ลงไปแล้วให้เป็นรูปที่ถูก\n"
     "• /links — ลิงก์โพสต์ที่เก็บไว้ (ใส่ตัวเลขต่อท้ายเพื่อดูย้อนหลังมากขึ้น)\n"
+    "• /pending — โพสต์ที่ยังไม่ขึ้น (รอผู้ดูแลอนุมัติ) · /pending run เพื่อไล่เลย\n"
+    "• /report — สรุปว่ากลุ่มไหน/เวลาไหนได้ผลจริง (/report 7 = ดู 7 วัน)\n"
+    "• /health — ตรวจความพร้อมของเครื่องก่อนเริ่มงาน\n"
+    "• /uncomment — ปลดพักคอมเมนต์ (ตอนโดนพักเพราะนึกว่าถูกบล็อก)\n"
+    "• /preview — ดูตัวอย่างก่อนโพสต์ (รูปไหนเข้าคอมเมนต์ไหน)\n"
+    "• /quotafb — โควตาโพสต์/คอมเมนต์ ต่อชั่วโมงและต่อวัน + ของที่ค้าง\n"
+    "• /clean — ล้างเครื่องเดี๋ยวนี้ (ปกติล้างเองทุกวัน 00:01)\n"
+    "• /backup — สำรองข้อมูลเดี๋ยวนี้ (ปกติสำรองเองวันละครั้ง)\n"
     "• /cancel — ยกเลิกงานที่ค้าง\n"
     "• /stop — สั่งหยุดงานที่กำลังโพสต์"
 )
@@ -4610,6 +4733,13 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
     # ซึ่งอ่านแล้วเหมือนล้มเหลว ทั้งที่ความจริงคือไม่มีอะไรต้องทำ
     # (เจอจริง 12 ส.ค. งาน p525306924: ครบทั้ง 5 กลุ่มตั้งแต่รอบโพสต์)
     want_comment = bool(_fb_comments(job))
+    # โดนพักคอมเมนต์อยู่ = ตัดงานคอมเมนต์ออกจากรอบนี้ไปเลย ไม่ใช่ไปตันทีละกลุ่ม
+    #
+    # ถ้าไม่ตัดตรงนี้ รอบตามเก็บจะยังเปิดโพสต์ทีละกลุ่ม (กลุ่มละ ~13 วินาที)
+    # แล้วค่อยไปโดนด่านปฏิเสธข้างใน — เสียเวลาจอฟรีทั้งที่รู้ผลตั้งแต่ยังไม่ออกตัว
+    comment_hold = fb_comment_guard.hold_reason() if want_comment else ""
+    if comment_hold:
+        want_comment = False
 
     def _needs_work(entry: dict) -> bool:
         if not entry.get("posted"):
@@ -4629,6 +4759,9 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
     ]
     if not targets:
         done = sum(1 for r in job["results"] if r.get("posted"))
+        if comment_hold:
+            return (f"⏸ งาน {job['id']} เหลือแค่งานคอมเมนต์ แต่ตอนนี้{comment_hold}\n"
+                    "ไม่ออกตัวไปเสียเวลาจอเปล่าๆ — ค่อยสั่ง /followup ใหม่ตอนพ้นเวลาพัก")
         if done:
             return (f"✅ งาน {job['id']} ครบแล้วทั้ง {done} กลุ่ม — ถูกใจ คอมเมนต์ "
                     "และลิงก์เก็บครบตั้งแต่รอบโพสต์ ไม่ต้องตามเก็บ")
@@ -4641,6 +4774,11 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
     override = comment_override.strip()
     comment = override or _fb_comments(job)
     comment_shots = [] if override else _fb_comment_images(job)
+    # ยังมีกลุ่มที่ต้องกดถูกใจ/เก็บลิงก์อยู่ จึงยังออกตัว — แต่ตัดคอมเมนต์ทิ้ง
+    # ไม่ให้ไปเปิดแผงคอมเมนต์แล้วพิมพ์ทิ้งเปล่าๆ ระหว่างโดนพัก
+    if comment_hold and not override:
+        comment = ""
+        comment_shots = []
 
     def on_log(line: str) -> None:
         append_log("publish", f"[{job_id}·ตามเก็บ] {line}")
@@ -4709,6 +4847,618 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         f"🔁 เริ่มตามเก็บ {len(targets)} กลุ่ม — เปิดโพสต์จากแจ้งเตือนแล้วกดถูกใจ"
         + ("/คอมเมนต์ให้" if comment else "")
     )
+
+
+EDIT_IMAGE_WORDS = ("รูป", "รูปภาพ", "image", "images", "photo")
+
+
+def _fb_edit_start(chat_id: str, job_id: str = "", want_image: bool = False) -> str:
+    """เปิดงานขึ้นมาแก้ — คืนข้อความบอกผล (การ์ดถูกส่งแยกอีกใบ)
+
+    **งานที่โพสต์ไปแล้วจะถูกทำสำเนาก่อนเสมอ ไม่แก้ทับของเดิม**
+
+    เพราะ `/followup` `/collect` `/fiximage` ทั้งสามตัว **หาโพสต์บนจอด้วยการ
+    เทียบแคปชัน** (ส่ง `caption=job["caption"]` เข้าไปตรงๆ) ถ้าแก้แคปชันของงานที่
+    ลงไปแล้ว ระบบจะหาโพสต์ใบนั้นไม่เจออีกเลย — ตามเก็บไม่ได้ เก็บยอดไม่ได้
+    แก้รูปไม่ได้ และประวัติว่า "ตอนนั้นโพสต์อะไรลงไป" ก็เพี้ยนตามไปด้วย
+
+    ส่วนงานที่ยังไม่ได้โพสต์ (ร่าง) แก้ทับได้เลย ไม่มีอะไรอ้างอิงอยู่
+    """
+    if job_id:
+        source = fb_jobs.get(job_id)
+        if source is None:
+            return f"ไม่พบงาน {job_id}"
+        posted = bool(source.get("results")) or \
+            source["status"] not in fb_auto_post.OPEN_STATUSES
+        if posted:
+            job, problem = _fb_clone_job(job_id, chat_id)
+            if job is None:
+                return problem
+            note = (f"📄 ทำสำเนา {job_id} → <b>{job['id']}</b> ขึ้นมาแก้\n"
+                    f"<i>ของเดิมไม่ถูกแตะ — ถ้าแก้ทับ จะตามเก็บ/เก็บยอด/แก้รูป "
+                    f"ของโพสต์ที่ลงไปแล้วไม่ได้อีก</i>")
+        else:
+            job, note = source, f"✏️ เปิดแก้งาน <b>{job_id}</b>"
+    else:
+        job = fb_jobs.latest_open(chat_id)
+        if job is None:
+            return ("ยังไม่มีงานที่กำลังทำอยู่ — ส่งรูปพร้อมแคปชันเข้ามาเพื่อเริ่มงานใหม่\n"
+                    "หรือ <code>/edit &lt;รหัสงาน&gt;</code> เพื่อเอางานเก่ามาแก้ "
+                    "(ดูรหัสได้จาก /repost)")
+        note = f"✏️ แก้งาน <b>{job['id']}</b> ที่ทำค้างอยู่"
+
+    if want_image:
+        # เคลียร์รูปแล้วตั้งสถานะเป็น "รอรูป" — รูปใบถัดไปที่ส่งเข้ามาจะเข้างานนี้เอง
+        # ผ่านทางเดินเดิมของการส่งรูป ไม่ต้องมีทางพิเศษให้ดูแลเพิ่ม
+        job = fb_jobs.update(job["id"], images=[], image="",
+                             status=fb_auto_post.STATUS_WAIT_IMAGE) or job
+        note += "\n\n📷 <b>ล้างรูปเดิมแล้ว — ส่งรูปใหม่เข้ามาได้เลย</b>"
+
+    used_by = [r for r in fb_routine.listing()
+               if job_id and job_id in (r.get("sources") or [])]
+    if used_by:
+        times = " · ".join(r["time"] for r in used_by)
+        note += (f"\n\n⚠️ งาน {job_id} ถูกใช้ในโพสต์ประจำวัน {times} "
+                 f"ซึ่งยังชี้ที่ใบเก่าอยู่\n"
+                 f"อยากให้ตารางใช้ใบใหม่ ต้องตั้งใหม่: "
+                 f"<code>/routine del &lt;เลข&gt;</code> แล้ว "
+                 f"<code>/routine add {used_by[0]['time']} {job['id']}</code>")
+
+    _fb_show_card(job)
+    return note + "\n\n" + _fb_edit_help()
+
+
+def _fb_edit_help() -> str:
+    return (
+        "<b>แก้อะไรได้บ้าง</b>\n"
+        "📝 <code>/caption ข้อความใหม่</code>\n"
+        "💬 <code>/comment ข้อความ</code> · <code>/comment 2 ข้อความ</code> · "
+        "<code>/comment -</code> ล้าง\n"
+        "📷 <code>/edit รูป</code> แล้วส่งรูปใหม่เข้ามา (ส่งอัลบั้มได้)\n"
+        "📎 ส่งรูปพร้อมข้อความ <code>/comment</code> = รูปแนบคอมเมนต์\n"
+        "📦 เลือกกลุ่มจากปุ่มบนการ์ด · ⏰ <code>/schedule 20:30</code>\n"
+        "🚀 พร้อมแล้วกดปุ่มโพสต์บนการ์ด"
+    )
+
+
+def _fb_edit_command(chat_id: str, argument: str) -> str:
+    """ตัวแปลคำสั่ง /edit"""
+    parts = argument.split()
+    job_id, want_image = "", False
+    for word in parts:
+        if word.lower() in EDIT_IMAGE_WORDS:
+            want_image = True
+        elif not job_id:
+            job_id = word.strip()
+    return _fb_edit_start(chat_id, job_id, want_image)
+
+
+def _routine_label(job_id: str) -> str:
+    """ชื่อเรียกงานเก่าแบบสั้น — รหัส + ต้นแคปชัน ให้รู้ว่าโพสต์ไหน"""
+    job = fb_jobs.get(job_id)
+    if job is None:
+        return f"{job_id} ⚠️ ไม่มีงานนี้แล้ว"
+    head = (job.get("caption") or "").strip().splitlines()[0][:28]
+    return f"{job_id} · {telegram_bot._escape(head)}"
+
+
+def _routine_check_source(job_id: str) -> str:
+    """งานนี้เอามาลงซ้ำได้จริงไหม — คืนข้อความปัญหา ("" = ใช้ได้)
+
+    ตรวจตั้งแต่ตอนตั้งตาราง ไม่ใช่ตอนถึงเวลา — ถ้ารอไปเจอตอน 09:00 ผู้ใช้จะรู้ว่า
+    ตารางเสียก็ต่อเมื่อวันนั้นไม่มีโพสต์ขึ้น ซึ่งสายเกินไปแล้ว
+    """
+    job = fb_jobs.get(job_id)
+    if job is None:
+        return f"ไม่พบงาน {job_id}"
+    if not (job.get("caption") or "").strip():
+        return f"งาน {job_id} ไม่มีแคปชัน"
+    images = [p for p in (job.get("images") or [job.get("image", "")]) if p]
+    if not any(Path(p).is_file() for p in images):
+        return f"ไฟล์รูปของงาน {job_id} หายไปแล้ว"
+    return ""
+
+
+def _routine_fire(record: dict, forced: bool = False) -> str:
+    """ลงโพสต์ของตารางนี้หนึ่งรอบ — คืนข้อความบอกผล
+
+    **สร้างงานแล้วตั้ง `run_at` เป็นเดี๋ยวนี้ ไม่ได้สั่งรันตรงๆ** เพื่อให้ไหลเข้า
+    ตัวตั้งเวลาเดิมทั้งหมด — คิวรอจอ · ด่านตรวจความพร้อม · การเตือนโพสต์ซ้ำ
+    ทำงานเหมือนงานที่ผู้ใช้ตั้งเวลาเองทุกประการ ไม่ต้องมีทางเดินพิเศษให้ดูแลสองที่
+    """
+    source = fb_routine.current_source(record)
+    chat_id = record.get("chat_id", "")
+    problem = _routine_check_source(source)
+    if problem:
+        append_log("publish", f"[ตาราง {record['time']}] ข้าม — {problem}")
+        fb_routine.mark_skipped(record["id"])
+        return f"⚠️ ตาราง {record['time']} ข้ามรอบนี้ — {problem}"
+    job, note = _fb_clone_job(source, chat_id)
+    if job is None:
+        append_log("publish", f"[ตาราง {record['time']}] ทำซ้ำไม่สำเร็จ — {note}")
+        fb_routine.mark_skipped(record["id"])
+        return f"⚠️ ตาราง {record['time']} ทำซ้ำไม่สำเร็จ — {note}"
+    fb_jobs.update(job["id"], run_at=datetime.now().isoformat(timespec="seconds"))
+    fb_routine.mark_fired(record["id"], job["id"])
+    append_log(
+        "publish",
+        f"[ตาราง {record['time']}] สร้างงาน {job['id']} จาก {source}"
+        + (" (สั่งเอง)" if forced else ""),
+    )
+    return (f"🗓 <b>โพสต์ประจำวัน {record['time']}</b>\n"
+            f"ทำซ้ำ {source} → งาน <b>{job['id']}</b> · เริ่มโพสต์เดี๋ยวนี้")
+
+
+def _routine_pump() -> None:
+    """ถึงเวลาไหนแล้วก็ลงให้ — เกาะไปกับตัวตั้งเวลาที่วนอยู่แล้ว"""
+    for record in fb_routine.missed():
+        # ตกรอบไปไกลเกิน CATCHUP_MINUTES — ข้ามแล้วบอกให้รู้ ไม่ใช่เงียบ
+        fb_routine.mark_skipped(record["id"])
+        append_log(
+            "publish",
+            f"[ตาราง {record['time']}] เลยเวลามาเกิน "
+            f"{fb_routine.CATCHUP_MINUTES} นาที — ข้ามของวันนี้",
+        )
+        _fb_say(record.get("chat_id", ""),
+                f"⏭ ข้ามโพสต์ประจำวัน {record['time']} ของวันนี้ "
+                f"(เลยเวลามานานเกินไป)")
+    for record in fb_routine.due():
+        note = _routine_fire(record)
+        _fb_say(record.get("chat_id", ""), note)
+
+
+def _fb_routine_command(chat_id: str, argument: str) -> str:
+    """ตัวแปลคำสั่ง /routine ทั้งหมด"""
+    text = argument.strip()
+    if not text:
+        return fb_routine.summary_text(label=_routine_label)
+
+    word, _, rest = text.partition(" ")
+    word, rest = word.lower(), rest.strip()
+
+    if word == "add":
+        times, _, jobs = rest.partition(" ")
+        wanted = [j.strip() for j in jobs.replace(",", " ").split() if j.strip()]
+        if not wanted:
+            return ("บอกด้วยว่าจะเอาโพสต์ไหนมาลง เช่น\n"
+                    "<code>/routine add 9:00 p782116693</code>\n"
+                    "หลายเวลา/หลายโพสต์: "
+                    "<code>/routine add 9:00,10:00 p782116693,p617465263</code>\n"
+                    "ดูรหัสงานเก่าได้จาก /repost")
+        for job_id in wanted:
+            problem = _routine_check_source(job_id)
+            if problem:
+                return f"⚠️ {problem} — ตั้งตารางไม่ได้"
+        try:
+            added = fb_routine.add(
+                times.replace(",", " ").split(), wanted, chat_id=chat_id
+            )
+        except fb_routine.RoutineError as error:
+            return f"⚠️ {error}"
+        names = " · ".join(r["time"] for r in added)
+        append_log("publish",
+                   f"ตั้งโพสต์ประจำวัน {names} จาก {', '.join(wanted)}")
+        return (f"🗓 ตั้งโพสต์ประจำวันแล้ว: <b>{names}</b>\n"
+                + fb_routine.summary_text(label=_routine_label))
+
+    if word in ("del", "delete", "rm", "off", "on", "run"):
+        if not rest.isdigit():
+            return f"ใส่เลขลำดับด้วย เช่น <code>/routine {word} 1</code>"
+        record = fb_routine.by_index(int(rest))
+        if record is None:
+            return f"ไม่มีรายการที่ {rest}"
+        if word in ("del", "delete", "rm"):
+            fb_routine.remove(record["id"])
+            append_log("publish", f"ลบโพสต์ประจำวัน {record['time']}")
+            return f"🗑 ลบตาราง {record['time']} แล้ว\n" + \
+                fb_routine.summary_text(label=_routine_label)
+        if word in ("on", "off"):
+            fb_routine.set_enabled(record["id"], word == "on")
+            return (f"{'✅ เปิด' if word == 'on' else '⏸ พัก'}ตาราง "
+                    f"{record['time']} แล้ว\n"
+                    + fb_routine.summary_text(label=_routine_label))
+        # run = สั่งลงเดี๋ยวนี้โดยไม่รอเวลา (ใช้ทดสอบว่าตารางตั้งถูกไหม)
+        return _routine_fire(record, forced=True)
+
+    return ("ใช้แบบนี้:\n"
+            "<code>/routine</code> ดูตาราง\n"
+            "<code>/routine add 9:00,10:00 &lt;รหัสงาน&gt;</code> เพิ่ม\n"
+            "<code>/routine del 1</code> ลบ · <code>/routine off 1</code> พัก · "
+            "<code>/routine on 1</code> เปิด\n"
+            "<code>/routine run 1</code> ลงเดี๋ยวนี้เลย (ทดสอบ)")
+
+
+def _fb_pending_text() -> str:
+    """รายการโพสต์ที่ยังไม่ขึ้น (รอผู้ดูแลอนุมัติ)"""
+    items = fb_pending.pending_items(fb_jobs.listing())
+    return fb_pending.summary_text(items, label=fb_groups.label)
+
+
+def _fb_pending_run(job_id: str = "") -> str:
+    """ไล่ตามโพสต์ที่ยังไม่ขึ้น — ทีละงาน โดยใช้รอบตามเก็บที่มีอยู่แล้ว
+
+    ระบุงานเองได้ (`/pending p123`) ซึ่งใช้ไล่งานที่ถูกยกเลิกไว้ได้ด้วย —
+    ตัวไล่อัตโนมัติจะไม่แตะงานพวกนั้นเอง แต่ถ้าเจ้าของสั่งเองก็ทำให้
+    """
+    items = fb_pending.pending_items(fb_jobs.listing())
+    if job_id:
+        wanted = [x for x in items if x["job_id"] == job_id]
+        if not wanted:
+            return f"งาน {job_id} ไม่มีกลุ่มที่ค้างรออนุมัติ"
+    else:
+        job_id = fb_pending.next_job(items)
+        if not job_id:
+            return ("ยังไม่มีงานที่ถึงเวลาไล่\n" + _fb_pending_text())
+        wanted = [x for x in items if x["job_id"] == job_id]
+    note = _fb_followup(job_id=job_id)
+    # **ตัดสินว่า “ลงมือแล้ว” จากตัวเดินงานจริง ไม่ใช่จากข้อความที่ได้กลับมา**
+    #
+    # `_fb_followup` คืนข้อความทุกกรณี — สำเร็จก็คืน “🔁 เริ่มตามเก็บ N กลุ่ม…”
+    # ล้มก็คืนเหตุผล ไม่มีเคสไหนคืนค่าว่างเลยสักเคส โค้ดเดิมตรงนี้อ่านว่า
+    # “มีข้อความ = เริ่มไม่ได้” จึง return ก่อนถึง mark_tried ทุกครั้งที่สำเร็จ
+    # ตัวนับไม่ขยับ ตัวไล่อัตโนมัติจึงยิงซ้ำทุก 10 นาทีแทนที่จะเว้น 4 ชั่วโมง
+    # (เกิดจริง 14 ส.ค. ยิง 23:22 แล้วยิงอีกที 23:32 — ห่างกันเป๊ะ 10 นาที)
+    #
+    # ถามตัวเดินงานว่า “ตอนนี้ถืองานนี้อยู่ไหม” เป็นหลักฐานตรง ไม่ต้องเดาจากสตริง
+    # ที่เปลี่ยนถ้อยคำเมื่อไรก็พังเมื่อนั้น
+    if not fb_runner.job_running(job_id):
+        # ยังไม่ได้ลงมือ ห้ามนับเป็นหนึ่งครั้ง ไม่งั้นตัวนับจะเต็มทั้งที่ไม่เคยไล่จริง
+        # แล้วกลุ่มนั้นจะถูกเลิกตามไปเฉยๆ
+        return note or "เริ่มไล่ไม่ได้"
+    fb_pending.mark_tried(job_id, [x["group_id"] for x in wanted])
+    append_log("publish", f"[{job_id}] ไล่โพสต์ที่ยังไม่ขึ้น {len(wanted)} กลุ่ม")
+    return note or f"🔄 เริ่มไล่โพสต์ที่ยังไม่ขึ้นของงาน {job_id} ({len(wanted)} กลุ่ม)"
+
+
+def _fb_report_card(days: int = fb_report.DEFAULT_DAYS) -> tuple[str, dict | None]:
+    """รายงาน + ปุ่มกดดูรูปของแต่ละโพสต์
+
+    ปุ่มหนึ่งใบต่อหนึ่ง**งาน** ไม่ใช่ต่อกลุ่ม — งานเดียวลงหกกลุ่ม ถ้าทำปุ่มรายกลุ่ม
+    จะได้ปุ่มซ้ำหกใบที่เปิดรูปชุดเดียวกัน
+    """
+    jobs = fb_jobs.listing()
+    text = fb_report.build(jobs, days=days, label=fb_groups.label)
+    rows = fb_report.post_report(jobs, days=days)
+    if not rows:
+        return text, None
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": fb_report.post_line(row),
+                 "callback_data": f"fb:ri:{row['job_id']}"},
+                {"text": "✏️", "callback_data": f"fb:ed:{row['job_id']}"},
+            ]
+            for row in rows
+        ]
+    }
+    return text, keyboard
+
+
+def _fb_preview(chat_id: str, job_id: str = "") -> str:
+    """ส่งตัวอย่างว่างานนี้จะออกมาหน้าตายังไง — โพสต์ก่อน แล้วคอมเมนต์ทีละใบ
+
+    **ส่งคอมเมนต์ทีละข้อความ ไม่รวมเป็นอัลบั้ม** — นี่คือหัวใจของฟังก์ชันนี้
+    คำถามที่ต้องตอบคือ "รูปที่เพิ่งแนบไป มันไปอยู่คอมเมนต์ไหน" ซึ่งอัลบั้มตอบ
+    ไม่ได้เลย เพราะ Telegram แสดงคำบรรยายรวมเป็นก้อนเดียวเหนือรูปทั้งชุด
+    ตาเปล่าจึงจับคู่รูปกับข้อความไม่ได้
+
+    (ปุ่ม 📷 ใน /report กับ /repost เป็นแบบอัลบั้ม ซึ่งดีสำหรับ "ดูภาพรวมโพสต์"
+    แต่ใช้ตรวจการจับคู่ไม่ได้ — คนละงานกัน จึงต้องมีตัวนี้เพิ่ม)
+
+    ส่งรูปเดี่ยวพร้อมคำบรรยายของช่องนั้น = เห็นคู่กันชัดในกรอบเดียว ตรงกับที่
+    มันจะไปปรากฏบน Facebook จริง (คอมเมนต์หนึ่ง = รูปหนึ่ง + ข้อความหนึ่ง)
+    """
+    job = fb_jobs.get(job_id) if job_id else (
+        fb_jobs.latest_open(chat_id)
+        or next((j for j in fb_jobs.listing() if j.get("results")), None)
+    )
+    if job is None:
+        return f"ไม่พบงาน {job_id}" if job_id else "ยังไม่มีงานให้ดู"
+    token, default_chat = _fb_telegram()
+    target = chat_id or default_chat
+    if not token or not target:
+        return "ยังไม่ได้ตั้งค่าบอท"
+
+    job_id = job["id"]
+    comments = _fb_comments(job)
+    shots = _fb_comment_images(job)
+    post_shots = [Path(p) for p in (job.get("images") or [job.get("image", "")]) if p]
+    alive = [p for p in post_shots if p.is_file()]
+    warns = []
+    if len(alive) < len(post_shots):
+        warns.append(f"⚠️ รูปโพสต์หายไปแล้ว {len(post_shots) - len(alive)} ใบ")
+
+    head = (
+        f"👁 <b>ตัวอย่างงาน {job_id}</b> — จะออกมาหน้าตาแบบนี้"
+        "\n\n"
+        f"📤 <b>ตัวโพสต์</b> · รูป {len(alive)} ใบ\n"
+        + telegram_bot._escape((job.get("caption") or "(ยังไม่มีแคปชัน)")[:700])
+    )
+    try:
+        if alive:
+            telegram_bot.send_media_group(token, target, alive, head)
+        else:
+            telegram_bot.send_message(token, target, head + "\n\n⚠️ ยังไม่มีรูปโพสต์")
+
+        # คอมเมนต์ทีละช่อง — ตรงนี้คือคำตอบของ "รูปเข้าคอมเมนต์ไหน"
+        for order, text in enumerate(comments, 1):
+            raw = shots[order - 1] if order <= len(shots) else ""
+            clip = Path(raw) if raw else None
+            body = (f"💬 <b>คอมเมนต์ที่ {order}</b>\n"
+                    + telegram_bot._escape(text[:900]))
+            if clip and clip.is_file():
+                telegram_bot.send_photo(
+                    token, target, clip, f"{body}\n\n📎 <code>{clip.name}</code>")
+            elif clip:
+                # ตั้งรูปไว้แต่ไฟล์หาย = โพสต์ออกไปจะไม่มีรูป ต้องรู้ก่อนโพสต์
+                warns.append(f"⚠️ คอมเมนต์ที่ {order} ตั้งรูป "
+                             f"<code>{clip.name}</code> ไว้แต่ไฟล์หายแล้ว "
+                             "— จะโพสต์ออกไปแบบไม่มีรูป")
+                telegram_bot.send_message(token, target, body + "\n\n📎 ไฟล์รูปหาย")
+            else:
+                telegram_bot.send_message(token, target, body + "\n\n(ช่องนี้ไม่มีรูป)")
+    except telegram_bot.TelegramError as error:
+        append_log("publish", f"ส่งตัวอย่างงาน {job_id} ไม่ได้: {error}")
+        return "ส่งตัวอย่างไม่สำเร็จ"
+
+    if not comments:
+        warns.append("ยังไม่ได้ตั้งคอมเมนต์เลย — สั่ง /comment")
+    # รูปที่ตั้งไว้เกินจำนวนข้อความ = รูปนั้นจะไม่ถูกใช้เลย ต้องบอก ไม่ใช่เงียบ
+    extra = [x for index, x in enumerate(shots) if x and index >= len(comments)]
+    if extra:
+        warns.append(f"⚠️ มีรูปคอมเมนต์เกินมา {len(extra)} ใบ ที่ไม่มีข้อความคู่ "
+                     "— รูปพวกนี้จะไม่ถูกใช้")
+    with_photo = sum(1 for x in shots[:len(comments)] if x)
+    tail = [f"✅ ตรวจแล้ว: คอมเมนต์ {len(comments)} ช่อง · มีรูป {with_photo} ช่อง"]
+    tail += warns
+    tail += ["", "แก้ข้อความ: <code>/comment 1 ข้อความ</code>",
+             "เปลี่ยนรูป: ส่งรูปพร้อมพิมพ์ <code>/comment 2</code> ในคำบรรยาย"]
+    _fb_say(target, "\n".join(tail))
+    return f"ส่งตัวอย่างงาน {job_id} แล้ว"
+
+
+def _fb_report_images(chat_id: str, job_id: str) -> str:
+    """ส่งรูปของงานนั้นกลับเข้าแชท — ทั้งรูปในโพสต์และรูปในคอมเมนต์
+
+    ส่งเป็น **อัลบั้มเดียว** ไม่ใช่ทีละใบ เพราะจุดประสงค์คือ "ดูว่าโพสต์นี้หน้าตา
+    ยังไง" ซึ่งต้องเห็นครบในกรอบเดียวถึงจะเทียบกับโพสต์อื่นได้
+
+    เรียงรูปโพสต์ก่อนแล้วค่อยรูปคอมเมนต์ ตรงกับลำดับที่มันไปปรากฏบน Facebook จริง
+    """
+    job = fb_jobs.get(job_id)
+    if job is None:
+        return "ไม่พบงานนี้แล้ว"
+    post_shots = [Path(p) for p in (job.get("images") or [job.get("image", "")]) if p]
+    comment_shots = [Path(p) for p in _fb_comment_images(job) if p]
+    alive = [p for p in post_shots + comment_shots if p.is_file()]
+    missing = len(post_shots) + len(comment_shots) - len(alive)
+
+    results = job.get("results") or []
+    posted = sum(1 for r in results if r.get("posted"))
+    links = [r.get("link", "") for r in results if r.get("link")]
+    comments = _fb_comments(job)
+    when = job.get("finished_at") or job.get("started_at") or job.get("created_at") or ""
+    head = [
+        f"🧾 <b>งาน {job_id}</b>" + (f" · {_fb_when_text(when)}" if when else ""),
+        telegram_bot._escape((job.get("caption") or "")[:400]),
+    ]
+    if comments:
+        head += ["", "💬 <b>คอมเมนต์</b>"]
+        head += [f"{index}. {telegram_bot._escape(text[:200])}"
+                 for index, text in enumerate(comments, 1)]
+    head += ["", f"📤 โพสต์สำเร็จ {posted}/{len(results) or len(job.get('groups') or [])} กลุ่ม"
+             + (f" · เก็บลิงก์ได้ {len(links)}" if links else "")]
+    if missing:
+        # บอกตรงๆ ว่ารูปหาย ไม่ใช่ส่งเท่าที่มีแล้วให้เข้าใจว่าโพสต์มีแค่นี้
+        head.append(f"⚠️ ไฟล์รูปหายไปแล้ว {missing} ใบ")
+    caption = "\n".join(head)
+
+    if not alive:
+        _fb_say(chat_id, caption + "\n\n⚠️ ไม่เหลือไฟล์รูปให้แสดงเลย")
+        return "ไฟล์รูปหายหมดแล้ว"
+    token, default_chat = _fb_telegram()
+    target = chat_id or default_chat
+    if not token or not target:
+        return "ยังไม่ได้ตั้งค่าบอท"
+    try:
+        telegram_bot.send_media_group(token, target, alive, caption)
+    except telegram_bot.TelegramError as error:
+        append_log("publish", f"ส่งรูปของงาน {job_id} ไม่ได้: {error}")
+        return "ส่งรูปไม่สำเร็จ"
+    return f"ส่งรูป {len(alive)} ใบแล้ว"
+
+
+def _fb_routine_demand(now: datetime) -> tuple[list[dict], int]:
+    """โพสต์ประจำวันที่ยังไม่ถึงคิววันนี้ ต้องใช้คอมเมนต์อีกกี่ครั้ง
+
+    คืน (รายการที่รอ, จำนวนครั้งที่ต้องใช้) — ตารางที่ปิดไว้หรือยิงไปแล้ววันนี้
+    ไม่นับ เพราะมันจะไม่กินโควตาอีกแล้ว
+
+    **นับจากงานต้นทางที่ตารางจะหยิบมาลงจริง** ไม่ใช่เดาเอาว่ากลุ่มละ 2 ข้อความ
+    ตารางหมุนเวียนได้หลายโพสต์ แต่ละใบตั้งกลุ่มกับจำนวนคอมเมนต์ไม่เท่ากัน
+    เดาแล้วตัวเลขจะเพี้ยนพอดีตอนที่คนกำลังใช้มันตัดสินใจ
+    """
+    waiting = []
+    total = 0
+    for record in fb_routine.listing():
+        if not record.get("enabled", True):
+            continue
+        try:
+            hour, minute = (int(x) for x in record["time"].split(":"))
+        except (KeyError, ValueError):
+            continue
+        when = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if when <= now:
+            continue                       # เลยเวลาไปแล้ว — วันนี้ไม่ยิงอีก
+        source = fb_routine.current_source(record)
+        job = fb_jobs.get(source) if source else None
+        groups = len([g for g in (job.get("groups") or []) if g]) if job else 0
+        per_post = len(_fb_comments(job)) if job else 0
+        need = groups * per_post
+        total += need
+        waiting.append({"time": record["time"], "source": source,
+                        "groups": groups, "per_post": per_post, "need": need,
+                        "ok": bool(job)})
+    waiting.sort(key=lambda x: x["time"])
+    return waiting, total
+
+
+def _fb_quota_text(now: datetime | None = None) -> str:
+    """สรุปโควตาโพสต์/คอมเมนต์ — ตอบ /quotafb
+
+    **ที่ต้องมีคือ "เหลือเท่าไร" คู่กับ "ค้างเท่าไร"** ดูอย่างเดียวว่าเหลือ 20
+    ไม่ได้บอกอะไร ถ้าไม่รู้ว่าของค้างรอเติมอยู่ 24 ครั้ง — ตัวเลขสองตัวนี้ต้อง
+    อยู่ในจอเดียวกันถึงจะตัดสินใจได้ว่า "เติมของเก่า" หรือ "เก็บไว้ให้ของใหม่"
+
+    เจอจริง 19 ส.ค.: ของค้างโตจาก 4 เป็น 12 กลุ่มภายในสองชั่วโมง เพราะเลน post
+    เติมได้ 4 กลุ่ม/ชั่วโมง แต่งานยิงชั่วโมงละ 6 กลุ่ม — ไล่เท่าไรก็ไม่ทัน
+    ตัวเลข "ตามทันไหม" ข้างล่างจึงสำคัญกว่าโควตาที่เหลือด้วยซ้ำ
+    """
+    now = now or datetime.now()
+    try:
+        account = _fb_serial()
+    except fb_auto_post.AutoPostError:
+        account = ""
+    today = now.date().isoformat()
+    lines = [f"📊 <b>โควตาการโพสต์</b> · {now:%H:%M}"]
+
+    # ---------------------------------------------------------- โพสต์วันนี้
+    jobs = fb_jobs.listing()
+    mine = [j for j in jobs
+            if (j.get("finished_at") or j.get("created_at") or "").startswith(today)]
+    posted = sum(1 for j in mine for r in (j.get("results") or []) if r.get("posted"))
+    tried = sum(len(j.get("results") or []) for j in mine)
+    lines += ["", f"📤 <b>โพสต์วันนี้</b> {len(mine)} งาน · "
+                  f"ขึ้นจริง {posted}/{tried} กลุ่ม"]
+
+    # ------------------------------------------------------- คอมเมนต์ชั่วโมงนี้
+    lines += ["", "💬 <b>คอมเมนต์ — ชั่วโมงนี้</b>"]
+    for lane, what in (("post", "งานโพสต์"), ("reply", "บอทตอบคอมเมนต์")):
+        cap = facebook_group_post.comment_lane_limit(lane, account)
+        free = facebook_group_post.comment_quota_left(lane, account)
+        bar = "🟩" * free + "⬜" * max(0, cap - free)
+        lines.append(f"   เลน {lane} ({what}) {bar} {free}/{cap}")
+    lines.append(f"   เพดานรวมของบัญชี {facebook_group_post.comment_limit_per_hour(account)}/ชั่วโมง")
+    wait = facebook_group_post.comment_quota_resets_in("post", account)
+    if wait:
+        lines.append(f"   ⏳ ว่างอีกช่องในอีก {wait / 60:.0f} นาที")
+
+    # ---------------------------------------------------------- คอมเมนต์รายวัน
+    used = fb_comment_guard.daily_used(now)
+    cap_day = fb_comment_guard.daily_limit(account)
+    left_day = fb_comment_guard.daily_left(now, account=account)
+    lines += ["", f"💬 <b>คอมเมนต์ — วันนี้</b> {used}/{cap_day} → เหลือ {left_day}"]
+    hold = fb_comment_guard.hold_reason(now, account=account)
+    if hold:
+        lines.append(f"   🛑 {hold}")
+
+    # ------------------------------------------------------------- ของที่ค้าง
+    waiting = []
+    for job in jobs:
+        per_post = len(_fb_comments(job))
+        if not per_post or job["status"] in ("cancelled", "failed"):
+            continue
+        short = [r for r in (job.get("results") or [])
+                 if r.get("posted") and not r.get("commented")]
+        if short:
+            when = (job.get("finished_at") or job.get("created_at") or "")
+            waiting.append((job["id"], when, len(short), len(short) * per_post))
+    # จำนวนข้อความต่อโพสต์ที่ใช้อยู่จริง — ใช้ทั้งตอนสรุปและตอนคิดว่าตามทันไหม
+    per_post_now = max((len(_fb_comments(j)) for j in mine if _fb_comments(j)),
+                       default=0)
+
+    # **แยกของที่ยังคุ้มเติม ออกจากของที่เลยเวลาไปแล้ว**
+    #
+    # รวมกันเป็นก้อนเดียวจะอ่านผิด: เห็น "ค้าง 28 กลุ่ม" แล้วตกใจ ทั้งที่ครึ่งหนึ่ง
+    # เป็นโพสต์อายุข้ามวันซึ่งคนเห็นไปแล้วไม่กลับมาดูคอมเมนต์ทีหลัง — เติมไปก็
+    # แค่เผาโควตาที่ของใหม่ต้องใช้ (เกณฑ์เดียวกับ fb_pending.WINDOW_HOURS)
+    fresh = [x for x in waiting
+             if (now - datetime.fromisoformat(x[1])).total_seconds() < 3600 * 24]
+    stale = [x for x in waiting if x not in fresh]
+    need_fresh = sum(x[3] for x in fresh)
+    if fresh:
+        need = need_fresh
+        lines += ["", f"⏳ <b>ค้างรอเติมคอมเมนต์</b> {sum(x[2] for x in fresh)} กลุ่ม "
+                      f"({need} ครั้ง)"]
+        for job_id, when, groups, times in fresh[:6]:
+            lines.append(f"   <code>{job_id}</code> {when[11:16]} ขาด {groups} กลุ่ม")
+        if len(fresh) > 6:
+            lines.append(f"   …และอีก {len(fresh) - 6} งาน")
+        if need > left_day:
+            lines.append(f"   ⚠️ เกินโควตาที่เหลือวันนี้อยู่ {need - left_day} ครั้ง")
+    else:
+        lines += ["", "✅ ไม่มีงานใหม่ค้างรอเติมคอมเมนต์"]
+    if stale:
+        lines.append(f"   <i>(อีก {sum(x[2] for x in stale)} กลุ่มเป็นโพสต์เกิน 24 ชม. "
+                     "— เติมไปคนคงไม่กลับมาเห็นแล้ว)</i>")
+
+    # --------------------------------------------------- โพสต์ประจำวันที่จะมา
+    routines, routine_need = _fb_routine_demand(now)
+    if routines:
+        lines += ["", f"🔁 <b>โพสต์ประจำวันที่ยังไม่ถึงคิว</b> "
+                      f"{len(routines)} รอบ ({routine_need} ครั้ง)"]
+        for item in routines:
+            if not item["ok"]:
+                lines.append(f"   {item['time']} ⚠️ ไม่พบงานต้นทาง "
+                             f"<code>{item['source'] or '-'}</code>")
+                continue
+            lines.append(f"   {item['time']} {item['groups']} กลุ่ม × "
+                         f"{item['per_post']} ข้อความ = {item['need']} ครั้ง")
+
+    # ------------------------------------------------------- สรุปว่าจะเหลือเท่าไร
+    #
+    # **ตัวเลขที่ต้องใช้ตัดสินใจจริงคือบรรทัดนี้** — "เหลือ 20" ไม่ได้แปลว่าใช้ได้ 20
+    # ถ้าอีกสองชั่วโมงข้างหน้ามีโพสต์ประจำวันรออยู่อีก 24 ครั้ง เอาไปเติมของเก่า
+    # ตอนนี้คือไปแย่งโควตาของงานที่ยังไม่เกิด แล้วงานนั้นจะออกมาไม่มีคอมเมนต์
+    committed = need_fresh + routine_need
+    if committed:
+        after = left_day - committed
+        lines += ["", "🧮 <b>คิดรวมทั้งหมดแล้ว</b>",
+                  f"   เหลือตอนนี้ {left_day} − ของค้าง {need_fresh} "
+                  f"− โพสต์ประจำวัน {routine_need} = <b>{after}</b>"]
+        if after < 0:
+            lines.append(f"   ⚠️ ขาดอีก {-after} ครั้ง — ต้องเลือกว่าจะให้ใครได้ก่อน")
+        elif after == 0:
+            lines.append("   ⚠️ พอดีเป๊ะ ไม่เหลือเผื่องานที่สั่งเพิ่มระหว่างวัน")
+        else:
+            lines.append(f"   ✅ เหลือเผื่องานใหม่ได้อีก {after} ครั้ง "
+                         f"(~{after // max(1, per_post_now)} กลุ่ม)")
+
+    # --------------------------------------------------------- ตามทันไหม
+    lane_cap = facebook_group_post.comment_lane_limit("post", account)
+    per_post = per_post_now
+    if per_post:
+        groups_per_hour = lane_cap // per_post
+        lines += ["", f"📐 <b>คอมเมนต์ตามงานทันไหม</b>",
+                  f"   เติมได้ {groups_per_hour} กลุ่ม/ชม. "
+                  f"(เลน {lane_cap} ครั้ง ÷ {per_post} ข้อความต่อโพสต์)"]
+        if len(mine) >= 2:
+            span = max(1.0, (now - datetime.fromisoformat(
+                min(j.get("created_at") or now.isoformat() for j in mine)
+            )).total_seconds() / 3600)
+            rate = posted / span
+            if groups_per_hour >= rate:
+                mark = "✅ ตามทัน"
+            else:
+                mark = (f"⚠️ ตามไม่ทัน — ค้างเพิ่มราว "
+                        f"{(rate - groups_per_hour) * 24:.0f} กลุ่ม/วัน")
+            lines.append(f"   โพสต์จริง {rate:.1f} กลุ่ม/ชม. → {mark}")
+    return "\n".join(lines)
+
+
+def _fb_health_text() -> str:
+    """ตรวจความพร้อมของเครื่องแบบไม่เริ่มงาน — ตอบ /health"""
+    try:
+        serial = _fb_serial()
+    except fb_auto_post.AutoPostError as error:
+        return f"🚫 {error}"
+    report = fb_preflight.run_checks(
+        serial, adb=ADB, jobs=fb_jobs.listing(),
+        group_ids=fb_groups.enabled_ids(), label=fb_groups.label,
+    )
+    return (report.text() + "\n\n" + fb_comment_guard.summary_text()
+            + "\n\n" + fb_phone_clean.summary_text()
+            + "\n\n" + fb_backup.summary_text())
 
 
 def _fb_collect(job_id: str = "", queued: bool = False) -> str:
@@ -4867,6 +5617,9 @@ def _fb_auto_followup(job_id: str, delay: float = AUTO_FOLLOWUP_DELAY,
 
     ทำไมต้องหน่วงก่อน: กลุ่มส่วนใหญ่ต้องรอผู้ดูแลอนุมัติ ยิงทันทีที่โพสต์เสร็จ
     จะยังไม่มีแจ้งเตือนให้หา เสียเวลาเปล่าราวหนึ่งนาทีต่อกลุ่ม
+
+    **ต้องรู้ว่าเครื่องไหน** ไม่งั้นรอบตามเก็บจะไปเกิดบนเครื่องตัวหลักเสมอ ทั้งที่
+    โพสต์ไปจากอีกเครื่อง — เปิดแอปผิดบัญชีแล้วหาโพสต์ไม่เจอสักกลุ่ม
     """
     def worker() -> None:
         deadline = time.time() + 180
@@ -4878,7 +5631,7 @@ def _fb_auto_followup(job_id: str, delay: float = AUTO_FOLLOWUP_DELAY,
         time.sleep(delay)
         append_log("publish", f"[{job_id}] โพสต์จบแล้ว — ไล่หาโพสต์จากแจ้งเตือนต่อ")
         try:
-            note = _fb_followup()
+            note = _fb_followup(job_id=job_id)
         except Exception as error:      # ห้ามให้เธรดนี้ตายเงียบ
             append_log("publish", f"[{job_id}] ตามเก็บอัตโนมัติล้ม: {error}")
             return
@@ -5110,16 +5863,25 @@ class PhoneGate:
             time.sleep(3.0)
         return False
 
-    def give_back(self, owner: str) -> None:
+    def give_back(self, owner: str, serial: str) -> None:
+        key = self._key(serial)
         with self._lock:
-            if self.owner == owner:
-                self.owner, self.since = "", 0.0
+            if (self._held.get(key) or ("", 0.0))[0] == owner:
+                self._held.pop(key, None)
 
-    def held_by(self) -> str:
-        return self.owner
+    def held_by(self, serial: str) -> str:
+        with self._lock:
+            return (self._held.get(self._key(serial)) or ("", 0.0))[0]
 
-    def held_for(self) -> float:
-        return (time.time() - self.since) if self.owner else 0.0
+    def held_for(self, serial: str) -> float:
+        with self._lock:
+            owner, since = self._held.get(self._key(serial)) or ("", 0.0)
+        return (time.time() - since) if owner else 0.0
+
+    def holders(self) -> dict:
+        """{serial: เจ้าของ} ทุกเครื่องที่มีคนถืออยู่ — ใช้โชว์ในหน้าเว็บ/Telegram"""
+        with self._lock:
+            return {serial: owner for serial, (owner, _) in self._held.items() if owner}
 
 
 phone_gate = PhoneGate()
@@ -5484,6 +6246,288 @@ def _fb_parse_when(text: str) -> datetime | None:
 _deferred_jobs: set[str] = set()
 
 
+# เดินงานเบื้องหลังทุกๆ กี่วินาที — ไม่ต้องถี่ ทั้งสองงานเป็นงานรายชั่วโมง/รายวัน
+HOUSEKEEPING_EVERY = 600.0
+_housekeeping_at = 0.0
+
+
+def _housekeeping() -> None:
+    """งานประจำที่ควรทำเองโดยไม่ต้องมีใครสั่ง — สำรองข้อมูล + ไล่โพสต์ที่ยังไม่ขึ้น
+
+    เกาะไปกับตัวตั้งเวลาที่วนอยู่แล้ว ไม่เพิ่มเธรดใหม่ — เธรดยิ่งเยอะยิ่งไล่ปัญหายาก
+    และงานพวกนี้ช้าได้ ไม่ต้องตรงเป๊ะระดับวินาที
+
+    **ห้ามไปแย่งจอมือถือกับงานของผู้ใช้เด็ดขาด** จึงลงมือต่อเมื่อจอว่างจริงเท่านั้น
+    ถ้าไม่ว่างก็ข้ามไป รอบหน้าค่อยมาใหม่ (อีก 10 นาที)
+    """
+    global _housekeeping_at
+    if time.time() - _housekeeping_at < HOUSEKEEPING_EVERY:
+        return
+    _housekeeping_at = time.time()
+
+    # โดนพักคอมเมนต์แล้วต้อง**ดัง** ไม่ใช่รู้กันเองในไฟล์ log
+    #
+    # เรื่องเดิมที่พลาด: 16 ส.ค. คอมเมนต์ล้ม 32 ครั้งติดกัน 5 ชั่วโมงโดยไม่มี
+    # ข้อความเข้าแชทสักบรรทัด ผู้ใช้รู้ตัวก็ต่อเมื่อมานั่งไล่ดูงานเองทีหลัง
+    try:
+        alert = fb_comment_guard.take_alert()
+        if alert:
+            _fb_say(_fb_telegram()[1], alert)
+            append_log("publish", "แจ้งเตือน: พักคอมเมนต์ทั้งระบบ")
+    except Exception as error:
+        append_log("publish", f"แจ้งเตือนพักคอมเมนต์ไม่สำเร็จ: {error}")
+
+    try:
+        made = fb_backup.run_daily()
+        if made:
+            append_log("publish", f"สำรองข้อมูลรายวัน → {made['path'].name} "
+                                  f"({made['files']} ไฟล์)")
+            for name in made.get("pruned", []):
+                append_log("publish", f"ลบไฟล์สำรองเก่า {name}")
+    except Exception as error:
+        append_log("publish", f"สำรองข้อมูลไม่สำเร็จ: {error}")
+
+    try:
+        jobs = fb_jobs.listing()
+        fb_pending.cleanup(jobs)
+        # ต้องมีเครื่องว่างสักเครื่อง และไม่มีงานตั้งเวลาใกล้ถึง — งานผู้ใช้มาก่อน
+        if not _any_phone_free():
+            return
+        soon = datetime.now() + timedelta(minutes=15)
+        for job in jobs:
+            when = job.get("run_at") or ""
+            if when and datetime.now() <= datetime.fromisoformat(when) <= soon:
+                return
+        items = fb_pending.pending_items(jobs)
+        if not fb_pending.due_items(items):
+            return
+        note = _fb_pending_run()
+        append_log("publish", f"ไล่โพสต์ที่ยังไม่ขึ้นเอง — {note[:80]}")
+    except Exception as error:
+        append_log("publish", f"ไล่โพสต์ที่ยังไม่ขึ้นไม่สำเร็จ: {error}")
+
+
+PHONE_CLEAN_OWNER = "ล้างเครื่องประจำวัน"
+SCREEN_OWNER = "ดูแลจอมือถือ"
+_screen_at = 0.0
+SCREEN_EVERY = 60.0
+
+
+def _screen_shell(serial: str):
+    return fb_screen.make_shell(serial, ADB)
+
+
+def _job_due_within(seconds: float, now: datetime | None = None) -> bool:
+    """มีงานตั้งเวลาจะถึงภายในกี่วินาทีนี้ไหม"""
+    now = now or datetime.now()
+    edge = now + timedelta(seconds=seconds)
+    for job in fb_jobs.listing():
+        when = job.get("run_at") or ""
+        if not when or job["status"] != fb_auto_post.STATUS_READY:
+            continue
+        try:
+            at = datetime.fromisoformat(when)
+        except ValueError:
+            continue
+        if now <= at <= edge:
+            return True
+    return False
+
+
+def _screen_pump(now: datetime | None = None) -> str:
+    """ดูแลจอมือถือ — ปลุกก่อนงานถึง / ดับเมื่อไม่มีใครใช้
+
+    **ทำไมต้องดับ** วัดเมื่อ 18 ส.ค.: จอเปิดค้าง 2 วัน 14 ชม. เพราะตั้ง
+    `stay_on_while_plugged_in=15` ผลคือแบต 50 °C และค้างที่ 15% ทั้งที่เสียบ AC
+    เกิน 45 °C ค้างนานๆ แบตเสื่อมถาวร
+
+    **ตัวชี้ขาดว่า "ว่าง" คือ `lastUserActivityTime` ของเครื่องเอง** ซึ่งนับทั้ง
+    นิ้วผู้ใช้และ `input tap` ของบอท — ตัวเดียวคุมได้ทั้งสองเรื่อง ไม่ต้องเดาว่า
+    ผู้ใช้ถือเครื่องอยู่ไหม (มือถือเครื่องนี้เจ้าของใช้เองด้วย ดับใส่หน้าไม่ได้)
+    """
+    global _screen_at
+    now = now or datetime.now()
+    if time.time() - _screen_at < SCREEN_EVERY:
+        return ""
+    _screen_at = time.time()
+    # ดูแล**ทุกเครื่องที่เปิดใช้** ไม่ใช่แค่เครื่องตัวหลัก — ของเดิมดูแลเครื่องเดียว
+    # เครื่องที่สองจึงเปิดจอค้างตลอดกาลโดยไม่มีใครดับให้ ซึ่งคืออาการเดียวกับที่
+    # วัดได้เมื่อ 18 ส.ค. (จอค้าง 2 วัน 14 ชม. · แบต 50 °C · เสื่อมถาวร)
+    ready = {d["serial"] for d in list_devices() if d["ready"]}
+    notes = []
+    for serial in device_book.enabled_serials():
+        if serial not in ready:
+            continue
+        try:
+            note = _screen_pump_one(serial, now)
+        except Exception as error:    # เครื่องเดียวพังต้องไม่ลามไปหยุดเครื่องอื่น
+            append_log("publish", f"ดูแลจอ {device_book.label(serial)} ไม่สำเร็จ: {error}")
+            continue
+        if note:
+            notes.append(f"{device_book.label(serial)}: {note}")
+    return " · ".join(notes)
+
+
+def _screen_pump_one(serial: str, now: datetime) -> str:
+    """ดูแลจอของเครื่องเดียว — ค่าเปิด/ปิดอ่านจากค่าตั้งของเครื่องนั้น"""
+    if not bool(device_book.setting(serial, "screen_saver", True)):
+        return ""
+    shell = _screen_shell(serial)
+
+    # 1) ใกล้ถึงเวลางาน = ปลุกล่วงหน้า ให้แอปมีเวลาตั้งตัวก่อนบอทเริ่มกด
+    if _job_due_within(fb_screen.PREWAKE_SECONDS, now):
+        if not fb_screen.is_awake(shell):
+            fb_screen.wake(shell, log=lambda x: append_log("publish", x))
+            append_log("publish", f"ปลุกจอ {device_book.label(serial)} ก่อนงานตั้งเวลา")
+        return "ปลุกล่วงหน้า"
+
+    # 2) จะดับได้ต้องว่างจริงทุกด้าน — งานของ app.py · บอทคนละโปรเซส · นิ้วผู้ใช้
+    if not phone_is_free(serial):
+        return ""
+    if _job_due_within(fb_screen.KEEP_AWAKE_BEFORE, now):
+        return ""
+    if not fb_screen.is_awake(shell):
+        return ""
+    try:
+        # queue=False — งานหรี่จอเป็นงานจร ถ้าไม่ว่างให้ข้ามไปเลย
+        # ห้ามเข้าแถวรอ ไม่งั้นไปแทรกหน้างานโพสต์ที่รอมาก่อน
+        with studio_shared.phone_lock(serial, timeout=0.5, poll=0.2,
+                                      label=SCREEN_OWNER, queue=False):
+            idle = fb_screen.idle_seconds(shell)
+            if idle < 0 or idle < fb_screen.IDLE_SECONDS:
+                return ""
+            fb_screen.sleep_screen(shell, log=lambda x: append_log("publish", x))
+            return "ดับจอ"
+    except studio_shared.PhoneBusy:
+        return ""                     # บอทตัวอื่นใช้อยู่ ไม่ใช่เรื่องของเรา
+
+
+def _phone_clean_pump(now: datetime | None = None) -> str:
+    """ถึงเวลาล้างเครื่องประจำวันหรือยัง — ถึงแล้วล้างให้เลย
+
+    **งานของผู้ใช้มาก่อนเสมอ** ด่านสามชั้นก่อนลงมือ:
+      1. จอต้องว่างจริง (ไม่มีงานโพสต์ ไม่มีใครจองประตู)
+      2. ต้องไม่มีงานตั้งเวลาใกล้ถึงใน 15 นาที
+      3. ต้องจองประตูจอได้ — จองไม่ได้ก็ถอย รอบหน้า (อีก 20 วิ) ค่อยมาใหม่
+
+    **จองสองชั้น** ประตูในโปรเซส (`phone_gate`) กันงานของ app.py เอง ส่วนล็อก
+    ข้ามโปรเซส (`studio_shared.phone_lock`) กันบอทตัวอื่นที่รันแยกกันคนละโปรเซส
+    (fb_engage_bot / fb_mass_bot) — ขาดชั้นไหนไปอีกฝั่งก็แตะจอทับได้
+
+    **ADB หลุด/เครื่องดับกลางทางไม่ต้องกลัว** ทุกขั้นทำซ้ำได้ไม่เสียหาย และถ้า
+    ไม่ได้ล้างสักเครื่องจะ**ไม่บันทึกว่าล้างแล้ว** รอบหน้าจึงกลับมาล้างใหม่เอง
+    ส่วน `finally` คืนประตูเสมอ — ไม่งั้นล้มทีเดียวจอจะถูกล็อกค้างตลอดกาล
+    """
+    now = now or datetime.now()
+    # เปิดไว้อย่างน้อยหนึ่งเครื่องก็พอ — สวิตช์จริงเป็นของแต่ละเครื่อง เช็คซ้ำ
+    # ตอนวนล้างทีละเครื่องอีกที ตรงนี้แค่กันไม่ให้เสียเวลายิง adb เปล่าๆ
+    if not any(bool(device_book.setting(s, "phone_clean", True))
+               for s in device_book.enabled_serials()):
+        return ""
+    if not fb_phone_clean.due(now):
+        return ""
+    if not _any_phone_free():
+        return ""
+    soon = now + timedelta(minutes=15)
+    for job in fb_jobs.listing():
+        when = job.get("run_at") or ""
+        if when and now <= datetime.fromisoformat(when) <= soon:
+            return ""
+    return _phone_clean_run(now)
+
+
+# ใครล้างไปแล้วบ้างวันนี้ — เก็บแยกรายเครื่อง
+#
+# **จำเป็นเพราะ `fb_phone_clean` จดว่า "ล้างแล้ววันไหน" เป็นค่าเดียวทั้งระบบ**
+# พอมีสองเครื่องแล้วเครื่องหนึ่งกำลังโพสต์อยู่ตอนถึงเวลาล้าง ของเดิมจะล้างเฉพาะ
+# เครื่องที่ว่าง แล้วปั๊มว่า "ล้างแล้ววันนี้" — เครื่องที่ยุ่งจึงไม่ได้ล้างทั้งวัน
+# โดยไม่มีอะไรบอก และจะไม่ได้ล้างไปเรื่อยๆ ทุกวันถ้ามันยุ่งเวลาเดิมประจำ
+#
+# จดในหน่วยความจำพอ — รีสตาร์ตแล้วลืมก็แค่ล้างซ้ำหนึ่งรอบ ซึ่งไม่เสียหายอะไร
+# (ทุกขั้นของการล้างทำซ้ำได้) ดีกว่าเพิ่มไฟล์สถานะใหม่ที่ต้องมาดูแลอีกไฟล์
+_clean_today: dict = {"date": "", "done": set(), "reports": []}
+
+
+def _clean_ledger(now: datetime) -> dict:
+    """สมุดรายวันของการล้างเครื่อง — ข้ามวันแล้วเริ่มนับใหม่"""
+    today = now.date().isoformat()
+    if _clean_today["date"] != today:
+        _clean_today.update({"date": today, "done": set(), "reports": []})
+    return _clean_today
+
+
+def _phone_clean_run(now: datetime | None = None, force: bool = False) -> str:
+    """ล้างเครื่องเดี๋ยวนี้ — ใช้ทั้งจากตัวตั้งเวลาและคำสั่ง /clean
+
+    **จองประตูทีละเครื่อง ไม่ใช่จองยกเซ็ต** ของเดิมจองประตูใบเดียวทั้งระบบไว้
+    ตลอดรอบล้าง ซึ่งแปลว่าระหว่างล้างเครื่อง A อยู่ เครื่อง B จะสั่งงานไม่ได้เลย
+    ทั้งที่ยังไม่มีใครไปแตะมัน — ล้างเครื่องใช้เวลาเป็นนาที งานที่ตั้งเวลาไว้พอดี
+    ตอนนั้นจะถูกเลื่อนออกไปฟรีๆ
+
+    **เครื่องที่ยุ่งจะถูกข้ามแล้วกลับมาล้างทีหลัง ไม่ใช่ข้ามทั้งวัน** ตราบใดที่ยัง
+    ล้างไม่ครบทุกเครื่อง จะยังไม่ปั๊มว่า "ล้างแล้ววันนี้" ตัวตั้งเวลาจึงวนกลับมา
+    เก็บเครื่องที่เหลือให้เองทุก 20 วินาที และรายงานเข้า Telegram ครั้งเดียว
+    ตอนครบทุกเครื่องแล้วเท่านั้น
+    """
+    now = now or datetime.now()
+    serials = [d["serial"] for d in list_devices() if d["ready"]]
+    if not serials:
+        return "ไม่มีมือถือเชื่อมต่ออยู่"
+    ledger = _clean_ledger(now)
+    if force:
+        ledger["done"], ledger["reports"] = set(), []
+    fresh = []
+    skipped = []
+    for serial in serials:
+        if serial in ledger["done"]:
+            continue                              # ล้างไปแล้วรอบก่อนของวันนี้
+        if not bool(device_book.setting(serial, "phone_clean", True)):
+            ledger["done"].add(serial)            # ปิดไว้ = ถือว่าจบแล้ว ไม่ค้างคิว
+            continue
+        if not force and not phone_is_free(serial):
+            skipped.append(device_book.label(serial))
+            continue
+        if not phone_gate.try_take(PHONE_CLEAN_OWNER, serial):
+            skipped.append(device_book.label(serial))
+            continue
+        try:
+            # queue=False — ล้างเครื่องตอนเที่ยงคืนเป็นงานจร ไม่ว่างก็ข้าม
+            with studio_shared.phone_lock(serial, timeout=3.0, poll=0.5,
+                                          label=PHONE_CLEAN_OWNER, queue=False):
+                report = fb_phone_clean.clean(
+                    serial, adb=ADB,
+                    log=lambda line: append_log("publish", line),
+                )
+            fresh.append(report)
+            ledger["done"].add(serial)
+            ledger["reports"].append(report)
+        except studio_shared.PhoneBusy:
+            append_log("publish", f"ล้างเครื่อง {serial} ไม่ได้ — "
+                                  f"{studio_shared.who_holds_phone(serial)}")
+        except Exception as error:
+            append_log("publish", f"ล้างเครื่อง {serial} ไม่สำเร็จ: {error}")
+        finally:
+            # ต้องคืนประตูของ **เครื่องนี้** ทุกทางออก ไม่งั้นล้มทีเดียว
+            # เครื่องนั้นจะถูกล็อกค้างตลอดกาลจนกว่าจะรีสตาร์ตเซิร์ฟเวอร์
+            phone_gate.give_back(PHONE_CLEAN_OWNER, serial)
+
+    left = [s for s in serials if s not in ledger["done"]]
+    if left:
+        # ยังไม่ครบ = ยังไม่ปั๊มว่าทำแล้ว รอบหน้ามาเก็บที่เหลือ และเงียบไว้ก่อน
+        # ไม่งั้นจะยิงรายงานเข้า Telegram ทุก 20 วินาทีจนกว่าเครื่องนั้นจะว่าง
+        names = ", ".join(skipped) or ", ".join(device_book.label(s) for s in left)
+        note = f"ล้างแล้ว {len(ledger['done'])}/{len(serials)} เครื่อง — รอ {names}"
+        if fresh:
+            append_log("publish", note)
+        return note
+
+    fb_phone_clean.mark_done(ledger["reports"], now)
+    text = fb_phone_clean.report_text(ledger["reports"])
+    _fb_say(_fb_telegram()[1], text)
+    append_log("publish", f"ล้างเครื่องประจำวันแล้ว {len(ledger['reports'])} เครื่อง")
+    return text
+
+
 def _fb_scheduler() -> None:
     """เฝ้างานที่ตั้งเวลาไว้ ถึงเวลาแล้วเริ่มโพสต์ให้เอง
 
@@ -5494,6 +6538,16 @@ def _fb_scheduler() -> None:
         time.sleep(20)
         try:
             _phone_wait_pump()          # จอว่างแล้วเริ่มงานที่รอคิวไว้
+            _routine_pump()             # ถึงเวลาของโพสต์ประจำวันหรือยัง
+            _housekeeping()             # สำรองรายวัน + ไล่โพสต์ที่ยังไม่ขึ้น
+            try:
+                _phone_clean_pump()     # ล้างเครื่องตอนเที่ยงคืน
+            except Exception as error:
+                append_log("publish", f"ล้างเครื่องประจำวันไม่สำเร็จ: {error}")
+            try:
+                _screen_pump()          # ดับจอตอนว่าง / ปลุกก่อนงานถึง
+            except Exception as error:
+                append_log("publish", f"ดูแลจอมือถือไม่สำเร็จ: {error}")
             for job in fb_jobs.listing():
                 if job["status"] != fb_auto_post.STATUS_READY:
                     continue
@@ -6152,6 +7206,61 @@ def _telegram_command(chat_id: str, text: str) -> bool:
         if note:
             _fb_say(chat_id, note)
         return True
+    if command == "/edit":
+        _fb_say(chat_id, _fb_edit_command(chat_id, argument.strip()))
+        return True
+    if command == "/routine":
+        _fb_say(chat_id, _fb_routine_command(chat_id, argument))
+        return True
+    if command == "/pending":
+        note = argument.strip()
+        if note.startswith("run"):
+            _fb_say(chat_id, _fb_pending_run(note[3:].strip()))
+        elif note.startswith("reset"):
+            cleared = fb_pending.forget(note[5:].strip())
+            _fb_say(chat_id, f"ล้างตัวนับการไล่แล้ว {cleared} รายการ")
+        elif note:
+            _fb_say(chat_id, _fb_pending_run(note))
+        else:
+            _fb_say(chat_id, _fb_pending_text())
+        return True
+    if command == "/report":
+        days = argument.strip()
+        message, keyboard = _fb_report_card(
+            int(days) if days.isdigit() and 0 < int(days) <= 365
+            else fb_report.DEFAULT_DAYS
+        )
+        _fb_say(chat_id, message, keyboard)
+        return True
+    if command == "/health":
+        _fb_say(chat_id, _fb_health_text())
+        return True
+    if command == "/preview":
+        # ดูตัวอย่างก่อนโพสต์ — ตอบคำถาม "รูปที่แนบไปเข้าคอมเมนต์ไหน"
+        _fb_say(chat_id, _fb_preview(chat_id, argument.strip()))
+        return True
+    if command == "/quotafb":
+        _fb_say(chat_id, _fb_quota_text())
+        return True
+    if command == "/clean":
+        # สั่งล้างเดี๋ยวนี้โดยไม่ต้องรอเที่ยงคืน — ยังเคารพจอไม่ว่างเหมือนเดิม
+        _fb_say(chat_id, _phone_clean_run() or "ล้างไม่สำเร็จ")
+        return True
+    if command == "/uncomment":
+        # ปลดพักเอง — ไว้ใช้ตอนเปิดดูหลักฐานแล้วพบว่าไม่ได้โดนบล็อกจริง
+        # (เช่น Facebook เปลี่ยนหน้าจอจนหาปุ่มส่งไม่เจอ ซึ่งต้องแก้คนละทาง)
+        _fb_say(chat_id, fb_comment_guard.release() + "\n" +
+                fb_comment_guard.summary_text())
+        return True
+    if command == "/backup":
+        try:
+            made = fb_backup.make_backup("manual")
+            fb_backup.prune()
+            _fb_say(chat_id, f"🗄 สำรองแล้ว {made['path'].name} "
+                             f"({made['files']} ไฟล์ · {made['bytes'] / 1024:.0f} KB)")
+        except Exception as error:
+            _fb_say(chat_id, f"⚠️ สำรองไม่สำเร็จ: {telegram_bot._escape(str(error))}")
+        return True
     if command == "/fiximage":
         note = _fb_fiximage(argument.strip())
         if note:
@@ -6264,6 +7373,14 @@ def _telegram_callback(chat_id: str, data: str, callback: dict) -> str:
 
     if action == "cl":
         return _fb_claude_start(chat_id, rest)
+
+    if action == "ri":
+        return _fb_report_images(chat_id, rest)
+
+    if action == "ed":
+        note = _fb_edit_start(chat_id, rest)
+        _fb_say(chat_id, note)
+        return "เปิดแก้แล้ว"
 
     if action == "rp":
         job, problem = _fb_clone_job(rest, chat_id)
@@ -6488,7 +7605,7 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
         return str(error)
 
     fb_jobs.update(
-        job_id, status=fb_auto_post.STATUS_RUNNING, results=[],
+        job_id, status=fb_auto_post.STATUS_RUNNING, results=[], serial=serial,
         started_at=datetime.now().isoformat(timespec="seconds"),
     )
     append_log("publish", f"[{job_id}] เริ่มโพสต์ {len(groups)} กลุ่ม ด้วย {serial}")
@@ -6612,8 +7729,11 @@ async def fb_followup(request: Request) -> dict:
     มีไว้ให้หน้าเว็บและการทดสอบเรียกได้ ไม่ต้องพิมพ์ในแชทอย่างเดียว
     """
     payload = await request.json() if await request.body() else {}
+    # รับรหัสงานได้ด้วย — ไม่งั้นสั่งตามเก็บงานที่ต้องการไม่ได้เลย
+    # (ของเดิมเลือก "งานล่าสุดที่มีผลลัพธ์" ให้เสมอ ซึ่งมักไม่ใช่ใบที่ตั้งใจ)
     note = await asyncio.to_thread(
-        _fb_followup, str((payload or {}).get("comment", ""))
+        _fb_followup, str((payload or {}).get("comment", "")),
+        str((payload or {}).get("job_id", "")),
     )
     return {"ok": True, "note": note}
 

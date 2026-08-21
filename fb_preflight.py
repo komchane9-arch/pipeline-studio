@@ -136,8 +136,9 @@ def check_phone_free(serial: str) -> Check:
     ก่อนหน้าตายแบบไม่ได้เก็บกวาด ส่วนล็อกของ OS ปล่อยเองเสมอเมื่อโปรเซสตาย
     """
     try:
+        # queue=False — นี่คือแค่ "ถามว่าว่างไหม" ไม่ใช่การขอใช้จริง
         with studio_shared.phone_lock(serial, timeout=0.5, poll=0.2,
-                                      label="ตรวจความพร้อม"):
+                                      label="ตรวจความพร้อม", queue=False):
             return Check("มือถือว่าง", True, serial)
     except studio_shared.PhoneBusy:
         return Check("มือถือว่าง", False, studio_shared.who_holds_phone(serial))

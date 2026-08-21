@@ -52,6 +52,62 @@ BROWSER_LOCK_INFO = DATA_DIR / "browser.lock.info"
 # โปรไฟล์ Chrome ที่ใช้ขับ ChatGPT / Shopee / Google Flow — **มีตัวเดียว**
 BROWSER_PROFILE = DATA_DIR / "flow_browser_profile"
 
+# ============================================ ข้อมูลงานโพสต์ (Google Drive)
+#
+# ข้อมูลของสายโพสต์ย้ายออกจาก data/ ไปอยู่บน Google Drive ตามที่เจ้าของงานสั่ง
+# (19 ส.ค. 2026) เพื่อให้สำรองอัตโนมัติและเปิดดูจากเครื่องอื่นได้
+#
+# **ย้ายเฉพาะของสายโพสต์** ไม่ใช่ทั้ง data/ — data/ มีโปรไฟล์บอท 1.7 GB กับ
+# โปรไฟล์เบราว์เซอร์อีก 500 MB ซึ่งเป็นของชั่วคราวที่เขียนรัวตลอดเวลา
+# ยัดขึ้น Drive คือเผาแบนด์วิดท์ทิ้งโดยไม่ได้ประโยชน์อะไร
+#
+# **วัดกับไดรฟ์จริงแล้วก่อนย้าย** (G: · 19 ส.ค.):
+#     เขียนแบบสลับไฟล์ (os.replace)  ใช้ได้ · 15-24 ms (ในเครื่อง 1 ms)
+#     ล็อกไฟล์ข้ามโปรเซส (msvcrt)    ใช้ได้
+#     ยิงรัว 80 ครั้งเท่างานหนึ่งใบ   1.9 วินาที · ไม่ล้มเลย · ไม่ต้องลองซ้ำ
+#
+# **ไดรฟ์ไม่พร้อมต้องไม่ทำให้ระบบตาย** — Google Drive ไม่ได้รัน/เน็ตหลุด/ยังไม่
+# ล็อกอิน เกิดได้จริง ถ้าล้มตอน import คือทั้งระบบเปิดไม่ขึ้น จึงถอยมาใช้ data/
+# ในเครื่องแทน แล้วชูธงไว้ให้ /health กับ /quotafb เห็นว่ากำลังใช้ที่สำรองอยู่
+# **สนามทดสอบต้องลากข้อมูลโพสต์ตามไปด้วย** ใครตั้ง STUDIO_DATA_DIR แปลว่า
+# ตั้งใจแยกสนาม ถ้า POST_DIR ยังชี้ Drive อยู่ เทสจะไปอ่าน-เขียนข้อมูลจริง
+# บนคลาวด์ — กินโควตาจริง ทับงานจริง และผลเทสก็เพี้ยนตามสถานะจริงไปด้วย
+# (เคยพลาดแบบนี้มาแล้วกับ comment_times.json เมื่อ 18 ส.ค.)
+_post_name = os.environ.get("STUDIO_POST_DIR", "").strip()
+if not _post_name:
+    _post_name = ("" if os.environ.get("STUDIO_DATA_DIR", "").strip()
+                  else r"G:\My Drive\pipeline studio\Post")
+if _post_name:
+    POST_DIR = (Path(_post_name) if Path(_post_name).is_absolute()
+                else BASE_DIR / _post_name)
+else:
+    POST_DIR = DATA_DIR              # อยู่ในสนามทดสอบ — เก็บไว้ในสนามเดียวกัน
+POST_DIR_READY = True
+try:
+    POST_DIR.mkdir(parents=True, exist_ok=True)
+    _probe = POST_DIR / ".writable"
+    _probe.write_text("ok", encoding="utf-8")
+    _probe.unlink(missing_ok=True)
+except OSError:
+    POST_DIR = DATA_DIR
+    POST_DIR_READY = False
+
+# แยกโฟลเดอร์ย่อยให้หาของเจอด้วยตา ไม่ใช่กองรวมกันเป็นร้อยไฟล์
+POST_STATE = POST_DIR / "state"        # ไฟล์สถานะ (งาน · กลุ่ม · โควตา · ตาราง)
+POST_IMAGES = POST_DIR / "images"      # รูปโพสต์และรูปคอมเมนต์
+POST_EVIDENCE = POST_DIR / "evidence"  # หน้าจอตอนคอมเมนต์/โพสต์ล้ม
+for _folder in (POST_STATE, POST_IMAGES, POST_EVIDENCE):
+    try:
+        _folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+
+def post_file(name: str) -> Path:
+    """ที่อยู่ไฟล์สถานะของสายโพสต์"""
+    return POST_STATE / name
+
+
 # ล็อกที่แยกต่อทรัพยากร (มือถือรายเครื่อง / โปรไฟล์บอทรายตัว) อยู่ในโฟลเดอร์นี้
 # ของเดิม browser.lock / phone.lock อยู่ที่ data/ ตรงๆ — ปล่อยไว้ที่เดิมไม่ย้าย
 LOCK_DIR = DATA_DIR / "locks"
@@ -229,7 +285,8 @@ def _phone_lock_paths(serial: str) -> tuple[Path, Path]:
     return LOCK_DIR / f"phone-{key}.lock", LOCK_DIR / f"phone-{key}.info"
 
 
-def phone_lock(serial: str, timeout: float = 600.0, poll: float = 2.0, label: str = ""):
+def phone_lock(serial: str, timeout: float = 600.0, poll: float = 2.0, label: str = "",
+               queue: bool = True, owner: str = ""):
     """กันไม่ให้สองโปรเซสสั่ง ADB ใส่มือถือ **เครื่องเดียวกัน** พร้อมกัน
 
     **มือถือมีจอเดียว** สองโปรเซสยิง ADB ใส่เครื่องเดียวกันคือแตะทับกันเละทั้งคู่ —
@@ -266,10 +323,39 @@ def phone_lock(serial: str, timeout: float = 600.0, poll: float = 2.0, label: st
             "ถ้าไม่ระบุจะกลายเป็นสองงานแตะจอเครื่องเดียวกันพร้อมกันโดยไม่มีใครกัน"
         )
     lock_file, info_file = _phone_lock_paths(serial)
-    return _resource_lock(
+    raw = _resource_lock(
         lock_file, info_file, timeout=timeout, poll=poll, label=label,
         busy=PhoneBusy, what=f"มือถือ {serial}",
     )
+    if not queue:
+        # **แค่มาลองจับดูว่าว่างไหม** — ห้ามเข้าแถว ไม่งั้นงานจรจะไปแทรกหน้า
+        # งานจริงที่รอมาก่อน (ตัวหรี่จอ · ล้างเครื่องตอนเที่ยงคืน · ด่านตรวจ)
+        return raw
+    return _phone_lock_queued(serial, raw, timeout=timeout, label=label, owner=owner)
+
+
+@contextmanager
+def _phone_lock_queued(serial: str, raw, *, timeout: float, label: str, owner: str):
+    """เข้าแถวก่อน แล้วค่อยจับล็อกจริง — สองชั้นที่ทำคนละหน้าที่
+
+    ชั้นคิว (`phone_queue`) ตัดสิน **ลำดับ** ว่าใครได้ก่อน และทำให้เห็นบนกระดาน
+    ว่าใครรออยู่กี่คน · ชั้นล็อกไฟล์ตัดสิน **การกันชนจริง** และยังต้องมีอยู่
+    เพราะโปรเซสที่ยังไม่ได้แปลงมาเข้าคิวจะมองไม่เห็นชั้นคิวเลย
+
+    ถ้าโปรเซสนี้ถือบัตรของเครื่องนี้อยู่แล้ว = ขอซ้อน ไม่ต้องต่อคิวใหม่
+    (ของเดิมขอซ้อนได้อยู่แล้ว ถ้าชั้นคิวขอซ้อนไม่ได้จะกลายเป็นรอตัวเองค้างถาวร)
+    """
+    import phone_queue                                          # noqa: PLC0415
+
+    if phone_queue.holding(serial) is not None:
+        with raw:
+            yield
+        return
+    who = str(owner or "").strip() or phone_queue.default_owner()
+    task = label or "งานมือถือ"
+    with phone_queue.slot(serial, owner=who, task=task, timeout=max(timeout, 30.0)):
+        with raw:
+            yield
 
 
 def who_holds_phone(serial: str) -> str:

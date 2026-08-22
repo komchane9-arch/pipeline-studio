@@ -3405,6 +3405,117 @@ def _mass_bot_keeper() -> None:
         time.sleep(60)
 
 
+# ------------------------------------------------- ตัวเฝ้าตัวเก็บข้อมูลโพสต์
+#
+# **ทำไมต้องมี** `fb_posts_collect.py` เป็นโปรเซสยาวตัวเดียวในระบบที่ไม่มีใครเฝ้า
+# และไม่มีใครสั่งเปิดให้อัตโนมัติ — สายคลิปมี `_clip_server_keeper` บอทหาโพสต์แมส
+# มี `_mass_bot_keeper` แต่ตัวเก็บข้อมูลไม่มีอะไรเลย
+#
+# ผลที่วัดได้จริง 22 ส.ค. 2569: Bot8/Bot9 ทำจบกลุ่มละใบแล้วออกไปเมื่อ 14:44
+# แล้ว **ไม่มีใครปลุกอีกเลยเป็นเวลา ~20 ชั่วโมง** ทั้งที่ยังมี 124 กลุ่มรอเก็บอยู่ในคิว
+# (ค่า `--groups` เริ่มต้นเป็น 1 = เก็บจบกลุ่มเดียวแล้วออกเองตามออกแบบ)
+#
+# ก่อนหน้านั้นเครื่องรีบูต 6 ครั้งใน 68 นาที ก็ไม่มีใครปลุกกลับเช่นกัน — บทเรียน
+# เดียวกันเป๊ะกับที่จดไว้ใน `ensure_clip_server` เมื่อ 12 ส.ค. ("เครื่องรีบูตแล้ว
+# มีแต่ 8866 ที่กลับมา") แค่ย้ายบ้านมาเกิดกับตัวเก็บข้อมูลแทน
+POSTS_COLLECT_SCRIPT = BASE_DIR / "fb_posts_collect.py"
+POSTS_COLLECT_GAP = 60.0            # เช็คทุกกี่วินาที
+POSTS_COLLECT_COOLDOWN = 180.0      # ปลุกบอทตัวเดิมซ้ำได้เร็วสุดแค่ไหน
+POSTS_COLLECT_OFF = DATA_DIR / "posts_collect_keeper.off"   # สร้างไฟล์นี้ = สั่งหยุด
+_posts_collect_woke: dict[str, float] = {}
+
+
+def posts_collect_bots() -> list[str]:
+    """บอทที่ **เคยเก็บข้อมูลจริงมาก่อน** เท่านั้น
+
+    ห้ามคิดชื่อบอทขึ้นเอง — ตัวเก็บข้อมูลเปิดเบราว์เซอร์แล้วล็อกอิน Facebook จริง
+    ถ้าเดาชื่อผิดจะไปปลุกบัญชีที่เจ้าของไม่ได้ตั้งใจใช้ ซึ่งเสี่ยงโดนตีธง
+    เครื่องใหม่ที่ไม่เคยรันเลยจะไม่ถูกแตะ จนกว่าเจ้าของจะสั่งรันเองครั้งแรก
+    """
+    import sqlite3                                             # noqa: PLC0415
+    try:
+        with sqlite3.connect(f"file:{DATA_DIR / 'fb_posts.db'}?mode=ro", uri=True,
+                             timeout=5) as conn:
+            return [r[0] for r in conn.execute(
+                "SELECT DISTINCT bot FROM collect_run WHERE bot!='' ORDER BY bot")]
+    except Exception:                                          # noqa: BLE001
+        return []
+
+
+def posts_collect_work_left() -> int:
+    """ยังมีกลุ่มรอเก็บอยู่กี่กลุ่ม — ไม่มีงานก็ไม่ต้องปลุกใคร"""
+    import sqlite3                                             # noqa: PLC0415
+    try:
+        with sqlite3.connect(f"file:{DATA_DIR / 'fb_posts.db'}?mode=ro", uri=True,
+                             timeout=5) as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM fb_group WHERE state IN ('pending','failed') "
+                "AND attempts < 3").fetchone()[0]
+    except Exception:                                          # noqa: BLE001
+        return 0
+
+
+def ensure_posts_collect() -> list[str]:
+    """ปลุกตัวเก็บข้อมูลที่ไม่ได้ทำงานอยู่ — คืนรายชื่อบอทที่ปลุก
+
+    ใช้ชีพจรของ `heartbeat` ตัดสินว่ายังทำงานอยู่ไหม (ตัวเก็บเต้นทุก 15 วิ)
+    **ไม่แยกระหว่าง "ตาย" กับ "ทำเสร็จแล้วออกไป"** เพราะทั้งสองอย่างแปลว่า
+    "ตอนนี้ไม่มีใครเก็บข้อมูล ทั้งที่ยังมีงานค้าง" ซึ่งต้องปลุกเหมือนกัน
+    """
+    if POSTS_COLLECT_OFF.exists() or not POSTS_COLLECT_SCRIPT.is_file():
+        return []
+    left = posts_collect_work_left()
+    if left <= 0:
+        return []
+
+    # `heartbeat.py` เป็นของแชทอื่นที่ยังไม่ได้เก็บเข้า git ตอนเขียนตัวนี้ —
+    # ถ้าวันหนึ่งไฟล์นั้นหายไป ตัวเฝ้าต้อง **เงียบแล้วไม่ทำอะไร** ไม่ใช่ทำให้
+    # เซิร์ฟเวอร์ 8866 พังทั้งตัว (เคยเจอมาแล้วว่าโค้ดที่พังใน keeper
+    # ลากทั้ง endpoint ตายตาม)
+    try:
+        import heartbeat                                       # noqa: PLC0415
+    except ImportError:
+        return []
+    woke = []
+    now = time.time()
+    for bot in posts_collect_bots():
+        if heartbeat.alive(f"fb_posts_collect_{bot}"):
+            continue
+        if now - _posts_collect_woke.get(bot, 0.0) < POSTS_COLLECT_COOLDOWN:
+            continue          # เพิ่งปลุกไป ให้เวลามันตั้งตัวก่อน กันวนปลุกรัว
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
+                subprocess, "DETACHED_PROCESS", 0)
+            env = dict(os.environ, PYTHONIOENCODING="utf-8")
+            log_path = DATA_DIR / "logs" / f"{bot}_stdout.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(log_path, "a", encoding="utf-8")
+            try:
+                subprocess.Popen(
+                    [sys.executable, str(POSTS_COLLECT_SCRIPT), bot],
+                    cwd=str(BASE_DIR), stdout=handle, stderr=subprocess.STDOUT,
+                    creationflags=flags, env=env)
+            finally:
+                handle.close()
+            _posts_collect_woke[bot] = now
+            woke.append(bot)
+            append_log("publish",
+                       f"ปลุกตัวเก็บข้อมูล {bot} อัตโนมัติ — ยังมี {left} กลุ่มรอเก็บ")
+        except OSError as error:
+            append_log("publish", f"ปลุกตัวเก็บข้อมูล {bot} ไม่สำเร็จ: {error}")
+    return woke
+
+
+def _posts_collect_keeper() -> None:
+    """เฝ้าให้มีตัวเก็บข้อมูลทำงานอยู่เสมอตราบใดที่ยังมีกลุ่มค้างในคิว"""
+    while True:
+        try:
+            ensure_posts_collect()
+        except Exception as error:                              # noqa: BLE001
+            append_log("publish", f"keeper ตัวเก็บข้อมูลผิดพลาด: {error}")
+        time.sleep(POSTS_COLLECT_GAP)
+
+
 @app.on_event("startup")
 async def _start_watcher() -> None:
     _fb_seed_groups()
@@ -3423,6 +3534,9 @@ async def _start_watcher() -> None:
     threading.Thread(target=_clip_server_keeper, daemon=True).start()
     # บอทหาโพสต์แมสเป็นโปรเซสแยก (role mass) — ให้ app.py ปลุกและเฝ้าให้ฟื้นเอง
     threading.Thread(target=_mass_bot_keeper, daemon=True).start()
+    # ตัวเก็บข้อมูลโพสต์เป็นตัวสุดท้ายที่ยังไม่มีใครเฝ้า — เคยหยุดเงียบ 20 ชม.
+    # ทั้งที่มี 124 กลุ่มรอ เพราะมันเก็บจบกลุ่มเดียวแล้วออกเองตามออกแบบ
+    threading.Thread(target=_posts_collect_keeper, daemon=True).start()
 
 
 # บอท 2 ตัว: main = โพสต์ Facebook · clip = สายเจนคลิป (อนุมัติจุดขาย/คลิป)

@@ -88,6 +88,24 @@ file_claims.release("fb_report.py", "แชทดี", note="ทำเสร็�
 hits = orders.clashes("sess-C")
 check("กลับมาเป็นแค่เตือน", any(h.get("hard") for h in hits), False)
 
+print("=== 10. งานที่ปิดแล้ว ต้องไม่เด้งกลับเป็นเปิด ===")
+orders.record("sess-E", "แชทอี", "ขอแก้ fb_brief.py หน่อยครับ")
+orders.close("sess-E", "ทำเสร็จแล้ว")
+check("ปิดงานแล้ว", orders._load()["orders"]["sess-E"]["status"], "done")
+orders.record("sess-E", "แชทอี", "ครับ")                    # คำตอบรับสั้นๆ
+check("คำตอบรับไม่ปลุกงานกลับ", orders._load()["orders"]["sess-E"]["status"], "done")
+orders.record("sess-E", "แชทอี", "<task-notification>งานเสร็จ</task-notification>")
+check("ข้อความระบบไม่ปลุกงานกลับ", orders._load()["orders"]["sess-E"]["status"], "done")
+orders.record("sess-E", "แชทอี", "เปลี่ยนใจ ขอแก้ fb_report.py ต่อ")
+check("คำสั่งจริงอันใหม่ปลุกงานกลับได้", orders._load()["orders"]["sess-E"]["status"], "open")
+
+print("=== 11. ประวัติไฟล์ทับกัน ต้องจดไว้ไม่ทับของเก่า ===")
+before = orders.CLASH_LOG.read_text(encoding="utf-8").count("\n") if orders.CLASH_LOG.exists() else 0
+orders.log_clash("soft", "แชททดสอบ", [{"chat": "แชทอื่น"}], ["a.py"])
+orders.log_clash("hard", "แชททดสอบ", [{"chat": "แชทอื่น"}], ["a.py"])
+after = orders.CLASH_LOG.read_text(encoding="utf-8").count("\n")
+check("จดเพิ่ม 2 รายการ ไม่ทับของเดิม", after - before, 2)
+
 print(f"\nสรุป: ผ่าน {ok} · ไม่ผ่าน {fail}")
 shutil.rmtree(TMP, ignore_errors=True)
 sys.exit(1 if fail else 0)

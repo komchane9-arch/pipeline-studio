@@ -28,7 +28,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import dispatcher
 import file_claims
@@ -135,12 +135,22 @@ def record(session: str, chat: str, prompt: str) -> dict:
         book = data.setdefault("orders", {})
         row = book.setdefault(session, {
             "chat": chat, "text": "", "history": [], "files": [],
-            "opened": _stamp(_now()), "status": "open",
+            # ต้องมี `updated` ตั้งแต่แถวเกิด ไม่งั้นแถวใหม่จะไม่มีคีย์นี้เลย
+            # แล้วตัวกรอง "เงียบนานแล้ว" จะอ่านไม่ได้ (คืน None = ไม่ถูกกรอง)
+            "opened": _stamp(_now()), "updated": _stamp(_now()), "status": "open",
         })
         row["chat"] = chat or row.get("chat") or ""
-        row["updated"] = _stamp(_now())
-        row["status"] = "open"
+        # **`updated` กับ `status` ต้องอยู่ในเงื่อนไขเดียวกับหัวข้องาน** (22 ส.ค. 2569)
+        #
+        # เดิมอยู่ข้างนอก จึงเขียนใหม่ทุกครั้งที่มีข้อความเข้ามาไม่ว่าข้อความอะไร
+        # ผลสองอย่างที่ทำให้กระดานเชื่อไม่ได้:
+        #   1. "ขยับล่าสุด 1 นาทีก่อน" แปลว่า **มีข้อความมาถึง** ไม่ได้แปลว่าทำงาน
+        #      แชทที่นั่งเฉยๆ แต่มีแจ้งเตือนวิ่งเข้าไปก็ดูเหมือนกำลังทำงานตลอด
+        #   2. งานที่สั่ง `close` ปิดไปแล้ว **เด้งกลับเป็น open เอง** ทันทีที่มี
+        #      ข้อความถัดไป แม้แค่คำว่า "ครับ" — ปิดงานจึงไม่เคยอยู่จริง
         if prompt and not _is_ack(prompt):
+            row["updated"] = _stamp(_now())
+            row["status"] = "open"
             if row.get("text"):
                 row.setdefault("history", []).append(row["text"])
                 row["history"] = row["history"][-HISTORY_LIMIT:]
@@ -204,6 +214,73 @@ def clashes(session: str) -> list[dict]:
     return found
 
 
+CLASH_LOG = studio_shared.DATA_DIR / "orders_clash_log.jsonl"
+
+
+def log_clash(kind: str, me_chat: str, hits: list, shared: list) -> None:
+    """จดทุกครั้งที่เจอไฟล์ทับกัน — **เขียนต่อท้ายอย่างเดียว ไม่เคยลบ**
+
+    **ทำไมต้องแยกไฟล์** ช่อง `clash` ในทะเบียนเก็บได้ทีละรอบ รอบใหม่ทับรอบเก่า
+    เงียบๆ — 22 ส.ค. 2569 จึงนับได้แค่ 2 รอบทั้งที่ของจริงเกิด 6 รอบ
+    **ปัญหาที่วัดไม่ได้ = ปัญหาที่ไม่มีวันรู้ว่าหนักแค่ไหน**
+
+    และ **ห้ามยัดประวัติลง `orders.json`** เพราะไฟล์นั้นถูกเขียนใหม่ทุกครั้งที่ใคร
+    พิมพ์อะไรก็ตาม ประวัติจะทำให้มันโตขึ้นเรื่อยๆ แล้วทุกการพิมพ์ช้าลงตาม
+    """
+    try:
+        CLASH_LOG.parent.mkdir(parents=True, exist_ok=True)
+        row = {"at": _stamp(_now()), "kind": kind, "chat": me_chat,
+               "with": [h.get("chat") for h in hits], "files": shared}
+        with open(CLASH_LOG, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass          # จดประวัติไม่ได้ ต้องไม่ขวางผู้ใช้พิมพ์
+
+
+def stats(days: int = 7) -> int:
+    """นับว่าไฟล์ทับกันเกิดบ่อยแค่ไหน และเป็นของจริงกี่ครั้ง"""
+    if not CLASH_LOG.exists():
+        print("ยังไม่มีประวัติไฟล์ทับกัน — เริ่มจดตั้งแต่ 22 ส.ค. 2569")
+        return 0
+    cutoff = _now() - timedelta(days=days)
+    hard = soft = 0
+    pairs: dict[tuple, int] = {}
+    files: dict[str, int] = {}
+    with open(CLASH_LOG, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            when = _parse(row.get("at", ""))
+            if when and when < cutoff:
+                continue
+            if row.get("kind") == "hard":
+                hard += 1
+            else:
+                soft += 1
+            for other in row.get("with") or []:
+                key = tuple(sorted([row.get("chat") or "?", other or "?"]))
+                pairs[key] = pairs.get(key, 0) + 1
+            for rel in row.get("files") or []:
+                files[rel] = files.get(rel, 0) + 1
+
+    total = hard + soft
+    print(f"📊 ไฟล์ทับกันใน {days} วันล่าสุด: {total} ครั้ง")
+    print(f"   🔒 ของจริง (มีคนตอกบัตรเข้าอยู่) : {hard} ครั้ง")
+    print(f"   ⚠️ แค่พูดถึงไฟล์เดียวกัน          : {soft} ครั้ง"
+          + (f"  ({soft / total * 100:.0f}% ของทั้งหมด)" if total else ""))
+    if pairs:
+        print("\n   คู่ที่ทับกันบ่อยสุด:")
+        for (a, b), n in sorted(pairs.items(), key=lambda x: -x[1])[:5]:
+            print(f"     {n:>3} ครั้ง  {a}  ×  {b}")
+    if files:
+        print("\n   ไฟล์ที่ทับกันบ่อยสุด:")
+        for rel, n in sorted(files.items(), key=lambda x: -x[1])[:5]:
+            print(f"     {n:>3} ครั้ง  {rel}")
+    return 0
+
+
 def mark_clash(me_session, me_chat, me_text, hits, shared):
     """ปักธงข้อพิพาทให้ทุกฝั่งที่เกี่ยวข้อง
 
@@ -230,6 +307,7 @@ def mark_clash(me_session, me_chat, me_text, hits, shared):
 
     studio_shared.update_json(ORDERS_FILE, change, default=_blank(),
                               label="ปักธงงานชนกัน")
+    log_clash("hard", me_chat, hits, shared)
 
 def pending(session, rel):
     """ไฟล์นี้ติดข้อพิพาทที่ยังไม่ตัดสินหรือเปล่า
@@ -331,6 +409,7 @@ def catch(raw: str) -> int:
         print(f"⚠️ แชทอื่นพูดถึงไฟล์เดียวกัน: {' · '.join(soft)}  (แชท: {who_else})")
         print("   ยังไม่มีใครตอกบัตรเข้าไฟล์พวกนี้ — ทำงานต่อได้ตามปกติ")
         print("   ถ้าจะแก้ไฟล์เดียวกันจริง ด่านตอนแก้จะกันให้เองอีกชั้น")
+        log_clash("soft", chat, hits, soft)
         return 0
 
     hits = hard_hits
@@ -516,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("who", help="ใครทำอะไร ตรงไหน")
     p_card = sub.add_parser("card", help="บัตรตอกเวลา — ใครเข้าไฟล์ไหนเมื่อไร ออกหรือยัง")
     p_card.add_argument("--all", action="store_true", help="เอาประวัติเก่ามาด้วย")
+    p_stats = sub.add_parser("stats", help="ไฟล์ทับกันบ่อยแค่ไหน เป็นของจริงกี่ครั้ง")
+    p_stats.add_argument("--days", type=int, default=7)
 
     p_close = sub.add_parser("close", help="ปิดงานของแชทนี้")
     p_close.add_argument("--session", required=True)
@@ -536,6 +617,8 @@ def main(argv: list[str] | None = None) -> int:
         return who()
     if args.command == "card":
         return card(args.all)
+    if args.command == "stats":
+        return stats(args.days)
     if args.command == "resolve":
         return resolve(args.session, args.note)
     return close(args.session, args.note)

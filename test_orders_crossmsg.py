@@ -68,6 +68,26 @@ orders.record("sess-A", "แชททดสอบ", cross_b)
 clash = orders.clashes("sess-A")
 check("แชท A ไม่ถูกปักธงชนกับแชท B", len(clash), 0)
 
+print("=== 7. บัตรตอกเวลา: แค่พูดถึงไฟล์เดียวกัน = เตือน ห้ามบล็อก ===")
+orders.record("sess-C", "แชทซี", "ขอแก้ fb_report.py หน่อย")
+orders.record("sess-D", "แชทดี", "เดี๋ยวผมดู fb_report.py ให้")
+hits = orders.clashes("sess-C")
+check("เจอว่าพูดถึงไฟล์เดียวกัน", len(hits) >= 1, True)
+check("แต่ไม่ใช่ของจริง (ไม่มีใครตอกบัตรเข้า)",
+      any(h.get("hard") for h in hits), False)
+
+print("=== 8. อีกฝั่งตอกบัตรเข้าจริง = ต้องบล็อก ===")
+import file_claims          # noqa: E402
+file_claims.claim("fb_report.py", "แชทดี", why="ตอกบัตรเข้าจริง", session="sess-D")
+hits = orders.clashes("sess-C")
+check("คราวนี้เป็นของจริง", any(h.get("hard") for h in hits), True)
+check("บอกไฟล์ที่ชนถูก", "fb_report.py" in sum((h["shared"] for h in hits), []), True)
+
+print("=== 9. ตอกบัตรออกแล้ว = เลิกบล็อก ===")
+file_claims.release("fb_report.py", "แชทดี", note="ทำเสร็จแล้ว")
+hits = orders.clashes("sess-C")
+check("กลับมาเป็นแค่เตือน", any(h.get("hard") for h in hits), False)
+
 print(f"\nสรุป: ผ่าน {ok} · ไม่ผ่าน {fail}")
 shutil.rmtree(TMP, ignore_errors=True)
 sys.exit(1 if fail else 0)

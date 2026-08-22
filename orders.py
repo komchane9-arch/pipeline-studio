@@ -173,8 +173,15 @@ def clashes(session: str) -> list[dict]:
     """
     book = _load()["orders"]
     me = book.get(session) or {}
-    my_files = set(me.get("files") or []) | set(held_by(me.get("chat", "")))
-    if not my_files:
+    # **แยกสองตะกร้าออกจากกัน** (22 ส.ค. 2569) เดิมเทรวมเป็นก้อนเดียว ระบบจึงแยก
+    # ไม่ออกว่าอันไหนคือข้อเท็จจริง อันไหนคือการเดา แล้วบล็อกเหมือนกันหมด
+    #
+    #   my_guess = เดาจากการอ่านชื่อไฟล์ในข้อความ — ผิดได้ตลอด เช่นสั่งว่า
+    #              "อย่าไปแตะ app.py นะ" ก็ถูกจดว่ากำลังแก้ app.py
+    #   my_held  = **ตอกบัตรเข้าแล้วยังไม่ตอกออก** — เป็นข้อเท็จจริง
+    my_guess = set(me.get("files") or [])
+    my_held = set(held_by(me.get("chat", "")))
+    if not (my_guess | my_held):
         return []
 
     found = []
@@ -184,10 +191,16 @@ def clashes(session: str) -> list[dict]:
         idle = _ago_minutes(row.get("updated", ""))
         if idle is not None and idle > STALE_MINUTES:
             continue
-        shared = my_files & (set(row.get("files") or []) | set(held_by(row.get("chat", ""))))
-        if shared:
-            found.append({**row, "session": other_id, "shared": sorted(shared),
-                          "idle": idle})
+        other_held = set(held_by(row.get("chat", "")))
+        # ของจริง: อีกฝั่ง **ตอกบัตรเข้าไฟล์นั้นแล้วยังไม่ตอกออก** = เขาทำอยู่จริง
+        # ถ้าเราเข้าไปแก้ด้วยคือเขียนทับกันแน่ → หยุดไว้ก่อน
+        hard = (my_guess | my_held) & other_held
+        # แค่พูดถึงกันทั้งคู่ ไม่มีใครตอกบัตรเข้าเลย → เตือนพอ ห้ามบล็อก
+        soft = (my_guess & set(row.get("files") or [])) - hard
+        if hard or soft:
+            found.append({**row, "session": other_id,
+                          "shared": sorted(hard or soft),
+                          "hard": bool(hard), "idle": idle})
     return found
 
 
@@ -305,6 +318,22 @@ def catch(raw: str) -> int:
     if not hits:
         return 0
 
+    # ---- แค่พูดถึงไฟล์เดียวกัน ไม่มีใครตอกบัตรเข้า → เตือน ห้ามล็อก ----
+    #
+    # **ห้ามเรียก mark_clash() ทางนี้** เพราะนั่นคือตัวที่ปักธงแล้วทำให้ด่านตอน
+    # แก้ไฟล์บล็อก — วัดจริง 22 ส.ค. 2569: คู่เดียวโดนบล็อกจากการเดา 6 รอบใน
+    # วันเดียว ต้องเรียกเจ้าหน้าที่ทุกรอบ รอบละ 40,000-110,000 โทเคน
+    # ทั้ง 6 รอบนั้นไม่มีใครตอกบัตรเข้าไฟล์นั้นเลยสักคน
+    hard_hits = [row for row in hits if row.get("hard")]
+    if not hard_hits:
+        soft = sorted({f for row in hits for f in row["shared"]})
+        who_else = " · ".join(dict.fromkeys(r.get("chat") or "?" for r in hits))
+        print(f"⚠️ แชทอื่นพูดถึงไฟล์เดียวกัน: {' · '.join(soft)}  (แชท: {who_else})")
+        print("   ยังไม่มีใครตอกบัตรเข้าไฟล์พวกนี้ — ทำงานต่อได้ตามปกติ")
+        print("   ถ้าจะแก้ไฟล์เดียวกันจริง ด่านตอนแก้จะกันให้เองอีกชั้น")
+        return 0
+
+    hits = hard_hits
     shared = sorted({f for row in hits for f in row["shared"]})
     mine = (_load()["orders"] or {}).get(session) or {}
     mark_clash(session, chat, mine.get("text") or prompt, hits, shared)
@@ -377,6 +406,64 @@ def who() -> int:
     return 0
 
 
+def card(show_all: bool = False) -> int:
+    """บัตรตอกเวลา — เข้าไฟล์ไหนเมื่อไร ออกหรือยัง (เจ้าของสั่ง 22 ส.ค. 2569)
+
+    **กติกาข้อเดียวที่ต้องจำ**: มีเวลาเข้าแต่ยังไม่มีเวลาออก = คนนั้นยังทำไฟล์นั้นอยู่
+
+    ข้อมูลมีอยู่แล้วครบใน `data/file_claims.json` (`since` คือเวลาเข้า · `released`
+    คือเวลาออก · `how` คือออกเพราะอะไร) แค่ไม่เคยมีใครเอามาแสดงเป็นบัตรตอกเวลา
+    และที่สำคัญกว่าคือ **ตัวตัดสินว่าชนกันไม่ได้ใช้ข้อมูลนี้เลย** — มันไปเดาจาก
+    ชื่อไฟล์ในข้อความแทน ซึ่งเป็นต้นเหตุของข้อพิพาทปลอม 6 รอบในวันเดียว
+    """
+    book = file_claims._load()
+    now = _now()
+
+    def hhmm(text: str) -> str:
+        when = file_claims._parse(text or "")
+        return when.strftime("%H:%M") if when else "—"
+
+    def span(start: str, end: str = "") -> str:
+        first = file_claims._parse(start or "")
+        last = file_claims._parse(end or "") if end else now
+        if not first or not last:
+            return ""
+        minutes = (last - first).total_seconds() / 60
+        return f"{minutes:.0f} นาที" if minutes < 90 else f"{minutes / 60:.1f} ชม."
+
+    rows: dict[str, list[dict]] = {}
+    for rel, held in (book.get("claims") or {}).items():
+        rows.setdefault(held.get("chat") or "ไม่ทราบชื่อ", []).append(
+            {"file": rel, "in": held.get("since", ""), "out": "", "how": ""})
+    if show_all:
+        for past in (book.get("history") or []):
+            rows.setdefault(past.get("chat") or "ไม่ทราบชื่อ", []).append(
+                {"file": past.get("file", ""), "in": past.get("since", ""),
+                 "out": past.get("released", ""), "how": past.get("how", "")})
+
+    if not rows:
+        print("📋 ยังไม่มีใครตอกบัตรเข้าไฟล์ไหนเลย")
+        return 0
+
+    print("📋 บัตรตอกเวลา — ใครเข้าไฟล์ไหน ออกหรือยัง\n")
+    working = 0
+    for chat in sorted(rows):
+        print(f"  {chat}")
+        for item in sorted(rows[chat], key=lambda x: x["in"], reverse=True):
+            if item["out"]:
+                print(f"     ⚪ {item['file']:<26} เข้า {hhmm(item['in'])}  "
+                      f"ออก {hhmm(item['out'])}  ({span(item['in'], item['out'])}"
+                      + (f" · {item['how']}" if item["how"] else "") + ")")
+            else:
+                working += 1
+                print(f"     🟢 {item['file']:<26} เข้า {hhmm(item['in'])}  "
+                      f"ออก —      (ยังทำอยู่ {span(item['in'])})")
+        print()
+    print(f"รวมที่ยังทำอยู่ {working} ไฟล์"
+          + ("" if show_all else "  ·  ใส่ --all เพื่อดูที่ตอกออกไปแล้วด้วย"))
+    return 0
+
+
 def close(session: str, note: str = "") -> int:
     done: dict = {}
 
@@ -427,6 +514,8 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("catch", help="ใช้โดย hook เท่านั้น — รับ JSON ทาง stdin")
     sub.add_parser("who", help="ใครทำอะไร ตรงไหน")
+    p_card = sub.add_parser("card", help="บัตรตอกเวลา — ใครเข้าไฟล์ไหนเมื่อไร ออกหรือยัง")
+    p_card.add_argument("--all", action="store_true", help="เอาประวัติเก่ามาด้วย")
 
     p_close = sub.add_parser("close", help="ปิดงานของแชทนี้")
     p_close.add_argument("--session", required=True)
@@ -445,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
     if args.command == "who":
         return who()
+    if args.command == "card":
+        return card(args.all)
     if args.command == "resolve":
         return resolve(args.session, args.note)
     return close(args.session, args.note)

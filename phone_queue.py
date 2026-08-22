@@ -144,7 +144,7 @@ def holding(serial: str) -> int | None:
         return _held.get(_device_key(serial))
 
 
-def require_slot(serial: str, what: str = "") -> int | None:
+def require_slot(serial: str, what: str = "", enforce: bool | None = None) -> int | None:
     """เรียกก่อนยิง ADB ทุกครั้ง — ไม่มีบัตรในมือ = ผิดกติกา
 
     บังคับจริง (ENFORCE=1) จะโยน QueueError ตรงจุดที่ลืม ทำให้หาที่แก้ได้ใน
@@ -157,7 +157,9 @@ def require_slot(serial: str, what: str = "") -> int | None:
         return ticket
     message = (f"ยิง ADB ใส่ {key} โดยไม่ได้กดบัตรคิว"
                + (f" — {what}" if what else ""))
-    if ENFORCE:
+    # `enforce` รายจุด — ให้โปรเจกต์ที่ยังแปลงไม่เสร็จ (เช่น 7.web app) เปิด
+    # โหมดจดอย่างเดียวได้โดยไม่ต้องปิดการบังคับของทั้งระบบ
+    if ENFORCE if enforce is None else enforce:
         raise QueueError(
             message + "\nต้องครอบด้วย  with phone_queue.slot(serial, owner=..., task=...):"
                       "\n(ถ้ากำลังแปลงระบบอยู่ ตั้ง PHONE_QUEUE_ENFORCE=0 ชั่วคราวได้)")

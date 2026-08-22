@@ -30,6 +30,8 @@ let focused = "";
 const supportsWebCodecs = typeof window.VideoDecoder === "function";
 // หลุดแล้วต่อใหม่กี่ครั้งก่อนยอมถอยไปภาพนิ่ง — มีเพดานเสมอ ห้ามวนไม่จบ
 const STREAM_RETRIES = 3;
+// รหัสปิดที่ "ต่อใหม่ไปก็ไม่ติด" — 1008 เซิร์ฟเวอร์ไม่อนุญาต · 4404 เครื่องไม่พร้อม
+const PERMANENT_CLOSE = new Set([1008, 4404]);
 // ตกไปใช้ภาพนิ่งแล้ว ยังลองกลับมาใช้ท่อเร็วทุกกี่มิลลิวินาที
 const STREAM_RECOVER_MS = 15000;
 // ภาพนิ่ง: ถ่ายหนึ่งใบใช้ ~600 ms อยู่แล้ว รออีก 900 ms คือเสียเปล่า
@@ -113,6 +115,15 @@ class PhoneScreen {
     this.nameBox.textContent = labelOf(this.serial);
     const busy = row && (row.holder || row.job);
     this.card.classList.toggle("is-busy", Boolean(busy));
+    // **เครื่องที่ไม่ได้เสียบสาย ต้องบอกตั้งแต่แรกเห็น** ของเดิมปล่อยให้กด
+    // "เริ่มดูจอ" ได้ตามปกติ แล้วไปล้มที่เซิร์ฟเวอร์เป็นรหัสที่ผู้ใช้อ่านไม่ออก
+    // (ข้อมูลนี้มีอยู่แล้วใน /api/devices — แค่ไม่เคยเอามาใช้กับการ์ดจอ)
+    const ready = !row || row.ready !== false;
+    this.card.classList.toggle("is-offline", !ready);
+    if (this.toggle) this.toggle.disabled = !ready;
+    if (!ready && !this.live) {
+      this.say("🔌 ยังไม่ได้เสียบสาย — เสียบแล้วกดรีเฟรชรายการอุปกรณ์");
+    }
     this.card.title = busy
       ? `${labelOf(this.serial)} — ${row.holder || "งานโพสต์ " + row.job} ใช้อยู่`
       : labelOf(this.serial);
@@ -239,7 +250,12 @@ class PhoneScreen {
     let pps = null;
     this.socket.onmessage = (event) => {
       if (typeof event.data === "string") {
-        this.say(JSON.parse(event.data).error || "");
+        // จำเหตุผลไว้ด้วย — เดี๋ยว onclose จะเขียนข้อความทับ ถ้าไม่จำไว้
+        // ผู้ใช้จะเห็นแค่ "สตรีมหลุด (รหัส …)" ซึ่งบอกอะไรไม่ได้เลย
+        let why = "";
+        try { why = JSON.parse(event.data).error || ""; } catch { why = event.data; }
+        this.lastStreamError = why;
+        this.say(why);
         return;
       }
       const data = new Uint8Array(event.data);
@@ -276,6 +292,15 @@ class PhoneScreen {
       if (!this.live) return;                 // ผู้ใช้กดหยุดเอง
       // **ของเดิมตกไปใช้ภาพนิ่งถาวร แล้วไม่ลองกลับมาอีกเลย** หลุดครั้งเดียว
       // = ช้าไปตลอดจนกว่าจะปิดหน้าเว็บแล้วเปิดใหม่เอง ซึ่งผู้ใช้ไม่มีทางรู้
+      // **บางสาเหตุต่อใหม่ไปก็ไม่มีทางติด** — เครื่องไม่ได้เสียบสาย หรือเปิดหน้านี้
+      // จากเครื่องอื่นที่เซิร์ฟเวอร์ไม่อนุญาต ต่อใหม่ 3 ครั้งมีแต่ทำให้ข้อความจริง
+      // ถูกกลบ ผู้ใช้เห็นแต่ "สตรีมหลุด (รหัส 1008)" แล้วไล่สาเหตุไม่ได้
+      const why = event.reason || this.lastStreamError || "";
+      if (PERMANENT_CLOSE.has(event.code)) {
+        this.say(`⛔ เปิดจอไม่ได้ — ${why || "เซิร์ฟเวอร์ปฏิเสธ (รหัส " + event.code + ")"}`);
+        this.stop();
+        return;
+      }
       this.streamTries = (this.streamTries || 0) + 1;
       if (this.streamTries <= STREAM_RETRIES) {
         this.say(`สตรีมหลุด (รหัส ${event.code}${event.reason ? " " + event.reason : ""})`
@@ -516,7 +541,12 @@ function syncCount() {
 function syncScreens() {
   const enabled = deviceRows.filter((d) => d.enabled).map((d) => d.serial);
   for (const serial of enabled) {
-    if (!screens.has(serial) && !dismissed.has(serial)) addScreen(serial);
+    if (screens.has(serial) || dismissed.has(serial)) continue;
+    // เปิดจอให้ แต่ **ห้ามยิงสตรีมอัตโนมัติใส่เครื่องที่ยังไม่ได้เสียบสาย**
+    // ของเดิมยิงทุกเครื่องที่ "เปิดใช้" โดยไม่ดูว่าเสียบอยู่ไหม เครื่องที่ถอดสาย
+    // ไว้จึงล้มซ้ำๆ แล้วขึ้นข้อความรหัสที่อ่านไม่รู้เรื่องรัวๆ ตั้งแต่เปิดหน้าเว็บ
+    const row = deviceRows.find((d) => d.serial === serial);
+    addScreen(serial, { autoStart: !row || row.ready !== false });
   }
   for (const serial of [...screens.keys()]) {
     // เครื่องที่ถูกปิดใช้/ถอดออกจากทะเบียนแล้ว ต้องเก็บจอทิ้งด้วย ไม่งั้นจะเหลือ

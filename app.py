@@ -1938,6 +1938,16 @@ def h264_start_codes(buffer: bytearray) -> list[tuple[int, int]]:
     return starts
 
 
+def _close_reason(text: str, limit: int = 120) -> str:
+    """ข้อความปิด WebSocket ยาวได้ไม่เกิน 123 ไบต์ตามมาตรฐาน
+
+    ภาษาไทยตัวละ 3 ไบต์ ถ้าส่งยาวเกินเฟรมปิดจะเสียรูปแล้วเบราว์เซอร์จะได้
+    รหัส 1006 (หลุดผิดปกติ) แทนรหัสจริง — กลายเป็นซ่อนสาเหตุอีกชั้นหนึ่ง
+    """
+    raw = str(text or "").encode("utf-8")[:limit]
+    return raw.decode("utf-8", "ignore")
+
+
 def _websocket_is_local(websocket: WebSocket) -> bool:
     host = websocket.client.host if websocket.client else ""
     return host in {"127.0.0.1", "::1", "localhost"}
@@ -2103,8 +2113,13 @@ async def phone_input_socket(websocket: WebSocket, serial: str) -> None:
     try:
         cleaned = await asyncio.to_thread(clean_serial, serial, True)
     except HTTPException as error:
+        # **ต้องติดเหตุผลไปกับการปิดท่อด้วย** ของเดิมปิดเปล่าๆ ด้วยรหัส 1008
+        # หน้าเว็บจึงขึ้นได้แค่ "สตรีมหลุด (รหัส 1008)" ซึ่งบอกอะไรไม่ได้เลย
+        # แล้วยังไปต่อใหม่ซ้ำอีก 3 ครั้งทั้งที่เครื่องไม่ได้เสียบสายอยู่
+        # ใช้รหัส 4404 (ช่วงของแอปเอง) เพื่อให้ฝั่งหน้าเว็บแยกออกว่า
+        # "เครื่องไม่พร้อม" ต่างจาก "ท่อสะดุด" — อันแรกต่อใหม่ไปก็เท่านั้น
         await websocket.send_json({"error": error.detail})
-        await websocket.close(code=1008)
+        await websocket.close(code=4404, reason=_close_reason(error.detail))
         return
     if not scrcpy_control.is_available():
         await websocket.send_json({"error": "ยังไม่มีช่องทางสัมผัสเรียลไทม์"})
@@ -2195,8 +2210,13 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
     try:
         cleaned = await asyncio.to_thread(clean_serial, serial, True)
     except HTTPException as error:
+        # **ต้องติดเหตุผลไปกับการปิดท่อด้วย** ของเดิมปิดเปล่าๆ ด้วยรหัส 1008
+        # หน้าเว็บจึงขึ้นได้แค่ "สตรีมหลุด (รหัส 1008)" ซึ่งบอกอะไรไม่ได้เลย
+        # แล้วยังไปต่อใหม่ซ้ำอีก 3 ครั้งทั้งที่เครื่องไม่ได้เสียบสายอยู่
+        # ใช้รหัส 4404 (ช่วงของแอปเอง) เพื่อให้ฝั่งหน้าเว็บแยกออกว่า
+        # "เครื่องไม่พร้อม" ต่างจาก "ท่อสะดุด" — อันแรกต่อใหม่ไปก็เท่านั้น
         await websocket.send_json({"error": error.detail})
-        await websocket.close(code=1008)
+        await websocket.close(code=4404, reason=_close_reason(error.detail))
         return
 
     # **ต้องปลุกจอก่อนสตรีม** — ตั้งแต่มีตัวดับจออัตโนมัติ ถ้าไม่ปลุก

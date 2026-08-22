@@ -1408,3 +1408,19 @@ button:disabled { opacity: 0.5; }
   /* ตารางกว้างๆ ให้เลื่อนในกล่องตัวเอง ห้ามดันให้ทั้งหน้าเลื่อนซ้ายขวา */
   .fb-list, .publish-list, .story-detail { overflow-x: auto; }
 }
+
+/* กระดานคิวจอมือถือ — โผล่เองเมื่อมีคนเข้าคิว ซ่อนเองเมื่อไม่มีใครรอ
+   (ป้ายที่อยู่ตลอดเวลาจะถูกมองข้าม — ให้ขึ้นเฉพาะตอนมีเรื่องจริง) */
+.queue-board {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-deep);
+  font-size: 13px;
+}
+.queue-title { font-weight: 600; margin-bottom: 6px; }
+.queue-device { margin-bottom: 8px; }
+.queue-device:last-child { margin-bottom: 0; }
+.queue-now { margin: 2px 0 0 8px; }
+.queue-wait { margin: 2px 0 0 8px; opacity: 0.8; }

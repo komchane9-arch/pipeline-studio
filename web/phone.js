@@ -492,6 +492,63 @@ window.addEventListener("pagehide", () => {
   }
 });
 
+// -------------------------------------------------------- กระดานคิวจอมือถือ
+//
+// **ทำไมต้องขึ้นหน้าเว็บ** ของเดิมดูได้จาก `python phone_queue.py board` อย่างเดียว
+// ซึ่งแปลว่าเจ้าของต้องนึกได้เองว่าต้องไปพิมพ์ดู — บทเรียนเดิมของโปรเจกต์บอกไว้แล้ว
+// ว่าอะไรที่พึ่งความจำ สุดท้ายไม่มีใครทำ  ตรงนี้จึงโผล่เองเมื่อมีคนเข้าคิวจริง
+// และ **ซ่อนตัวเองเมื่อไม่มีใครรอ** เพื่อไม่ให้กลายเป็นป้ายที่อยู่ตลอดจนคนเลิกมอง
+const queueBox = $("#queueBoard");
+const QUEUE_REFRESH_MS = 5000;
+
+function agoText(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  if (seconds < 60) return `${Math.round(seconds)} วิ`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} นาที`;
+  return `${(seconds / 3600).toFixed(1)} ชม.`;
+}
+
+async function refreshQueueBoard() {
+  if (!queueBox) return;
+  let data;
+  try {
+    data = await api("/api/phone/queue");
+  } catch {
+    return;                       // กระดานล่มต้องไม่ส่งเสียงรบกวนงานหลัก
+  }
+  const busy = (data.devices || []).filter((d) => d.running || (d.waiting || []).length);
+  if (!busy.length) {
+    queueBox.hidden = true;
+    queueBox.textContent = "";
+    return;
+  }
+  const parts = ['<div class="queue-title">คิวใช้จอมือถือ</div>'];
+  for (const device of busy) {
+    parts.push(`<div class="queue-device"><b>${escapeHtml(device.label || device.serial)}</b>`);
+    if (device.running) {
+      parts.push(`<div class="queue-now">🟢 ${escapeHtml(device.running.owner)}`
+        + ` — ${escapeHtml(device.running.task || "ไม่ได้บอกว่าทำอะไร")}`
+        + ` <span class="note">(${agoText(device.running.seconds)})</span></div>`);
+    }
+    (device.waiting || []).forEach((row, index) => {
+      parts.push(`<div class="queue-wait">คิวที่ ${index + 1} · ${escapeHtml(row.owner)}`
+        + ` — ${escapeHtml(row.task || "—")}`
+        + ` <span class="note">(รอมา ${agoText(row.seconds)})</span></div>`);
+    });
+    parts.push("</div>");
+  }
+  queueBox.innerHTML = parts.join("");
+  queueBox.hidden = false;
+}
+
+function escapeHtml(text) {
+  return String(text ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+window.setInterval(refreshQueueBoard, QUEUE_REFRESH_MS);
+refreshQueueBoard();
+
 // ------------------------------------------------------------ จัดการชุดจอ
 
 function focus(serial) {

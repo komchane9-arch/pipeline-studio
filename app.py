@@ -2200,6 +2200,42 @@ def someone_watching(serial: str) -> bool:
     return (time.time() - last) < WATCHING_GRACE_SECONDS
 
 
+@app.get("/api/phone/queue")
+async def phone_queue_board() -> dict:
+    """กระดานคิวจอมือถือ — ใครถือจออยู่ ใครรอ รอมานานเท่าไร
+
+    **ทำไมต้องขึ้นหน้าเว็บ** ของเดิมดูได้จากบรรทัดคำสั่งอย่างเดียว ซึ่งแปลว่า
+    เจ้าของต้องนึกได้เองว่าต้องไปพิมพ์ดู — บทเรียนเดิมของโปรเจกต์นี้บอกไว้แล้วว่า
+    อะไรที่ต้องพึ่งความจำ สุดท้ายไม่มีใครทำ (เรื่อง `claims: 0`)
+    """
+    def read() -> dict:
+        import phone_queue                                      # noqa: PLC0415
+        rows = []
+        for group in phone_queue.board():
+            serial = group["device"]
+            run = group["running"]
+            rows.append({
+                "serial": serial,
+                "label": device_book.label(serial),
+                "running": None if not run else {
+                    "owner": run["owner"], "task": run["task"],
+                    "seconds": time.time() - (run["started_at"] or run["created_at"]),
+                    "ticket": run["id"],
+                },
+                "waiting": [{
+                    "owner": row["owner"], "task": row["task"],
+                    "seconds": time.time() - row["created_at"], "ticket": row["id"],
+                } for row in group["waiting"]],
+            })
+        return {"ok": True, "devices": rows}
+
+    try:
+        return await asyncio.to_thread(read)
+    except Exception as error:                                  # noqa: BLE001
+        # กระดานพังต้องไม่ทำให้หน้าเว็บทั้งหน้าพัง — คืนว่างพร้อมเหตุผล
+        return {"ok": False, "devices": [], "error": str(error)}
+
+
 @app.websocket("/ws/phone/stream")
 async def phone_stream(websocket: WebSocket, serial: str) -> None:
     """สตรีมหน้าจอ H.264 หน่วงต่ำ — ฝั่งหน้าเว็บถอดด้วย WebCodecs"""

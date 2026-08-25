@@ -39,6 +39,22 @@ CMD_TIMEOUT = 20.0
 # แอปที่สั่งปิดถาวร — ของผู้ใช้ที่ไม่เกี่ยวกับงานโพสต์แต่ค้างกินแรมอยู่เบื้องหลัง
 # (วัดเมื่อ 18 ส.ค.: Netflix 238 MB · Line 284 MB · ChatGPT 152 MB ·
 #  Bolt ผู้โดยสาร 152 MB · Bolt คนขับ 139 MB · Notion 153 MB รวมราว 1.1 GB)
+#
+# ชุดที่สอง เพิ่ม 25 ส.ค. 2569 หลังมือถือขึ้น "หน่วยความจำไม่พอ" ตอนเปิดแอป
+# วัดของจริงเครื่อง REDMI 15C - โพสต์ 2 (แรม 5.52 GB ซึ่งน้อย):
+#   Google ค้นหา/ผู้ช่วย 189 · Play Store 132 · กล้อง 108 ·
+#   ภาพพื้นหลังหมุนเวียน Xiaomi 70 · ตัวจัดการไฟล์ Google 40 · สภาพอากาศ 17
+#   รวมราว 556 MB
+#
+# **เจ้าของสั่งห้ามแตะ Shopee** (577 MB) เพราะเป็นแอปที่ใช้ทำงานจริง —
+# ชุดนี้จึงเลือกมาให้คืนแรมได้พอๆ กันโดยไม่ต้องแตะมันเลย
+#
+# **ที่จงใจไม่ใส่**
+#   com.google.android.apps.walletnfcrel  Google Wallet — เป็นแอปจ่ายเงิน
+#                                         ไม่ใช่วอลเปเปอร์อย่างที่ชื่อชวนเข้าใจผิด
+#   com.miui.miwallpaper                  ตัววาดภาพพื้นหลัง ปิดแล้วพื้นหลังอาจดำ
+#   com.google.android.inputmethod.latin  คีย์บอร์ด — บอทต้องใช้พิมพ์แคปชัน
+#   com.google.android.apps.messaging     ข้อความ SMS — เผื่อรหัสยืนยันตัวตน
 IDLE_APPS = (
     "com.netflix.mediaclient",
     "jp.naver.line.android",
@@ -46,6 +62,12 @@ IDLE_APPS = (
     "ee.mtakso.client",
     "ee.mtakso.driver",
     "notion.id",
+    "com.google.android.googlequicksearchbox",
+    "com.android.vending",
+    "com.android.camera",
+    "com.miui.android.fashiongallery",
+    "com.google.android.apps.nbu.files",
+    "com.miui.weather2",
 )
 
 _WAKE_RE = re.compile(r"mWakefulness=(\w+)")

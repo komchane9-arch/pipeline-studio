@@ -2544,6 +2544,8 @@ _phone_cleaned_at: dict[str, float] = {}
 _phone_cleaning: set[str] = set()
 # ล้างแล้วได้คืนน้อยกว่านี้ (GB) ถือว่า "ล้างไปก็เท่านั้น" แล้วถอยห่างขึ้นเรื่อยๆ
 PHONE_CLEAN_MIN_GAIN = 0.10
+# swap สูงจะนับว่า "เต็ม" ก็ต่อเมื่อแรมตึงด้วย — ต่ำกว่านี้ถือว่าเครื่องยังสบาย
+PHONE_SWAP_RAM_FLOOR = 60
 PHONE_CLEAN_BACKOFF_MAX = 12       # 30 นาที x 12 = 6 ชั่วโมงเป็นอย่างมาก
 _phone_clean_backoff: dict[str, int] = {}
 
@@ -2647,7 +2649,15 @@ def _read_phone_health(serial: str, *, force: bool = False) -> dict:
     # เจ้าของจึงสั่ง (25 ส.ค. 2569) ให้เพิ่มเงื่อนไข "เกิน 1 GB = เคลียร์"
     swap_limit = _phone_swap_limit()
     data["swap_limit_gb"] = swap_limit
-    data["swap_full"] = data["swap_used_gb"] >= swap_limit
+    # **ต้องดูคู่กับแรมด้วย** ตัวเลข swap เป็น "ประวัติ" ไม่ใช่ "สภาพตอนนี้" —
+    # Linux ไม่ดึงของกลับขึ้นแรมจนกว่าจะมีคนเรียกใช้ ล้างเครื่องเสร็จแล้ว swap จึง
+    # ค้างสูงอยู่ทั้งที่แรมโล่งแล้ว ถ้าดู swap อย่างเดียวจะสั่งล้างซ้ำไม่จบ
+    #
+    # จุดตัด 60% มาจากของจริงสองจุด (25 ส.ค. 2569 เครื่องเดียวกัน):
+    #   ตอนขึ้น "หน่วยความจำไม่พอ"  แรม 67% · swap 1.39 GB  -> ต้องล้าง
+    #   หลังกวาดตัวส่งภาพค้าง       แรม 55% · swap 1.19 GB  -> สบายแล้ว ไม่ต้องล้าง
+    data["swap_full"] = (data["swap_used_gb"] >= swap_limit
+                         and ram_pct >= PHONE_SWAP_RAM_FLOOR)
     data["need_clean"] = bool(
         data["ram_full"] or data["disk_full"] or data["swap_full"]
     )
@@ -2723,6 +2733,75 @@ def _phone_memory_round() -> None:
         if health.get("ok") and health.get("need_clean") and not health.get("busy"):
             threading.Thread(target=_clean_phone_when_free, args=(serial,),
                              daemon=True).start()
+
+
+def _sweep_orphan_streamers() -> None:
+    """กวาดตัวส่งภาพหน้าจอที่ค้างบนมือถือจากรอบก่อน — ทำครั้งเดียวตอนเปิดเซิร์ฟเวอร์
+
+    **รากเหง้าที่เพิ่งเจอ 25 ส.ค. 2569** ตอนปิดสตรีมโค้ดสั่ง `pkill -f scid=<id>`
+    ฆ่าตัวบนมือถือถูกต้องอยู่แล้ว **แต่ตอนรีสตาร์ตเซิร์ฟเวอร์มันตายก่อนได้สั่ง**
+    ตัวบนมือถือจึงค้างอยู่ตัวหนึ่งต่อการรีสตาร์ตหนึ่งครั้ง
+
+    วัดจริงวันนั้น: รีสตาร์ตไป 7 รอบ เหลือค้าง 5 ตัว ตัวละราว 166 MB
+    กวาดทิ้งแล้วแรมที่ใช้ได้เพิ่มขึ้น **0.64 GB** ซึ่งมากกว่าปิด Shopee (0.59 GB)
+    — ของค้างของเราเองคือตัวกินแรมอันดับหนึ่งของเครื่องมาตลอดโดยไม่มีใครรู้
+
+    **ทำตอนเปิดเซิร์ฟเวอร์เท่านั้น** เพราะตอนนั้นยังไม่มีสตรีมของเราสักตัว
+    อะไรที่ค้างอยู่จึงเป็นของรอบก่อนแน่นอน ถ้าไปกวาดตอนอื่นจะไปตัดคนที่ดูจออยู่
+    และเจาะจงชื่อไฟล์ jar ของเราเอง ไม่แตะ scrcpy ตัวจริงที่ผู้ใช้อาจเปิดไว้
+    """
+    time.sleep(8)              # รอ ADB ตั้งตัวก่อน อย่ายิงตอนเซิร์ฟเวอร์เพิ่งเปิด
+    # **จับด้วยชื่อคลาส ไม่ใช่ชื่อไฟล์ jar** — ชื่อไฟล์ส่งผ่าน CLASSPATH ไม่ได้อยู่
+    # ในบรรทัดคำสั่ง `pkill -f scrcpy-server-webapp.jar` จึงไม่เคยแมตช์อะไรเลย
+    # (เสียเวลาไล่อยู่พักหนึ่ง — บรรทัดจริงคือ
+    #  "app_process / com.genymobile.scrcpy.Server 4.1 scid=... video=true ...")
+    #
+    # ปลอดภัยเพราะทำ **ตอนเปิดเซิร์ฟเวอร์เท่านั้น** ยังไม่มีสตรีมของเราสักตัว
+    # ถ้าผู้ใช้เปิด scrcpy ตัวจริงบนคอมค้างไว้พอดีจะโดนด้วย — ยอมรับได้ เพราะเปิดใหม่
+    # ได้ทันที ส่วนของค้างที่ปล่อยไว้กินแรมมือถือถาวรจนเครื่องบ่นว่าหน่วยความจำไม่พอ
+    mark = "com.genymobile.scrcpy.Server"
+    try:
+        rows = _device_rows()
+    except Exception as error:              # noqa: BLE001
+        append_log("publish", f"กวาดตัวส่งภาพค้างไม่ได้ (อ่านรายชื่อเครื่องไม่ออก): {error}")
+        return
+    for row in rows:
+        serial = row.get("serial", "")
+        if not serial or row.get("ready") is False:
+            continue
+        try:
+            with studio_shared.phone_lock(
+                serial, timeout=5.0, poll=0.5,
+                label="กวาดตัวส่งภาพค้าง", queue=False,
+            ):
+                shell = fb_phone_clean.make_shell(serial, ADB)
+                # **นับจากชื่อโปรเซส ไม่ใช่ชื่อไฟล์** — `ps -A` บน Android โชว์แค่
+                # ชื่อโปรเซสซึ่งคือ "app_process" ไม่ได้โชว์บรรทัดคำสั่งเต็ม
+                # ส่วน `pkill -f` มองบรรทัดคำสั่งเต็มได้ จึงเจาะจง jar ของเราได้
+                def count() -> int:
+                    out = shell("ps -A | grep app_process") or ""
+                    return len([l for l in out.splitlines() if l.strip()])
+
+                before = count()
+                if not before:
+                    continue
+                # pkill บน Android ฆ่าได้ทีละตัว ต้องวนจนไม่มีอะไรตายเพิ่ม
+                # มีเพดานรอบไว้เสมอ ห้ามวนไม่จบ (กติกาโปรเจกต์)
+                left = before
+                for _ in range(10):
+                    shell(f'pkill -f "{mark}"')
+                    time.sleep(1.0)
+                    now = count()
+                    if now >= left:
+                        break
+                    left = now
+                killed = before - left
+                if killed > 0:
+                    append_log("publish",
+                               f"กวาดตัวส่งภาพหน้าจอที่ค้างจากรอบก่อนบน "
+                               f"{device_book.label(serial)} — {killed} ตัว")
+        except Exception as error:          # noqa: BLE001
+            append_log("publish", f"กวาดตัวส่งภาพค้างบน {serial} ไม่สำเร็จ: {error}")
 
 
 def _phone_memory_keeper() -> None:
@@ -3886,6 +3965,9 @@ async def _start_watcher() -> None:
     # เฝ้าหน่วยความจำมือถือ — เต็มเกินเพดานแล้วเคลียร์ให้เอง โดยกดบัตรคิวปกติ
     # จึงรอจนงานที่กำลังทำอยู่จบก่อนเสมอ ไม่ตัดกลางงานโพสต์
     threading.Thread(target=_phone_memory_keeper, daemon=True).start()
+
+    # กวาดตัวส่งภาพหน้าจอที่ค้างจากรอบก่อน
+    threading.Thread(target=_sweep_orphan_streamers, daemon=True).start()
 
 
 # บอท 2 ตัว: main = โพสต์ Facebook · clip = สายเจนคลิป (อนุมัติจุดขาย/คลิป)

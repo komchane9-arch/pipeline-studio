@@ -2542,6 +2542,10 @@ _phone_health_cache: dict[str, tuple[float, dict]] = {}
 _phone_health_lock = threading.Lock()
 _phone_cleaned_at: dict[str, float] = {}
 _phone_cleaning: set[str] = set()
+# ล้างแล้วได้คืนน้อยกว่านี้ (GB) ถือว่า "ล้างไปก็เท่านั้น" แล้วถอยห่างขึ้นเรื่อยๆ
+PHONE_CLEAN_MIN_GAIN = 0.10
+PHONE_CLEAN_BACKOFF_MAX = 12       # 30 นาที x 12 = 6 ชั่วโมงเป็นอย่างมาก
+_phone_clean_backoff: dict[str, int] = {}
 
 
 def _phone_full_pct() -> int:
@@ -2555,6 +2559,15 @@ def _phone_full_pct() -> int:
     except (TypeError, ValueError):
         return 90
     return max(50, min(99, value))
+
+
+def _phone_swap_limit() -> float:
+    """ของที่ถูกยัดลงที่ช้าเกินกี่ GB ถึงเรียกว่าเต็ม — เจ้าของสั่ง 1 GB"""
+    try:
+        value = float(load_config().get("phone_swap_limit_gb", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    return max(0.2, min(8.0, value))
 
 
 def _parse_meminfo(text: str) -> dict[str, float]:
@@ -2624,9 +2637,29 @@ def _read_phone_health(serial: str, *, force: bool = False) -> dict:
         "disk_full": disk_pct >= limit,
         "cleaning": serial in _phone_cleaning,
     })
-    data["need_clean"] = bool(data["ram_full"] or data["disk_full"])
+    # **เลข % อย่างเดียวไม่พอ** วัดจริง 25 ส.ค. 2569: ตอนเครื่องขึ้น
+    # "หน่วยความจำไม่พอ" แรมใช้ไปแค่ 67% — เพราะพอแรมจะเต็ม Android จะยัดของ
+    # ลง swap (พื้นที่เก็บของซึ่งช้ากว่าแรมสิบเท่า) เสียก่อนทุกที เลข % จึงวนอยู่
+    # 65-70% ตลอดและไม่มีวันแตะ 90 ที่ตั้งไว้
+    #
+    # ตัวที่บอกความจริงคือ **ของที่ถูกยัดลง swap ไปแล้วเท่าไร** — ตอนเครื่องบ่น
+    # คือ 1.39 GB · หลังล้างลงมาเหลือ 1.31 GB แล้วไต่กลับขึ้นไปเรื่อยๆ
+    # เจ้าของจึงสั่ง (25 ส.ค. 2569) ให้เพิ่มเงื่อนไข "เกิน 1 GB = เคลียร์"
+    swap_limit = _phone_swap_limit()
+    data["swap_limit_gb"] = swap_limit
+    data["swap_full"] = data["swap_used_gb"] >= swap_limit
+    data["need_clean"] = bool(
+        data["ram_full"] or data["disk_full"] or data["swap_full"]
+    )
+    data["why_clean"] = (
+        f"แรม {ram_pct}% ถึงเพดาน {limit}%" if data["ram_full"]
+        else f"เนื้อที่ {disk_pct}% ถึงเพดาน {limit}%" if data["disk_full"]
+        else f"ของถูกยัดลงที่ช้า {data['swap_used_gb']} GB เกิน {swap_limit} GB"
+        if data["swap_full"] else ""
+    )
     data["text"] = (f"แรม {ram_pct}% (ว่าง {data['ram_free_gb']} GB) · "
-                    f"เก็บของ {disk_pct}% (ว่าง {data['disk_free_gb']} GB)")
+                    f"เก็บของ {disk_pct}% (ว่าง {data['disk_free_gb']} GB) · "
+                    f"ที่ช้า {data['swap_used_gb']}/{swap_limit} GB")
     with _phone_health_lock:
         _phone_health_cache[serial] = (now, data)
     return data
@@ -2638,8 +2671,10 @@ def _clean_phone_when_free(serial: str) -> None:
     label = device_book.label(serial)
     _phone_cleaning.add(serial)
     try:
-        append_log("publish", f"หน่วยความจำ {label} เต็ม — ขอคิวเพื่อเคลียร์ "
-                              f"(ถ้ามีงานทำอยู่จะรอให้จบก่อน)")
+        why = (_read_phone_health(serial).get("why_clean") or "").strip()
+        append_log("publish", f"หน่วยความจำ {label} เต็ม"
+                              + (f" ({why})" if why else "")
+                              + " — ขอคิวเพื่อเคลียร์ ถ้ามีงานทำอยู่จะรอให้จบก่อน")
         with phone_queue.slot(serial, owner="ตัวเฝ้าหน่วยความจำ",
                               task="เคลียร์แรม/เนื้อที่", lane="ดูแลเครื่อง",
                               timeout=PHONE_CLEAN_WAIT):
@@ -2648,10 +2683,25 @@ def _clean_phone_when_free(serial: str) -> None:
                                  log=lambda text: append_log("publish", text))
             after = _read_phone_health(serial, force=True)
         _phone_cleaned_at[serial] = time.time()
+        # **ล้างแล้วไม่ดีขึ้น = อย่าล้างซ้ำถี่ๆ** (หลักการโปรเจกต์: retry ต้องเปลี่ยน
+        # อะไรบางอย่าง ไม่ใช่ยิงของเดิมซ้ำ) วัดจริง 25 ส.ค. 2569: เครื่องแรม 5.52 GB
+        # ที่ต้องเปิด Shopee ค้างไว้ 574 MB ล้างแล้วคืนได้แค่ ~0.01 GB เพราะของที่
+        # กินอยู่คือแอปงานกับระบบซึ่งปิดไม่ได้ — ปล่อยไว้จะกลายเป็นล้างทุก 30 นาที
+        # ตลอดไปโดยไม่ได้อะไร กินเวลาเครื่องและรบกวนคิวมือถือเปล่าๆ
+        gain = (after.get("ram_free_gb", 0) - before.get("ram_free_gb", 0)) \
+            + (before.get("swap_used_gb", 0) - after.get("swap_used_gb", 0))
+        if gain < PHONE_CLEAN_MIN_GAIN:
+            old = _phone_clean_backoff.get(serial, 1)
+            _phone_clean_backoff[serial] = min(old * 2, PHONE_CLEAN_BACKOFF_MAX)
+            extra = f" · ได้คืนแค่ {gain:.2f} GB จึงเว้นรอบหน้ายาวขึ้นเป็น " \
+                    f"{PHONE_CLEAN_COOLDOWN * _phone_clean_backoff[serial] / 60:.0f} นาที"
+        else:
+            _phone_clean_backoff[serial] = 1
+            extra = f" · ได้คืน {gain:.2f} GB"
         append_log("publish",
                    f"เคลียร์ {label} เสร็จ — แรม {before.get('ram_pct')}% → "
-                   f"{after.get('ram_pct')}% · เก็บของ {before.get('disk_pct')}% → "
-                   f"{after.get('disk_pct')}%")
+                   f"{after.get('ram_pct')}% · ที่ช้า {before.get('swap_used_gb')} → "
+                   f"{after.get('swap_used_gb')} GB{extra}")
     except Exception as error:              # noqa: BLE001
         # **ห้ามเงียบ** เคลียร์ไม่สำเร็จแล้วไม่บอก = เครื่องเต็มต่อไปโดยไม่มีใครรู้
         append_log("publish", f"เคลียร์ {label} ไม่สำเร็จ: {error}")
@@ -2666,7 +2716,8 @@ def _phone_memory_round() -> None:
             continue
         if serial in _phone_cleaning:
             continue
-        if time.time() - _phone_cleaned_at.get(serial, 0.0) < PHONE_CLEAN_COOLDOWN:
+        wait = PHONE_CLEAN_COOLDOWN * _phone_clean_backoff.get(serial, 1)
+        if time.time() - _phone_cleaned_at.get(serial, 0.0) < wait:
             continue
         health = _read_phone_health(serial)
         if health.get("ok") and health.get("need_clean") and not health.get("busy"):

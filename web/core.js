@@ -802,11 +802,11 @@ export async function pollHealth() {
           !device.need_clean,
           `📱 ${short} ${device.ram_pct}%`,
           `${device.label}\n${device.text}\n`
-          + `แรมที่ถูกดันไปเก็บในที่ช้า ${device.swap_used_gb} GB\n`
           + (device.need_clean
-            ? `⚠️ เกินเพดาน ${device.limit}% — ระบบจะเคลียร์ให้เอง `
+            ? `⚠️ ${device.why_clean || "เต็ม"} — ระบบจะเคลียร์ให้เอง `
               + "โดยรอจนงานที่ทำอยู่จบก่อน"
-            : `ยังไม่ถึงเพดาน ${device.limit}%`),
+            : `ยังไม่ถึงเพดาน (แรม ${device.limit}% · `
+              + `ที่ช้า ${device.swap_limit_gb} GB)`),
         );
         if (device.cleaning) {
           chip.textContent = `📱 ${short} กำลังเคลียร์…`;

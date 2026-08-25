@@ -104,9 +104,13 @@ input:focus, select:focus, textarea:focus {
 }
 .gear-button:hover { border-color: var(--accent); color: var(--accent-text); }
 
+/* คอลัมน์ซ้ายกว้าง 380px ตามปกติ — แต่ตอนกด "เท่าจริง" ต้องกว้างพอให้ภาพ
+   จากมือถือลงเต็มความละเอียด ไม่งั้น max-width จะบีบภาพลงแล้วคำว่าเท่าจริง
+   ก็ไม่จริง ค่าที่ต้องใช้ตั้งจาก JS (--phone-col) เพราะขึ้นกับมือถือแต่ละรุ่น
+   คุมเพดานไว้ 46vw ไม่ให้กินฝั่งขวาจนทำงานไม่ได้ */
 .layout {
   display: grid;
-  grid-template-columns: minmax(280px, 380px) 1fr;
+  grid-template-columns: minmax(280px, min(var(--phone-col, 380px), 46vw)) 1fr;
   gap: 16px;
   padding: 16px;
   align-items: start;
@@ -122,6 +126,33 @@ input:focus, select:focus, textarea:focus {
   position: sticky;
   top: 12px;
 }
+/* ปุ่มพับแถบมือถือ — เต็มความกว้าง กดง่ายด้วยนิ้วบนไอแพด */
+.panel-fold {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-deep);
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.panel-fold:hover { border-color: var(--accent); }
+.panel-fold .fold-arrow { transition: transform 0.15s ease; }
+.panel-fold .note { margin-left: auto; font-weight: normal; }
+.phone-panel.folded .panel-fold { margin-bottom: 0; }
+.phone-panel.folded .fold-arrow { transform: rotate(-90deg); }
+/* พับแล้วซ่อนทุกอย่างในแถบยกเว้นตัวปุ่มเอง — ไม่ต้องรื้อโครง HTML
+   ยกเว้น dialog ด้วย ไม่งั้นหน้าต่างตั้งค่าที่เปิดค้างอยู่จะหายไปทั้งอัน */
+.phone-panel.folded > *:not(.panel-fold):not(dialog) { display: none; }
+.phone-panel.folded { position: static; }
+
 .device-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
 .device-row select { flex: 1; min-width: 0; }
 
@@ -129,6 +160,47 @@ input:focus, select:focus, textarea:focus {
    ใช้ auto-fit ไม่ใช่จำนวนคอลัมน์ตายตัว เพราะจำนวนจอไม่จำกัด (3, 4, 5 ...) */
 .phone-screens { display: grid; grid-template-columns: 1fr; gap: 10px; }
 .phone-screens.many { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+
+/* ปุ่มเลือกจอ — [ทุกจอ] [จอ 1] [จอ 2] [จอ 3] จุดเขียว = เครื่องนั้นเสียบสายอยู่ */
+.screen-tabs { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.screen-tabs button {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.screen-tabs button.is-on {
+  border-color: #7aa2f7;
+  box-shadow: 0 0 0 2px rgba(122, 162, 247, 0.28);
+}
+.screen-tabs .tab-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--line); flex: none;
+}
+.screen-tabs button.is-ready .tab-dot { background: #7fae63; }
+/* ปุ่มขนาดไม่ต้องยืดเท่าปุ่มเลขจอ — ป้ายมันยาวกว่าอยู่แล้ว */
+.screen-tabs .size-tab { flex: 0 0 auto; }
+
+/* โหมดจอเดียว — ใหญ่เท่าที่หน้าต่างให้ได้จริง
+   ความสูงคำนวณสดด้วย JS (--solo-h) ห้ามใส่เลขตายตัว เพราะที่ว่างขึ้นกับ
+   ความสูงหัวจอ · แถบปุ่ม · แถบข้อความล่าง ซึ่งเปลี่ยนได้ทุกเมื่อ
+   ส่วนความกว้างปล่อยให้ aspect-ratio ของภาพจริงเป็นคนกำหนด */
+.phone-screens.solo { grid-template-columns: 1fr; }
+.phone-screens.solo .screen-viewer {
+  height: var(--solo-h, 60vh);
+  max-height: none;
+  width: auto;
+  max-width: 100%;
+  margin-inline: auto;
+}
+/* `.screen-card` ตั้ง display:flex ไว้ ซึ่งชนะ [hidden] ของเบราว์เซอร์
+   ถ้าไม่เขียนบรรทัดนี้ จอที่สั่งซ่อนจะยังโผล่อยู่ */
+.screen-card[hidden] { display: none; }
 .screen-card {
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -283,6 +355,56 @@ input:focus, select:focus, textarea:focus {
 .highlight-list { margin: 4px 0; padding-left: 20px; font-size: 12px; line-height: 1.7; }
 .highlight-list:empty::after { content: "ยังไม่มีจุดขาย"; opacity: 0.5; }
 .shopee-gallery:empty::after { content: "ไม่พบรูป"; opacity: 0.5; font-size: 12px; }
+
+/* ---------------------------------------- ตรวจของก่อนส่งไปทำคลิป (แก้ได้ทุกช่อง)
+   ตัวคัดอัตโนมัติเลือกผิดได้เสมอ ทุกอย่างที่ตาเห็นต้องแก้ได้ (หลักการข้อ 3) */
+.shopee-shot { position: relative; }
+/* ปุ่ม ✕ / ＋ บนมุมรูป — ต้องกดโดนง่ายบนมือถือ จึงไม่เล็กกว่า 22px */
+.shot-act {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 1;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 13px;
+  cursor: pointer;
+}
+.shot-act:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-text); }
+/* กองที่เขี่ยออกไว้ทำให้จางลง จะได้ไม่สับสนกับกองที่จะเอาไปใช้จริง */
+.shopee-gallery.is-spare img { opacity: 0.55; width: 60px; height: 60px; }
+.shopee-gallery.is-spare .shopee-shot { width: 60px; }
+
+/* จุดขาย: ช่องพิมพ์ + ปุ่มเอาออก อยู่บรรทัดเดียวกัน */
+.highlight-list li { margin-bottom: 4px; }
+.highlight-list li input {
+  width: calc(100% - 34px);
+  font-size: 12px;
+  padding: 3px 8px;
+  vertical-align: middle;
+}
+button.tiny {
+  padding: 2px 8px;
+  font-size: 13px;
+  line-height: 1.2;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+/* กองจุดขายสำรอง — ไม่ใส่เลขข้อ เพราะยังไม่ได้ถูกเลือกให้เป็นข้อที่เท่าไร */
+.spare-list { list-style: none; margin: 4px 0; padding: 0; font-size: 12px; }
+.spare-list li { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 4px; }
+.spare-list li span { flex: 1; min-width: 0; line-height: 1.6; opacity: 0.85; }
+.spare-list li button.tiny { margin-left: 0; flex: none; }
+
+/* เขี่ยรูปออกจนหมด = ทำคลิปไม่ได้ ต้องเห็นตั้งแต่ตอนนี้ ไม่ใช่ไปล้มตอนเจน */
+.note.warn { color: var(--danger); opacity: 1; font-weight: 600; }
+/* ตัดสินไปแล้ว = ทั้งกล่องแก้ไม่ได้ ต้องดูออกด้วยตาไม่ใช่แค่กดไม่ติด */
+#shopeeResult.locked { opacity: 0.75; }
+.decide-row { margin-top: 8px; gap: 8px; flex-wrap: wrap; }
 #shopeeResult { display: flex; flex-direction: column; gap: 8px; }
 
 /* เปิดจากมือถือ — QR + รายชื่ออุปกรณ์ที่ขอเข้าใช้ */

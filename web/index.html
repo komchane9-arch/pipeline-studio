@@ -25,6 +25,13 @@
     <main class="layout">
       <!-- (A) ซ้าย: Device no. + จอมือถือ -->
       <section class="phone-panel">
+        <!-- ปุ่มพับแถบมือถือทั้งแถบ — จำเป็นบนไอแพด/มือถือ เพราะจอแคบกว่า 900
+             จุด หน้าเว็บจะเรียงเป็นคอลัมน์เดียว แถบนี้เลยไปขวางอยู่ข้างบนทั้งหมด
+             ต้องเลื่อนผ่านจอมือถือ + ปุ่มลัด + ช่องลิงก์ ก่อนถึงงานที่จะทำจริง -->
+        <button id="phoneFold" class="panel-fold" type="button" aria-expanded="true">
+          <span class="fold-arrow">▾</span> จอมือถือ
+          <span id="phoneFoldHint" class="note"></span>
+        </button>
         <!-- จอมือถือหลายเครื่องพร้อมกัน
              จำนวนจอล้อตามเครื่องที่ "เปิดใช้" ในทะเบียน เสียบเครื่องที่ 3 แล้ว
              เปิดใช้ จอที่ 3 ขึ้นเอง ปุ่ม ＋ / − ไว้เพิ่ม-ลดด้วยมือเมื่อไม่อยากดูครบ
@@ -38,6 +45,10 @@
           <span id="screenCount" class="note">0/0 จอ</span>
           <button id="refreshDevices" class="ghost" type="button">รีเฟรช</button>
         </div>
+        <!-- ปุ่มเลือกจอ 1·2·3 — กดเลขไหนก็ดูจอนั้นใบเดียวเต็มความสูงที่จอคอมมีให้
+             เลขจอล้อตามลำดับในทะเบียน ไม่ใช่ลำดับที่เปิด "จอ 2" จึงหมายถึง
+             เครื่องเดิมเสมอ แม้จะปิดแล้วเปิดใหม่ (กติกาข้อ 8) -->
+        <div id="screenTabs" class="screen-tabs" role="tablist" hidden></div>
         <div id="phoneScreens" class="phone-screens"></div>
         <div id="screensEmpty" class="phone-placeholder" hidden>
           ยังไม่มีจอเปิดอยู่ — กด ＋ เพิ่มจอ หรือเปิดใช้มือถือจากปุ่ม ⚙ บนหัวจอ
@@ -257,18 +268,52 @@
                 <input id="shopeeAllImages" type="checkbox" />
                 เอารูปทั้งหมด <small>(ปกติเอาแค่ภาพรวม 1 ใบ + ตัวเลือกสีละ 1 ใบ)</small>
               </label>
+              <!-- ตรวจของก่อนส่งไปทำคลิป — แก้ได้ทุกอย่างที่ตาเห็น
+                   ตัวคัดอัตโนมัติเลือกชื่อ/รูป/จุดขายผิดได้เสมอ ของเดิมโชว์อย่างเดียว
+                   ผู้ใช้จึงต้องยอมรับของที่ผิดไปทั้งดุ้นหรือไม่ก็ทิ้งแล้วดึงใหม่ -->
               <div id="shopeeResult" hidden>
-                <strong id="shopeeName" class="mini-title"></strong>
-                <div id="shopeeGallery" class="shopee-gallery"></div>
+                <label class="mini-title" for="shopeeName">ชื่อสินค้า</label>
+                <input id="shopeeName" type="text" placeholder="ชื่อสินค้า" />
+
                 <strong class="mini-title">
-                  จุดขาย 3 ข้อ
+                  รูปที่จะเอาไปใช้
+                  <span id="shopeePickCount" class="note"></span>
+                </strong>
+                <div id="shopeeGallery" class="shopee-gallery"></div>
+                <details id="shopeeSpareWrap" hidden>
+                  <summary class="note">
+                    รูปที่เหลือ <span id="shopeeSpareCount"></span> — กด ＋ เอากลับมาใช้
+                  </summary>
+                  <div id="shopeeSpare" class="shopee-gallery is-spare"></div>
+                </details>
+
+                <strong class="mini-title">
+                  จุดขายที่จะเอาไปทำคลิป
                   <span id="approvalBadge" class="approval-badge" hidden></span>
                 </strong>
                 <ol id="shopeeHighlights" class="highlight-list"></ol>
-                <div id="approvalActions" class="inline-row" hidden>
-                  <button id="approveWeb" class="primary" type="button">อนุมัติ</button>
-                  <button id="rejectWeb" class="ghost danger" type="button">ไม่เอา</button>
+                <div class="inline-row">
+                  <button id="shopeeAddHighlight" class="ghost" type="button">
+                    ＋ เพิ่มข้อเปล่า
+                  </button>
+                  <span id="shopeeHighlightCount" class="note"></span>
                 </div>
+                <details id="shopeeExtraWrap" hidden>
+                  <summary class="note">
+                    จุดขายเพิ่มเติม <span id="shopeeExtraCount"></span> — กด ＋ เอาขึ้นไปใช้
+                  </summary>
+                  <ul id="shopeeExtra" class="spare-list"></ul>
+                </details>
+
+                <div id="approvalActions" class="inline-row decide-row" hidden>
+                  <button id="approveWeb" class="primary" type="button">
+                    ✅ อนุมัติ — ส่งไปทำสตอรีบอร์ด
+                  </button>
+                  <button id="rejectWeb" class="ghost danger" type="button">
+                    ✕ ยกเลิก ทิ้งงานนี้
+                  </button>
+                </div>
+                <p id="decideNote" class="note" aria-live="polite"></p>
                 <details>
                   <summary class="note">รายละเอียดเต็ม</summary>
                   <textarea id="shopeeDetail" rows="5" placeholder="รายละเอียดสินค้า"></textarea>

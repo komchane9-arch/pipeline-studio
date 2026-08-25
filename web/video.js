@@ -44,7 +44,137 @@ $("#excelSave").addEventListener("click", async () => {
 });
 
 // ------------------------------------------- ดึงข้อมูลจากลิงก์ Shopee
+//
+// **ตรวจของก่อนส่งไปทำคลิป** ตัวคัดอัตโนมัติเลือกรูป/จุดขายผิดได้เสมอ ของเดิม
+// หน้านี้โชว์อย่างเดียวแก้ไม่ได้ ผู้ใช้จึงต้องยอมรับของที่ผิดไปทั้งดุ้น หรือทิ้ง
+// แล้วดึงใหม่ (ซึ่งเสียเวลาครึ่งนาทีและโควตา AI ทุกครั้ง)
+//
+// ข้อมูลที่ต้องใช้มีครบอยู่แล้วตั้งแต่ตอนดึง — `picked` (รูปที่คัดมา) ·
+// `candidates` (รูปทั้งหมดที่โหลดไว้) · `highlights` (จุดขาย 3 ข้อ) ·
+// `features` (จุดขายเต็มรายการ ที่ตั้งใจเก็บไว้ให้สลับได้ตั้งแต่ 22 ส.ค. 2569
+// แต่ยังไม่เคยมีหน้าจอให้สลับ) ตรงนี้คือหน้าจอนั้น
 let shopeeData = null;
+// ของที่กำลังแก้อยู่ แยกจาก `shopeeData` ที่เป็นของดิบตอนดึงมา
+let pickedImages = [];      // รูปที่จะเอาไปใช้
+let spareImages = [];       // รูปที่เขี่ยออก ยังดึงกลับได้
+let liveHighlights = [];    // จุดขายที่จะเอาไปใช้
+let spareFeatures = [];     // จุดขายที่ AI หามาได้แต่ยังไม่ได้ใช้
+let canEditShopee = true;   // ตัดสินไปแล้ว = แก้ไม่ได้อีก
+
+const shopeeImageSrc = (file) =>
+  `/api/shopee/image?path=${encodeURIComponent(file)}`;
+
+/** การ์ดรูปหนึ่งใบ — mode "spare" คือกองที่เขี่ยออกไว้ ปุ่มจะเป็น ＋ แทน ✕ */
+function imageCard(image, index, mode) {
+  const box = document.createElement("figure");
+  box.className = `shopee-shot ${image.kind || ""}`;
+  const img = document.createElement("img");
+  // เสิร์ฟจากเครื่องเราเอง ไม่ดึงจาก Shopee ซ้ำตอนแสดงผล
+  img.src = shopeeImageSrc(image.file);
+  img.alt = image.label || `รูปที่ ${index + 1}`;
+  img.loading = "lazy";
+  const act = document.createElement("button");
+  act.type = "button";
+  act.className = "shot-act";
+  act.textContent = mode === "spare" ? "＋" : "✕";
+  act.title = mode === "spare" ? "เอารูปนี้กลับมาใช้" : "เอารูปนี้ออก";
+  act.disabled = !canEditShopee;
+  act.addEventListener("click", () => {
+    if (mode === "spare") {
+      spareImages = spareImages.filter((i) => i.file !== image.file);
+      pickedImages = [...pickedImages, image];
+    } else {
+      pickedImages = pickedImages.filter((i) => i.file !== image.file);
+      spareImages = [image, ...spareImages];
+    }
+    renderShopeeImages();
+  });
+  const caption = document.createElement("figcaption");
+  caption.textContent =
+    image.kind === "overview" ? "ภาพรวม" : (image.label || "ตัวเลือก");
+  caption.title = caption.textContent;
+  box.append(img, act, caption);
+  return box;
+}
+
+function renderShopeeImages() {
+  $("#shopeeGallery").replaceChildren(
+    ...pickedImages.map((image, index) => imageCard(image, index, "picked")),
+  );
+  $("#shopeeSpare").replaceChildren(
+    ...spareImages.map((image, index) => imageCard(image, index, "spare")),
+  );
+  const count = $("#shopeePickCount");
+  count.textContent = `${pickedImages.length} ใบ`;
+  // **เขี่ยรูปออกจนหมดแล้วทำคลิปไม่ได้** ต้องบอกตรงนี้ ไม่ใช่ปล่อยให้ไปล้ม
+  // ตอนเจนซึ่งเสียเวลาเป็นนาทีและเสียเครดิตไปแล้ว
+  count.classList.toggle("warn", pickedImages.length === 0);
+  $("#shopeeSpareCount").textContent = `${spareImages.length} ใบ`;
+  $("#shopeeSpareWrap").hidden = spareImages.length === 0;
+}
+
+function renderShopeeHighlights() {
+  $("#shopeeHighlights").replaceChildren(
+    ...liveHighlights.map((text, index) => {
+      const row = document.createElement("li");
+      const field = document.createElement("input");
+      field.type = "text";
+      field.value = text;
+      field.placeholder = "พิมพ์จุดขาย";
+      field.disabled = !canEditShopee;
+      field.addEventListener("input", () => {
+        liveHighlights[index] = field.value;
+      });
+      const drop = document.createElement("button");
+      drop.type = "button";
+      drop.className = "ghost tiny";
+      drop.textContent = "−";
+      drop.title = "เอาข้อนี้ออก (ไปกองเพิ่มเติม ดึงกลับได้)";
+      drop.disabled = !canEditShopee;
+      drop.addEventListener("click", () => {
+        const [gone] = liveHighlights.splice(index, 1);
+        if (gone && gone.trim()) spareFeatures = [gone, ...spareFeatures];
+        renderShopeeHighlights();
+        renderShopeeExtra();
+      });
+      row.append(field, drop);
+      return row;
+    }),
+  );
+  $("#shopeeHighlightCount").textContent = `${liveHighlights.length} ข้อ`;
+}
+
+function renderShopeeExtra() {
+  $("#shopeeExtra").replaceChildren(
+    ...spareFeatures.map((text, index) => {
+      const row = document.createElement("li");
+      const take = document.createElement("button");
+      take.type = "button";
+      take.className = "ghost tiny";
+      take.textContent = "＋";
+      take.title = "เอาข้อนี้ขึ้นไปใช้";
+      take.disabled = !canEditShopee;
+      take.addEventListener("click", () => {
+        spareFeatures.splice(index, 1);
+        liveHighlights = [...liveHighlights, text];
+        renderShopeeHighlights();
+        renderShopeeExtra();
+      });
+      const label = document.createElement("span");
+      label.textContent = text;
+      row.append(take, label);
+      return row;
+    }),
+  );
+  $("#shopeeExtraCount").textContent = `${spareFeatures.length} ข้อ`;
+  $("#shopeeExtraWrap").hidden = spareFeatures.length === 0;
+}
+
+$("#shopeeAddHighlight")?.addEventListener("click", () => {
+  liveHighlights = [...liveHighlights, ""];
+  renderShopeeHighlights();
+  $("#shopeeHighlights").querySelector("li:last-child input")?.focus();
+});
 
 $("#shopeeFetch").addEventListener("click", async () => {
   const link = $("#shopeeLink").value.trim();
@@ -60,32 +190,27 @@ $("#shopeeFetch").addEventListener("click", async () => {
       body: JSON.stringify({ link, all_images: $("#shopeeAllImages").checked }),
     });
     shopeeData = payload;
-    $("#shopeeName").textContent = payload.name;
+    pickedImages = [...(payload.picked || [])];
+    // รูปที่เหลือ = ที่โหลดมาทั้งหมด ลบที่ถูกคัดไว้แล้วออก
+    const taken = new Set(pickedImages.map((image) => image.file));
+    spareImages = (payload.candidates || []).filter((i) => !taken.has(i.file));
+    liveHighlights = [...(payload.highlights || [])];
+    // จุดขายเพิ่มเติม = รายการเต็มที่ AI หามาได้ ลบข้อที่ถูกเลือกไปแล้วออก
+    const used = new Set(liveHighlights.map((text) => String(text).trim()));
+    spareFeatures = (payload.features || [])
+      .map((text) => String(text).trim())
+      .filter((text) => text && !used.has(text));
+    $("#shopeeName").value = payload.name || "";
     $("#shopeeDetail").value = payload.detail || "";
-    $("#shopeeGallery").replaceChildren(
-      ...(payload.picked || []).map((image, index) => {
-        const box = document.createElement("figure");
-        box.className = `shopee-shot ${image.kind}`;
-        const img = document.createElement("img");
-        // เสิร์ฟจากเครื่องเราเอง ไม่ดึงจาก Shopee ซ้ำตอนแสดงผล
-        img.src = `/api/shopee/image?path=${encodeURIComponent(image.file)}`;
-        img.alt = image.label || `รูปที่ ${index + 1}`;
-        img.loading = "lazy";
-        const caption = document.createElement("figcaption");
-        caption.textContent =
-          image.kind === "overview" ? "ภาพรวม" : (image.label || "ตัวเลือก");
-        caption.title = caption.textContent;
-        box.append(img, caption);
-        return box;
-      }),
-    );
-    $("#shopeeHighlights").replaceChildren(
-      ...(payload.highlights || []).map((text) => {
-        const item = document.createElement("li");
-        item.textContent = text;
-        return item;
-      }),
-    );
+    $("#decideNote").textContent = "";
+    // ดึงสินค้าชิ้นใหม่ = เริ่มแก้ได้ใหม่ ไม่ติดล็อกจากชิ้นก่อนที่ตัดสินไปแล้ว
+    canEditShopee = true;
+    $("#shopeeResult").classList.remove("locked");
+    $("#shopeeName").disabled = false;
+    $("#shopeeAddHighlight").disabled = false;
+    renderShopeeImages();
+    renderShopeeHighlights();
+    renderShopeeExtra();
     $("#shopeeFolder").textContent = `เก็บรูปไว้ที่ ${payload.folder}`;
     $("#shopeeResult").hidden = false;
     watchApproval(payload.approval);
@@ -122,15 +247,14 @@ function paintApproval(entry) {
   badge.className = `approval-badge ${entry.status}`;
   // ปุ่มบนหน้าเว็บเป็นทางสำรอง โผล่เฉพาะตอนที่ยังไม่ตัดสิน
   actions.hidden = entry.status !== "pending";
+  // ตัดสินไปแล้วต้องแก้ไม่ได้ — ของเดิมยังพิมพ์ทับได้ทั้งที่กดอนุมัติไปแล้ว
+  // ผู้ใช้จะนึกว่าที่แก้ถูกบันทึก ทั้งที่ขั้นถัดไปหยิบของตอนกดอนุมัติไปใช้แล้ว
+  setShopeeEditable(entry.status === "pending");
+  // อนุมัติจาก Telegram แล้วแก้ข้อความมาด้วย ต้องเอามาแสดงให้ตรงกัน
   if (entry.status === "approved" && Array.isArray(entry.highlights)) {
     shopeeData = { ...(shopeeData || {}), highlights: entry.highlights };
-    $("#shopeeHighlights").replaceChildren(
-      ...entry.highlights.map((text) => {
-        const item = document.createElement("li");
-        item.textContent = text;
-        return item;
-      }),
-    );
+    liveHighlights = [...entry.highlights];
+    renderShopeeHighlights();
   }
 }
 
@@ -150,14 +274,87 @@ function watchApproval(entry) {
   }, 3000);
 }
 
+/** ล็อกการแก้หลังตัดสินแล้ว — เรียกซ้ำได้ ปุ่มถูกสร้างใหม่ทุกครั้งที่วาด */
+function setShopeeEditable(on) {
+  canEditShopee = on;
+  $("#shopeeResult").classList.toggle("locked", !on);
+  $("#shopeeName").disabled = !on;
+  $("#shopeeAddHighlight").disabled = !on;
+  renderShopeeImages();
+  renderShopeeHighlights();
+  renderShopeeExtra();
+}
+
 async function decide(status) {
   if (!approvalId) return;
-  const fresh = await api(`/api/approvals/${approvalId}`, {
-    method: "POST",
-    body: JSON.stringify({ status }),
-  });
-  paintApproval(fresh);
-  if (approvalTimer) window.clearInterval(approvalTimer);
+  const note = $("#decideNote");
+  const product = $("#shopeeName").value.trim();
+  const highlights = liveHighlights.map((t) => t.trim()).filter(Boolean);
+  // **ด่านก่อนส่ง** ปล่อยของไม่ครบไปขั้นถัดไป = เสียเวลาเจนแล้วล้มกลางทาง
+  if (status === "approved") {
+    const missing = !product ? "ชื่อสินค้า"
+      : !highlights.length ? "จุดขายอย่างน้อย 1 ข้อ"
+        : !pickedImages.length ? "รูปอย่างน้อย 1 ใบ" : "";
+    if (missing) {
+      note.textContent = `ยังส่งไม่ได้ — ต้องมี${missing}ก่อน`;
+      return;
+    }
+  }
+  $("#approveWeb").disabled = true;
+  $("#rejectWeb").disabled = true;
+  note.textContent = status === "approved"
+    ? "กำลังบันทึกที่แก้ แล้วส่งไปทำสตอรีบอร์ด…" : "กำลังยกเลิก…";
+  try {
+    const fresh = await api(`/api/approvals/${approvalId}`, {
+      method: "POST",
+      body: JSON.stringify({
+        status,
+        product,
+        highlights,
+        images: pickedImages.map((image) => image.file),
+        features: spareFeatures,
+      }),
+    });
+    // ขั้นถัดไปในหน้านี้ (ช่องสินค้าเดียว · ขั้น GEMS) ต้องได้ของที่แก้แล้ว
+    shopeeData = {
+      ...(shopeeData || {}),
+      name: product,
+      highlights,
+      picked: pickedImages,
+      saved_images: pickedImages.map((image) => image.file),
+    };
+    paintApproval(fresh);
+    if (approvalTimer) window.clearInterval(approvalTimer);
+    if (status === "approved") await sendToStoryboard(note);
+    else note.textContent = "ยกเลิกแล้ว — รูปที่โหลดมายังอยู่ในเครื่องและบน Drive ไม่ได้ลบ";
+  } catch (error) {
+    note.textContent = error.message;
+  } finally {
+    $("#approveWeb").disabled = false;
+    $("#rejectWeb").disabled = false;
+  }
+}
+
+/** ส่งเข้าคิวสตอรีบอร์ดของสายคลิป (คนละเซิร์ฟเวอร์ พอร์ต 8877) */
+async function sendToStoryboard(note) {
+  const link = shopeeData?.url || "";
+  if (!link) {
+    note.textContent = "บันทึกแล้ว — แต่ไม่มีลิงก์สินค้าให้ส่งต่อ "
+      + "สั่งเองได้ที่แท็บสตอรีบอร์ด";
+    return;
+  }
+  try {
+    const payload = await api(`${CLIP_API}/api/jobs`, {
+      method: "POST",
+      body: JSON.stringify({ links: link }),
+    });
+    note.textContent = "✅ อนุมัติแล้ว · ส่งเข้าคิวสตอรีบอร์ดแล้ว "
+      + `(ค้างในคิวทั้งหมด ${payload.waiting} งาน)`;
+  } catch (error) {
+    // **ห้ามเงียบ** บันทึกสำเร็จแต่ส่งต่อไม่สำเร็จ ถ้าไม่บอกจะนั่งรอคลิปที่ไม่มีวันมา
+    note.textContent = "อนุมัติและบันทึกแล้ว แต่ส่งเข้าคิวสตอรีบอร์ดไม่สำเร็จ: "
+      + error.message;
+  }
 }
 
 $("#approveWeb").addEventListener("click", () => decide("approved"));
@@ -165,10 +362,13 @@ $("#rejectWeb").addEventListener("click", () => decide("rejected"));
 
 $("#shopeeUse").addEventListener("click", () => {
   if (!shopeeData) return;
-  $("#singleName").value = shopeeData.name;
-  // ส่งจุดขาย 3 ข้อไปให้ขั้นเจน ไม่ใช่รายละเอียดดิบ 5 พันตัวอักษร
+  // ต้องหยิบ**ของที่ผู้ใช้แก้อยู่ตรงหน้า** ไม่ใช่ของดิบตอนดึงมา
+  // ของเดิมหยิบ shopeeData.name เสมอ แก้ชื่อแล้วกดปุ่มนี้จะได้ชื่อเก่ากลับมา
+  $("#singleName").value = $("#shopeeName").value.trim() || shopeeData.name || "";
+  // ส่งจุดขายไปให้ขั้นเจน ไม่ใช่รายละเอียดดิบ 5 พันตัวอักษร
   // (prompt ที่ยาวเกินทำให้ Gemini หลุดประเด็นไปพูดเรื่องใบกำกับภาษี)
-  const highlights = (shopeeData.highlights || []).join("\n");
+  const highlights = liveHighlights
+    .map((text) => text.trim()).filter(Boolean).join("\n");
   $("#singleDetail").value = highlights || $("#shopeeDetail").value;
   // เปิดบล็อกสินค้าเดียวให้เห็นว่าค่าถูกใส่แล้วจริง
   const block = [...document.querySelectorAll("#tab-input details.block")]

@@ -162,8 +162,13 @@ class PhoneScreen {
       // **ต้องบอกให้ชัดว่าทำไม** ภาพนิ่งช้ากว่าท่อวิดีโอราว 9 เท่า
       // (วัดจริง 22 ส.ค. 2569: ท่อวิดีโอ 169 ms/ภาพ · ภาพนิ่ง ~1,500 ms/ภาพ)
       // ถ้าตกมาทางนี้เงียบๆ ผู้ใช้จะนึกว่าระบบพังทั้งที่แค่เลือกทางผิด
-      this.say("⚠️ เบราว์เซอร์นี้ใช้ท่อวิดีโอไม่ได้ (ไม่มี WebCodecs) — "
-        + "ใช้ภาพนิ่งซึ่งช้ากว่ามาก · เปิดหน้านี้ผ่าน http://127.0.0.1:8866 จะใช้ท่อเร็วได้");
+      // **ห้ามบอกที่อยู่ที่คนอ่านเปิดไม่ได้** ของเดิมบอกให้ไปเปิด 127.0.0.1:8866
+      // ซึ่งแปลว่า "เครื่องตัวเอง" — คนที่นั่งอยู่คอมอีกเครื่องเปิดแล้วเจอหน้า error
+      // แน่นอน เพราะเครื่องเขาไม่มีอะไรฟังพอร์ตนั้น (เจอจริง 25 ส.ค. 2569
+      // เสียเวลาไล่ผิดทางเพราะข้อความนี้) ต้องบอกทางที่ใช้ได้จากตรงไหนก็ได้
+      this.say("⚠️ เบราว์เซอร์ปิดท่อวิดีโอเพราะหน้านี้ไม่ได้เปิดแบบปลอดภัย — "
+        + "ใช้ภาพนิ่งซึ่งช้ากว่า 8 เท่า · เปิดหน้านี้ด้วย https:// "
+        + "หรือเปิดบนเครื่องหลักที่ http://127.0.0.1:8866 จะได้ท่อเร็ว");
       this.startPolling();
     }
   }
@@ -396,6 +401,9 @@ class PhoneScreen {
     const ratio = `${width} / ${height}`;
     if (this.viewer.style.aspectRatio === ratio) return;
     this.viewer.style.aspectRatio = ratio;
+    // ขนาดภาพจริงเพิ่งรู้ตอนเฟรมแรกมาถึง — โหมด "เท่าจริง" ใช้ตัวเลขนี้คิดความสูง
+    // ถ้าไม่คิดใหม่ตรงนี้ จอจะค้างขนาดที่เดาไว้ก่อนรู้ความละเอียดจริง
+    sizeSolo();
   }
 
   /** ภาพที่กำลังแสดงอยู่ (canvas สตรีม หรือ img ภาพนิ่ง) */
@@ -586,12 +594,242 @@ function removeScreen(serial) {
 function syncCount() {
   const shown = screens.size;
   const total = deviceRows.filter((d) => d.enabled).length;
-  screensBox.classList.toggle("many", shown > 1);
   screensBox.dataset.count = String(shown);
   $("#screenCount").textContent = `${shown}/${total} จอ`;
   $("#removeScreen").disabled = shown === 0;
   $("#addScreen").disabled = shown >= total;
   $("#screensEmpty").hidden = shown > 0;
+  // ต้องมาหลังนับเสมอ — ปุ่มเลือกจอกับการซ่อน/โชว์อ่านจำนวนจอไปใช้
+  applyView();
+  renderTabs();
+}
+
+// ------------------------------------------------------- ปุ่มเลือกจอ 1·2·3
+//
+// **ทำไมต้องมี** ยัดสามจอลงคอลัมน์กว้าง 380px ได้จอละ ~150px กว้าง ซึ่งเล็กจน
+// อ่านตัวหนังสือบนมือถือไม่ออกและกดปุ่มพลาดง่าย (วัดจริง 25 ส.ค. 2569:
+// แสดงผลได้ 153x341 ทั้งที่ภาพที่ส่งมาคือ 460x1024)
+//
+// **เลขจอต้องหมายถึงเครื่องเดิมเสมอ** จึงเรียงตามลำดับในทะเบียน ไม่ใช่ลำดับที่
+// เปิดจอ ปิด "จอ 2" แล้วเปิดใหม่มันต้องยังเป็นจอ 2 ไม่ใช่ไหลไปเป็นจอสุดท้าย
+// (กติกาข้อ 8 — ห้าม hardcode เลข 1/2/3 ทุกที่ต้องวนตามรายชื่อจริงในทะเบียน)
+const VIEW_KEY = "phoneView";       // "all" = เรียงทุกจอ · หรือ serial ของจอที่เลือก
+const SIZE_KEY = "phoneSize";       // "fit" = พอดีหน้าต่าง · "full" = เท่าภาพจริง
+// เผื่อไว้ใต้จอให้บรรทัดคำใบ้ยังโผล่พ้นขอบล่าง — ไม่ใช่ที่อยู่ของทุกอย่างข้างล่าง
+const SOLO_TAIL_GAP = 56;
+// เตี้ยกว่านี้ก็ไม่มีประโยชน์แล้ว ยอมให้หน้าเลื่อนดีกว่าได้จอจิ๋ว
+const SOLO_MIN_HEIGHT = 240;
+const tabsBox = $("#screenTabs");
+let viewMode = localStorage.getItem(VIEW_KEY) || "";
+let sizeMode = localStorage.getItem(SIZE_KEY) || "fit";
+
+/** จอทั้งหมดเรียงตามลำดับในทะเบียน — คือที่มาของเลข "จอ 1 · 2 · 3" */
+function screenOrder() {
+  const rank = new Map(
+    deviceRows.filter((d) => d.enabled).map((d, i) => [d.serial, i]),
+  );
+  return [...screens.keys()].sort(
+    (a, b) => (rank.get(a) ?? 999) - (rank.get(b) ?? 999),
+  );
+}
+
+function isReady(serial) {
+  const row = deviceRows.find((d) => d.serial === serial);
+  return !row || row.ready !== false;
+}
+
+/** จอที่จะโชว์ใบเดียว — คืนค่าว่างแปลว่าโหมดเรียงทุกจอ */
+function soloTarget(order) {
+  if (viewMode === "all") return "";
+  // เลือกไว้เองต้องได้ตามนั้นเสมอ แม้เครื่องจะถอดสายอยู่ — ของที่ผู้ใช้สั่งเอง
+  // ห้ามระบบเปลี่ยนให้เงียบๆ ไม่งั้นเสียบสายกลับมาแล้วงงว่าทำไมไปอยู่จออื่น
+  if (screens.has(viewMode)) return viewMode;
+  // มีจอเดียวก็ใหญ่ไปเลย ไม่ต้องให้กดอะไร — จะเรียงกับใครก็ไม่มี
+  if (order.length === 1) return order[0];
+  // **ยังไม่เคยเลือก → ต้องเปิดเครื่องที่เสียบสายอยู่ให้** ของเดิมหยิบตัวแรกใน
+  // ทะเบียน ซึ่งบังเอิญเป็นเครื่องที่ถอดสายไว้ ผู้ใช้เปิดหน้าเว็บมาเจอจอเปล่า
+  // แล้วนึกว่าระบบพัง ทั้งที่มีอีกเครื่องพร้อมใช้อยู่
+  if (focused && screens.has(focused) && isReady(focused)) return focused;
+  return order.find(isReady) || focused || order[0] || "";
+}
+
+function setView(key) {
+  viewMode = key;
+  try { localStorage.setItem(VIEW_KEY, key); } catch { /* โหมดส่วนตัวเขียนไม่ได้ */ }
+  applyView();
+  renderTabs();
+}
+
+function applyView() {
+  const order = screenOrder();
+  const solo = soloTarget(order);
+  screensBox.classList.toggle("solo", Boolean(solo));
+  screensBox.classList.toggle("many", !solo && screens.size > 1);
+  for (const [serial, screen] of screens) {
+    screen.card.hidden = Boolean(solo) && serial !== solo;
+  }
+  // จอที่เห็นอยู่ต้องเป็นจอที่ปุ่มลัด/ช่องพิมพ์/การเทรนตำแหน่งจะไปลงด้วย
+  // ไม่งั้นกดปุ่มแล้วไปโผล่เครื่องที่มองไม่เห็นอยู่ = ความเสียหายที่กู้ไม่ได้
+  if (solo) focus(solo);
+  sizeSolo();
+  // การ์ดที่เพิ่งถูกสร้างยังไม่ถูกจัดวาง วัดความสูงตอนนี้จะได้ 0 แล้วจอค้างขนาดสำรอง
+  // วัดซ้ำหลังเบราว์เซอร์จัดวางเสร็จอีกรอบ
+  requestAnimationFrame(sizeSolo);
+}
+
+function makeTab(key, text, serial) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost";
+  button.classList.toggle("is-on", key === screensBox.dataset.view);
+  if (serial) {
+    const row = deviceRows.find((d) => d.serial === serial);
+    button.classList.toggle("is-ready", !row || row.ready !== false);
+    button.title = labelOf(serial)
+      + (row && row.ready === false ? " — ยังไม่ได้เสียบสาย" : "");
+    const dot = document.createElement("span");
+    dot.className = "tab-dot";
+    button.append(dot);
+  } else {
+    button.title = "เรียงทุกจอให้เห็นพร้อมกัน (จอจะเล็กลง)";
+  }
+  button.append(document.createTextNode(text));
+  button.addEventListener("click", () => setView(key));
+  return button;
+}
+
+/** ปุ่มสลับขนาด — ป้ายบอก "จะไปโหมดไหน" ไม่ใช่ "ตอนนี้อยู่โหมดไหน" */
+function makeSizeButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost size-tab";
+  const toFull = sizeMode !== "full";
+  button.textContent = toFull ? "⤢ เท่าจริง" : "⤡ พอดีหน้าต่าง";
+  button.title = toFull
+    ? "โชว์เท่าความละเอียดที่มือถือส่งมาจริง — หน้าต่างเตี้ยกว่านั้นต้องเลื่อนหน้าดู"
+    : "ย่อให้พอดีหน้าต่าง ไม่ต้องเลื่อนหน้า";
+  button.addEventListener("click", () => {
+    sizeMode = toFull ? "full" : "fit";
+    try { localStorage.setItem(SIZE_KEY, sizeMode); } catch { /* โหมดส่วนตัวเขียนไม่ได้ */ }
+    sizeSolo();
+    renderTabs();
+  });
+  return button;
+}
+
+function renderTabs() {
+  if (!tabsBox) return;
+  const order = screenOrder();
+  tabsBox.hidden = order.length === 0;
+  if (tabsBox.hidden) { tabsBox.replaceChildren(); return; }
+  const solo = soloTarget(order);
+  screensBox.dataset.view = solo || "all";
+  const items = [];
+  // จอเดียวไม่มีอะไรให้สลับ — ปุ่มที่กดแล้วไม่เกิดอะไรมีแต่ทำให้สับสน
+  if (order.length > 1) {
+    items.push(makeTab("all", "ทุกจอ", ""));
+    for (const [index, serial] of order.entries()) {
+      items.push(makeTab(serial, `จอ ${index + 1}`, serial));
+    }
+  }
+  // ปุ่มขนาดใช้ได้เฉพาะตอนดูจอเดียว — เรียงทุกจอแล้วขยายทีละใบไม่ได้อยู่แล้ว
+  if (solo) items.push(makeSizeButton());
+  tabsBox.replaceChildren(...items);
+}
+
+/** ขอบซ้าย-ขวารวมที่กินพื้นที่ไปจากคอลัมน์ (แผง + การ์ด + กรอบจอ)
+ *  ทั้งหน้าใช้ box-sizing: border-box ตัวเลขนี้จึงบวกตรงๆ กับความกว้างภาพได้ */
+function sideChrome(panel, card) {
+  const sum = (el, ...names) => names.reduce((total, name) => {
+    const value = parseFloat(getComputedStyle(el)[name]);
+    return total + (Number.isFinite(value) ? value : 0);
+  }, 0);
+  return sum(panel, "paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth")
+    + sum(card, "paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth")
+    + 2;   // กรอบของตัวจอเอง 1px สองข้าง
+}
+
+/** ตั้งความสูงจอเดียวให้เต็มที่ว่างจริง — วัดสดทุกครั้ง ไม่ใช้เลขตายตัว */
+function sizeSolo() {
+  // พับแถบเก็บอยู่ วัดอะไรก็ได้ 0 หมด แล้วจะไปตั้งความสูงเป็นค่าต่ำสุดค้างไว้
+  if (screensBox.closest(".phone-panel")?.classList.contains("folded")) return;
+  if (!screensBox.classList.contains("solo")) {
+    screensBox.style.removeProperty("--solo-h");
+    document.body.style.removeProperty("--phone-col");
+    return;
+  }
+  const screen = [...screens.values()].find((s) => !s.card.hidden);
+  if (!screen) return;
+  const panel = screensBox.closest(".phone-panel") || screensBox.parentElement;
+  // เต็มขนาด = โชว์เท่าความละเอียดที่เครื่องส่งมาจริง ไม่ย่อสักพิกเซล
+  // หน้าต่างเตี้ยกว่านั้นก็ปล่อยให้หน้าเลื่อนเอา ดีกว่าบีบจนอ่านตัวหนังสือไม่ออก
+  if (sizeMode === "full" && screen.canvas && screen.canvas.height > 1) {
+    screensBox.style.setProperty("--solo-h", `${screen.canvas.height}px`);
+    // **คอลัมน์ต้องกว้างพอด้วย** ไม่งั้น max-width บีบภาพลง แล้วอัตราส่วนก็ลาก
+    // ความสูงลงตาม = กดว่า "เท่าจริง" แล้วได้ไม่เท่าจริง
+    // คิดจากขอบจริงที่วัดได้ ไม่ใช่เลขตายตัว เพราะมือถือแต่ละรุ่นกว้างไม่เท่ากัน
+    document.body.style.setProperty(
+      "--phone-col",
+      `${screen.canvas.width + sideChrome(panel, screen.card) + 4}px`,
+    );
+    return;
+  }
+  document.body.style.removeProperty("--phone-col");
+  const card = screen.card.getBoundingClientRect();
+  const viewer = screen.viewer.getBoundingClientRect();
+  if (!card.height) return;
+  // ส่วนของการ์ดที่ไม่ใช่ตัวจอ (หัวจอ + แถบปุ่มล่าง + ขอบ) — เปลี่ยนได้ตามข้อความ
+  const chrome = card.height - viewer.height;
+  // **ต้องวัดจากตำแหน่งที่แผงจะไป "ติดหนึบ" ไม่ใช่ตำแหน่งตอนนี้**
+  // แผงมือถือเป็น sticky พอเลื่อนหน้าลงมันจะขึ้นไปติดขอบบนแล้วมีที่ว่างเพิ่มอีกมาก
+  // ถ้าวัดจากตำแหน่งตอนเพิ่งเปิดหน้า (ยังไม่เลื่อน · มีแถบเตือนเวอร์ชันคั่น)
+  // จะได้จอเตี้ยค้างไว้ตลอด — เจอจริงรอบแรก: คำนวณได้ 240px ทั้งที่มีที่ว่าง 460px
+  //
+  // และ **ห้ามเอาของใต้ตารางจอมานับ** ปุ่มลัด · ช่องลิงก์ · ช่องแคปชัน อยู่ใต้
+  // ลงไปทั้งแถบและเลื่อนดูได้ ถ้านับมันด้วยจะเหลือที่ว่างติดลบทุกครั้ง
+  const stickyTop = parseFloat(getComputedStyle(panel).top) || 0;
+  const above = screensBox.getBoundingClientRect().top
+    - panel.getBoundingClientRect().top;
+  const room = window.innerHeight - stickyTop - above - chrome - SOLO_TAIL_GAP;
+  screensBox.style.setProperty(
+    "--solo-h", `${Math.max(SOLO_MIN_HEIGHT, Math.round(room))}px`,
+  );
+}
+
+// ย่อ/ขยายหน้าต่างแล้วจอต้องโตตาม ไม่ใช่ค้างขนาดเดิมจนล้นออกนอกหน้าจอ
+window.addEventListener("resize", sizeSolo);
+
+// ------------------------------------------------- พับแถบมือถือทั้งแถบ
+//
+// **จำเป็นบนไอแพด** จอแคบกว่า 900 จุดหน้าเว็บจะเรียงเป็นคอลัมน์เดียว แถบมือถือ
+// จึงไปกองอยู่ข้างบนทั้งหมด ต้องเลื่อนผ่านจอมือถือ + ปุ่มลัด + ช่องลิงก์ + ช่อง
+// แคปชัน + Wi-Fi ก่อนจะถึงงานที่ตั้งใจจะมาทำจริง — พับเก็บได้จบเรื่อง
+const FOLD_KEY = "phoneFold";
+// ตรงกับจุดที่ styles.css สลับเป็นคอลัมน์เดียว ถ้าแก้ที่นั่นต้องแก้ที่นี่ด้วย
+const NARROW_PX = 900;
+const foldButton = $("#phoneFold");
+const phonePanel = screensBox.closest(".phone-panel");
+
+function applyFold(folded) {
+  if (!phonePanel || !foldButton) return;
+  phonePanel.classList.toggle("folded", folded);
+  foldButton.setAttribute("aria-expanded", String(!folded));
+  const hint = $("#phoneFoldHint");
+  if (hint) hint.textContent = folded ? "แตะเพื่อกางออก" : "แตะเพื่อพับเก็บ";
+  // กางออกแล้วต้องคิดความสูงจอใหม่ — ตอนพับอยู่วัดอะไรก็ได้ 0 ทั้งหมด
+  if (!folded) sizeSolo();
+}
+
+if (foldButton && phonePanel) {
+  let saved = null;
+  try { saved = localStorage.getItem(FOLD_KEY); } catch { /* โหมดส่วนตัว */ }
+  // ยังไม่เคยเลือกเอง: จอแคบพับไว้ก่อน (ไอแพด/มือถือ) จอกว้างกางไว้เหมือนเดิม
+  applyFold(saved === null ? window.innerWidth <= NARROW_PX : saved === "1");
+  foldButton.addEventListener("click", () => {
+    const next = !phonePanel.classList.contains("folded");
+    try { localStorage.setItem(FOLD_KEY, next ? "1" : "0"); } catch { /* ไม่เป็นไร */ }
+    applyFold(next);
+  });
 }
 
 /** เปิดจอให้ครบตามเครื่องที่เปิดใช้จริง — เพิ่มเครื่องที่ 3 ก็ได้จอที่ 3 เอง */
@@ -635,7 +873,14 @@ $("#removeScreen").addEventListener("click", () => {
 });
 
 $("#refreshDevices").addEventListener("click", () => loadDevices());
-deviceSelect.addEventListener("change", () => focus(deviceSelect.value));
+deviceSelect.addEventListener("change", () => {
+  focus(deviceSelect.value);
+  // เลือกเครื่องจากช่องนี้ตอนกำลังดูจอเดียว ต้องสลับจอที่โชว์ตามไปด้วย
+  // ไม่งั้นเลือกเครื่องหนึ่งแต่ตายังเห็นอีกเครื่อง แล้วกดปุ่มลัดผิดตัว
+  if (viewMode !== "all" && screens.has(deviceSelect.value)) {
+    setView(deviceSelect.value);
+  }
+});
 
 export async function loadDevices() {
   try {

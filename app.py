@@ -1953,6 +1953,32 @@ def _websocket_is_local(websocket: WebSocket) -> bool:
     return host in {"127.0.0.1", "::1", "localhost"}
 
 
+def _websocket_is_allowed(websocket: WebSocket) -> bool:
+    """เครื่องหลัก **หรือ** เครื่องที่อนุมัติแล้ว เปิดท่อเร็วได้
+
+    เดิมด่านนี้รับแค่ 127.0.0.1 เขียนไว้ตั้งแต่ commit แรก (13 ส.ค. 2569)
+    ตอนที่ยังไม่มีระบบอนุมัติเครื่อง พอมีระบบแล้วไม่มีใครกลับมาต่อให้
+    ผลคือคอมเครื่องที่สองซึ่ง **อนุมัติผ่านแล้ว** ถูกไล่ตั้งแต่ยังไม่ทันเปิดท่อ
+    แล้วตกไปใช้ภาพนิ่งเงียบๆ โดยหน้าเว็บโทษว่าเบราว์เซอร์ไม่รองรับ
+
+    วัดจริง 25 ส.ค. 2569 จากคอมเครื่องที่สอง: ภาพนิ่ง 1,380 ms/ภาพ ·
+    ท่อวิดีโอ 169 ms/ภาพ = ช้ากว่า 8 เท่า · ท่อนิ้วก็โดนกฎเดียวกัน
+    ทำให้ส่งได้ ~50 ครั้ง/วินาที แทนที่จะเป็น 120-240
+
+    **ไม่ได้เปิดสิทธิ์อะไรใหม่** — เครื่องที่อนุมัติแล้วดูจอและแตะจอได้อยู่ก่อนแล้ว
+    ผ่าน /api/screen · /api/phone/touch · /api/phone/swipe ซึ่งไม่มีด่านนี้กั้น
+    ด่านนี้จึงกันได้แค่ "ความเร็ว" ไม่ได้กัน "สิทธิ์" — เป็นด่านที่ทำร้ายเจ้าของ
+    โดยไม่กันใครเลย ใบเดียวกับหน้าเว็บ (gate_remote_devices) คือใบที่ถูกต้อง
+    """
+    if _websocket_is_local(websocket):
+        return True
+    token = websocket.cookies.get(
+        access_control.ACCESS_COOKIE, ""
+    ) or websocket.headers.get(access_control.ACCESS_TOKEN_HEADER, "")
+    record = access_store.find_by_token(token)
+    return bool(record and record.get("status") == "approved")
+
+
 @app.post("/api/phone/session")
 async def phone_session(request: Request) -> dict:
     """เปิดช่องทางเรียลไทม์ล่วงหน้าตอนกดเริ่มดูจอ
@@ -2106,8 +2132,8 @@ async def phone_input_socket(websocket: WebSocket, serial: str) -> None:
     ช่องนี้ตัดค่าใช้จ่ายต่อ request ทิ้ง และ socket ขาดก็ปล่อยนิ้วทันที
     ไม่ต้องรอ watchdog 60 วินาที
     """
-    if not _websocket_is_local(websocket):
-        await websocket.close(code=1008, reason="อนุญาตเฉพาะเครื่องหลัก")
+    if not _websocket_is_allowed(websocket):
+        await websocket.close(code=1008, reason="เครื่องนี้ยังไม่ได้รับอนุญาต")
         return
     await websocket.accept()
     try:
@@ -2239,8 +2265,8 @@ async def phone_queue_board() -> dict:
 @app.websocket("/ws/phone/stream")
 async def phone_stream(websocket: WebSocket, serial: str) -> None:
     """สตรีมหน้าจอ H.264 หน่วงต่ำ — ฝั่งหน้าเว็บถอดด้วย WebCodecs"""
-    if not _websocket_is_local(websocket):
-        await websocket.close(code=1008, reason="อนุญาตเฉพาะเครื่องหลัก")
+    if not _websocket_is_allowed(websocket):
+        await websocket.close(code=1008, reason="เครื่องนี้ยังไม่ได้รับอนุญาต")
         return
     await websocket.accept()
     try:
@@ -4160,6 +4186,26 @@ async def decide_approval(approval_id: str, request: Request) -> dict:
     if isinstance(highlights, list) and highlights:
         changes["highlights"] = [str(item).strip() for item in highlights if str(item).strip()]
         changes["edited"] = True
+
+    # **ของที่ผู้ใช้เห็นต้องแก้ได้ทุกอย่าง ไม่ใช่แค่จุดขาย** (หลักการข้อ 3 ของโปรเจกต์)
+    # ตัวคัดอัตโนมัติเลือกชื่อ/รูปผิดได้เสมอ ของเดิมรับกลับมาแค่ `highlights`
+    # ชื่อที่แก้กับรูปที่เขี่ยออกจึงหายไปเงียบๆ ตอนกดอนุมัติ แล้วขั้นถัดไป
+    # หยิบของเดิมไปใช้ทั้งที่ผู้ใช้แก้แล้ว — เสียเครดิตเจนคลิปฟรีเพราะเรื่องนี้
+    product = str(payload.get("product", "")).strip()
+    if product:
+        changes["product"] = product
+        changes["edited"] = True
+    images = payload.get("images")
+    if isinstance(images, list):
+        # เก็บเฉพาะไฟล์ที่มีอยู่จริง — กันพาธค้างจากหน้าเว็บที่เปิดทิ้งไว้ข้ามวัน
+        kept = [str(p) for p in images if str(p).strip() and Path(str(p)).is_file()]
+        if kept:
+            changes["images"] = kept
+            changes["edited"] = True
+    spare = payload.get("features")
+    if isinstance(spare, list):
+        changes["features"] = [str(item).strip() for item in spare if str(item).strip()]
+
     entry = approval_store.update(approval_id, **changes)
     if entry is None:
         raise HTTPException(status_code=404, detail="ไม่พบคำขอนี้")

@@ -1029,6 +1029,32 @@ $("#forgetScreen").addEventListener("click", async () => {
 
 $("#closeScreenSettings").addEventListener("click", () => settingsBox.close());
 
+// ---- ปลุกจอ (คนละเรื่องกับปุ่ม ⏻ ซึ่งเป็นปุ่มสลับ)
+$("#phoneWake")?.addEventListener("click", async () => {
+  const serial = deviceSelect.value;
+  if (!serial) {
+    phoneNote.textContent = "เลือกมือถือก่อน";
+    return;
+  }
+  const button = $("#phoneWake");
+  button.disabled = true;
+  phoneNote.textContent = "กำลังปลุกจอ…";
+  try {
+    const result = await api("/api/phone/wake", {
+      method: "POST",
+      body: JSON.stringify({ serial }),
+    });
+    // บอกสถานะก่อน-หลังให้เห็น จะได้รู้ว่าจอดับอยู่จริงหรือติดอยู่แล้ว
+    phoneNote.textContent = result.before === "Awake"
+      ? "จอติดอยู่แล้ว — ปัดหน้าล็อกออกให้อีกที"
+      : `ปลุกจอแล้ว (จาก ${result.before} → ${result.after})`;
+  } catch (error) {
+    phoneNote.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
 // ---- ปุ่มลัด + พิมพ์ข้อความ
 document.querySelectorAll("[data-key]").forEach((button) => {
   button.addEventListener("click", async () => {

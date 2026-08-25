@@ -115,6 +115,13 @@
           <button type="button" data-key="BACK">← ย้อนกลับ</button>
           <button type="button" data-key="HOME">● หน้าหลัก</button>
           <button type="button" data-key="RECENTS">▣ แอปล่าสุด</button>
+          <!-- ปลุกจอ ≠ ⏻ — ⏻ เป็นปุ่ม "สลับ" กดตอนจอติดอยู่คือสั่งให้ดับ
+               ตัวนี้สั่งให้ "ติด" อย่างเดียว แล้วปัดหน้าล็อกออกให้ด้วย
+               ทิ้งเครื่องไว้นานจอดับเอง คนมาสั่งงานต่อจะกดลงจอดำโดยไม่รู้ตัว -->
+          <button id="phoneWake" type="button"
+                  title="สั่งให้จอติด + ปัดหน้าล็อกออก (ต่างจาก ⏻ ที่เป็นปุ่มสลับ)">
+            ☀ ปลุกจอ
+          </button>
           <button type="button" data-key="POWER">⏻ เปิด/ปิดจอ</button>
           <button type="button" data-key="VOLUME_DOWN">− เสียง</button>
           <button type="button" data-key="VOLUME_UP">＋ เสียง</button>

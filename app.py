@@ -2066,14 +2066,27 @@ async def phone_key(request: Request) -> dict:
     """
     payload = await request.json()
     name = str(payload.get("key", "")).strip()
-    if name not in scrcpy_control.KEYCODES:
+    keycode = scrcpy_control.KEYCODES.get(name)
+    # **ปุ่มระบบอยู่คนละตาราง** BACK · HOME · RECENTS · POWER · VOLUME_* ส่งผ่าน
+    # ช่อง scrcpy ไม่ได้ ต้องใช้ `input keyevent` ของ Android
+    #
+    # ของเดิมมี endpoint ที่รู้จักปุ่มพวกนี้อยู่จริง แต่ประกาศ /api/phone/key
+    # **ซ้ำสองรอบ** FastAPI หยิบตัวแรกไปใช้ ตัวหลังจึงเป็นโค้ดตายที่ไม่เคยถูกเรียก
+    # ผลคือปุ่มลัดบนหน้าเว็บ 5 จาก 6 ปุ่มตอบ 400 มาตลอดโดยไม่มีใครรู้
+    # (วัดจริง 25 ส.ค. 2569: POWER · HOME · RECENTS · VOLUME_UP · VOLUME_DOWN
+    #  ตอบ "ไม่รู้จักปุ่ม" ทั้งหมด เหลือ back ตัวเดียวที่ใช้ได้)
+    android_key = ADB_KEY_EVENTS.get(name.upper()) if keycode is None else None
+    if keycode is None and android_key is None:
         raise HTTPException(status_code=400, detail=f"ไม่รู้จักปุ่ม “{name}”")
     serial = await asyncio.to_thread(clean_serial, str(payload.get("serial", "")), True)
-    keycode = scrcpy_control.KEYCODES[name]
     meta = scrcpy_control.META_CTRL if payload.get("ctrl") else 0
     repeat = max(1, min(int(payload.get("repeat", 1) or 1), 50))
 
     def press() -> dict:
+        if android_key is not None:
+            for _ in range(repeat):
+                run_adb("-s", serial, "shell", "input", "keyevent", android_key)
+            return {"ok": True, "realtime": False}
         if scrcpy_control.is_available():
             try:
                 session = scrcpy_control._get_or_open(ADB, serial)
@@ -2467,20 +2480,45 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
             pass
 
 
-@app.post("/api/phone/key")
-async def phone_key(request: Request) -> dict:
+@app.post("/api/phone/wake")
+async def phone_wake(request: Request) -> dict:
+    """ปลุกจอมือถือให้ติด + ปัดหน้าล็อกออก — **ไม่ใช่ปุ่มสลับเปิด/ปิด**
+
+    ทิ้งเครื่องไว้นานจอดับเอง แล้วคนที่มาแตะจอต่อจะกดลงบนจอดำโดยไม่รู้ตัว
+    ปุ่ม ⏻ ของเดิมส่ง POWER ซึ่ง "สลับ" — จอติดอยู่แล้วกดคือดับ จึงต้องมีตัวที่
+    สั่งให้ "ติด" อย่างเดียว ใช้ได้โดยไม่ต้องเดาว่าตอนนี้จออยู่สถานะไหน
+
+    ใช้ `fb_screen.wake` ตัวเดียวกับที่ขั้นโพสต์ใช้ — ปลุกแล้ว **ยืนยันว่าแตะจอ
+    ได้จริง** ไม่ใช่สั่งแล้วเชื่อว่าติด (สั่งอย่างเดียวเคยได้จอดำแล้วบอทกดมั่วต่อ)
+    """
     payload = await request.json()
-    key = str(payload.get("key", "")).strip().upper()
-    code = ADB_KEY_EVENTS.get(key)
-    if code is None:
-        raise HTTPException(status_code=400, detail="ไม่รองรับปุ่มนี้")
     serial = await asyncio.to_thread(
         clean_serial, str(payload.get("serial", "")), True
     )
-    await asyncio.to_thread(
-        lambda: run_adb("-s", serial, "shell", "input", "keyevent", code)
-    )
-    return {"ok": True, "key": key}
+
+    def work() -> dict:
+        # งานจรที่แค่มาปลุกจอ **ห้ามเข้าแถว** ไม่งั้นไปแทรกหน้างานจริง (กติกาข้อ 9)
+        with studio_shared.phone_lock(
+            serial, label="ปลุกจอจากหน้าเว็บ", queue=False
+        ):
+            shell = fb_screen.make_shell(serial, ADB)
+            before = fb_screen.wakefulness(shell)
+            woke = fb_screen.wake(shell, log=lambda text: append_log("publish", text))
+            return {
+                "ok": bool(woke),
+                "before": before or "ไม่รู้",
+                "after": fb_screen.wakefulness(shell) or "ไม่รู้",
+            }
+
+    result = await asyncio.to_thread(work)
+    if not result["ok"]:
+        # **ห้ามตอบ ok แล้วปล่อยผ่าน** ปลุกไม่ขึ้นแต่บอกว่าสำเร็จ = คนไปสั่งงานต่อ
+        # บนจอดำแล้วงงว่าทำไมไม่มีอะไรเกิดขึ้น
+        raise HTTPException(
+            status_code=502,
+            detail=f"ปลุกจอไม่ขึ้น (ตอนนี้: {result['after']}) — เช็คสาย/สิทธิ์ debugging",
+        )
+    return result
 
 
 @app.post("/api/phone/text")

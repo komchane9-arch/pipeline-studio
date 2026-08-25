@@ -786,6 +786,39 @@ export async function pollHealth() {
   chips.push(healthChip(phones > 0, phones ? `มือถือ ${phones}` : "ไม่มีมือถือ",
     phones ? "" : "ต่อ USB แล้วกดรีเฟรชรายการเครื่อง"));
 
+  // 3.5) แรม/เนื้อที่ของมือถือแต่ละเครื่อง
+  //
+  // **ทำไมต้องอยู่บนหัวจอ** 25 ส.ค. 2569 มือถือขึ้น "หน่วยความจำไม่พอ" ตอนเปิดแอป
+  // แล้วไล่หาสาเหตุอยู่นานเพราะไม่มีตัวเลขให้ดูเลย ต้องต่อ ADB เข้าไปอ่านเอง
+  // ตัวเลขจริงตอนนั้น: แรมว่าง 0.11 GB จาก 5.52 GB แต่เนื้อที่เก็บของว่างตั้ง 85 GB
+  // — **คนละเรื่องกันคนละตัว** ถ้าโชว์รวมเป็นค่าเดียวจะพาไปไล่ผิดทางอีก
+  if (phones) {
+    try {
+      const health = await api("/api/phone/health");
+      for (const device of (health.devices || []).filter((d) => d.ok)) {
+        // ชื่อเครื่องยาว ("REDMI 15C - โพสต์ 2") ตัดให้พอดีแถบ รายละเอียดเต็มอยู่ใน title
+        const short = String(device.label || device.serial).split(" - ").pop().slice(0, 12);
+        const chip = healthChip(
+          !device.need_clean,
+          `📱 ${short} ${device.ram_pct}%`,
+          `${device.label}\n${device.text}\n`
+          + `แรมที่ถูกดันไปเก็บในที่ช้า ${device.swap_used_gb} GB\n`
+          + (device.need_clean
+            ? `⚠️ เกินเพดาน ${device.limit}% — ระบบจะเคลียร์ให้เอง `
+              + "โดยรอจนงานที่ทำอยู่จบก่อน"
+            : `ยังไม่ถึงเพดาน ${device.limit}%`),
+        );
+        if (device.cleaning) {
+          chip.textContent = `📱 ${short} กำลังเคลียร์…`;
+          chip.className = "health-chip waiting";
+        }
+        chips.push(chip);
+      }
+    } catch {
+      // อ่านไม่ได้ก็แค่ไม่โชว์ ห้ามทำให้แถบสถานะทั้งแถบหาย
+    }
+  }
+
   // 4) งานรออนุมัติ — ตัวเลขที่ค้างนานที่สุดในระบบ กดแล้วพาไปแท็บสตอรีบอร์ดเลย
   if (waiting) {
     const jump = document.createElement("button");

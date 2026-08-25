@@ -2521,6 +2521,200 @@ async def phone_wake(request: Request) -> dict:
     return result
 
 
+# ======================================= สุขภาพหน่วยความจำมือถือ + เคลียร์เอง
+#
+# **ทำไมต้องโชว์** 25 ส.ค. 2569 มือถือขึ้น "หน่วยความจำไม่พอ" ตอนเปิดแอป
+# ไล่หาสาเหตุอยู่นานเพราะไม่มีตัวเลขให้ดูเลย ต้องต่อ ADB เข้าไปอ่านเอง
+# ตัวเลขจริงตอนนั้น: แรมว่าง 0.11 GB จาก 5.52 GB · ถูกดันไปไว้ที่ช้า 1.39 GB
+# ส่วนเนื้อที่เก็บของว่างตั้ง 85 GB — **คนละเรื่องกันคนละตัว ต้องแยกให้เห็นทั้งคู่**
+#
+# **ทำไมต้องเคลียร์เอง** ล้างด้วยมือได้แรมคืน 0.64 GB (ว่าง 0.11 -> 0.75 GB)
+# แต่เดี๋ยวก็เต็มอีก ปล่อยไว้คือรอให้พังแล้วค่อยมาไล่ใหม่ทุกครั้ง
+#
+# **ห้ามเคลียร์ทับงานที่กำลังทำ** เคลียร์คือ force-stop แอป ถ้าไปตัดกลางงานโพสต์
+# จะได้โพสต์ครึ่งใบแล้วต้องมาตามเก็บเอง จึงต้อง **กดบัตรคิวปกติ** (กติกาข้อ 9)
+# ให้รอจนงานที่ทำอยู่จบก่อน แล้วค่อยเคลียร์ แล้วคิวถัดไปค่อยเดินต่อ
+PHONE_HEALTH_TTL = 20.0            # อ่านซ้ำถี่กว่านี้ไม่ได้อะไร มีแต่ทำให้ ADB อ่วม
+PHONE_HEALTH_ROUND = 180.0         # ตัวเฝ้าวนตรวจทุกกี่วินาที
+PHONE_CLEAN_COOLDOWN = 30 * 60.0   # ล้างแล้วอย่าเพิ่งล้างซ้ำ ให้เวลาเครื่องตั้งตัว
+PHONE_CLEAN_WAIT = 1800.0          # รอคิวมือถือได้นานสุด (งานโพสต์หนึ่งใบไม่เกินนี้)
+_phone_health_cache: dict[str, tuple[float, dict]] = {}
+_phone_health_lock = threading.Lock()
+_phone_cleaned_at: dict[str, float] = {}
+_phone_cleaning: set[str] = set()
+
+
+def _phone_full_pct() -> int:
+    """เพดานที่ถือว่า 'เต็ม' — ผู้ใช้กำหนด 90% ไว้ 25 ส.ค. 2569
+
+    อ่านจาก config เพื่อให้จูนได้โดยไม่ต้องแก้โค้ด — วัดจริงวันนั้นแรมใช้ไป 67%
+    ตอนที่เครื่องเริ่มบ่นแล้ว ถ้า 90 ไม่เคยเข้าเงื่อนไขเลยให้ลดลงได้ทันที
+    """
+    try:
+        value = int(load_config().get("phone_full_pct", 90))
+    except (TypeError, ValueError):
+        return 90
+    return max(50, min(99, value))
+
+
+def _parse_meminfo(text: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for line in (text or "").splitlines():
+        if ":" not in line:
+            continue
+        key, rest = line.split(":", 1)
+        parts = rest.strip().split()
+        if parts and parts[0].isdigit():
+            out[key.strip()] = int(parts[0]) / 1024 / 1024      # GB
+    return out
+
+
+def _read_phone_health(serial: str, *, force: bool = False) -> dict:
+    """แรม + เนื้อที่ของมือถือเครื่องหนึ่ง — มีแคชกันยิง ADB ถี่เกิน
+
+    เครื่องที่มีคนถือจออยู่จะคืนของในแคชพร้อมธง `busy` **ไม่แย่งจอ** เพราะแค่มาดู
+    ตัวเลข ไม่คุ้มกับการไปขวางงานจริง (กติกาข้อ 9 — งานจรห้ามเข้าแถว)
+    """
+    now = time.time()
+    with _phone_health_lock:
+        cached = _phone_health_cache.get(serial)
+    if cached and not force and now - cached[0] < PHONE_HEALTH_TTL:
+        return cached[1]
+
+    data: dict = {"serial": serial, "at": now, "busy": False}
+    try:
+        with studio_shared.phone_lock(
+            serial, timeout=3.0, poll=0.5, label="อ่านหน่วยความจำมือถือ", queue=False
+        ):
+            shell = fb_phone_clean.make_shell(serial, ADB)
+            mem = _parse_meminfo(shell("cat /proc/meminfo"))
+            disk = shell("df -k /data | tail -1") or ""
+    except Exception as error:              # noqa: BLE001 - เครื่องไม่ว่าง/ถอดสาย
+        if cached:
+            stale = dict(cached[1])
+            stale["busy"] = True
+            return stale
+        return {**data, "ok": False, "why": str(error)[:120]}
+
+    total = mem.get("MemTotal", 0.0)
+    avail = mem.get("MemAvailable", 0.0)
+    swap_total = mem.get("SwapTotal", 0.0)
+    swap_free = mem.get("SwapFree", 0.0)
+    parts = disk.split()
+    disk_total = disk_free = 0.0
+    if len(parts) >= 4 and parts[1].isdigit() and parts[3].isdigit():
+        disk_total = int(parts[1]) / 1024 / 1024
+        disk_free = int(parts[3]) / 1024 / 1024
+
+    ram_pct = round((total - avail) * 100 / total) if total else 0
+    disk_pct = round((disk_total - disk_free) * 100 / disk_total) if disk_total else 0
+    limit = _phone_full_pct()
+    data.update({
+        "ok": True,
+        "ram_pct": ram_pct,
+        "ram_free_gb": round(avail, 2),
+        "ram_total_gb": round(total, 2),
+        # แรมที่ถูกดันไปเก็บในที่ช้า — เยอะแปลว่าเครื่องหายใจไม่ทันแล้ว
+        "swap_used_gb": round(max(0.0, swap_total - swap_free), 2),
+        "disk_pct": disk_pct,
+        "disk_free_gb": round(disk_free, 1),
+        "disk_total_gb": round(disk_total, 1),
+        "limit": limit,
+        "ram_full": ram_pct >= limit,
+        "disk_full": disk_pct >= limit,
+        "cleaning": serial in _phone_cleaning,
+    })
+    data["need_clean"] = bool(data["ram_full"] or data["disk_full"])
+    data["text"] = (f"แรม {ram_pct}% (ว่าง {data['ram_free_gb']} GB) · "
+                    f"เก็บของ {disk_pct}% (ว่าง {data['disk_free_gb']} GB)")
+    with _phone_health_lock:
+        _phone_health_cache[serial] = (now, data)
+    return data
+
+
+def _clean_phone_when_free(serial: str) -> None:
+    """เคลียร์เครื่องหนึ่งเครื่อง — **ต่อคิวปกติ รองานที่ทำอยู่ให้จบก่อน**"""
+    import phone_queue                                          # noqa: PLC0415
+    label = device_book.label(serial)
+    _phone_cleaning.add(serial)
+    try:
+        append_log("publish", f"หน่วยความจำ {label} เต็ม — ขอคิวเพื่อเคลียร์ "
+                              f"(ถ้ามีงานทำอยู่จะรอให้จบก่อน)")
+        with phone_queue.slot(serial, owner="ตัวเฝ้าหน่วยความจำ",
+                              task="เคลียร์แรม/เนื้อที่", lane="ดูแลเครื่อง",
+                              timeout=PHONE_CLEAN_WAIT):
+            before = _read_phone_health(serial, force=True)
+            fb_phone_clean.clean(serial, adb=ADB,
+                                 log=lambda text: append_log("publish", text))
+            after = _read_phone_health(serial, force=True)
+        _phone_cleaned_at[serial] = time.time()
+        append_log("publish",
+                   f"เคลียร์ {label} เสร็จ — แรม {before.get('ram_pct')}% → "
+                   f"{after.get('ram_pct')}% · เก็บของ {before.get('disk_pct')}% → "
+                   f"{after.get('disk_pct')}%")
+    except Exception as error:              # noqa: BLE001
+        # **ห้ามเงียบ** เคลียร์ไม่สำเร็จแล้วไม่บอก = เครื่องเต็มต่อไปโดยไม่มีใครรู้
+        append_log("publish", f"เคลียร์ {label} ไม่สำเร็จ: {error}")
+    finally:
+        _phone_cleaning.discard(serial)
+
+
+def _phone_memory_round() -> None:
+    for row in _device_rows():
+        serial = row.get("serial", "")
+        if not serial or row.get("ready") is False or not row.get("enabled", True):
+            continue
+        if serial in _phone_cleaning:
+            continue
+        if time.time() - _phone_cleaned_at.get(serial, 0.0) < PHONE_CLEAN_COOLDOWN:
+            continue
+        health = _read_phone_health(serial)
+        if health.get("ok") and health.get("need_clean") and not health.get("busy"):
+            threading.Thread(target=_clean_phone_when_free, args=(serial,),
+                             daemon=True).start()
+
+
+def _phone_memory_keeper() -> None:
+    """เฝ้าหน่วยความจำมือถือทุกเครื่อง เต็มเมื่อไรเคลียร์ให้เองโดยไม่ตัดงานที่ทำอยู่"""
+    time.sleep(30)          # ให้เซิร์ฟเวอร์ตั้งตัวก่อน อย่าไปแย่ง ADB ตอนเพิ่งเปิด
+    while True:
+        try:
+            _phone_memory_round()
+        except Exception as error:          # noqa: BLE001
+            append_log("publish", f"ตัวเฝ้าหน่วยความจำมือถือสะดุด: {error}")
+        time.sleep(PHONE_HEALTH_ROUND)
+
+
+@app.get("/api/phone/health")
+async def phone_health(serial: str = "") -> dict:
+    """แรม/เนื้อที่ของมือถือ — หน้าเว็บเอาไปโชว์บนแถบสถานะด้านบน"""
+    if serial:
+        rows = [{"serial": await asyncio.to_thread(clean_serial, serial, True)}]
+    else:
+        rows = [r for r in await asyncio.to_thread(_device_rows)
+                if r.get("serial") and r.get("ready") is not False]
+    out = []
+    for row in rows:
+        health = await asyncio.to_thread(_read_phone_health, row["serial"])
+        out.append({**health, "label": device_book.label(row["serial"])})
+    return {"ok": True, "limit": _phone_full_pct(), "devices": out}
+
+
+@app.post("/api/phone/clean")
+async def phone_clean(request: Request) -> dict:
+    """สั่งเคลียร์ด้วยมือ — ต่อคิวเหมือนกัน ไม่ตัดงานที่กำลังทำอยู่"""
+    payload = await request.json()
+    serial = await asyncio.to_thread(
+        clean_serial, str(payload.get("serial", "")), True
+    )
+    if serial in _phone_cleaning:
+        return {"ok": True, "already": True, "message": "กำลังเคลียร์อยู่แล้ว"}
+    threading.Thread(target=_clean_phone_when_free, args=(serial,),
+                     daemon=True).start()
+    return {"ok": True, "queued": True,
+            "message": "เข้าคิวเคลียร์แล้ว — ถ้ามีงานทำอยู่จะรอให้จบก่อน"}
+
+
 @app.post("/api/phone/text")
 async def phone_text(request: Request) -> dict:
     """พิมพ์ข้อความลงช่องที่โฟกัสอยู่บนมือถือ — ไทยได้ผ่าน ADBKeyboard"""
@@ -3637,6 +3831,10 @@ async def _start_watcher() -> None:
     # ตัวเก็บข้อมูลโพสต์เป็นตัวสุดท้ายที่ยังไม่มีใครเฝ้า — เคยหยุดเงียบ 20 ชม.
     # ทั้งที่มี 124 กลุ่มรอ เพราะมันเก็บจบกลุ่มเดียวแล้วออกเองตามออกแบบ
     threading.Thread(target=_posts_collect_keeper, daemon=True).start()
+
+    # เฝ้าหน่วยความจำมือถือ — เต็มเกินเพดานแล้วเคลียร์ให้เอง โดยกดบัตรคิวปกติ
+    # จึงรอจนงานที่กำลังทำอยู่จบก่อนเสมอ ไม่ตัดกลางงานโพสต์
+    threading.Thread(target=_phone_memory_keeper, daemon=True).start()
 
 
 # บอท 2 ตัว: main = โพสต์ Facebook · clip = สายเจนคลิป (อนุมัติจุดขาย/คลิป)

@@ -737,18 +737,6 @@ function renderTabs() {
   tabsBox.replaceChildren(...items);
 }
 
-/** ขอบซ้าย-ขวารวมที่กินพื้นที่ไปจากคอลัมน์ (แผง + การ์ด + กรอบจอ)
- *  ทั้งหน้าใช้ box-sizing: border-box ตัวเลขนี้จึงบวกตรงๆ กับความกว้างภาพได้ */
-function sideChrome(panel, card) {
-  const sum = (el, ...names) => names.reduce((total, name) => {
-    const value = parseFloat(getComputedStyle(el)[name]);
-    return total + (Number.isFinite(value) ? value : 0);
-  }, 0);
-  return sum(panel, "paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth")
-    + sum(card, "paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth")
-    + 2;   // กรอบของตัวจอเอง 1px สองข้าง
-}
-
 /** ตั้งความสูงจอเดียวให้เต็มที่ว่างจริง — วัดสดทุกครั้ง ไม่ใช้เลขตายตัว */
 function sizeSolo() {
   // พับแถบเก็บอยู่ วัดอะไรก็ได้ 0 หมด แล้วจะไปตั้งความสูงเป็นค่าต่ำสุดค้างไว้
@@ -761,20 +749,43 @@ function sizeSolo() {
   const screen = [...screens.values()].find((s) => !s.card.hidden);
   if (!screen) return;
   const panel = screensBox.closest(".phone-panel") || screensBox.parentElement;
+
+  // ขอบทั้งหมดที่กินความกว้างไป = ความกว้างแผง ลบ ที่ว่างจริงข้างในการ์ด
+  // **วัดเอา ไม่ไล่นับเอง** — ขอบมีทั้ง padding · border · ช่องไฟ · แถบเลื่อน
+  // ซึ่งเปลี่ยนตามธีมและขนาดหน้าต่าง ตอนแรกผมไล่นับเองแล้วพลาดไป 16 จุด
+  // จอเลยเหลือขอบขาวทั้งสองโหมด (พอดีหน้าต่าง 36 จุด · เท่าจริง 37 จุด)
+  const edge = () => {
+    const cs = getComputedStyle(screen.card);
+    const px = (name) => parseFloat(cs.getPropertyValue(name)) || 0;
+    const inner = screen.card.getBoundingClientRect().width
+      - px("padding-left") - px("padding-right")
+      - px("border-left-width") - px("border-right-width");
+    return { inner, outside: panel.getBoundingClientRect().width - inner };
+  };
+
+  // **ห้ามหดคอลัมน์ให้แคบกว่าค่าปกติเด็ดขาด**
+  //
+  // เจอจริงตอนแก้บั๊กนี้: ผมหดคอลัมน์จาก 380 เหลือ 303 จุดเพื่อให้พอดีภาพ
+  // ผลคือแถบปุ่มหัวแผง (ช่องเลือกเครื่อง · ปุ่มจอ 1/2/3 · ปุ่มขนาด) **ตัดบรรทัด
+  // จาก 2 แถวเป็น 4 แถว** กินที่แนวตั้งเพิ่มอีกเกือบร้อยจุด ที่ว่างของจอจึงหดตาม
+  // แล้วรอบถัดไปก็หดคอลัมน์ลงอีก — ยิ่งแก้ยิ่งเล็ก
+  //
+  // วัดค่าปกติด้วยการถอดค่าที่เราตั้งออกก่อน แล้วดูว่า CSS ให้มาเท่าไร
+  document.body.style.removeProperty("--phone-col");
+  const floorWidth = panel.getBoundingClientRect().width;
+
   // เต็มขนาด = โชว์เท่าความละเอียดที่เครื่องส่งมาจริง ไม่ย่อสักพิกเซล
   // หน้าต่างเตี้ยกว่านั้นก็ปล่อยให้หน้าเลื่อนเอา ดีกว่าบีบจนอ่านตัวหนังสือไม่ออก
   if (sizeMode === "full" && screen.canvas && screen.canvas.height > 1) {
     screensBox.style.setProperty("--solo-h", `${screen.canvas.height}px`);
     // **คอลัมน์ต้องกว้างพอด้วย** ไม่งั้น max-width บีบภาพลง แล้วอัตราส่วนก็ลาก
     // ความสูงลงตาม = กดว่า "เท่าจริง" แล้วได้ไม่เท่าจริง
-    // คิดจากขอบจริงที่วัดได้ ไม่ใช่เลขตายตัว เพราะมือถือแต่ละรุ่นกว้างไม่เท่ากัน
     document.body.style.setProperty(
       "--phone-col",
-      `${screen.canvas.width + sideChrome(panel, screen.card) + 4}px`,
+      `${Math.ceil(Math.max(floorWidth, screen.canvas.width + edge().outside))}px`,
     );
     return;
   }
-  document.body.style.removeProperty("--phone-col");
   const card = screen.card.getBoundingClientRect();
   const viewer = screen.viewer.getBoundingClientRect();
   if (!card.height) return;
@@ -787,17 +798,112 @@ function sizeSolo() {
   //
   // และ **ห้ามเอาของใต้ตารางจอมานับ** ปุ่มลัด · ช่องลิงก์ · ช่องแคปชัน อยู่ใต้
   // ลงไปทั้งแถบและเลื่อนดูได้ ถ้านับมันด้วยจะเหลือที่ว่างติดลบทุกครั้ง
+  //
+  // **แต่ก็ห้ามเชื่อว่ามันจะขึ้นไปติดขอบบนได้เสมอ** — แผงจะเลื่อนขึ้นได้ก็ต่อเมื่อ
+  // หน้ามีที่ให้เลื่อนจริง ถ้าเนื้อหาทั้งหน้าสั้นกว่าหน้าต่าง แผงจะค้างอยู่ที่เดิม
+  // ตลอดกาล แล้วจอที่คำนวณจากตำแหน่งติดหนึบจะยาวเลยขอบล่างออกไปโดยไม่มีทางเลื่อนดู
+  //
+  // เกิดจริงบนจอผู้ใช้ 2160x999 เมื่อ 26 ส.ค. 2569: แผงอยู่ที่ 149 และหน้าเลื่อน
+  // ไม่ได้เลย (scrollHeight = innerHeight) แต่โค้ดคิดว่าแผงจะไปอยู่ที่ 12
+  // จึงตั้งจอสูงเกินไป **137 จุด** ผลคือก้นการ์ดจมหายใต้ขอบล่าง 81 จุด
+  // — ผู้ใช้เห็นเป็น "จอโดนตัด" ซึ่งคือคำถามที่ถามมาพอดี
   const stickyTop = parseFloat(getComputedStyle(panel).top) || 0;
+  const canScroll = Math.max(
+    0, document.documentElement.scrollHeight - window.innerHeight,
+  );
+  const panelTop = panel.getBoundingClientRect().top + window.scrollY;
+  const settleTop = Math.max(stickyTop, panelTop - canScroll);
   const above = screensBox.getBoundingClientRect().top
     - panel.getBoundingClientRect().top;
-  const room = window.innerHeight - stickyTop - above - chrome - SOLO_TAIL_GAP;
-  screensBox.style.setProperty(
-    "--solo-h", `${Math.max(SOLO_MIN_HEIGHT, Math.round(room))}px`,
+  const room = Math.max(
+    SOLO_MIN_HEIGHT,
+    Math.round(window.innerHeight - settleTop - above - chrome - SOLO_TAIL_GAP),
   );
+
+  // **ที่ว่างแนวตั้งอย่างเดียวตัดสินไม่ได้ — คอลัมน์ต้องกว้างพอด้วย**
+  //
+  // บั๊กที่แก้ตรงนี้ (วัดจริงบนจอผู้ใช้ 2160x999 เมื่อ 26 ส.ค. 2569):
+  // ที่ว่างแนวตั้ง 813 จุด โค้ดจึงตั้งจอสูง 813 — แต่คอลัมน์กว้างแค่ 312
+  // ภาพ 460x1024 ที่ `object-fit: contain` จึงขยายได้แค่ 312x694
+  // เหลือ **แถบขาวบนล่างรวม 118 จุด** ทั้งที่พื้นที่ขวามือว่างอยู่ 1,714 จุด
+  // ผู้ใช้เห็นเป็น "จอเล็กแล้วมีขอบขาว" โดยไม่รู้ว่าเพราะอะไร
+  //
+  // แก้โดยคิดกลับ: อยากได้สูง `room` ต้องกว้างเท่าไร แล้วขยายคอลัมน์ให้เท่านั้น
+  const shape = screen.canvas && screen.canvas.height > 1
+    ? screen.canvas.width / screen.canvas.height
+    : 0;
+  if (shape <= 0) {                 // ยังไม่รู้สัดส่วนจอ ทำได้แค่ตั้งความสูงไปก่อน
+    document.body.style.removeProperty("--phone-col");
+    screensBox.style.setProperty("--solo-h", `${room}px`);
+    return;
+  }
+
+  // **เลิกเดาความหนาของขอบ — ให้เบราว์เซอร์บอกเอง**
+  //
+  // ตอนแรกผมคิดขอบเองด้วย `sideChrome()` แล้วพลาดไป 16 จุด จอเลยเหลือขอบขาว
+  // 36 จุด และครั้งหนึ่งยังตั้งคอลัมน์ **แคบกว่าค่าปกติ** จนจอเล็กลงกว่าเดิมด้วย
+  // ขอบมีทั้ง padding · border · ช่องไฟ · แถบเลื่อน ซึ่งเปลี่ยนไปตามธีมและ
+  // ขนาดหน้าต่าง ไล่นับให้ครบทุกกรณีไม่มีทางถูกตลอด
+  //
+  // วิธีที่ถูกคือ **ตั้งให้สูงเกินไว้ก่อน** แล้ววัดว่าตัวจอถูกบีบเหลือกว้างเท่าไร
+  // ค่าที่วัดได้ตอนนั้นคือความกว้างที่มีจริง รวมขอบทุกชนิดไปแล้วโดยไม่ต้องนับเอง
+  // จังหวะ 1 — ขอคอลัมน์ให้กว้างพอสำหรับภาพที่สูงเต็มที่ว่าง
+  const want = room * shape;
+  document.body.style.setProperty(
+    "--phone-col", `${Math.ceil(Math.max(floorWidth, want + edge().outside))}px`,
+  );
+
+  // จังหวะ 2 — วัดว่าได้จริงเท่าไร (CSS ยังกั้นเพดานไว้ที่ 46vw จอแคบจึงได้ไม่ครบ)
+  // แล้วตัดความสูงลงมาให้พอดีกับความกว้างที่ได้ — ไม่เหลือขอบขาวไม่ว่าจอกว้างแค่ไหน
+  const room2 = Math.floor(Math.min(want, edge().inner) / shape);
+  screensBox.style.setProperty(
+    "--solo-h", `${Math.max(SOLO_MIN_HEIGHT, Math.min(room, room2))}px`,
+  );
+
+  // จังหวะ 3 — **ด่านสุดท้าย: วัดผลลัพธ์จริง อย่าเชื่อการคำนวณ**
+  //
+  // ตัวเลขนำเข้าทุกตัวข้างบน (ตำแหน่งแผง · ความสูงของเหนือจอ · ความสามารถในการเลื่อน)
+  // ยังขยับได้อีกหลายวินาทีระหว่างหน้ากำลังโหลดข้อมูลจากเซิร์ฟเวอร์ คิดเก่งแค่ไหน
+  // ก็พลาดได้ถ้านำเข้าเพี้ยน — วัดก้นการ์ดจริงแล้วหดตามที่จมจริงจึงไม่มีทางพลาด
+  // (ไล่บั๊กนี้มาแล้วสองรอบ: จมใต้ขอบล่าง 81 จุด แล้ว 24 จุด ทั้งที่คำนวณว่าพอดี)
+  for (let pass = 0; pass < 3; pass += 1) {
+    const over = Math.round(screen.card.getBoundingClientRect().bottom)
+      - window.innerHeight + 8;
+    if (over <= 0) break;
+    const nowH = parseFloat(screensBox.style.getPropertyValue("--solo-h")) || room;
+    const next = Math.max(SOLO_MIN_HEIGHT, Math.round(nowH - over));
+    if (next >= nowH) break;
+    screensBox.style.setProperty("--solo-h", `${next}px`);
+    document.body.style.setProperty(
+      "--phone-col", `${Math.ceil(Math.max(floorWidth, next * shape + edge().outside))}px`,
+    );
+  }
 }
 
 // ย่อ/ขยายหน้าต่างแล้วจอต้องโตตาม ไม่ใช่ค้างขนาดเดิมจนล้นออกนอกหน้าจอ
 window.addEventListener("resize", sizeSolo);
+
+// **คิดครั้งเดียวตอนเปิดหน้าไม่พอ — ของเหนือจอโตทีหลังได้อีกหลายวินาที**
+//
+// เจอจริง 26 ส.ค. 2569: คิดตอนเพิ่งโหลดได้ที่ว่าง 240 จุด (ค่าต่ำสุด) จอเลยยุบ
+// เหลือ 108x240 แล้วค้างอยู่อย่างนั้น ทั้งที่พอหน้าจัดวางเสร็จมีที่ว่างจริง 646 จุด
+// ของที่โตทีหลังคือ รายชื่อเครื่อง · ชิปแรม/เนื้อที่ · แถบเตือนเวอร์ชัน ซึ่งมาจาก
+// การถามเซิร์ฟเวอร์ จึงมาถึงช้ากว่าเฟรมแรกของเบราว์เซอร์เสมอ
+//
+// `requestAnimationFrame` รอบเดียวแบบเดิมช่วยได้แค่เฟรมถัดไป ไม่ครอบคลุมของที่
+// มาอีกสองวินาทีให้หลัง — ต้องเฝ้าไว้ตลอดแล้วคิดใหม่ทุกครั้งที่แผงเปลี่ยนความสูง
+if (typeof ResizeObserver === "function") {
+  let queued = false;
+  const soon = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; sizeSolo(); });
+  };
+  const watcher = new ResizeObserver(soon);
+  const panel = screensBox.closest(".phone-panel") || screensBox.parentElement;
+  if (panel) watcher.observe(panel);
+  watcher.observe(screensBox);
+}
 
 // ------------------------------------------------- พับแถบมือถือทั้งแถบ
 //
@@ -1028,6 +1134,28 @@ $("#forgetScreen").addEventListener("click", async () => {
 });
 
 $("#closeScreenSettings").addEventListener("click", () => settingsBox.close());
+
+// ---- กลับมาดูอีกครั้งแล้วภาพต้องมาเอง
+//
+// **ทำไมต้องมี** ฝั่งเซิร์ฟเวอร์ไล่ "ตัวถ่ายจอที่ไม่มีคนดู" ออกเป็นระยะ เพื่อไม่ให้
+// สะสมจนกินแรมมือถือ (26 ส.ค. 2569 เคยค้าง 12 ตัวบนเครื่องเดียว กิน 596 MB)
+// พอสลับแท็บไปทำอย่างอื่นนานๆ แล้วกลับมา ท่ออาจถูกตัดไปแล้ว ถ้าไม่ต่อคืนให้
+// ผู้ใช้จะเห็นจอค้างนิ่งแล้วนึกว่าระบบพัง
+//
+// **ต่อคืนเฉพาะจอที่ยังเปิดค้างไว้** จอที่ผู้ใช้กด "หยุด" เองห้ามเปิดคืนเด็ดขาด
+// (ยังกด "เริ่มดูจอ" เองได้ตามปกติ)
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  for (const screen of screens.values()) {
+    if (!screen.live) continue;
+    const open = screen.socket && screen.socket.readyState === WebSocket.OPEN;
+    if (open) continue;
+    screen.streamTries = 0;
+    screen.say("กลับมาแล้ว — กำลังต่อภาพคืน…");
+    if (supportsWebCodecs) screen.startStream();
+    else screen.startPolling();
+  }
+});
 
 // ---- ปลุกจอ (คนละเรื่องกับปุ่ม ⏻ ซึ่งเป็นปุ่มสลับ)
 $("#phoneWake")?.addEventListener("click", async () => {

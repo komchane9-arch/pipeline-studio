@@ -639,6 +639,42 @@ $("#openSettings").addEventListener("click", () => {
 });
 $("#settingsClose").addEventListener("click", () => dialog.close());
 
+// ---- รายชื่อบอทต้องสดตลอดที่หน้าตั้งค่าเปิดอยู่
+//
+// **ทำไมต้องมี** ขั้นตอนเพิ่มบอทคือ วางโทเคน → **ออกไปทัก /start ในแอป Telegram**
+// → กลับมาดูว่าติดหรือยัง ระหว่างนั้นหน้าตั้งค่ายังเปิดค้างอยู่ ของเดิมโหลดรายชื่อ
+// แค่ตอน "กดเปิดหน้าต่าง" ครั้งเดียว กลับมาแล้วจึงยังขึ้นข้อความเดิมค้างอยู่
+//
+// เจอจริง 26 ส.ค. 2569: เพิ่ม Richmantai1Bot ตอน 14:21 แล้วทัก /start
+// เซิร์ฟเวอร์รู้แล้วว่า chat 8914124494 แต่หน้าจอยังบอก "ยังไม่ได้ทัก /start"
+// ผู้ใช้จึงนึกว่าเพิ่มไม่สำเร็จ แล้วเสี่ยงไปเพิ่มซ้ำหรือรื้อของที่ถูกอยู่แล้ว
+//
+// ถามเฉพาะตอน **หน้าต่างเปิดอยู่และมีคนดู** ปิดเมื่อไรหยุดทันที ไม่กินอะไรเปล่าๆ
+const BOT_REFRESH_MS = 8000;
+let botRefreshTimer = null;
+
+function watchBots(on) {
+  if (botRefreshTimer) window.clearInterval(botRefreshTimer);
+  botRefreshTimer = null;
+  if (!on) return;
+  botRefreshTimer = window.setInterval(() => {
+    if (document.hidden || !dialog.open) return;
+    loadBots();
+    loadTelegram();
+  }, BOT_REFRESH_MS);
+}
+
+$("#openSettings").addEventListener("click", () => watchBots(true));
+// ปิดด้วยปุ่ม · ปุ่ม Esc · หรือกดนอกกล่อง — `close` ครอบทุกทาง ต่างจาก onclick ปุ่มเดียว
+dialog.addEventListener("close", () => watchBots(false));
+// กลับมาที่แท็บนี้แล้วต้องเห็นของสดทันที ไม่ต้องรอครบรอบ
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && dialog.open) {
+    loadBots();
+    loadTelegram();
+  }
+});
+
 function fillSettings() {
   const settings = config.settings;
   document.querySelector(`input[name="videoMode"][value="${settings.video_mode}"]`).checked = true;
@@ -837,6 +873,41 @@ export async function pollHealth() {
     chips.push(jump);
   }
 
+  // 5) โควตา Gemini ชั้นฟรีที่ใช้ไปวันนี้ (ผู้ใช้สั่ง 26 ส.ค. 2026)
+  //
+  // **ตัวเลขนี้คือ "เรายิงไปกี่ครั้ง" ไม่ใช่ "เหลืออีกกี่ครั้ง"**
+  // Google ไม่มีที่ให้ถามว่าเหลือเท่าไร รู้เพดานได้ทางเดียวคือตอนโดนปฏิเสธ
+  // เพราะหมดโควตา (คำตอบ 429 มีเพดานจริงติดมา) จึงโชว์เท่าที่รู้จริง
+  // ห้ามเดาเลข "เหลือ" ให้เอง — คนจะวางแผนว่าเจนได้อีกกี่คลิปตามเลขนั้น
+  try {
+    const quota = await api("/api/gemini-quota");
+    if (quota.ok) {
+      const dry = quota.dry || [];
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "health-chip " + (dry.length ? "down" : "ok");
+      chip.textContent = dry.length
+        ? `🤖 Gemini หมด ${dry.length} รุ่น`
+        : `🤖 Gemini ${quota.total}`;
+      const lines = [`วันนี้ (${quota.date}) ยิงไปทั้งหมด ${quota.total} ครั้ง`, ""];
+      for (const row of quota.rows || []) {
+        const cap = row.limit ? ` / เพดาน ${row.limit}` : "";
+        const left = row.left !== null && row.left !== undefined ? ` · เหลือ ${row.left}` : "";
+        lines.push(`${row.dry ? "🔴" : "🟢"} ${row.model} — ${row.calls} ครั้ง${cap}${left}`);
+        if (row.job) lines.push(`     ใช้ทำ: ${row.job}`);
+        if (row.dry) lines.push(`     หมดตอน ${row.dry_at}`);
+      }
+      if (!(quota.rows || []).length) lines.push("(วันนี้ยังไม่ได้ยิงเลย)");
+      lines.push("", quota.note || "");
+      chip.title = lines.join("\n");
+      // กดแล้วเปิดรายละเอียดเต็ม — ในแถบเล็กๆ ใส่ได้แค่ยอดรวม
+      chip.addEventListener("click", () => window.alert(lines.join("\n")));
+      chips.push(chip);
+    }
+  } catch (error) {
+    // อ่านโควตาไม่ได้ = ไม่ต้องโชว์ ไม่ใช่เรื่องที่ต้องหยุดงาน
+  }
+
   strip.replaceChildren(...chips);
 }
 
@@ -866,3 +937,68 @@ async function testKeys() {
     }
   }
 }
+
+/* ── คลิกฝั่งไหน ฝั่งนั้นรับการเลื่อนด้วยแป้นพิมพ์ (ผู้ใช้สั่ง 26 ส.ค. 2026) ──
+ *
+ *  "ทำให้ฝั่งนี้มี scroll down แยกกันต่างกัน ใช้โดยการคลิ๊กจุดใดก็ได้ในฝั่งนั้น"
+ *
+ *  แถบเลื่อนแยกฝั่งทำด้วย CSS แล้ว (`.phone-panel` / `.process-panel` มี
+ *  overflow-y ของตัวเอง) ล้อเมาส์เลื่อนฝั่งที่เคอร์เซอร์อยู่ให้เองอยู่แล้ว
+ *  แต่ **ปุ่มลูกศร / PageDown / เว้นวรรค เลื่อนตามสิ่งที่โฟกัสอยู่** ซึ่งถ้าไม่ทำอะไร
+ *  จะไปเลื่อนทั้งหน้าแทน — ตรงนี้จึงให้ฝั่งที่ถูกคลิกรับโฟกัสไว้
+ *
+ *  ใส่ tabindex จากตรงนี้แทนที่จะไปแก้ index.html เพราะไฟล์นั้นเป็นของส่วนกลาง
+ *  ที่หลายสายแตะร่วมกัน — แก้น้อยที่สุดเท่าที่ทำได้
+ *
+ *  **ห้ามแย่งโฟกัสจากช่องพิมพ์/ปุ่ม** ถ้าคลิกโดนช่องกรอกแล้วเราดึงโฟกัสมาที่แผง
+ *  ผู้ใช้จะพิมพ์ไม่ได้เลย — เช็คก่อนว่าสิ่งที่คลิกโดนรับโฟกัสเองได้ไหม
+ */
+(function splitScroll() {
+  const SIDES = ".phone-panel, .process-panel";
+  const TYPING = "input, textarea, select, button, a, [contenteditable], summary, details";
+
+  const arm = () => {
+    document.querySelectorAll(SIDES).forEach((side) => {
+      if (side.dataset.sideReady) return;
+      side.dataset.sideReady = "1";
+      side.tabIndex = -1;                     // โฟกัสได้ด้วยการคลิก แต่ไม่ติดคิว Tab
+    });
+  };
+
+  document.addEventListener("pointerdown", (event) => {
+    // จอแคบวางซ้อนกันเป็นคอลัมน์เดียว ไม่ได้แบ่งฝั่ง — ไม่ต้องทำอะไร
+    if (!window.matchMedia("(min-width: 901px)").matches) return;
+    const side = event.target.closest(SIDES);
+    document.querySelectorAll(SIDES).forEach((el) => el.classList.toggle("side-active", el === side));
+    if (!side) return;
+    // คลิกโดนของที่รับโฟกัสเองได้ (ช่องพิมพ์ · ปุ่ม · หัวข้อพับ) ปล่อยให้เป็นของมัน
+    if (event.target.closest(TYPING)) return;
+    side.focus({ preventScroll: true });
+  }, true);
+
+  /* ฝั่งที่ไม่มีอะไรให้เลื่อน ต้องส่งล้อเมาส์ไปให้อีกฝั่ง
+   *
+   *  พอตัวหน้าไม่เลื่อนแล้ว (body overflow:hidden) การหมุนล้อเหนือฝั่งที่เนื้อหา
+   *  สั้นกว่าช่องจะ **ไม่มีอะไรขยับเลย** — วัดแล้วฝั่งจอมือถือกิน 27% ของหน้าจอ
+   *  และเนื้อพอดีช่อง (797/797) เท่ากับหมุนล้อบนพื้นที่เกือบหนึ่งในสามของจอแล้วตาย
+   *  ซึ่งแยกไม่ออกจาก "หน้าเว็บค้าง" — ก่อนแยกฝั่งตรงนั้นเคยเลื่อนทั้งหน้าได้
+   */
+  document.addEventListener("wheel", (event) => {
+    if (!window.matchMedia("(min-width: 901px)").matches) return;
+    const side = event.target.closest(SIDES);
+    if (!side || side.scrollHeight > side.clientHeight) return;   // ฝั่งนี้เลื่อนเองได้ ปล่อยไป
+    const other = document.querySelector(
+      side.classList.contains("phone-panel") ? ".process-panel" : ".phone-panel");
+    if (!other || other.scrollHeight <= other.clientHeight) return;
+    other.scrollTop += event.deltaY;
+    event.preventDefault();
+  }, { passive: false });
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", arm);
+  } else {
+    arm();
+  }
+  // แผงถูกวาดใหม่ได้ระหว่างใช้งาน — ติดตั้งซ้ำให้ของใหม่ด้วย
+  new MutationObserver(arm).observe(document.body, { childList: true, subtree: true });
+})();

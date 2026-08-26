@@ -2787,8 +2787,14 @@ def _phone_memory_round() -> None:
             if gone:
                 append_log("publish", f"ไล่ตัวถ่ายจอที่ไม่มีคนดูบน "
                                       f"{device_book.label(serial)} — {gone} ตัว")
-        except Exception:                   # noqa: BLE001 - เครื่องไม่ว่างก็ข้ามรอบนี้
-            pass
+        except studio_shared.PhoneBusy:
+            pass                            # เครื่องไม่ว่าง = เรื่องปกติ ข้ามรอบนี้เงียบได้
+        except Exception as error:          # noqa: BLE001
+            # **ห้ามเงียบ** ของเดิมกลืนทุก error ไว้หมด ทำให้ตัวไล่พังเงียบได้โดย
+            # ไม่มีใครรู้ — เกิดจริง 26 ส.ค. 2569: ตัวไล่ไม่ทำงาน 3 ชั่วโมงเต็ม
+            # จนมีของค้าง 20 ตัวบนเครื่องเดียว แต่ log ไม่มีสักบรรทัดให้ไล่
+            append_log("publish", f"ไล่ตัวถ่ายจอค้างบน "
+                                  f"{device_book.label(serial)} ไม่สำเร็จ: {error}")
         wait = PHONE_CLEAN_COOLDOWN * _phone_clean_backoff.get(serial, 1)
         if time.time() - _phone_cleaned_at.get(serial, 0.0) < wait:
             continue
@@ -2867,6 +2873,31 @@ def _sweep_orphan_streamers() -> None:
             append_log("publish", f"กวาดตัวส่งภาพค้างบน {serial} ไม่สำเร็จ: {error}")
 
 
+def _adb_forward_scids() -> set[str]:
+    """`scid` ของช่องต่อที่ ADB ยืนยันว่ายังเปิดอยู่จริง — ทุกเครื่องรวมกัน
+
+    อ่านจาก `adb forward --list` ซึ่งเป็นทะเบียนของ ADB เอง ไม่ใช่ของเรา จึงไม่
+    เพี้ยนตามความจำที่ค้างของเซิร์ฟเวอร์ แต่ละบรรทัดหน้าตาแบบนี้
+
+        7a95129e tcp:53234 localabstract:scrcpy_4f8e5825
+
+    อ่านไม่ได้ให้คืนเซตว่าง แล้วให้ผู้เรียกถอยไปใช้ทะเบียนในหน่วยความจำแทน —
+    **ห้ามคืนเซตว่างแล้วปล่อยให้ผู้เรียกไล่ทุกตัวทิ้ง** เพราะ ADB สะดุดชั่วคราว
+    จะกลายเป็นจอดับหมดทุกหน้าเว็บพร้อมกัน
+    """
+    out = ""
+    with contextlib.suppress(Exception):
+        done = subprocess.run(                              # noqa: S603
+            [ADB, "forward", "--list"], capture_output=True, text=True,
+            errors="replace", timeout=8,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        out = done.stdout or ""
+    mark = "localabstract:scrcpy_"
+    return {line.rsplit(mark, 1)[1].strip()
+            for line in out.splitlines() if mark in line}
+
+
 def _sweep_idle_streamers(serial: str) -> int:
     """ไล่ตัวถ่ายจอบนมือถือที่ **ไม่มีใครดูแล้ว** ออก — เก็บเฉพาะตัวที่ใช้งานอยู่จริง
 
@@ -2878,12 +2909,28 @@ def _sweep_idle_streamers(serial: str) -> int:
     **ห้ามไล่มั่ว** ตัวที่หน้าเว็บกำลังใช้ดูอยู่จริงต้องไม่โดน จึงเทียบด้วย `scid`
     ซึ่งเป็นรหัสประจำตัวที่เราตั้งตอนเปิด — ตัวไหนไม่มีชื่ออยู่ในทะเบียนคือของค้าง
     (ช่องแตะจอใช้ scrcpy คนละตัวและมี scid ของมันเอง ต้องนับเป็นของใช้งานด้วย)
+
+    **ห้ามเชื่อทะเบียนในหน่วยความจำอย่างเดียว** วัดจริง 26 ส.ค. 2569 เวลา 18:25 น.:
+    เครื่อง Xiaomi มีตัวถ่ายจอ 11 ชุด (22 โปรเซส) แต่ช่องต่อที่ยังใช้งานจริงมี
+    **ชุดเดียว** — อีก 10 ชุดค้างอยู่โดยที่ `_live_scids` ยังจำว่า "มีคนดู"
+    ตัวไล่จึงไม่แตะเลยสักตัวตลอด 3 ชั่วโมง (ไม่มีบรรทัด "ไล่ตัวถ่ายจอ" ใน
+    publish.log แม้แต่ครั้งเดียว) เพราะทะเบียนนี้**โตอย่างเดียว ไม่เคยหด**
+    เมื่อหน้าเว็บหลุดแบบผิดปกติจนโค้ดคืนของไม่ทัน
+
+    ตัวชี้ขาดจึงต้องเป็นของที่ **ADB ยืนยันเอง** ไม่ใช่ความจำของเรา: ตัวถ่ายจอที่ยัง
+    มีคนดูจริงต้องมีช่องต่อ `localabstract:scrcpy_<scid>` เปิดค้างอยู่เสมอ
+    (`scrcpy_control` เปิดให้ตอนต่อ และถอนตอนปิด) ไม่มีช่องต่อ = ไม่มีใครดูแน่นอน
+    ต่อให้ทะเบียนจะยังจำชื่อมันอยู่ก็ตาม
     """
-    live = set(_live_scids.get(serial, set()))
+    live = _adb_forward_scids()
     with contextlib.suppress(Exception):
         session = scrcpy_control._sessions.get(serial)      # noqa: SLF001
         if session is not None:
             live.add(str(getattr(session, "scid", "")))
+    # ทะเบียนในหน่วยความจำใช้เป็น "ตัวช่วยกันพลาด" เท่านั้น — ถ้าช่องต่ออ่านไม่ได้
+    # (ADB สะดุด) จะได้ไม่ไล่ของที่ยังใช้อยู่ทิ้งทั้งยวง
+    if not live:
+        live = set(_live_scids.get(serial, set()))
     shell = fb_phone_clean.make_shell(serial, ADB)
     pids = [p for p in (shell("pgrep -f com.genymobile.scrcpy.Server") or "").split()
             if p.isdigit()]
@@ -2897,6 +2944,28 @@ def _sweep_idle_streamers(serial: str) -> int:
         shell(f"kill -9 {pid}")
         killed += 1
     return killed
+
+
+def _phone_watch_keeper() -> None:
+    """เฝ้าสายมือถือ — หลุดแล้วต่อคืนเอง · ต่อคืนไม่ได้ก็บอกให้รู้ทันที
+
+    แยกเป็นไฟล์ `phone_watch.py` เพราะต้องสั่งจากบรรทัดคำสั่งได้ด้วยตอนไล่ปัญหา
+    (`python phone_watch.py board`) และเพื่อให้โปรเจกต์อื่นเรียกใช้ซ้ำได้
+    """
+    time.sleep(45)          # ให้เซิร์ฟเวอร์ตั้งตัวก่อน อย่าไปแย่ง ADB ตอนเพิ่งเปิด
+    try:
+        import phone_watch                              # noqa: PLC0415
+    except Exception as error:                          # noqa: BLE001
+        append_log("publish", f"เปิดตัวเฝ้าสายมือถือไม่ได้: {error}")
+        return
+    while True:
+        try:
+            for what in phone_watch.heal_once(verbose=False):
+                append_log("publish", f"สายมือถือ: {what}")
+        except Exception as error:                      # noqa: BLE001
+            # **ห้ามเงียบ** ตัวเฝ้าที่ตายเงียบแย่กว่าไม่มีตัวเฝ้า เพราะเราจะนึกว่ามีคนดูอยู่
+            append_log("publish", f"ตัวเฝ้าสายมือถือสะดุด: {error}")
+        time.sleep(phone_watch.GAP)
 
 
 def _phone_memory_keeper() -> None:
@@ -4063,6 +4132,10 @@ async def _start_watcher() -> None:
 
     # กวาดตัวส่งภาพหน้าจอที่ค้างจากรอบก่อน
     threading.Thread(target=_sweep_orphan_streamers, daemon=True).start()
+
+    # เฝ้าสายมือถือ — หลุดแล้วต่อคืนให้เอง และร้องดังเมื่อต่อคืนเองไม่ได้
+    # (ก่อน 26 ส.ค. 2569 ไม่มีตัวต่อคืนเลยสักตัว หลุดแล้วค้างจนคนมาเห็นเอง)
+    threading.Thread(target=_phone_watch_keeper, daemon=True).start()
 
 
 # บอท 2 ตัว: main = โพสต์ Facebook · clip = สายเจนคลิป (อนุมัติจุดขาย/คลิป)

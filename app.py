@@ -542,6 +542,26 @@ async def index() -> Response:
     )
 
 
+@app.get("/api/gemini-quota")
+async def gemini_quota_today() -> dict:
+    """โควตา Gemini ชั้นฟรีที่ใช้ไปวันนี้ (ผู้ใช้สั่ง 26 ส.ค. 2026)
+
+    **Google ไม่มีที่ให้ถามว่าเหลือกี่ครั้ง** ตัวเลขที่ได้จึงมาจากการนับเองว่า
+    ระบบนี้ยิงไปกี่ครั้ง ส่วนเพดานจะรู้ก็ต่อเมื่อโดนปฏิเสธเพราะหมดโควตาแล้ว
+    (คำตอบ 429 ของ Google มีเพดานจริงติดมาด้วย)
+
+    ห้ามเดาตัวเลข "เหลืออีกเท่าไร" ให้เอง — เลขที่เดาแล้วผิดอันตรายกว่าไม่มีเลข
+    เพราะคนจะวางแผนว่าจะเจนได้อีกกี่คลิปตามมัน
+    """
+    try:
+        import gemini_quota
+        data = gemini_quota.today()
+        data["history"] = gemini_quota.history(7)
+        return {"ok": True, **data}
+    except Exception as error:                               # noqa: BLE001
+        return {"ok": False, "detail": str(error), "rows": [], "total": 0, "dry": []}
+
+
 @app.get("/api/system")
 async def system_info() -> dict:
     return {
@@ -1142,6 +1162,7 @@ async def train_position(request: Request) -> dict:
 
 import clip_store                                                # noqa: E402
 import publish_flow                                              # noqa: E402
+import publish_order                                             # noqa: E402
 import hashtag as hashtag_lib                                    # noqa: E402
 
 # มือถือมีจอเดียว สองงานยิง adb พร้อมกันจะกดทับกันทั้งคู่ — ล็อกให้รันทีละงาน
@@ -1384,6 +1405,13 @@ def _build_context(
         screen=(width, height),
         tap=lambda x, y: run_adb("-s", serial, "shell", "input", "tap", str(x), str(y)),
         type_text=lambda text: adb_type_text(serial, text),
+        # คัดลอก-วางบนมือถือ — ใช้กับขั้น "วางลิงก์" (ผู้ใช้สั่ง 25 ส.ค. 2026)
+        #
+        # ผ่านช่องควบคุมของ scrcpy ตัวเดียวกับปุ่มคัดลอกในหน้าจอมือถือบนเว็บ
+        # (`adb shell service call clipboard` ใช้ไม่ได้ตั้งแต่ Android 10)
+        # ตัวเดินผังจะถอยไปพิมพ์ทีละตัวเองถ้าตรงนี้ล้ม — และขึ้น log ว่าถอย
+        set_clipboard=lambda text, paste=True: scrcpy_control.set_clipboard(
+            ADB, serial, text, paste),
         run_adb=lambda *args: run_adb("-s", serial, *args, timeout=25).stdout,
         caption=(run or {}).get("caption") or clip_store.build_caption(run or {}),
         # ต้องเป็นลิงก์ที่ผู้ใช้ส่งมาทาง Telegram เท่านั้น — ลิงก์ที่ระบบแปลงเอง
@@ -1404,6 +1432,18 @@ async def publish_flow_run(request: Request) -> dict:
     item_id = str(payload.get("item_id", "")).strip()
     only = payload.get("only")
 
+    # ด่านลำดับการลง — Shopee Video → Facebook Reels → TikTok ห่างกันอย่างน้อย 1 วัน
+    #
+    # ตรวจ **ก่อน** จับล็อกและก่อนแตะมือถือ เพราะถ้าปล่อยให้เดินผังไปแล้วค่อยรู้
+    # ว่าผิดลำดับ = โพสต์ขึ้นจริงไปแล้ว ถอนไม่ได้ (ต้องไปลบเองในแอป)
+    # ไม่ตรวจตอนสั่งเดินทีละขั้น (`only`) เพราะนั่นคือการไล่เทรนผัง ไม่ใช่โพสต์จริง
+    if item_id and not only:
+        run = clip_store.load_run(DATA_DIR, item_id) or {}
+        ok, why = publish_order.check(run, target)
+        if not ok:
+            append_log("publish", f"[{target}] ไม่ได้เดินผัง — {why}")
+            raise HTTPException(status_code=409, detail=why)
+
     if not _publish_run_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="มีงานโพสต์รันอยู่แล้ว รอให้จบก่อน")
 
@@ -1412,6 +1452,11 @@ async def publish_flow_run(request: Request) -> dict:
             context = _build_context(serial, target, item_id, lambda *a: None)
             if only:
                 number = int(only)
+                # ทดลองทีละขั้น = กำลังพิสูจน์ว่าพิกัดที่เทรนไว้ถูกจริง
+                # ต้องแตะตรงจุดเป๊ะ ไม่งั้นถ้าเยื้องแล้วบังเอิญไปโดนปุ่มพอดี
+                # จะเก็บพิกัดที่ผิดไว้โดยไม่รู้ตัว แล้วไปพังตอนเดินผังจริง
+                context.tap_jitter = 0
+                context.settle_jitter = 0.0
                 return publish_flow.run_flow(context, start_at=number, stop_after=number)
             return publish_flow.run_flow(context)
         finally:
@@ -2322,6 +2367,7 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
         try:
             video = await asyncio.to_thread(
                 scrcpy_control.open_video, ADB, cleaned, 1024, 30)
+            _live_scids.setdefault(cleaned, set()).add(getattr(video, "scid", ""))
             print(f"[stream] scrcpy พร้อม {video.width}x{video.height}", flush=True)
         except scrcpy_control.ScrcpyUnavailable as error:
             # app.py ไม่มี logger — เขียนลง stdout ซึ่ง restart_studio ต่อเข้า
@@ -2443,10 +2489,12 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
                     break
                 revivals += 1
                 with contextlib.suppress(Exception):
+                    _live_scids.get(cleaned, set()).discard(getattr(video, "scid", ""))
                     await asyncio.to_thread(video.close)
                 try:
                     video = await asyncio.to_thread(
                         scrcpy_control.open_video, ADB, cleaned, 1024, 30)
+                    _live_scids.setdefault(cleaned, set()).add(getattr(video, "scid", ""))
                     print(f"[stream] ปลุกช่องวิดีโอคืนแล้ว (ครั้งที่ {revivals}) "
                           f"{video.width}x{video.height}", flush=True)
                 except scrcpy_control.ScrcpyUnavailable as error:
@@ -2459,6 +2507,7 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
         _watching_stop(cleaned)
         receive_task.cancel()
         if video is not None:
+            _live_scids.get(cleaned, set()).discard(getattr(video, "scid", ""))
             await asyncio.to_thread(video.close)
         if process is not None and process.poll() is None:
             process.terminate()
@@ -2546,6 +2595,8 @@ _phone_cleaning: set[str] = set()
 PHONE_CLEAN_MIN_GAIN = 0.10
 # swap สูงจะนับว่า "เต็ม" ก็ต่อเมื่อแรมตึงด้วย — ต่ำกว่านี้ถือว่าเครื่องยังสบาย
 PHONE_SWAP_RAM_FLOOR = 60
+# ตัวถ่ายจอที่ "มีคนดูอยู่จริง" ตอนนี้ แยกรายเครื่อง — ตัวที่ไม่อยู่ในนี้คือของค้าง
+_live_scids: dict[str, set[str]] = {}
 PHONE_CLEAN_BACKOFF_MAX = 12       # 30 นาที x 12 = 6 ชั่วโมงเป็นอย่างมาก
 _phone_clean_backoff: dict[str, int] = {}
 
@@ -2726,6 +2777,18 @@ def _phone_memory_round() -> None:
             continue
         if serial in _phone_cleaning:
             continue
+        # ไล่ตัวถ่ายจอที่ไม่มีคนดูออกก่อนเสมอ — ทำได้เร็วและไม่รบกวนใคร
+        # จึงไม่ต้องรอให้แรมเต็มก่อน (ของค้าง 12 ตัวเคยกินไป 596 MB)
+        try:
+            with studio_shared.phone_lock(
+                serial, timeout=3.0, poll=0.5, label="ไล่ตัวถ่ายจอค้าง", queue=False
+            ):
+                gone = _sweep_idle_streamers(serial)
+            if gone:
+                append_log("publish", f"ไล่ตัวถ่ายจอที่ไม่มีคนดูบน "
+                                      f"{device_book.label(serial)} — {gone} ตัว")
+        except Exception:                   # noqa: BLE001 - เครื่องไม่ว่างก็ข้ามรอบนี้
+            pass
         wait = PHONE_CLEAN_COOLDOWN * _phone_clean_backoff.get(serial, 1)
         if time.time() - _phone_cleaned_at.get(serial, 0.0) < wait:
             continue
@@ -2802,6 +2865,38 @@ def _sweep_orphan_streamers() -> None:
                                f"{device_book.label(serial)} — {killed} ตัว")
         except Exception as error:          # noqa: BLE001
             append_log("publish", f"กวาดตัวส่งภาพค้างบน {serial} ไม่สำเร็จ: {error}")
+
+
+def _sweep_idle_streamers(serial: str) -> int:
+    """ไล่ตัวถ่ายจอบนมือถือที่ **ไม่มีใครดูแล้ว** ออก — เก็บเฉพาะตัวที่ใช้งานอยู่จริง
+
+    **ทำไมตัวกวาดตอนบูตอย่างเดียวไม่พอ** วัดจริง 26 ส.ค. 2569: เปิดหน้าเว็บค้างไว้
+    หลายที่พร้อมกัน (คอมหลัก + คอมสอง + ไอแพด รวม 34 การเชื่อมต่อ) ทุกหน้าสั่งเปิด
+    ตัวถ่ายจอของตัวเอง สะสมได้ **12 ตัวบนเครื่องเดียว กินแรม 596 MB** ภายในไม่กี่นาที
+    ตัวกวาดตอนบูตช่วยไม่ได้เลยเพราะของพวกนี้เกิดหลังบูต
+
+    **ห้ามไล่มั่ว** ตัวที่หน้าเว็บกำลังใช้ดูอยู่จริงต้องไม่โดน จึงเทียบด้วย `scid`
+    ซึ่งเป็นรหัสประจำตัวที่เราตั้งตอนเปิด — ตัวไหนไม่มีชื่ออยู่ในทะเบียนคือของค้าง
+    (ช่องแตะจอใช้ scrcpy คนละตัวและมี scid ของมันเอง ต้องนับเป็นของใช้งานด้วย)
+    """
+    live = set(_live_scids.get(serial, set()))
+    with contextlib.suppress(Exception):
+        session = scrcpy_control._sessions.get(serial)      # noqa: SLF001
+        if session is not None:
+            live.add(str(getattr(session, "scid", "")))
+    shell = fb_phone_clean.make_shell(serial, ADB)
+    pids = [p for p in (shell("pgrep -f com.genymobile.scrcpy.Server") or "").split()
+            if p.isdigit()]
+    killed = 0
+    for pid in pids:
+        line = shell(f"tr '\\000' ' ' < /proc/{pid}/cmdline") or ""
+        scid = next((w.split("=", 1)[1] for w in line.split() if w.startswith("scid=")), "")
+        if scid and scid in live:
+            continue
+        # ไม่รู้ว่าเป็นของใคร = ของค้างแน่ เพราะของเราทุกตัวลงทะเบียน scid ไว้
+        shell(f"kill -9 {pid}")
+        killed += 1
+    return killed
 
 
 def _phone_memory_keeper() -> None:

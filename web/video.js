@@ -682,6 +682,23 @@ function jobRow(job) {
   return row;
 }
 
+/** บรรทัดบอกเพดาน "ทำทีละ 8 งาน" — สร้างจาก JS ไม่แตะ index.html
+ *
+ *  **เพดานที่มองไม่เห็น แยกไม่ออกจากระบบค้าง** 25 ส.ค. 2026 ผู้ใช้ส่งลิงก์ 33 ใบ
+ *  แล้วเห็นขยับแค่ 8 ใบ ถ้าไม่บอกไว้ตรงนี้ จะโดนไล่บั๊กผิดทางทุกครั้งที่คิวยาว
+ *
+ *  ข้อความมาจากเซิร์ฟเวอร์ (`load_text`) ทั้งดุ้น **ห้ามประกอบเอง** ไม่งั้นวันที่
+ *  เพดานเปลี่ยนจาก 8 เป็นเลขอื่น หน้าเว็บจะยังบอกเลขเก่าอยู่โดยไม่มีใครรู้
+ */
+function queueLoadNote() {
+  let node = $("#storyLoadNote");
+  if (!node) {
+    node = el("p", { className: "note load-note", id: "storyLoadNote" });
+    $("#storyQueueList")?.before(node);
+  }
+  return node;
+}
+
 export async function loadJobQueue() {
   const list = $("#storyQueueList");
   if (!list) return;
@@ -690,6 +707,7 @@ export async function loadJobQueue() {
     payload = await api(`${CLIP_API}/api/jobs`);
   } catch {
     $("#storyQueueCount").textContent = "ต่อไม่ติด";
+    queueLoadNote().textContent = "";
     list.replaceChildren(el("li", {
       className: "note",
       textContent: `เปิดเซิร์ฟเวอร์สายคลิปก่อน — python clip_app.py`,
@@ -701,9 +719,14 @@ export async function loadJobQueue() {
 
   const open = jobCards.filter((job) => job.open);
   const closed = jobCards.filter((job) => !job.open).slice(-8).reverse();
-  $("#storyQueueCount").textContent = open.length
-    ? `${open.length} งานค้าง${payload.busy ? " · กำลังทำอยู่" : ""}`
-    : "ว่าง";
+  const load = payload.load || null;
+  // ป้ายหัวคิวสั้นๆ ให้เห็นเพดานทันที ส่วนเหตุผลเต็มอยู่บรรทัดใต้ลงไป
+  $("#storyQueueCount").textContent = load
+    ? `${load.busy}/${load.limit}${load.queued ? ` · รอ ${load.queued}` : ""}`
+    : (open.length ? `${open.length} งานค้าง` : "ว่าง");
+  const note = queueLoadNote();
+  note.textContent = payload.load_text || "";
+  note.classList.toggle("warn", !!load?.full);
   list.replaceChildren(...open.map(jobRow), ...closed.map(jobRow));
 }
 
@@ -736,96 +759,897 @@ function approveBlock(job, target, done) {
   return el("div", { className: "story-approve" }, top, box);
 }
 
-function imageReview(job, run, meta) {
-  const images = run.images || [];
-  const pool = run.image_pool || [];
-  const out = [el("h4", { textContent: `🖼 ชุดรูปที่จะส่งเข้า GPT (${images.length} ใบ)` })];
+/** เปิดดูรูปขนาดเต็ม — ผู้ใช้สั่งเพิ่ม 25 ส.ค. 2026
+ *
+ *  รูปย่อในคลังเล็กมากจนดูไม่ออกว่าใบไหนเป็นใบไหน โดยเฉพาะรูปที่เป็นภาพ
+ *  รายละเอียดสินค้าซึ่งมีตัวหนังสือเต็มไปหมด ต้องกดดูเต็มก่อนถึงจะเลือกถูก
+ *
+ *  สร้าง <dialog> ต่อกับ body **ไม่แตะโครงหน้า** (body เป็น block ธรรมดา
+ *  และ dialog แบบ modal อยู่นอกการไหลของหน้าอยู่แล้ว)
+ */
+function zoomImage(src, alt) {
+  let box = document.getElementById("imgZoom");
+  if (!box) {
+    box = el("dialog", { id: "imgZoom", className: "img-zoom" });
+    // กดที่ว่างรอบรูปเพื่อปิด — บนมือถือหาปุ่มกากบาทยากกว่าแตะข้างๆ
+    box.addEventListener("click", (event) => {
+      if (event.target === box) box.close();
+    });
+    document.body.append(box);
+  }
+  const close = textBtn("✕ ปิด", "ghost", () => box.close());
+  const pic = el("img", { src, alt: alt || "", className: "img-zoom-pic" });
 
+  /* กำหนดขนาดรูปเป็นตัวเลขจริงหลังรูปโหลดเสร็จ (แก้ 26 ส.ค. 2026)
+   *
+   *  **ทำไมต้องคำนวณเอง ไม่ปล่อยให้ CSS จัดการ** กล่องเป็น <dialog> ซึ่งคิดขนาด
+   *  ตัวเองจากของข้างใน ตอนเปิดขึ้นมารูปยังโหลดไม่เสร็จ ขนาดจึงเป็นศูนย์ กล่องเลย
+   *  หดไปเท่าความกว้างของแถบปุ่มด้านล่าง (วัดได้ 560px) พอรูปโหลดมาที่ 774px
+   *  ก็ล้นออกนอกกล่อง ขอบขวาโดนตัด
+   *
+   *  ทางแก้แรกที่ลองคือบังคับกล่องเป็น 94% ของจอ ซึ่งแก้อาการล้นได้ **แต่เสียกว่าเดิม**
+   *  บนจอกว้างรูปจัตุรัสจะลอยกลางพื้นขาวกว้างมาก และแถบปุ่มปิดถูกดันออกไปไกลจนกดไม่ถึง
+   *
+   *  แบบนี้: คิดขนาดที่พอดีจอเอง (ไม่เกิน 88% กว้าง · 78% สูง) แล้วใส่เป็น px จริง
+   *  กล่องจึงหดพอดีรูปเป๊ะ ไม่มีพื้นที่ขาวเหลือ และปุ่มปิดอยู่ติดใต้รูปเสมอ
+   *  **ห้ามขยายเกินขนาดไฟล์จริง** (ตัวคูณไม่เกิน 1) ไม่งั้นรูปเล็กจะถูกดึงจนแตก
+   */
+  const fitPic = () => {
+    if (!pic.naturalWidth || !pic.naturalHeight) return;
+    // **ต้องวัดด้วย clientWidth/clientHeight ไม่ใช่ innerWidth/innerHeight**
+    // สองตัวนี้ต่างกันตรงความกว้างแถบเลื่อน (วัดได้ 397 กับ 380 = ต่างกัน 17px)
+    // ส่วนหน่วย vw ที่ CSS ใช้อิงตัวหลัง ถ้าเราคิดจากตัวแรก ค่าที่ได้จะใหญ่กว่าที่ CSS
+    // ยอม แล้ว max-width จะไปบีบความกว้างทีหลังโดยที่ความสูงไม่ถูกบีบตาม
+    // → กรอบรูปบิดเบี้ยว (เจอจริงบนจอ 397: JS สั่ง 349x349 แต่ออกมาเป็น 330x349)
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const scale = Math.min(
+      (vw * 0.88) / pic.naturalWidth,
+      (vh * 0.78) / pic.naturalHeight,
+      1,                                  // ห้ามขยายเกินขนาดไฟล์จริง เดี๋ยวภาพแตก
+    );
+    pic.style.width = `${Math.round(pic.naturalWidth * scale)}px`;
+    pic.style.height = `${Math.round(pic.naturalHeight * scale)}px`;
+  };
+  pic.addEventListener("load", fitPic);
+  if (pic.complete) fitPic();
+  // ย่อ/ขยายหน้าต่างแล้วต้องคิดใหม่ ไม่งั้นกล่องล้นจอที่เล็กลง
+  if (!box.dataset.fitBound) {
+    box.dataset.fitBound = "1";
+    window.addEventListener("resize", () => {
+      if (box.open) box.__fit?.();
+    });
+  }
+  box.__fit = fitPic;
+
+  box.replaceChildren(
+    pic,
+    el("div", { className: "img-zoom-bar" },
+      el("a", { href: src, target: "_blank", rel: "noreferrer",
+                textContent: "เปิดไฟล์เต็มในแท็บใหม่" }),
+      close),
+  );
+  box.showModal();
+}
+
+/** ปุ่มแว่นขยายบนรูปหนึ่งใบ — กดแล้วไม่ให้ไปโดนการกดของการ์ดที่ครอบอยู่ */
+function zoomBtn(src, alt) {
+  const button = iconBtn("🔍", "ดูรูปขนาดเต็ม", () => zoomImage(src, alt));
+  button.addEventListener("click", (event) => event.stopPropagation());
+  return button;
+}
+
+// ------------- ที่พักของที่กำลังแก้ (ผู้ใช้สั่งไว้ 23 ส.ค. 2026) ---------------
+//
+//   "ในการแก้จุดเด่นหรือแก้รูป มันจะมีแก้มากกว่า 1 จุดแน่ๆ ผมอยากให้มีการกดให้ครบก่อน
+//    แล้วมีปุ่มส่งทีเดียว เช่น ผมลบจุดเด่น 3 เพิ่ม 6 7 8 เสร็จปุ๊บกดส่งครั้งเดียว"
+//
+// เดิมหน้าเว็บยิงบันทึกทุกครั้งที่กดแก้ทีละจุด ซึ่งต่างจากฝั่งแชทที่สะสมไว้ก่อน
+// สองทางทำงานคนละแบบ แล้วกดพลาดทีเดียวก็บันทึกไปแล้ว ถอยไม่ได้
+//
+// **ห้ามสะสมในหน้าเว็บแล้วยิงทีละข้อรัวๆ ตอนกดยืนยัน** ถ้าขาดกลางคัน (เน็ตหลุด ·
+// ปิดหน้า) จะเหลือครึ่งๆ ซึ่งแย่กว่าไม่ได้แก้เลย เพราะไม่มีใครรู้ว่าหยุดตรงไหน —
+// ฝั่งเซิร์ฟเวอร์จึงมี `/images` กับ `/highlights` ที่เขียน**ทั้งชุดครั้งเดียวจบ**
+const editDraft = {};
+
+/** งานไหนกำลังรอ AI คิดจุดเด่นอยู่ (ผู้ใช้สั่ง 26 ส.ค. 2026)
+ *
+ *  "กด gen จุดเด่นผ่าน AI แล้วไม่รู้ว่าเสร็จหรือไม่เสร็จ ถ้ายังรอผลอยู่ให้ขึ้นตัววนๆ"
+ *
+ *  งานนี้ใช้เวลา 15–30 วินาที ซึ่งนานพอที่จะแยกไม่ออกว่า "กำลังทำ" กับ "กดไม่ติด"
+ *  เก็บสถานะไว้นอกฟังก์ชันวาด เพราะหน้าจอวาดใหม่เองทุก 6 วินาที ถ้าเก็บไว้ข้างใน
+ *  ตัวหมุนจะหายไปกลางทางแล้วกลับไปเหมือนไม่มีอะไรเกิดขึ้น
+ */
+const aiBusy = {};
+
+/** ที่แก้ค้างของงานนี้ — ผูกกับของฝั่งเซิร์ฟเวอร์ตอนเริ่มแก้
+ *
+ *  ถ้าของฝั่งเซิร์ฟเวอร์เปลี่ยนไประหว่างที่ยังแก้ค้าง (อีกคนกดในแชท) **ต้องทิ้ง
+ *  ที่แก้แล้วเริ่มใหม่** ไม่ใช่เขียนทับของเขา — แต่ต้องบอกด้วยว่าทิ้งเพราะอะไร
+ */
+function draftFor(job, run) {
+  const base = JSON.stringify([
+    run.images || [], run.image_pool || [], run.highlights || [], run.features || [],
+  ]);
+  const kept = editDraft[job.id];
+  if (kept && kept.base === base) return kept;
+  const highlights = run.highlights || [];
+  const fresh = {
+    base,
+    images: [...(run.images || [])],
+    pool: [...(run.image_pool || [])],
+    highlights: [...highlights],
+    spare: (run.features || []).filter((text) => !highlights.includes(text)),
+    // ทิ้งที่แก้ค้างเพราะของฝั่งโน้นเปลี่ยน — ต้องขึ้นเตือน ไม่ใช่หายไปเฉยๆ
+    dropped: !!(kept && draftDirty(kept)),
+  };
+  editDraft[job.id] = fresh;
+  return fresh;
+}
+
+function draftDirty(draft) {
+  const [images, , highlights] = JSON.parse(draft.base);
+  return JSON.stringify(draft.images) !== JSON.stringify(images)
+      || JSON.stringify(draft.highlights) !== JSON.stringify(highlights);
+}
+
+function draftChanges(draft) {
+  const [images, , highlights] = JSON.parse(draft.base);
+  const hlAdded = draft.highlights.filter((t) => !highlights.includes(t)).length;
+  const hlGone = highlights.filter((t) => !draft.highlights.includes(t)).length;
+  return {
+    imgOn: draft.images.some((name) => !images.includes(name)),
+    imgOff: images.some((name) => !draft.images.includes(name)),
+    hlOn: hlAdded > 0,
+    hlOff: hlGone > 0,
+    // **จุดเด่นนับด้วย max ไม่ใช่บวกกัน** (แก้ 26 ส.ค. 2026)
+    //
+    // ตั้งแต่พิมพ์ทับในกรอบได้ การแก้ข้อความหนึ่งข้อจะดูเหมือน "ข้อเก่าหายไป 1 +
+    // ข้อใหม่โผล่มา 1" ถ้าบวกกันจะขึ้นว่าแก้ 2 จุด — วัดจริงแล้วพิมพ์แก้ 2 ข้อ
+    // ขึ้นว่า "แก้ค้างไว้ 4 จุด" ซึ่งทำให้คนอ่านนึกว่าตัวเองเผลอไปแตะอะไรเพิ่ม
+    //
+    // ใช้ตัวที่มากกว่าแทน: แก้ข้อความ = 1 · เพิ่มข้อใหม่ = 1 · ลบทิ้ง = 1
+    // (ส่วนรูปยังบวกกันเหมือนเดิม เพราะเป็นการเอาเข้า/เอาออกจริงๆ ไม่ใช่แก้ข้อความ)
+    count: draft.images.filter((n) => !images.includes(n)).length
+         + images.filter((n) => !draft.images.includes(n)).length
+         + Math.max(hlAdded, hlGone),
+  };
+}
+
+/** ส่งที่แก้ทั้งชุดขึ้นเซิร์ฟเวอร์ — ยิงเฉพาะส่วนที่แก้จริง ส่วนละครั้งเดียว
+ *
+ *  ยิงสองครั้ง (รูป · จุดเด่น) เพราะเป็นของคนละชุด แต่**แต่ละครั้งเขียนทั้งชุดจบ
+ *  ในตัวเอง** ไม่ใช่ทยอยทีละข้อ ถ้าครั้งที่สองล้ม ต้องบอกให้ชัดว่าครั้งแรกผ่านแล้ว
+ *  ไม่ใช่ขึ้นว่า "ไม่สำเร็จ" ลอยๆ แล้วผู้ใช้กดซ้ำจนของซ้อนกัน
+ */
+async function saveDraft(job, draft) {
+  const changed = draftChanges(draft);
+  const done = [];
+  try {
+    if (changed.imgOn || changed.imgOff) {
+      const result = await jobPost(`${job.id}/images`, { images: draft.images });
+      done.push(result.message || "บันทึกชุดรูปแล้ว");
+    }
+    if (changed.hlOn || changed.hlOff) {
+      const result = await jobPost(`${job.id}/highlights`, { highlights: draft.highlights });
+      done.push(result.message || "บันทึกจุดเด่นแล้ว");
+    }
+  } catch (error) {
+    $("#storyNote").textContent = done.length
+      ? `${done.join(" · ")} — แต่ส่วนที่เหลือไม่สำเร็จ: ${error.message}`
+      : `บันทึกไม่สำเร็จ: ${error.message}`;
+    delete editDraft[job.id];          // ดึงของจริงมาตั้งต้นใหม่ จะได้ไม่เดาว่าเหลืออะไร
+    await loadJobQueue();
+    await showJob(job.id, true);
+    return false;
+  }
+  delete editDraft[job.id];
+  $("#storyNote").textContent = done.join(" · ") || "ไม่มีอะไรเปลี่ยน";
+  await loadJobQueue();
+  await showJob(job.id, true);
+  return true;
+}
+
+/** กล่องตรวจชุดรูป+จุดเด่น — วาดใหม่ในเครื่องทุกครั้งที่กด ไม่ยิงเซิร์ฟเวอร์
+ *  จนกว่าจะกดบันทึก (นั่นคือทั้งหมดของ "แก้ให้ครบก่อนแล้วส่งทีเดียว") */
+function imageReview(job, run, meta) {
+  const draft = draftFor(job, run);
+  const box = el("div", { className: "img-review" });
+  const paint = () => box.replaceChildren(...imageReviewParts(job, meta, draft, paint));
+  paint();
+  return [box];
+}
+
+function imageReviewParts(job, meta, draft, paint) {
+  const itemId = job.item_id || "";
+  const images = draft.images;
+  const pool = draft.pool;
+  const highlights = draft.highlights;
+  const out = [];
+
+  if (draft.dropped) {
+    // ทิ้งที่แก้ค้างเพราะอีกทาง (ปุ่มในแชท) แก้ของชิ้นเดียวกันไปแล้ว **ต้องบอก**
+    // ถ้าหายไปเงียบๆ ผู้ใช้จะนึกว่ากดบันทึกไปแล้วทั้งที่ยังไม่ได้กด
+    out.push(el("p", { className: "note warn", textContent:
+      "⚠️ ข้อมูลถูกแก้จากอีกทาง (แชท) ระหว่างที่กำลังแก้อยู่ — ที่แก้ค้างถูกทิ้ง "
+      + "หน้านี้ดึงของล่าสุดมาให้แล้ว เริ่มแก้ใหม่ได้เลย" }));
+    draft.dropped = false;
+  }
+
+  // ── แถบบันทึก: แก้ให้ครบก่อน แล้วกดส่งทีเดียว (ผู้ใช้สั่ง 23 ส.ค. 2026) ──
+  //
+  // `refreshBar` มีไว้ให้ช่องพิมพ์จุดเด่นเรียกตอนพิมพ์ — **ห้ามเรียก paint()**
+  // เพราะวาดใหม่ทั้งก้อนตอนกำลังพิมพ์จะทำให้เคอร์เซอร์เด้งไปท้ายช่องทุกตัวอักษร
+  const bar = el("div", { className: "inline-row save-bar" });
+  const refreshBar = () => {
+    const now = draftChanges(draft);
+    bar.className = `inline-row save-bar${now.count ? " on" : ""}`;
+    if (!now.count) {
+      bar.replaceChildren(el("small", { className: "note", textContent:
+        "แก้ได้หลายจุดติดกัน — ยังไม่บันทึกจนกว่าจะกดปุ่มบันทึก" }));
+      return;
+    }
+    bar.replaceChildren(
+      el("b", { className: "save-count", textContent: `แก้ค้างไว้ ${now.count} จุด` }),
+      textBtn("💾 บันทึกที่แก้ทั้งหมด", "primary", () => saveDraft(job, draft)),
+      textBtn("↩️ ยกเลิกที่แก้", "ghost", () => {
+        // คืนค่าจากของฝั่งเซิร์ฟเวอร์ที่ผูกไว้ตอนเริ่มแก้ ไม่ต้องยิงถามใหม่
+        const [wasImages, wasPool, wasHighlights, features] = JSON.parse(draft.base);
+        draft.images = [...wasImages];
+        draft.pool = [...wasPool];
+        draft.highlights = [...wasHighlights];
+        draft.spare = features.filter((text) => !wasHighlights.includes(text));
+        paint();
+      }),
+    );
+  };
+  refreshBar();
+  out.push(bar);
+
+  out.push(el("h4", { textContent: `🖼 ชุดรูปที่จะส่งเข้า GPT (${images.length} ใบ)` }));
+
+  // ── ซ้าย: ชุดที่เลือกไว้ · ขวา: คลังสำรอง กดเลือกได้เลย ──────────────
+  //
+  // ผู้ใช้สั่ง 25 ส.ค. 2026 (วงกลมแดงในภาพ) — "ให้รูปในคลังขึ้นโชว์ตรงนี้เลย
+  // แล้วผมกดเลือกเอง จุดเด่นด้วย" เดิมต้องกดปุ่ม 🔄 ทีละใบเพื่อสุ่มเปลี่ยน
+  // ซึ่งไม่รู้ว่าจะได้ใบไหน และไม่เห็นว่าในคลังมีอะไรบ้าง
+  //
+  // ทั้งก้อนนี้อยู่ใน #storyDetail — เป็นเนื้อหาในกล่อง ไม่ใช่โครงหน้า
+  const pair = el("div", { className: "bank-pair" });
+
+  const picked = el("div", { className: "bank-side" });
   const grid = el("div", { className: "story-grid" });
   images.forEach((name, index) => {
     const tools = el("span", { className: "story-cell-tools" });
+    tools.append(zoomBtn(clipFile(itemId, name), `รูปที่ ${index + 1}`));
     if (images.length > 1) {
-      tools.append(iconBtn("🗑", "เอาใบนี้ออก (ย้ายไปคลัง)", () =>
-        act(() => jobPost(`${job.id}/action`, { action: "img_del", index: index + 1 }))));
-    }
-    if (pool.length) {
-      tools.append(iconBtn("🔄", "เปลี่ยนเป็นใบในคลัง", () =>
-        act(() => jobPost(`${job.id}/action`, { action: "img_swap", index: index + 1 }))));
+      tools.append(iconBtn("🗑", "เอาใบนี้ออก (ย้ายไปคลัง)", () => {
+        draft.images = images.filter((_, spot) => spot !== index);
+        draft.pool = [name, ...pool];
+        paint();
+      }));
     }
     grid.append(el("figure", { className: "story-cell" },
       el("img", {
         className: "story-thumb", loading: "lazy", alt: `รูปที่ ${index + 1}`,
-        src: clipFile(run.item_id, name),
+        src: clipFile(itemId, name),
       }), tools));
   });
-  out.push(grid);
+  picked.append(grid);
 
-  const tools = el("div", { className: "inline-row" });
-  if (pool.length && images.length < meta.max_images) {
-    tools.append(textBtn("➕ เพิ่มรูปจากคลัง", "ghost",
-      () => act(() => jobPost(`${job.id}/action`, { action: "img_add" }))));
-  }
-  tools.append(
-    textBtn("✅ ใช้ชุดรูปนี้", "primary",
-      () => act(() => jobPost(`${job.id}/action`, { action: "img_ok" }))),
-    el("small", { className: "note", textContent: `คลังสำรอง ${pool.length} ใบ` }),
-  );
-  out.push(tools);
-
-  const highlights = run.highlights || [];
-  out.push(el("h4", { textContent: `✨ จุดเด่นที่จะส่งเข้า GPT (${highlights.length} ข้อ)` }));
-  const list = el("ol", { className: "story-highlights" });
-  highlights.forEach((text, index) => {
-    const item = el("li", {}, el("span", { textContent: text }));
-    item.append(iconBtn("✏️", "แก้ข้อนี้", () => {
-      const next = window.prompt(`แก้จุดเด่นข้อ ${index + 1}`, text);
-      if (next && next.trim() && next.trim() !== text) {
-        act(() => jobPost(`${job.id}/highlight`, { index: index + 1, text: next.trim() }));
+  const bank = el("div", { className: "bank-side" });
+  if (pool.length) {
+    bank.append(el("p", { className: "bank-title",
+                          textContent: `คลังสำรอง ${pool.length} ใบ — กดเพื่อใช้ใบนั้น` }));
+    const bankGrid = el("div", { className: "story-grid bank-grid" });
+    const full = images.length >= meta.max_images;
+    pool.forEach((name, spot) => {
+      const cell = el("figure", { className: `story-cell pick${full ? " off" : ""}` },
+        el("img", {
+          className: "story-thumb", loading: "lazy", alt: name,
+          src: clipFile(itemId, name),
+        }));
+      cell.append(el("span", { className: "story-cell-tools" },
+        zoomBtn(clipFile(itemId, name), name)));
+      cell.title = full ? `ครบ ${meta.max_images} ใบแล้ว — เอาใบเดิมออกก่อน` : "กดเพื่อใช้ใบนี้";
+      if (!full) {
+        cell.addEventListener("click", () => {
+          draft.images = [...images, name];
+          draft.pool = pool.filter((_, at) => at !== spot);
+          paint();
+        });
       }
-    }));
+      bankGrid.append(cell);
+    });
+    bank.append(bankGrid);
+  } else {
+    bank.append(el("p", { className: "note", textContent: "คลังสำรองว่าง" }));
+  }
+  pair.append(picked, bank);
+  out.push(pair);
+
+  out.push(el("div", { className: "inline-row" },
+    textBtn("✅ ใช้ชุดรูปนี้ ไปต่อ", "primary", () => commitDraft(job, draft, "img_ok"))));
+
+  // ── จุดเด่น: ซ้ายคือที่เลือกไว้ · ขวาคือจุดขายทั้งหมดที่ AI ไล่ไว้ ─────
+  out.push(el("h4", { textContent: `✨ จุดเด่นที่จะส่งเข้า GPT (${highlights.length} ข้อ)` }));
+
+  const hlPair = el("div", { className: "bank-pair" });
+  const hlPicked = el("div", { className: "bank-side" });
+  // พิมพ์ทับในกรอบได้เลย (ผู้ใช้สั่ง 26 ส.ค. 2026 — "ให้เหมือนเดิมแบบคลิ๊กในกรอบแล้วแก้ได้เลย")
+  //
+  // ของเดิมต้องกดปุ่ม ✏️ แล้วเด้งกล่อง prompt ของเบราว์เซอร์ขึ้นมา ซึ่งแก้ทีละข้อ
+  // และมองไม่เห็นข้ออื่นระหว่างแก้ ตอนนี้เป็นช่องพิมพ์ตรงๆ เหมือนกรอบบทพูด
+  const [, , baseHighlights] = JSON.parse(draft.base);
+  const list = el("ol", { className: "story-highlights hl-list" });
+  highlights.forEach((text, index) => {
+    const item = el("li", {});
+    const area = el("textarea", { className: "hl-line", rows: 1, spellcheck: false });
+    area.value = text;
+    const was = baseHighlights[index];
+    if (was !== undefined && text !== was) {
+      area.classList.add("edited");
+      area.title = `ของเดิม: ${was}`;
+    }
+    const fit = () => { area.style.height = "auto"; area.style.height = `${area.scrollHeight}px`; };
+    area.addEventListener("input", () => {
+      draft.highlights[index] = area.value;
+      fit();
+      area.classList.toggle("edited", area.value !== was);
+      refreshBar();               // ขยับแค่แถบล่าง ไม่วาดใหม่ทั้งก้อน เคอร์เซอร์จะได้ไม่เด้ง
+    });
+    area.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || was === undefined) return;
+      event.preventDefault();
+      draft.highlights[index] = was;
+      area.value = was;
+      area.classList.remove("edited");
+      fit();
+      refreshBar();
+    });
+    item.append(area);
     if (highlights.length > 1) {
-      item.append(iconBtn("🗑", "ลบข้อนี้", () =>
-        act(() => jobPost(`${job.id}/action`, { action: "hl_del", index: index + 1 }))));
+      item.append(iconBtn("🗑", "เอาข้อนี้ออก (ย้ายไปกองสำรอง)", () => {
+        const gone = draft.highlights[index];
+        draft.highlights = draft.highlights.filter((_, at) => at !== index);
+        // เก็บเข้ากองสำรองเสมอ ไม่ใช่ทิ้ง — ข้อที่พิมพ์เองก็ต้องดึงกลับได้
+        if (gone && !draft.spare.includes(gone)) draft.spare = [gone, ...draft.spare];
+        paint();
+      }));
     }
     list.append(item);
+    window.requestAnimationFrame(fit);
   });
-  out.push(list);
+  hlPicked.append(list);
+
+  const hlBank = el("div", { className: "bank-side" });
+  const spare = draft.spare.filter((text) => !highlights.includes(text));
+  if (spare.length) {
+    const full = highlights.length >= meta.max_highlights;
+    hlBank.append(el("p", { className: "bank-title",
+      textContent: `จุดขายทั้งหมดที่ไล่ไว้ ${spare.length} ข้อ — กดเพื่อใช้ข้อนั้น` }));
+    const ul = el("ul", { className: "bank-list" });
+    spare.forEach((text) => {
+      const row = el("li", { className: `bank-item${full ? " off" : ""}` },
+        el("span", { textContent: text }));
+      row.title = full ? `ครบ ${meta.max_highlights} ข้อแล้ว — เอาข้อเดิมออกก่อน` : "กดเพื่อใช้ข้อนี้";
+      if (!full) {
+        row.addEventListener("click", () => {
+          draft.highlights = [...highlights, text];
+          draft.spare = draft.spare.filter((old) => old !== text);
+          paint();
+        });
+      }
+      ul.append(row);
+    });
+    hlBank.append(ul);
+  } else {
+    hlBank.append(el("p", { className: "note",
+      textContent: "ยังไม่มีจุดขายสำรอง — เพิ่มเองได้ด้วยปุ่มข้างล่าง" }));
+  }
+  hlPair.append(hlPicked, hlBank);
+  out.push(hlPair);
 
   const hlTools = el("div", { className: "inline-row" });
   if (highlights.length < meta.max_highlights) {
-    hlTools.append(textBtn("➕ เพิ่มจุดเด่น", "ghost", () => {
+    hlTools.append(textBtn("➕ เพิ่มจุดเด่นเอง", "ghost", () => {
       const next = window.prompt("จุดเด่นข้อใหม่");
-      if (next && next.trim()) {
-        act(() => jobPost(`${job.id}/highlight`, { text: next.trim() }));
+      if (next && next.trim() && !highlights.includes(next.trim())) {
+        draft.highlights = [...highlights, next.trim()];
+        paint();
       }
     }));
   }
-  hlTools.append(textBtn("✅ ใช้จุดเด่นชุดนี้", "primary",
-    () => act(() => jobPost(`${job.id}/action`, { action: "hl_ok" }))));
+  if (aiBusy[job.id]) {
+    // กำลังรอ AI — ปุ่มกดไม่ได้ และมีตัวหมุนบอกว่ายังไม่เสร็จ
+    const wait = el("span", { className: "ai-wait" },
+      el("span", { className: "spinner" }),
+      el("span", { textContent: `กำลังให้ AI ดูรูป ${images.length} ใบ… (ราว 15–30 วินาที)` }));
+    hlTools.append(wait);
+  } else {
+    hlTools.append(textBtn(
+      `✨ ให้ AI ดูรูปแล้วเขียนจุดเด่นใหม่ (${Math.min(images.length, meta.max_highlights)} ข้อ)`,
+      "ghost", () => regenHighlights(job, draft, meta.max_highlights, paint)));
+  }
+  out.push(framingPicker(job, meta));
+  hlTools.append(textBtn("✅ ใช้จุดเด่นชุดนี้ ไปต่อ", "primary",
+    () => commitDraft(job, draft, "hl_ok")));
   out.push(hlTools);
+  // บอกจำนวนที่จะได้จริง ไม่ใช่จำนวนรูป — ถ้าเลือกรูปเกินเพดานจุดเด่น
+  // ต้องเห็นตั้งแต่ก่อนกด ไม่ใช่ไปงงตอนได้ผลมาไม่ครบตามจำนวนรูป
+  const willGet = Math.min(images.length, meta.max_highlights);
+  out.push(el("p", { className: "note", textContent:
+    `ปุ่ม ✨ จะส่งรูป ${images.length} ใบที่เลือกไว้ข้างบนเข้า Gemini `
+    + `แล้วให้เขียนจุดเด่นใบละ 1 ข้อ รวม ${willGet} ข้อ จากสิ่งที่เห็นในรูปใบนั้น`
+    + (images.length > meta.max_highlights
+        ? ` (เก็บจุดเด่นได้สูงสุด ${meta.max_highlights} ข้อ จึงได้ไม่ครบทุกใบ)`
+        : "")
+    + " — ของเดิมจะถูกแทนที่" }));
   return out;
 }
 
-function storyboardReview(job, run) {
+/** ช่องติ๊ก "เห็นสินค้าเต็มทุกฉาก" (ผู้ใช้สั่ง 26 ส.ค. 2026)
+ *
+ *  "ทำเป็นช่องให้ติ๊กเพิ่มตอนส่งไปสร้าง storyboard ว่าเห็นสินค้าเต็มทุกฉาก
+ *   **เป็นการซูมแต่ต้องเห็นสินค้าเต็มทุกฉาก**"
+ *
+ *  ประโยคหลังสำคัญ — ไม่ใช่ห้ามซูม กล้องยังขยับเข้าหาสินค้าได้ ที่ห้ามคือซูมเข้าไป
+ *  ในส่วนใดส่วนหนึ่งจนตัวสินค้าถูกตัดขอบ
+ *
+ *  **บันทึกทันทีที่ติ๊ก ไม่รอปุ่มบันทึกรวม** ต่างจากรูป/จุดเด่นโดยตั้งใจ —
+ *  ค่านี้ถูกจำไว้เป็นค่าตั้งต้นของงานถัดไปด้วย ถ้าค้างไว้ไม่บันทึกแล้วเผลอปิดหน้า
+ *  งานถัดไปจะได้ค่าเก่าโดยที่ผู้ใช้คิดว่าเปลี่ยนไปแล้ว
+ */
+function framingPicker(job, meta) {
+  const mode = (meta.framing_menu || [])[0];
+  const box = el("div", { className: "framing-box" });
+  if (!mode) return box;
+
+  let on = !!meta.framing;
+  const own = !!meta.framing_own;
+
+  const paint = () => {
+    const btn = textBtn(`${on ? "☑" : "☐"} ${mode.label}`, on ? "primary" : "ghost",
+      () => toggle(!on));
+    btn.title = mode.hint;
+    box.replaceChildren(
+      el("div", { className: "inline-row framing-row" }, btn),
+      el("p", { className: "note", textContent: on
+        ? mode.hint + (own ? "" : " · (ค่าที่จำไว้จากงานก่อน — กดเปลี่ยนได้)")
+        : "ไม่ติ๊ก = ปล่อยให้ GPT จัดมุมกล้องเอง (จะได้ฉากระยะใกล้เป็นส่วนใหญ่)" }),
+    );
+  };
+
+  async function toggle(next) {
+    const was = on;
+    on = next;
+    paint();
+    try {
+      const result = await jobPost(`${job.id}/framing`, { framing: next });
+      $("#storyNote").textContent = result.message;
+    } catch (error) {
+      on = was;                          // ยิงไม่ผ่าน ต้องเด้งกลับ ไม่ใช่โชว์ว่าเปลี่ยนแล้ว
+      paint();
+      $("#storyNote").textContent = `ตั้งค่าไม่สำเร็จ: ${error.message}`;
+    }
+  }
+
+  paint();
+  return box;
+}
+
+/** ให้ AI ดูรูปที่เลือกไว้แล้วคิดจุดเด่นใหม่ (ผู้ใช้สั่ง 26 ส.ค. 2026)
+ *
+ *  ส่ง **รูปชุดที่กำลังโชว์อยู่บนจอ** ไป ไม่ใช่ให้เซิร์ฟเวอร์ไปอ่านของที่บันทึกไว้
+ *  เพราะถ้ายังสลับรูปค้างไว้ไม่ได้กดบันทึก สองฝั่งจะเห็นคนละชุด แล้วผู้ใช้จะงงว่า
+ *  ทำไมจุดเด่นไม่ตรงกับรูปที่เห็นตรงหน้า
+ *
+ *  ยิงหนึ่งครั้ง = เสียโควตา Gemini หนึ่งครั้ง จึงต้องถามยืนยันก่อนเสมอ และต้อง
+ *  บอกให้ชัดว่าของเดิมจะหายไป ไม่ใช่เพิ่มต่อท้าย
+ */
+async function regenHighlights(job, draft, maxHighlights, paint = null) {
+  const images = [...draft.images];
+  if (!images.length) {
+    $("#storyNote").textContent = "เลือกรูปอย่างน้อย 1 ใบก่อน แล้วค่อยให้ AI ดู";
+    return;
+  }
+  const willGet = Math.min(images.length, maxHighlights);
+
+  /* **ต้องบันทึกชุดรูปก่อนเจน** (แก้ 26 ส.ค. 2026 — ผู้ใช้แจ้งว่ารูปที่เลือกหายหมด)
+   *
+   *  ของเดิมส่งรูปไปให้ AI ดูเฉยๆ แล้วทิ้งที่พักการแก้ พอวาดใหม่จากฝั่งเซิร์ฟเวอร์
+   *  ก็ได้ชุดรูป**เก่า**กลับมา เพราะไม่เคยมีใครสั่งบันทึกชุดใหม่
+   *
+   *  ที่ร้ายกว่ารูปหาย: จุดเด่นที่ได้คิดมาจากรูปที่ผู้ใช้เลือก แต่รูปที่โชว์เป็นชุดเก่า
+   *  = จุดเด่นพูดถึงของที่ไม่มีในรูป โดยไม่มีอะไรฟ้องเลย
+   *
+   *  รากของปัญหาคือผมมองการเลือกรูปเป็น "ข้อมูลป้อน AI" แต่ผู้ใช้มองว่าเป็น
+   *  "นี่คือรูปที่ฉันจะใช้" — กดปุ่มนี้แปลว่ายืนยันชุดรูปนี้แล้ว ต้องบันทึกให้
+   */
+  const changed = draftChanges(draft);
+  const needSave = changed.imgOn || changed.imgOff;
+  const hlDirty = changed.hlOn || changed.hlOff;
+
+  if (!window.confirm(
+    `ส่งรูป ${images.length} ใบที่เลือกไว้เข้า Gemini แล้วให้เขียนจุดเด่นใบละ 1 ข้อไหม\n\n`
+    + `· จะได้จุดเด่น ${willGet} ข้อ`
+    + (images.length > maxHighlights
+        ? ` (เลือกรูป ${images.length} ใบ แต่เก็บจุดเด่นได้สูงสุด ${maxHighlights} ข้อ)\n`
+        : " ตามจำนวนรูป\n")
+    + (needSave ? "· ชุดรูปที่เพิ่งเลือกจะถูก **บันทึกให้ก่อน** แล้วค่อยส่งเข้า AI\n" : "")
+    + `· จุดเด่นชุดเดิม ${draft.highlights.length} ข้อ กับคลังจุดขายเดิม จะถูกแทนที่ทั้งหมด\n`
+    + (hlDirty ? "· จุดเด่นที่แก้ค้างไว้จะถูกแทนที่ด้วย เพราะกำลังขอชุดใหม่ทั้งชุด\n" : "")
+    + "· ใช้โควตา Gemini 1 ครั้ง และรอราว 15–30 วินาที")) return;
+
+  const done = [];
+  aiBusy[job.id] = true;
+  paint?.();                    // เปลี่ยนปุ่มเป็นตัวหมุนทันที ไม่ต้องรอวาดรอบถัดไป
+  try {
+    if (needSave) {
+      $("#storyNote").textContent = `💾 บันทึกชุดรูป ${images.length} ใบก่อน…`;
+      const saved = await jobPost(`${job.id}/images`, { images });
+      done.push(saved.message || "บันทึกชุดรูปแล้ว");
+    }
+    $("#storyNote").textContent =
+      (done.length ? `${done.join(" · ")} · ` : "")
+      + `🔎 กำลังให้ AI ดูรูป ${images.length} ใบแล้วเขียนจุดเด่น ${willGet} ข้อ… `
+      + "(ราว 15–30 วินาที อย่าเพิ่งปิดหน้า)";
+    const result = await jobPost(`${job.id}/features`, { images });
+    // ทิ้งที่พักได้แล้ว — ทั้งชุดรูปและจุดเด่นถูกเขียนลงฝั่งเซิร์ฟเวอร์เรียบร้อย
+    delete editDraft[job.id];
+    done.push(result.message);
+    $("#storyNote").textContent =
+      `${done.join(" · ")} · จุดเด่นเดิมคือ: ${result.before.join(" / ") || "—"}`;
+  } catch (error) {
+    // บอกให้ชัดว่าขั้นไหนผ่านไปแล้ว ไม่ใช่ "ไม่สำเร็จ" ลอยๆ แล้วผู้ใช้กดซ้ำจนรูปซ้อน
+    delete editDraft[job.id];
+    $("#storyNote").textContent = done.length
+      ? `${done.join(" · ")} — แต่ขั้นถัดไปไม่สำเร็จ: ${error.message}`
+      : `คิดจุดเด่นจากรูปไม่สำเร็จ: ${error.message}`;
+  } finally {
+    // **ต้องปลดใน finally** ไม่งั้นถ้าล้มกลางทาง ตัวหมุนจะค้างตลอดกาล
+    // แล้วปุ่มจะกดไม่ได้อีกเลยจนกว่าจะโหลดหน้าใหม่
+    delete aiBusy[job.id];
+  }
+  await loadJobQueue();
+  await showJob(job.id, true);
+}
+
+/** กด "ใช้ชุดนี้ ไปต่อ" — บันทึกที่แก้ค้างให้ก่อนเสมอ แล้วค่อยส่งไปขั้นถัดไป
+ *
+ *  ถ้าปล่อยให้กดไปต่อทั้งที่ยังไม่บันทึก ขั้นถัดไปจะหยิบของเก่าไปใช้ แล้วผู้ใช้
+ *  จะเห็นคลิปที่ทำจากรูป/จุดเด่นชุดที่ตัวเองเพิ่งเปลี่ยนทิ้งไป โดยไม่มีอะไรฟ้อง
+ */
+async function commitDraft(job, draft, action) {
+  if (draftDirty(draft) && !(await saveDraft(job, draft))) return;
+  await act(() => jobPost(`${job.id}/action`, { action }));
+}
+
+/** นับคำในบทพูด — **ต้องได้เลขเดียวกับฝั่งเซิร์ฟเวอร์** (ผู้ใช้สั่ง 26 ส.ค. 2026)
+ *
+ *  **ห้ามนับตามช่องว่าง** ภาษาไทยไม่เว้นวรรคระหว่างคำ ช่องว่างที่เห็นคือการคั่นวลี
+ *  วัดของจริงมาแล้ว: บทพูดที่มี ~40 คำ นับตามช่องว่างได้แค่ 15 → ขึ้นว่า "สั้นไป"
+ *  ทั้งที่ยาวเกินเกณฑ์ ถ้าเชื่อเลขนั้นจะไปแก้บทให้ยาวขึ้นอีก
+ *
+ *  สูตร: อักษรไทยหารด้วยจำนวนอักษรต่อคำ + คำอังกฤษ/ตัวเลขนับตรงๆ
+ *  ตัวหาร (`perWord`) **รับมาจากเซิร์ฟเวอร์** ไม่ตั้งเองในหน้าเว็บ — วันหนึ่งเกณฑ์
+ *  ฝั่งโน้นเปลี่ยน หน้านี้จะตามเอง ไม่ต้องมาไล่แก้สองที่ให้ตรงกัน
+ *
+ *  เป็นค่าประมาณ ไม่ใช่ตัวตัดคำจริง — สิ่งที่ต้องรู้คือ "ยาวเกินคลิป 10 วินาทีไหม"
+ *  ความละเอียดระดับนี้พอ
+ */
+const THAI_RE = /[\u0E00-\u0E7F]/g;
+const LATIN_WORD_RE = /[A-Za-z0-9][A-Za-z0-9'\u2019-]*/g;
+
+function countWords(text, perWord) {
+  const body = Array.isArray(text) ? text.join(" ") : String(text || "");
+  const thai = (body.match(THAI_RE) || []).length;
+  const latin = (body.match(LATIN_WORD_RE) || []).length;
+  return Math.round(thai / (perWord || 5.5)) + latin;
+}
+
+/** กล่องพับเก็บได้ (ผู้ใช้สั่ง 26 ส.ค. 2026 — "ทำให้จอตั้งแต่โชว์รุ่นสินค้าจนถึง prompt พับเก็บได้")
+ *
+ *  หน้าตรวจงานหนึ่งใบยาวมาก — สตอรีบอร์ด 5 ภาพเต็มจอ + บทพูด + คำสั่ง Flow
+ *  กว่าจะเลื่อนถึงของที่อยากดูก็ผ่านของที่ไม่ได้ใช้ไปหลายจอ
+ *
+ *  **ต้องจำว่าพับอะไรไว้** เพราะหน้านี้วาดใหม่เองทุก 6 วินาที ถ้าไม่จำ พอถึงรอบ
+ *  วาดใหม่ทุกอย่างจะกางกลับหมด แล้วที่เลื่อนดูอยู่ก็กระโดด — น่ารำคาญกว่าไม่มีปุ่มพับ
+ *
+ *  จำแยกรายงาน (`${job.id}:${key}`) เพราะคนละสินค้าคนละเรื่อง พับของใบหนึ่งไว้
+ *  แล้วอีกใบพับตามด้วยไม่สมเหตุสมผล
+ */
+const foldOpen = {};
+
+function fold(job, key, title, parts, openDefault = true) {
+  const id = `${job.id}:${key}`;
+  const box = el("details", { className: "story-fold" },
+    el("summary", { className: "story-fold-head", textContent: title }), ...parts);
+  box.open = foldOpen[id] ?? openDefault;
+  box.addEventListener("toggle", () => { foldOpen[id] = box.open; });
+  return box;
+}
+
+function storyboardReview(job, run, meta = {}) {
   const frames = run.storyboard || [];
   const script = run.script || [];
-  const out = [el("h4", { textContent: `🖼 สตอรีบอร์ด (${frames.length} ภาพ)` })];
-  frames.forEach((name) => out.push(el("img", {
+  const shots = frames.map((name) => el("img", {
     className: "story-frame", loading: "lazy", alt: "สตอรีบอร์ด",
     src: clipFile(run.item_id, name),
-  })));
-  out.push(approveBlock(job, "storyboard", job.storyboard_ok));
+  }));
+  const out = [
+    fold(job, "storyboard", `🖼 สตอรีบอร์ด (${frames.length} ภาพ)`, shots),
+    approveBlock(job, "storyboard", job.storyboard_ok),
+    fold(job, "script", `🗣 บทพูด (${script.length} ฉาก)`, [scriptEditor(job, script, meta)]),
+    approveBlock(job, "script", job.script_ok),
+  ];
+  return out;
+}
 
-  out.push(el("h4", { textContent: `🗣 บทพูด (${script.length} ฉาก)` }));
-  const list = el("ol", { className: "story-highlights" });
-  script.forEach((line) => list.append(el("li", { textContent: line })));
-  out.push(list, approveBlock(job, "script", job.script_ok));
+/** พิมพ์แก้บทพูดได้ทีละฉาก แล้วกดบันทึกทีเดียว (ผู้ใช้สั่ง 26 ส.ค. 2026)
+ *
+ *  **ไม่บันทึกทุกครั้งที่พิมพ์** ตามที่ผู้ใช้วางไว้ตั้งแต่ฝั่งแชท — แก้ให้ครบก่อน
+ *  แล้วกดส่งครั้งเดียว ยิงขึ้นเซิร์ฟเวอร์ทั้งชุดจบในตัวเอง ไม่ทยอยทีละฉาก
+ *
+ *  **เพิ่ม/ลบฉากไม่ได้** เพราะบทพูดฉากที่ N ผูกกับภาพสตอรีบอร์ดใบที่ N —
+ *  ถ้าจำนวนเพี้ยน ฉากจะเลื่อนกันทั้งแถบแล้วคลิปจะพูดคนละเรื่องกับภาพ
+ *  ที่นี่จึงมีแต่ช่องพิมพ์ ไม่มีปุ่มเพิ่ม/ลบ และด่านจริงอยู่ฝั่งเซิร์ฟเวอร์อีกชั้น
+ */
+function scriptEditor(job, original, meta = {}) {
+  const box = el("div", { className: "script-edit" });
+  const bar = el("div", { className: "inline-row script-bar" });
+  let draft = [...original];
+
+  const countChanged = () =>
+    draft.reduce((n, text, i) => n + (text !== original[i] ? 1 : 0), 0);
+
+  /* ป้ายนับคำ — เกณฑ์มาจากเซิร์ฟเวอร์ ไม่ได้ตั้งเลขเองในหน้าเว็บ
+   *
+   *  เกณฑ์คือ **จำนวนคำรวมทั้งคลิป** ไม่ใช่ต่อฉาก เพราะคลิปยาว 10 วินาที
+   *  พูดได้เท่านี้ — ยาวกว่านี้เสียงจะล้นคลิป (เป็นเกณฑ์เดียวกับที่สั่ง GPT ตอนเขียน)
+   */
+  function wordTag() {
+    const min = meta.script_min_words;
+    const max = meta.script_max_words;
+    const total = countWords(draft, meta.thai_chars_per_word);
+    if (!min || !max) {
+      return el("span", { className: "note", textContent: `รวม ~${total} คำ` });
+    }
+    const over = total > max;
+    const under = total < min;
+    const mark = over ? "⚠️" : under ? "⚠️" : "✅";
+    const why = over ? `เกินไป ${total - max} คำ — เสียงจะล้นคลิป 10 วินาที`
+              : under ? `ยังขาดอีก ${min - total} คำ`
+              : "อยู่ในเกณฑ์";
+    return el("span", {
+      className: `word-tag${over ? " over" : under ? " under" : " ok"}`,
+      title: `เกณฑ์ ${min}–${max} คำต่อคลิป (คลิปยาว 10 วินาที) · นับแบบไทยไม่เว้นวรรค`,
+      textContent: `${mark} รวม ~${total} คำ / เกณฑ์ ${min}–${max} คำ · ${why}`,
+    });
+  }
+
+  function paintBar() {
+    const now = countChanged();
+    const bits = [wordTag()];
+    if (!now) {
+      bits.push(el("span", { className: "note", textContent:
+        "พิมพ์ทับในช่องได้เลย · แก้ครบทุกฉากแล้วค่อยกดบันทึก · กด Esc คืนฉากนั้นเป็นของเดิม" }));
+    } else {
+      bits.push(
+        el("span", { className: "note", textContent: `แก้ไป ${now} ฉาก ยังไม่ได้บันทึก` }),
+        textBtn("💾 บันทึกบทพูด", "primary", saveScript),
+        textBtn("↩ ทิ้งที่แก้", "ghost", () => { draft = [...original]; paintAll(); }),
+      );
+    }
+    bar.replaceChildren(...bits);
+  }
+
+  async function saveScript() {
+    if (draft.some((text) => !text.trim())) {
+      $("#storyNote").textContent = "มีฉากที่ยังว่างอยู่ — เติมข้อความให้ครบก่อนบันทึก";
+      return;
+    }
+    try {
+      const result = await jobPost(`${job.id}/script`, { script: draft });
+      $("#storyNote").textContent = result.message;
+      await loadJobQueue();
+      await showJob(job.id, true);
+    } catch (error) {
+      $("#storyNote").textContent = `บันทึกบทพูดไม่สำเร็จ: ${error.message}`;
+    }
+  }
+
+  function paintAll() {
+    const rows = el("ol", { className: "story-highlights script-list" });
+    draft.forEach((text, index) => {
+      const area = el("textarea", {
+        className: `script-line${text !== original[index] ? " edited" : ""}`,
+        rows: 1, spellcheck: false,
+      });
+      area.value = text;
+      area.title = text !== original[index] ? `ของเดิม: ${original[index]}` : "พิมพ์ทับได้เลย";
+      // ยืดช่องให้พอดีข้อความ จะได้เห็นทั้งฉากโดยไม่ต้องเลื่อนอ่าน
+      const fit = () => { area.style.height = "auto"; area.style.height = `${area.scrollHeight}px`; };
+      area.addEventListener("input", () => {
+        draft[index] = area.value;
+        fit();
+        area.classList.toggle("edited", area.value !== original[index]);
+        // ขยับแค่แถบล่าง ไม่วาดใหม่ทั้งก้อน — วาดใหม่ตอนพิมพ์จะทำให้เคอร์เซอร์เด้งไปท้ายช่อง
+        paintBar();
+      });
+      area.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        draft[index] = original[index];
+        area.value = original[index];
+        area.classList.remove("edited");
+        fit();
+        paintBar();
+      });
+      // นับรายฉากด้วย — เกณฑ์เป็นของทั้งคลิป แต่ตอนแก้ทีละฉากต้องรู้ว่าฉากนี้กินไปเท่าไร
+      const per = el("small", { className: "word-per" });
+      const showPer = () => {
+        per.textContent = `~${countWords(draft[index], meta.thai_chars_per_word)} คำ`;
+      };
+      showPer();
+      area.addEventListener("input", showPer);
+      area.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") window.requestAnimationFrame(showPer);
+      });
+      rows.append(el("li", {}, area, per));
+      window.requestAnimationFrame(fit);
+    });
+    box.replaceChildren(rows, bar);
+    paintBar();
+  }
+
+  paintAll();
+  return box;
+}
+
+/** ผลตรวจคลิป 3 ข้อ — ชัดถึง 1080p ไหม · มีเสียงพูดไหม · ตัวอักษรอ่านออกไหม
+ *
+ *  **ต้องโชว์คู่กับคลิปเสมอ** ผู้ใช้กดอนุมัติคลิปจากหน้านี้ ถ้าไม่เห็นผลตรวจก็จะ
+ *  อนุมัติคลิปที่ตัวอักษรเพี้ยนโดยไม่รู้ตัว แล้วต้องเจนใหม่ = เสียเครดิต Flow 15 หน่วย
+ *
+ *  ป้ายทั้งหมดมาจากเซิร์ฟเวอร์ (`clip_check.chips()`) ตัวเดียวกับที่ส่งเข้าแชท
+ *  **ห้ามตีความผลเองที่นี่** ไม่งั้นแชทกับหน้าเว็บจะบอกผลไม่ตรงกันแล้วไม่รู้ว่าอันไหนจริง
+ */
+function checkBlock(view) {
+  if (!view) return [];
+  const out = [];
+  // "ยังไม่ได้ตรวจ" กับ "ผลเก่าไม่ตรงกับไฟล์แล้ว" ต้องดังกว่าตัวป้าย เพราะสองอย่างนี้
+  // แปลว่ายังไม่มีใครดูคลิปนี้จริง ซึ่งอันตรายกว่าตรวจแล้วไม่ผ่าน
+  if (view.note) out.push(el("p", { className: "note warn", textContent: `⚠️ ${view.note}` }));
+  if (!view.chips?.length) return out;
+
+  const row = el("div", { className: "check-row" });
+  view.chips.forEach((chip) => row.append(
+    el("span", { className: `check-chip ${chip.state}`, textContent: chip.text }),
+  ));
+  out.push(el("p", { className: "bank-title", textContent: "🔍 ผลตรวจคลิป" }), row);
+  view.chips.filter((chip) => chip.detail).forEach((chip) => out.push(
+    el("p", { className: "note", textContent: `${chip.text} — ${chip.detail}` }),
+  ));
+  return out;
+}
+
+/** เลือกมือถือก่อนลงจริง — **ห้ามเดาว่าจะใช้เครื่องไหน** (กติกา CLAUDE.md ข้อ 8)
+ *
+ *  "โพสต์ลงบัญชีผิด" กู้คืนไม่ได้ ส่วน "ต้องกดเลือกเครื่องเพิ่มอีกที" เสียแค่เวลา
+ *  หนึ่งคลิก จอนี้จึงเป็นจุดยืนยันก่อนลงของจริงไปในตัว
+ */
+async function askPhoneThenPost(row, itemId) {
+  let phones = [];
+  try {
+    const payload = await api("/api/devices");
+    phones = (payload.devices || []).filter(
+      (device) => device.enabled && (device.lanes || []).includes("post"));
+  } catch (error) {
+    $("#storyNote").textContent = `อ่านทะเบียนมือถือไม่ได้: ${error.message}`;
+    return;
+  }
+  if (!phones.length) {
+    $("#storyNote").textContent =
+      "ยังไม่มีมือถือที่เปิดใช้ในสายโพสต์ — เปิดเครื่องในแท็บมือถือก่อน";
+    return;
+  }
+
+  let box = document.getElementById("pubPick");
+  if (!box) {
+    box = el("dialog", { id: "pubPick", className: "img-zoom" });
+    box.addEventListener("click", (event) => { if (event.target === box) box.close(); });
+    document.body.append(box);
+  }
+  const rows = phones.map((phone) => {
+    const button = textBtn(
+      `${phone.ready ? "📱" : "⚠️"} ${phone.label}` + (phone.ready ? "" : " (ไม่ได้เสียบอยู่)"),
+      phone.ready ? "primary" : "ghost",
+      () => { box.close(); runPublish(row, itemId, phone); },
+    );
+    return el("div", { className: "pub-pick-row" }, button,
+      el("small", { className: "note", textContent: phone.account || "ยังไม่ได้ผูกบัญชี" }));
+  });
+  box.replaceChildren(
+    el("h4", { textContent: `จะลง ${row.name} ด้วยมือถือเครื่องไหน` }),
+    el("p", { className: "note warn", textContent:
+      "กดแล้วระบบจะแตะจอเครื่องนั้นเองจนโพสต์ขึ้นจริง — ถอนคืนไม่ได้ ต้องไปลบเองในแอป" }),
+    ...rows,
+    el("div", { className: "img-zoom-bar" }, textBtn("✕ ยกเลิก", "ghost", () => box.close())),
+  );
+  box.showModal();
+}
+
+async function runPublish(row, itemId, phone) {
+  $("#storyNote").textContent =
+    `กำลังลง ${row.name} บน ${phone.label} — กินเวลาหลายนาที ห้ามแตะจอเครื่องนั้นระหว่างนี้`;
+  try {
+    const result = await api("/api/publish/flow/run", {
+      method: "POST",
+      body: JSON.stringify({ serial: phone.serial, target: row.target, item_id: itemId }),
+    });
+    $("#storyNote").textContent = result.ok
+      ? `✅ ลง ${row.name} แล้ว — เดินผังครบ ${result.done}/${result.total} ขั้น`
+      : `❌ เดินผังไม่จบ หยุดที่ขั้น ${result.done}/${result.total} — ดูสาเหตุใน Log`;
+  } catch (error) {
+    // ด่านลำดับปฏิเสธก็มาทางนี้ (409) ต้องโชว์เหตุผลของด่านตรงๆ ไม่ใช่ "ลงไม่สำเร็จ" ลอยๆ
+    $("#storyNote").textContent = `ลง ${row.name} ไม่ได้: ${error.message}`;
+  }
+  await loadJobQueue();
+  if (openJobId) await showJob(openJobId, true);
+}
+
+/** ลำดับการลง 3 ที่ — Shopee Video → Facebook Reels → TikTok เว้นอย่างน้อย 1 วันปฏิทิน
+ *
+ *  **หน้าเว็บห้ามคิดกติกาเอง** ทุกแถวมาจาก `publish_order.rows()` ฝั่งเซิร์ฟเวอร์
+ *  ซึ่งเป็นตัวเดียวกับด่านที่กั้นก่อนโพสต์จริง ถ้าเขียนแยกกันสองชุด วันหลังจะกลายเป็น
+ *  หน้าเว็บบอกว่ากดได้ แต่พอกดจริงด่านปฏิเสธ แล้วไม่มีใครรู้ว่าฝั่งไหนถูก
+ */
+function publishBlock(rows, itemId) {
+  // งานที่ยังไม่มีข้อมูลสินค้า (เพิ่งเข้าคิว) ยังไม่มีอะไรให้ลง — โชว์ไปก็สับสนเปล่า
+  if (!rows?.length || !itemId) return [];
+  const out = [el("h4", { textContent: "📤 ลำดับการลง" })];
+  const list = el("ol", { className: "pub-order" });
+  rows.forEach((row) => {
+    const line = el("li", { className: `pub-row ${row.status}` });
+    line.append(
+      el("b", { textContent: row.name }),
+      el("small", { className: "pub-mark", textContent: row.mark }),
+    );
+    if (row.url) {
+      line.append(el("a", {
+        href: row.url, target: "_blank", rel: "noreferrer", textContent: "เปิดโพสต์ที่ลงไว้",
+      }));
+    }
+    if (row.status !== "posted") {
+      // TikTok ยังลงด้วยการเปิดหน้าเว็บบนคอม ไม่ได้กดบนจอมือถือ (ขัดกติกาข้อ 2.7
+      // ที่ยังแก้ไม่เสร็จ) จึงยังสั่งจากปุ่มนี้ไม่ได้ — บอกตรงๆ ดีกว่าซ่อนปุ่มไว้
+      const noPhone = row.target === "tiktok";
+      const button = textBtn(
+        "⬆️ ลงเลย", row.can_post && !noPhone ? "primary" : "ghost",
+        () => askPhoneThenPost(row, itemId),
+      );
+      button.disabled = !row.can_post || noPhone;
+      button.title = noPhone
+        ? "TikTok ยังลงผ่านเบราว์เซอร์บนคอม สั่งจากแชทแทน"
+        : (row.can_post ? `ลง ${row.name} เดี๋ยวนี้` : row.why);
+      line.append(button);
+      if (noPhone) {
+        line.append(el("small", { className: "note",
+          textContent: "TikTok ยังลงผ่านเบราว์เซอร์บนคอม — สั่งจากแชท" }));
+      }
+    }
+    // **ห้ามซ่อนเหตุผล** ปุ่มจางที่ไม่บอกว่าทำไม แยกไม่ออกจากระบบพัง
+    if (!row.can_post) line.append(el("small", { className: "note", textContent: row.why }));
+    list.append(line);
+  });
+  out.push(list);
   return out;
 }
 
 /** เครื่องเล่นคลิปของงานนั้น — ใช้ทั้งตอนรอตรวจและตอนเปิดดูย้อนหลัง
  *  เขียนที่เดียวเพื่อให้สองที่นั้นแสดงเหมือนกันเสมอ */
-function videoBlock(run, heading = "🎬 คลิปที่เจนได้") {
+function videoBlock(run, heading = "🎬 คลิปที่เจนได้", view = null) {
   const names = run?.videos || [];
   if (!names.length) return [];
   const out = [el("h4", { textContent: `${heading} (${names.length} ไฟล์)` })];
@@ -840,18 +1664,96 @@ function videoBlock(run, heading = "🎬 คลิปที่เจนได้
       rel: "noreferrer", textContent: `⬇️ ${name.split("/").pop()}`,
     }));
   });
+  out.push(...checkBlock(view));
   return out;
 }
 
-function videoReview(job, run) {
-  const out = videoBlock(run, "🎬 คลิปที่เจนได้");
+function videoReview(job, run, view) {
+  const out = videoBlock(run, "🎬 คลิปที่เจนได้", view);
   if (!out.length) out.push(el("h4", { textContent: "🎬 ยังไม่พบไฟล์คลิป" }));
   out.push(el("div", { className: "inline-row" },
     textBtn("✅ อนุมัติคลิป", "primary",
-      () => act(() => jobPost(`${job.id}/action`, { action: "vid_ok" }))),
-    textBtn("🔄 ลบแล้วเจนใหม่", "ghost",
-      () => act(() => jobPost(`${job.id}/action`, { action: "vid_edit" })))));
+      () => act(() => jobPost(`${job.id}/action`, { action: "vid_ok" })))));
+  out.push(regenBox(job));
   return out;
+}
+
+/** ลบแล้วเจนใหม่ พร้อมช่องบอกว่าต้องแก้อะไร (ผู้ใช้สั่ง 26 ส.ค. 2026)
+ *
+ *  "ตรงฟังก์ชั่นลบแล้วเจนใหม่ ให้มีช่องใส่คอมเมนต์ที่ต้องแก้ด้วย
+ *   แล้วให้ทำคอมเมนต์นั้นไปปรับแก้"
+ *  ลำดับที่ต้องการ: AI ดูคลิป → ดูคอมเมนต์ → ปรับคำสั่ง → เจนใหม่
+ *
+ *  **ทำไมต้องมี** ปุ่มเดิมลบคลิปแล้วเจนซ้ำด้วยคำสั่งชุดเดิมเป๊ะ ซึ่งได้ของหน้าตา
+ *  เดิมกลับมาและเสียเครดิต Flow ฟรี — ขัดกติกาข้อ 3 ของโปรเจกต์ที่ว่า
+ *  "retry ต้องเปลี่ยนอะไรบางอย่าง ไม่ใช่ยิงของเดิมซ้ำ"
+ *
+ *  งานนี้กินเวลาหลายนาที (อัปคลิปขึ้น Gemini + ให้มันดูจนจบ + แก้คำสั่ง)
+ *  จึงต้องมีตัวหมุนบอก ไม่งั้นแยกไม่ออกจาก "กดไม่ติด"
+ */
+function regenBox(job) {
+  const box = el("div", { className: "regen-box" });
+
+  const paint = () => {
+    if (aiBusy[job.id]) {
+      box.replaceChildren(
+        el("h4", { textContent: "🔄 ลบแล้วเจนใหม่" }),
+        el("span", { className: "ai-wait" },
+          el("span", { className: "spinner" }),
+          el("span", { textContent: "AI กำลังดูคลิปแล้วแก้คำสั่ง… "
+            + "(อัปคลิปขึ้นไปให้ดูใช้เวลาหลายนาที อย่าเพิ่งปิดหน้า)" })),
+      );
+      return;
+    }
+    const note = el("textarea", {
+      className: "regen-note", rows: 2, spellcheck: false,
+      placeholder: "บอกว่าต้องแก้อะไร เช่น “ฉาก 3 ทีวีถูกตัดขอบ” "
+                 + "หรือ “ทั้งคลิปมืดไป ให้สว่างขึ้น” (เว้นว่างได้ = เจนซ้ำของเดิม)",
+    });
+    box.replaceChildren(
+      el("h4", { textContent: "🔄 ลบแล้วเจนใหม่" }),
+      note,
+      el("div", { className: "inline-row" },
+        textBtn("🔄 แก้ตามคอมเมนต์แล้วเจนใหม่", "ghost", () => run(note.value))),
+      el("p", { className: "note", textContent:
+        "AI จะดูคลิปที่ได้จริงก่อน แล้วเอาคอมเมนต์ไปแก้คำสั่งเจนภาพ "
+        + "จากนั้นค่อยลบคลิปเดิมแล้วเข้าคิวเจนใหม่ "
+        + "— ถ้าแก้คำสั่งไม่สำเร็จจะไม่ลบอะไรเลย" }),
+    );
+  };
+
+  async function run(note) {
+    const text = (note || "").trim();
+    if (!text && !window.confirm(
+      "ไม่ได้ใส่คอมเมนต์ — จะเจนใหม่ด้วยคำสั่งชุดเดิม\n\n"
+      + "คลิปที่ได้จะหน้าตาใกล้เคียงของเดิม และเสียเครดิต Flow อีกรอบ\n"
+      + "แน่ใจไหม")) return;
+
+    aiBusy[job.id] = true;
+    paint();
+    $("#storyNote").textContent = text
+      ? "🎬 AI กำลังดูคลิปแล้วแก้คำสั่งตามคอมเมนต์…"
+      : "🔄 กำลังลบคลิปเดิมแล้วเข้าคิวเจนใหม่…";
+    try {
+      const result = await jobPost(`${job.id}/regen`, { note: text });
+      const lines = [result.message];
+      if (result.why) lines.push(`เหตุผล: ${result.why}`);
+      if ((result.problems || []).length) {
+        lines.push("AI เห็นปัญหาในคลิป: " + result.problems.join(" · "));
+      }
+      $("#storyNote").textContent = lines.join(" · ");
+    } catch (error) {
+      $("#storyNote").textContent = `เจนใหม่ไม่สำเร็จ: ${error.message}`;
+    } finally {
+      // **ต้องปลดใน finally** ไม่งั้นล้มแล้วตัวหมุนค้างตลอดกาล กดปุ่มไม่ได้อีก
+      delete aiBusy[job.id];
+    }
+    await loadJobQueue();
+    await showJob(job.id, true);
+  }
+
+  paint();
+  return box;
 }
 
 async function showJob(jobId, force = false) {
@@ -865,29 +1767,52 @@ async function showJob(jobId, force = false) {
     return;
   }
   const { job, run } = payload;
+  const view = payload.video_check_view || null;
   // ไม่วาดใหม่ถ้าไม่มีอะไรเปลี่ยน — วาดทุก 6 วิจะทำให้ที่เลื่อนดูอยู่กระโดดกลับ
-  const key = [job.id, job.stage, job.updated_at, job.storyboard_ok, job.script_ok].join("|");
+  //
+  // ต้องมี `publish_next` กับผลตรวจอยู่ในกุญแจด้วย เพราะสองอย่างนี้เขียนลง run.json
+  // ไม่ได้แตะ `updated_at` ของงาน — ลงโพสต์เสร็จแล้วแถวลำดับจะค้างของเก่าถ้าไม่นับ
+  const key = [job.id, job.stage, job.updated_at, job.storyboard_ok, job.script_ok,
+               payload.publish_next || "", view?.checked, view?.ok, view?.stale].join("|");
   if (!force && key === detailKey) return;
   detailKey = key;
 
-  const parts = [
-    el("h4", { textContent: job.name || job.link || job.id }),
-    el("p", { className: "note", textContent: job.stage_label + (job.note ? ` · ${job.note}` : "") }),
-  ];
+  // ทุกอย่างตั้งแต่ชื่อรุ่นสินค้าลงไปอยู่ในกล่องพับใบเดียว (ผู้ใช้สั่ง 26 ส.ค. 2026)
+  // กดที่ชื่อสินค้า = พับเก็บทั้งใบ เหลือแค่บรรทัดเดียว แล้วเลื่อนไปดูงานอื่นได้เร็ว
+  // ส่วน "ลำดับการลง 3 ที่" อยู่นอกกล่อง เพราะเป็นแผงที่ต้องกดจริงและสั้นอยู่แล้ว
+  const parts = [];
   if (job.error) parts.push(el("p", { className: "note fail", textContent: `❌ ${job.error}` }));
 
   if (job.stage === "image_review") parts.push(...imageReview(job, run, payload));
   else if (job.stage === "storyboard_review" || job.stage === "script_review") {
-    parts.push(...storyboardReview(job, run));
-  } else if (job.stage === "video_review") parts.push(...videoReview(job, run));
+    parts.push(...storyboardReview(job, run, payload));
+  } else if (job.stage === "video_review") parts.push(...videoReview(job, run, view));
   else if (job.stage === "tiktok_post_review") {
     parts.push(el("p", { className: "note", textContent: "ขั้นยืนยันก่อนโพสต์ TikTok ยังต้องกดในแชท" }));
   } else if (job.open) {
     parts.push(el("p", { className: "note", textContent: "ยังไม่ถึงจุดที่ต้องตัดสินใจ — รอระบบทำต่อ" }));
   }
 
-  parts.push(...runExtras(run, job.stage === "video_review"));
-  box.replaceChildren(...parts);
+  parts.push(...runExtras(run, job.stage === "video_review", view, job));
+
+  const head = job.name || job.link || job.id;
+  const whole = fold(job, "whole",
+    `${head}  —  ${job.stage_label}${job.note ? ` · ${job.note}` : ""}`, parts);
+
+  // **แผงลงโพสต์อยู่บนสุด ไม่ใช่ล่างสุด** (แก้ 26 ส.ค. 2026)
+  //
+  // ของเดิมอยู่ท้ายสุด ซึ่งเคยพอใช้ได้ตอนทั้งหน้าเลื่อนเป็นก้อนเดียว แต่พอแยกให้
+  // แต่ละฝั่งเลื่อนเอง แถบเลื่อนของทั้งหน้าก็หายไป — วัดแล้วปุ่ม "ลงเลย" ตกไปอยู่ที่
+  // ระดับ 3,534 พิกเซล ในช่องที่สูงแค่ 900 ผู้ใช้จึงเห็นเป็น "ปุ่มโพสต์ด้านล่างหาย"
+  //
+  // เอาไว้บนสุดแล้วเห็นทันทีที่เปิดงาน ไม่ต้องเลื่อนผ่านสตอรีบอร์ด 5 ภาพกับคำสั่ง
+  // Flow 6 ชุดก่อน และยังพับเก็บได้ถ้าอยากได้ที่ว่างไปดูของอื่น (สูง 310px = 39%
+  // ของช่องที่เห็น ใหญ่เกินกว่าจะตรึงค้างไว้ตลอด)
+  const pub = publishBlock(payload.publish_order, run.item_id);
+  const pubFold = pub.length
+    ? [fold(job, "publish", "📤 ลำดับการลง 3 ที่ — กดลงได้จากตรงนี้", pub.slice(1))]
+    : [];
+  box.replaceChildren(...pubFold, whole);
 }
 
 let storyRuns = [];
@@ -977,18 +1902,19 @@ async function showStoryRun(itemId) {
       src: clipFile(run.item_id, name),
     }));
   });
-  parts.push(...runExtras(run));
+  parts.push(...runExtras(run, false, run.video_check_view));
+  parts.push(...publishBlock(run.publish_order, run.item_id));
   box.replaceChildren(...parts);
 }
 
 /** ของที่ดูได้เสมอไม่ว่างานอยู่ขั้นไหน — ลิงก์ แชท GPT และคำสั่ง Flow
  *  ใช้ร่วมกันระหว่างหน้ารายละเอียดของคิว กับรายการงานที่เก็บไว้ */
-function runExtras(run, skipVideos = false) {
+function runExtras(run, skipVideos = false, view = null, job = null) {
   if (!run || !run.item_id) return [];
   const parts = [];
   // คลิปขึ้นก่อนของอื่น — เป็นผลลัพธ์ที่คนอยากดูที่สุด
   // ข้ามเมื่องานอยู่ขั้นรอตรวจคลิป เพราะตรงนั้นแสดงไปแล้วพร้อมปุ่มอนุมัติ
-  if (!skipVideos) parts.push(...videoBlock(run, "▶️ คลิปที่เจนไว้"));
+  if (!skipVideos) parts.push(...videoBlock(run, "▶️ คลิปที่เจนไว้", view));
   if (run.affiliate_url) {
     parts.push(el("a", {
       href: run.affiliate_url, target: "_blank", rel: "noreferrer",
@@ -1003,9 +1929,7 @@ function runExtras(run, skipVideos = false) {
   }
 
   const prompts = run.flow_prompts || [];
-  if (prompts.length) {
-    parts.push(el("h4", { textContent: `คำสั่งสำหรับ Google Flow (${prompts.length} ชุด)` }));
-  }
+  const promptParts = [];
   prompts.forEach((prompt, index) => {
     const copy = textBtn(`คัดลอกชุดที่ ${index + 1}`, "ghost", async () => {
       // เขียนคลิปบอร์ดล้มได้เมื่อหน้าไม่ได้อยู่ในโฟกัส หรือเปิดผ่าน http บนเครื่องอื่น
@@ -1018,9 +1942,15 @@ function runExtras(run, skipVideos = false) {
       }
       window.setTimeout(() => { copy.textContent = `คัดลอกชุดที่ ${index + 1}`; }, 1800);
     });
-    parts.push(el("div", { className: "story-prompt" },
+    promptParts.push(el("div", { className: "story-prompt" },
       el("pre", { textContent: prompt }), copy));
   });
+  if (promptParts.length && job) {
+    parts.push(fold(job, "prompts",
+      `⌨ คำสั่งสำหรับ Google Flow (${prompts.length} ชุด)`, promptParts));
+  } else if (promptParts.length) {
+    parts.push(...promptParts);
+  }
 
   if (run.gpt_flow_reply) {
     parts.push(el("details", {},
@@ -1048,8 +1978,12 @@ $("#storyQueueAdd")?.addEventListener("click", async () => {
     const payload = await api(`${CLIP_API}/api/jobs`, {
       method: "POST", body: JSON.stringify({ links }),
     });
+    // บอกเพดานตั้งแต่ตอนรับลิงก์ — วาง 33 ใบแล้วเห็นขยับ 8 ใบโดยไม่มีคำอธิบาย
+    // แยกไม่ออกจาก "ระบบค้าง" (กติกา CLAUDE.md ข้อ 2.7.1)
     $("#storyAddNote").textContent =
-      `เข้าคิวแล้ว ${payload.count} งาน · ค้างในคิวทั้งหมด ${payload.waiting} งาน`;
+      `เข้าคิวแล้ว ${payload.count} งาน · ค้างในคิวทั้งหมด ${payload.waiting} งาน`
+      + (payload.load_text ? `\n${payload.load_text}` : "");
+    $("#storyAddNote").classList.toggle("warn", !!payload.load?.full);
     box.value = "";
     await loadJobQueue();
   } catch (error) {
@@ -1075,9 +2009,130 @@ $("#storyFlowOn")?.addEventListener("change", async (event) => {
   }
 });
 
+// ============================================ หลักฐานตอนพัง (กติกาข้อ 2.6.1)
+//
+// ทุกครั้งที่มีอะไรพัง ระบบแคปหน้าจอ + เก็บผังหน้า + บริบทไว้ให้เอง (`evidence.py`)
+// **หลักฐานที่เรียกดูยาก เท่ากับไม่ได้เก็บ** — 25 ส.ค. 2026 สายเจนคลิปล้มรวด 13 ใบ
+// เดาได้ว่าโดน Shopee บล็อก แต่ไม่มีภาพสักใบ จึงตอบไม่ได้ว่าหน้านั้นเขียนว่าอะไร
+// มีปุ่มให้กดไหม บอกให้รอกี่นาที
+//
+// สร้างทั้งก้อนจาก JS ต่อท้าย #tab-story — **ไม่แตะ index.html** ซึ่งเป็นไฟล์ส่วนกลาง
+// (.tab-area เป็น flex column ลูกใหม่จึงไปต่อท้ายเฉยๆ ไม่กระทบผังที่มีอยู่)
+let evidenceTag = "";
+let evidenceParts = null;
+
+function evidenceBlock() {
+  if (evidenceParts) return evidenceParts;
+  const tab = $("#tab-story");
+  if (!tab) return null;
+  const filter = el("div", { className: "inline-row ev-filter" });
+  const note = el("p", { className: "note" });
+  const list = el("div", { className: "ev-list" });
+  const box = el("details", { className: "block ev-block" },
+    el("summary", { textContent: "🧾 หลักฐานตอนพัง — ภาพหน้าจอ + บริบท" }),
+    el("div", {}, filter, note, list));
+  // โหลดตอนกางเท่านั้น — แท็บนี้ถูกวาดใหม่ทุก 6 วินาที ยิงทุกครั้งคือเปลืองเปล่า
+  box.addEventListener("toggle", () => { if (box.open) loadEvidence(); });
+  tab.append(box);
+  evidenceParts = { box, filter, note, list };
+  return evidenceParts;
+}
+
+function paintEvidenceFilter(tags) {
+  const parts = evidenceParts;
+  if (!parts) return;
+  const buttons = ["", ...tags].map((tag) => {
+    const button = textBtn(tag || "ทั้งหมด", "ghost tiny", () => {
+      evidenceTag = tag;
+      loadEvidence();
+    });
+    if (tag === evidenceTag) button.classList.add("on");
+    return button;
+  });
+  parts.filter.replaceChildren(...buttons);
+}
+
+function evidenceRow(event) {
+  const base = `${CLIP_API}/api/evidence/${encodeURIComponent(event.stem)}`;
+  const body = el("div", { className: "ev-body" });
+  const row = el("details", { className: "ev-item" },
+    el("summary", {},
+      el("b", { textContent: event.why || event.stem }),
+      el("small", { textContent: ` · ${event.when}${event.tag ? ` · ${event.tag}` : ""}` })),
+    body);
+
+  row.addEventListener("toggle", () => {
+    if (!row.open || row.dataset.loaded) return;
+    row.dataset.loaded = "1";        // โหลดครั้งเดียว กางปิดกางอีกไม่ยิงซ้ำ
+    if (event.has_shot) {
+      // **ไม่ใส่ loading="lazy"** ตรงนี้ — รูปถูกสร้างตอนกดกางรายการนั้นอยู่แล้ว
+      // จึงไม่มีอะไรให้ประหยัด แต่กลับเพิ่มโอกาสที่รูปไม่ยอมโหลดเพราะเบราว์เซอร์
+      // ตัดสินว่า "ยังไม่ถึงตา" (เจอจริงตอนทดสอบ: ยิงไฟล์ตรงๆ ได้ 200 แต่ <img>
+      // ไม่เริ่มโหลดเลย) — หลักฐานที่กดแล้วไม่ขึ้นรูป เท่ากับไม่ได้เก็บ
+      const shot = el("img", {
+        className: "ev-shot", src: `${base}/png`,
+        alt: event.why || "ภาพหน้าจอตอนพัง", title: "กดเพื่อดูเต็มจอ",
+      });
+      shot.addEventListener("click", () => zoomImage(`${base}/png`, event.why));
+      body.append(shot);
+    }
+    // โชว์เฉพาะไฟล์ที่มีจริง (เซิร์ฟเวอร์บอกมาใน `kinds`) — ลิงก์ที่กดแล้วไม่มีไฟล์
+    // ทำให้เข้าใจผิดว่าหลักฐานหาย ทั้งที่ตอนนั้นแคปได้แค่บางอย่าง
+    const links = el("div", { className: "inline-row" });
+    const label = {
+      txt: "📄 บริบท", txt2: "🔤 ข้อความที่อยู่บนจอตอนนั้น",
+      html: "🧩 ผังหน้าเว็บ", xml: "📱 ผังหน้าจอมือถือ",
+    };
+    (event.kinds || []).forEach((kind) => {
+      if (!label[kind]) return;
+      links.append(el("a", {
+        href: `${base}/${kind}`, target: "_blank", rel: "noreferrer",
+        textContent: label[kind],
+      }));
+    });
+    if (links.children.length) body.append(links);
+
+    // บริบทเป็นไฟล์ตัวหนังสือสั้นๆ กางให้อ่านตรงนี้เลย ดีกว่าบังคับเปิดแท็บใหม่
+    // (ใช้ fetch ตรงๆ ไม่ผ่าน api() เพราะ api() แกะเป็น JSON แต่นี่เป็นข้อความเปล่า)
+    if ((event.kinds || []).includes("txt")) {
+      fetch(`${base}/txt`)
+        .then((response) => (response.ok ? response.text() : ""))
+        .then((text) => {
+          if (text) body.append(el("pre", { className: "story-raw", textContent: text }));
+        })
+        .catch(() => { /* อ่านบริบทไม่ได้ไม่ควรทำให้ทั้งรายการพัง */ });
+    }
+  });
+  return row;
+}
+
+async function loadEvidence() {
+  const parts = evidenceBlock();
+  if (!parts || !parts.box.open) return;
+  parts.note.textContent = "กำลังโหลด…";
+  let payload;
+  try {
+    payload = await api(`${CLIP_API}/api/evidence?limit=40`
+      + (evidenceTag ? `&tag=${encodeURIComponent(evidenceTag)}` : ""));
+  } catch (error) {
+    parts.note.textContent = `โหลดหลักฐานไม่ได้: ${error.message}`;
+    parts.list.replaceChildren();
+    return;
+  }
+  paintEvidenceFilter(payload.tags || []);
+  const events = payload.events || [];
+  parts.note.textContent = events.length
+    ? `ทั้งหมด ${payload.total} เหตุการณ์ · แสดง ${events.length} รายการล่าสุด`
+    : "ยังไม่มีหลักฐานในหมวดนี้";
+  parts.list.replaceChildren(...events.map(evidenceRow));
+}
+
 // เฝ้าคิวเฉพาะตอนเปิดแท็บนี้อยู่ — งานสายคลิปกินเวลาเป็นนาที ไม่ต้องถามถี่
 window.setInterval(() => {
   if ($("#tab-story")?.hidden) return;
   loadJobQueue();
   if (openJobId) showJob(openJobId);
 }, 6000);
+
+// สร้างกล่องหลักฐานไว้รอตั้งแต่โหลดหน้า (ยังไม่ยิงข้อมูลจนกว่าจะกดกาง)
+evidenceBlock();

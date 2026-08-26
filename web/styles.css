@@ -1546,3 +1546,312 @@ button:disabled { opacity: 0.5; }
 .queue-device:last-child { margin-bottom: 0; }
 .queue-now { margin: 2px 0 0 8px; }
 .queue-wait { margin: 2px 0 0 8px; opacity: 0.8; }
+
+/* ══ คลังรูป/คลังจุดเด่น วางข้างของที่เลือกไว้ (ผู้ใช้สั่ง 25 ส.ค. 2026) ══
+   อยู่ใน #storyDetail เท่านั้น — ไม่ใช่โครงหน้า เพิ่มตรงนี้ไม่กระทบ layout หลัก
+   จอแคบยุบเป็นบนล่างเอง ไม่ต้องเขียน media query แยก */
+.bank-pair {
+  display: grid; gap: 14px; align-items: start;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  margin: 6px 0 10px;
+}
+.bank-side { min-width: 0; }
+.bank-title { font-size: 12px; font-weight: 600; color: var(--ink-3); margin: 0 0 6px; }
+
+/* คลังรูป — กดใบไหนก็หยิบเข้าชุด */
+.bank-grid .story-cell.pick { cursor: pointer; }
+.bank-grid .story-cell.pick:hover .story-thumb { outline: 2px solid var(--olive); }
+.bank-grid .story-cell.off { opacity: 0.4; cursor: not-allowed; }
+
+/* คลังจุดขาย — กดข้อไหนก็หยิบเข้าชุด */
+.bank-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.bank-item {
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
+  font-size: 13px; line-height: 1.4; cursor: pointer; background: var(--panel);
+}
+.bank-item:hover { border-color: var(--olive); color: var(--olive); }
+.bank-item.off { opacity: 0.4; cursor: not-allowed; }
+
+/* ── ดูรูปขนาดเต็ม (ผู้ใช้สั่งเพิ่ม 25 ส.ค. 2026) ──
+   เป็น <dialog> ต่อกับ body — ไม่แตะโครงหน้า */
+/* กล่องดูรูปเต็ม — **หดพอดีรูป ไม่ใช่เต็มจอ** (แก้ 26 ส.ค. 2026)
+ *
+ *  ขนาดรูปถูกคำนวณเป็น px จริงจาก JS หลังรูปโหลดเสร็จ (ดู `zoomImage`)
+ *  ที่นี่จึงแค่ปล่อยให้กล่องหดตามรูป และกันไม่ให้ล้นจอเป็นตาข่ายชั้นสอง
+ *
+ *  เคยพลาดสองทางมาแล้ว — ปล่อยให้ CSS จัดการล้วนๆ แล้วกล่องคิดขนาดตอนรูปยัง
+ *  ไม่โหลด (รูปล้นออกนอกกล่อง) · บังคับกล่องเต็มจอ 94% แล้วรูปจัตุรัสลอยกลาง
+ *  พื้นขาวกว้างมากและปุ่มปิดถูกดันไปไกลจนกดไม่ถึง
+ */
+.img-zoom {
+  border: none; border-radius: 14px; padding: 10px;
+  background: var(--panel); color: var(--ink);
+  width: fit-content; height: fit-content;
+  max-width: 94vw; max-height: 94vh;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.img-zoom::backdrop { background: rgba(0, 0, 0, 0.72); }
+.img-zoom-pic {
+  display: block;
+  /* ตาข่ายชั้นสอง เผื่อ JS ยังไม่ได้คิด (รูปโหลดไม่ขึ้น ฯลฯ)
+     **ต้องหลวมกว่าที่ JS ตั้งไว้ (88%/78%) เสมอ** ไม่งั้นมันจะไปบีบเฉพาะด้านกว้าง
+     ทีหลังโดยที่ด้านสูงไม่ถูกบีบตาม แล้วกรอบรูปจะบิดเบี้ยว
+     หักขอบกล่อง 10px สองด้าน กับแถบปุ่มล่างออกไปด้วย จะได้ไม่ดันกล่องล้นจอ */
+  max-width: calc(94vw - 24px);
+  max-height: calc(94vh - 70px);
+  object-fit: contain;
+  border-radius: 10px;
+}
+.img-zoom-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-top: 8px; font-size: 13px;
+  flex: none;                    /* แถบล่างต้องไม่ถูกบีบหาย เวลารูปสูงมาก */
+}
+/* แว่นขยายบนรูปในคลัง — ลอยมุมขวาบน ไม่บังภาพ */
+.bank-grid .story-cell { position: relative; }
+.bank-grid .story-cell .story-cell-tools {
+  position: absolute; top: 4px; right: 4px; margin: 0;
+}
+
+/* ============================================ สายเจนคลิป: ของที่เพิ่ม 25 ส.ค. 2026
+   สีเดียวที่ตั้งใหม่คือ --warn เพราะจานสีเดิมมีแค่ "ผ่าน" (เขียว) กับ "พัง" (แดง)
+   แต่ผลตรวจคลิปมีสถานะกลางจริงๆ คือ "ยังไม่ถึงเกณฑ์แต่ยังใช้ได้" (เช่น 720p)
+   ถ้าเอาไปรวมกับสีแดง จะแยกไม่ออกจากคลิปที่เสียจริง แล้วสั่งเจนใหม่ทิ้งเครดิตเปล่า
+   ใช้ systemOrange ของ iOS ให้เข้าชุดกับ --olive/--danger ที่เป็นสีระบบเหมือนกัน */
+:root { --warn: #ff9500; }
+
+/* ข้อความหลายบรรทัดจากเซิร์ฟเวอร์ (เพดานคิว) ต้องขึ้นบรรทัดตามที่ส่งมา */
+.load-note, #storyAddNote { white-space: pre-line; }
+
+/* ---- ผลตรวจคลิป: ป้ายสามอัน สีบอกสถานะ ไม่ใช่แค่ตัวหนังสือ ---- */
+.check-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; }
+.check-chip {
+  font-size: 12px; line-height: 18px; padding: 2px 10px;
+  border-radius: var(--r-pill); border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink);
+}
+.check-chip.ok { border-color: var(--olive); color: var(--olive); }
+.check-chip.warn { border-color: var(--warn); color: var(--warn); }
+.check-chip.fail { border-color: var(--danger); color: var(--danger); font-weight: 600; }
+.check-chip.unknown { border-color: var(--separator); color: var(--ink-3); }
+.check-chip.none { border-color: var(--line); color: var(--ink-3); }
+
+/* ---- ลำดับการลง 3 ที่ ---- */
+.pub-order { list-style: none; margin: 4px 0; padding: 0; display: grid; gap: 6px; counter-reset: pub; }
+.pub-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: var(--r-card); background: var(--panel);
+}
+.pub-row::before {
+  counter-increment: pub; content: counter(pub);
+  width: 20px; height: 20px; flex: none; border-radius: var(--r-pill);
+  background: var(--shade); color: var(--ink-3);
+  font-size: 11px; display: grid; place-items: center;
+}
+.pub-row.posted { border-color: var(--olive); }
+.pub-row.failed { border-color: var(--danger); }
+.pub-mark { color: var(--ink-2); }
+/* เหตุผลกินเต็มบรรทัดใหม่ — ห้ามให้โดนตัดหาย เพราะมันคือคำตอบว่าทำไมกดไม่ได้ */
+.pub-row .note { flex-basis: 100%; margin: 0; }
+.pub-row button[disabled] { opacity: 0.45; cursor: not-allowed; }
+.pub-pick-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.pub-pick-row button { flex: 1; }
+
+/* ---- แถบ "แก้ให้ครบก่อน แล้วกดส่งทีเดียว" ---- */
+.save-bar {
+  padding: 6px 10px; border-radius: var(--r-card);
+  background: var(--shade); border: 1px solid transparent;
+}
+.save-bar.on { border-color: var(--warn); background: var(--panel); }
+.save-count { color: var(--warn); font-size: 13px; }
+
+/* ---- หลักฐานตอนพัง ---- */
+.ev-block { margin-top: 4px; }
+.ev-filter { gap: 4px; margin: 6px 0; }
+.ev-filter .tiny.on { border-color: var(--olive); color: var(--olive); }
+.ev-list { display: grid; gap: 4px; }
+.ev-item {
+  border: 1px solid var(--line); border-radius: var(--r-field);
+  padding: 6px 10px; background: var(--panel);
+}
+.ev-item > summary { cursor: pointer; font-size: 13px; }
+.ev-item > summary small { color: var(--ink-3); }
+.ev-body { display: grid; gap: 6px; margin-top: 6px; }
+.ev-shot {
+  max-width: 100%; border-radius: var(--r-field);
+  border: 1px solid var(--line); cursor: zoom-in;
+}
+
+/* ── พิมพ์แก้บทพูดได้ทีละฉาก (ผู้ใช้สั่ง 26 ส.ค. 2026) ──────────────────
+   ธีมจัดสไตล์ textarea ไว้ให้แล้ว (พื้น --panel-deep · ขอบ --line · วงแหวนโฟกัส)
+   ตรงนี้จึงเติมเฉพาะที่ต่าง ไม่เขียนทับของเดิม จะได้เปลี่ยนธีมแล้วตามไปด้วย */
+.script-list li { margin-bottom: 8px; }
+.script-list .script-line {
+  width: 100%;
+  box-sizing: border-box;
+  line-height: 1.5;
+  resize: vertical;
+  overflow: hidden;              /* ความสูงถูกยืดให้พอดีข้อความด้วย JS แล้ว */
+  border-left: 3px solid transparent;
+}
+/* ฉากที่พิมพ์แก้แล้วแต่ยังไม่บันทึก — ต้องมองแวบเดียวรู้ว่าค้างอยู่ฉากไหน */
+.script-list .script-line.edited {
+  border-left-color: var(--olive);
+  background: var(--shade);
+}
+.script-bar { align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* ── พับเก็บส่วนยาวๆ ในหน้าตรวจงาน (ผู้ใช้สั่ง 26 ส.ค. 2026) ─────────────
+   หน้าตรวจงานหนึ่งใบยาวหลายจอ — สตอรีบอร์ด 5 ภาพเต็มจอ + บทพูด + คำสั่ง Flow
+   กดหัวข้อเพื่อพับเก็บ แล้วเลื่อนหาของที่อยากดูได้เร็วขึ้น */
+.story-fold {
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--panel);
+  margin: 8px 0;
+  overflow: hidden;
+}
+.story-fold > .story-fold-head {
+  cursor: pointer;
+  list-style: none;              /* ซ่อนสามเหลี่ยมมาตรฐาน ใช้ลูกศรของเราแทน */
+  padding: 9px 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+.story-fold > .story-fold-head::-webkit-details-marker { display: none; }
+.story-fold > .story-fold-head::before {
+  content: "▸";
+  color: var(--ink-3);
+  transition: transform 0.15s ease;
+  flex: none;
+}
+.story-fold[open] > .story-fold-head::before { transform: rotate(90deg); }
+.story-fold > .story-fold-head:hover { background: var(--shade); }
+/* เนื้อในกล่องพับ — เว้นขอบให้ไม่ชนเส้นกรอบ */
+.story-fold > :not(.story-fold-head) { margin-left: 12px; margin-right: 12px; }
+.story-fold > :last-child { margin-bottom: 10px; }
+
+/* ── สองฝั่งเลื่อนแยกกัน (ผู้ใช้สั่ง 26 ส.ค. 2026) ────────────────────────
+   "ทำให้ฝั่งนี้มี scroll down แยกกันต่างกัน ใช้โดยการคลิ๊กจุดใดก็ได้ในฝั่งนั้น"
+
+   ของเดิมทั้งหน้าเลื่อนเป็นก้อนเดียว จอมือถือใช้ position:sticky เกาะไว้ —
+   พอฝั่งงานยาว (สตอรีบอร์ด 5 ภาพ + คำสั่ง Flow 6 ชุด) การเลื่อนหาของในฝั่งหนึ่ง
+   ก็ลากอีกฝั่งไปด้วย
+
+   แบบใหม่: กรอบหน้าสูงเท่าจอพอดี แล้วแต่ละฝั่งมีแถบเลื่อนของตัวเอง
+   ล้อเมาส์เลื่อนฝั่งที่เคอร์เซอร์อยู่ให้เองตามปกติของเบราว์เซอร์ ส่วนการคลิกทำให้
+   ฝั่งนั้นรับปุ่มลูกศร/PageDown ต่อ (ใส่ tabindex ให้จาก core.js)
+
+   **ใช้เฉพาะจอกว้าง** — จอแคบ (≤900px) วางซ้อนกันเป็นคอลัมน์เดียวอยู่แล้ว
+   ถ้าไปแบ่งเป็นสองแถบเลื่อนบนมือถือ จะเหลือพื้นที่ดูของจริงนิดเดียว */
+@media (min-width: 901px) {
+  html, body { height: 100%; }
+  body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;             /* ให้แถบเลื่อนอยู่ในฝั่ง ไม่ใช่ที่ตัวหน้า */
+  }
+  .topbar { flex: none; }
+  .layout {
+    flex: 1;
+    min-height: 0;                /* ขาดบรรทัดนี้ ลูกใน flex จะดันกรอบให้ยาวเกินจอ */
+    align-items: stretch;
+    overflow: hidden;
+  }
+  .phone-panel,
+  .process-panel {
+    position: static;             /* ไม่ต้องเกาะแล้ว ฝั่งตัวเองเลื่อนได้เอง */
+    align-self: stretch;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain; /* เลื่อนสุดฝั่งแล้วไม่ลากอีกฝั่งต่อ */
+  }
+  /* คลิกฝั่งไหน ฝั่งนั้นรับปุ่มลูกศร — ขอบโฟกัสจางๆ พอให้รู้ว่าตอนนี้คุมฝั่งไหนอยู่ */
+  .phone-panel:focus-visible,
+  .process-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .phone-panel.side-active,
+  .process-panel.side-active { box-shadow: var(--soft-shadow), 0 0 0 1.5px var(--accent); }
+}
+
+/* ── ตัวนับคำในบทพูด (ผู้ใช้สั่ง 26 ส.ค. 2026) ───────────────────────────
+   เกณฑ์คือจำนวนคำ **รวมทั้งคลิป** (คลิป 10 วินาทีพูดได้ราว 25–35 คำ)
+   เกินแล้วเสียงจะล้นคลิป จึงต้องเตือนให้เห็นตั้งแต่ตอนพิมพ์ ไม่ใช่ไปรู้ตอนเจนเสร็จ */
+.word-tag {
+  font-size: 13px;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.word-tag.ok    { color: var(--ink-3); }
+/* เกินเกณฑ์ = แดง ต้องสะดุดตา เพราะเป็นจุดที่ทำให้คลิปเสีย */
+.word-tag.over  { color: var(--danger); border-color: var(--danger); font-weight: 600; }
+/* สั้นไป = เตือนเบากว่า ยังใช้ได้แต่เสียโอกาสพูด */
+.word-tag.under { color: var(--ink-3); border-style: dashed; }
+/* ตัวนับรายฉาก — เล็ก จางกว่า ไม่แย่งสายตาจากตัวนับรวม */
+.script-list .word-per {
+  display: block;
+  margin: 2px 0 0 6px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+/* ── พิมพ์ทับจุดเด่นในกรอบ + ตัวหมุนตอนรอ AI (ผู้ใช้สั่ง 26 ส.ค. 2026) ─────── */
+.hl-list li {
+  display: flex; align-items: flex-start; gap: 6px;
+  margin-bottom: 7px;
+}
+.hl-list .hl-line {
+  flex: 1;
+  box-sizing: border-box;
+  line-height: 1.5;
+  resize: vertical;
+  overflow: hidden;                /* ความสูงถูกยืดให้พอดีข้อความด้วย JS แล้ว */
+  border-left: 3px solid transparent;
+}
+/* ข้อที่พิมพ์แก้แล้วแต่ยังไม่บันทึก — ให้เห็นแวบเดียวว่าค้างอยู่ข้อไหน
+   ใช้เครื่องหมายชุดเดียวกับกรอบบทพูด จะได้ไม่ต้องจำสองแบบ */
+.hl-list .hl-line.edited {
+  border-left-color: var(--olive);
+  background: var(--shade);
+}
+
+/* กำลังรอ AI — งานนี้ใช้เวลา 15–30 วินาที นานพอที่จะแยกไม่ออกจาก "กดไม่ติด" */
+.ai-wait {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--ink-3);
+}
+.ai-wait .spinner {
+  width: 15px; height: 15px; flex: none;
+  border: 2px solid var(--line);
+  border-top-color: var(--ink-3);
+  border-radius: 50%;
+  animation: ai-spin 0.8s linear infinite;
+}
+@keyframes ai-spin { to { transform: rotate(360deg); } }
+/* เครื่องที่ตั้งค่าว่าไม่อยากเห็นภาพเคลื่อนไหว ให้กะพริบจางๆ แทนการหมุน */
+@media (prefers-reduced-motion: reduce) {
+  .ai-wait .spinner { animation: ai-fade 1.4s ease-in-out infinite; }
+  @keyframes ai-fade { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+}
+
+/* ── แถบเลือกแนวการวางกล้องของสตอรีบอร์ด (ผู้ใช้สั่ง 26 ส.ค. 2026) ────────── */
+.framing-box { margin: 10px 0 4px; }
+.framing-box h4 { margin-bottom: 6px; }
+.framing-row { flex-wrap: wrap; gap: 8px; }
+
+/* ── ช่องคอมเมนต์ตอนสั่งเจนคลิปใหม่ (ผู้ใช้สั่ง 26 ส.ค. 2026) ─────────────── */
+.regen-box { margin-top: 12px; }
+.regen-box h4 { margin-bottom: 6px; }
+.regen-box .regen-note {
+  width: 100%;
+  box-sizing: border-box;
+  line-height: 1.5;
+  resize: vertical;
+  margin-bottom: 8px;
+}

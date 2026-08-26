@@ -26,9 +26,14 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
+
+# โฟลเดอร์งาน — ที่แสดงในรายการ กับที่เก็บงานที่ติ๊กว่าทำแล้ว (ย้ายไป ไม่ลบ)
+RUNS_DIR = "shopee_products"
+DONE_DIR = "shopee_products_done"
 
 RUN_FILE = "run.json"
 PROMPTS_FILE = "prompts.json"
@@ -79,7 +84,65 @@ def _read_json(path: Path) -> dict:
 
 
 def run_dir(root: Path, item_id: str) -> Path:
-    return Path(root) / "shopee_products" / str(item_id)
+    return Path(root) / RUNS_DIR / str(item_id)
+
+
+def done_dir(root: Path, item_id: str) -> Path:
+    return Path(root) / DONE_DIR / str(item_id)
+
+
+def mark_done(root: Path, item_id: str) -> dict:
+    """ติ๊กว่าทำแล้ว — **ย้าย**ทั้งโฟลเดอร์ออกไป `shopee_products_done/` ไม่ลบ
+
+    ทำไมย้ายไม่ลบ: ของในโฟลเดอร์คือรูปที่จ่ายเครดิตไปแล้วกับคลิปที่เจนเสร็จ
+    ติ๊กผิดแล้วลบทิ้ง = จ่ายซ้ำ ย้ายไว้ข้างๆ กดกลับได้ทันทีด้วย `restore_done()`
+
+    `list_runs()` อ่านเฉพาะ `shopee_products/` งานที่ย้ายแล้วจึงหายจากทุกรายการ
+    เองโดยไม่ต้องเพิ่มธงกรองที่ไหนอีก — ที่เดียวจบ ไม่มีจุดที่ลืมกรอง
+    """
+    source = run_dir(root, item_id)
+    if not source.is_dir():
+        raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
+    run = _read_json(source / RUN_FILE)
+
+    target = done_dir(root, item_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        # เคยติ๊กแล้วเอากลับมาทำใหม่ แล้วติ๊กอีกรอบ — เก็บของเก่าไว้ ไม่ทับ
+        target = target.with_name(f"{target.name}-{int(time.time())}")
+    shutil.move(str(source), str(target))
+
+    run["done_at"] = _now()
+    run["folder"] = str(target)
+    try:
+        (target / RUN_FILE).write_text(
+            json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass  # ย้ายสำเร็จแล้ว แค่ประทับเวลาไม่ติด — ไม่ใช่เหตุให้ล้มทั้งงาน
+    return run
+
+
+def restore_done(root: Path, item_id: str) -> dict:
+    """เอางานที่ติ๊กไปแล้วกลับมาแสดงในรายการ — ทางกลับของ `mark_done()`"""
+    source = done_dir(root, item_id)
+    if not source.is_dir():
+        raise ClipStoreError(f"ไม่พบงาน {item_id} ในโฟลเดอร์ที่ทำแล้ว")
+    target = run_dir(root, item_id)
+    if target.exists():
+        raise ClipStoreError(f"งาน {item_id} อยู่ในรายการอยู่แล้ว")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(target))
+    run = _read_json(target / RUN_FILE)
+    run.pop("done_at", None)
+    run["folder"] = str(target)
+    try:
+        (target / RUN_FILE).write_text(
+            json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+    return run
 
 
 def _to_drive(root: Path, item_id: str) -> None:
@@ -111,6 +174,30 @@ def _to_drive(root: Path, item_id: str) -> None:
 
 # ------------------------------------------------------------------ เขียน
 
+def target_dir(root: Path, item_id: str) -> Path:
+    """โฟลเดอร์ที่ควร **เขียน** ของงานนี้ลงไป
+
+    **ต้องใช้ตัวนี้ทุกที่ที่เขียน ห้ามเรียก run_dir ตรงๆ** เพราะงานที่ผู้ใช้ติ๊กว่า
+    "ทำแล้ว" ถูกย้ายไป `shopee_products_done/` แล้ว — ตัวอ่าน (`load_run`) รู้จัก
+    ที่ใหม่ แต่ตัวเขียนที่เรียก `run_dir` ตรงๆ จะไปสร้างโฟลเดอร์เปล่าที่เดิม
+    กลายเป็น **ไฟล์อยู่ที่หนึ่ง สมุดบันทึกอยู่อีกที่หนึ่ง**
+
+    เกิดจริง 23 ส.ค. 2026 เวลา 22:31 — ทีวี 75 นิ้วที่เคยติ๊กว่าทำแล้ว ถูกสั่งเจน
+    คลิปใหม่ ไฟล์ 10.3 MB ลงที่โฟลเดอร์ "ทำแล้ว" ถูกต้อง แต่ `save_video` เขียน
+    run.json ไปที่โฟลเดอร์เดิมซึ่งว่างเปล่า ผลคือระบบรายงานว่า "ยังไม่มีไฟล์คลิป"
+    ทั้งที่เพิ่งจ่ายเครดิตไป 15 หน่วย และแฮชแท็กออกมา 0 ตัวเพราะอ่านเจอแต่ record เปล่า
+
+    ยังไม่เคยมีทั้งสองที่ = งานใหม่ ให้สร้างที่โฟลเดอร์ปกติ
+    """
+    active = run_dir(root, item_id)
+    if active.is_dir():
+        return active
+    done = done_dir(root, item_id)
+    if done.is_dir():
+        return done
+    return active
+
+
 def save_product(root: Path, data: dict) -> Path:
     """เก็บทุกอย่างที่ได้จากขั้นดึงสินค้า — เรียกทันทีที่ดึงเสร็จ
 
@@ -121,7 +208,7 @@ def save_product(root: Path, data: dict) -> Path:
     if not item_id:
         raise ClipStoreError("ไม่มีรหัสสินค้า เก็บไม่ได้")
 
-    folder = run_dir(root, item_id)
+    folder = target_dir(root, item_id)
     folder.mkdir(parents=True, exist_ok=True)
 
     # เก็บชื่อไฟล์แบบสัมพัทธ์ ไม่ใช่พาธเต็ม — ย้ายโฟลเดอร์โปรเจกต์แล้วยังใช้ได้
@@ -150,6 +237,12 @@ def save_product(root: Path, data: dict) -> Path:
         "shop_id": data.get("shop_id", ""),
         "name": data.get("name", ""),
         "highlights": data.get("highlights", []),
+        # จุดขายที่ไล่ออกมาได้ **ทั้งหมด** กับเหตุผลที่เลือก 3 ข้อนั้น
+        # (ผู้ใช้สั่ง 22 ส.ค. 2026) — เก็บไว้เพื่อสองอย่าง
+        #   1. สลับข้อที่ไม่ถูกใจได้โดยไม่ต้องยิง AI ใหม่ (โควตาวันละ 20 ครั้ง)
+        #   2. ตรวจได้ว่า AI เลือกด้วยเหตุผลอะไร จับได้เวลามันเลือกผิด
+        "features": data.get("features", []),
+        "highlight_why": data.get("highlight_why", []),
         "image_pool": pool,
         # ลิงก์ที่ผู้ใช้ส่งมาคือลิงก์ affiliate ตัวจริง ส่วน url คือลิงก์ที่ระบบ
         # แปลงได้ตอนเปิดหน้า ซึ่ง **ไม่มีรหัสผู้แนะนำ** ห้ามสลับกัน
@@ -177,7 +270,7 @@ def set_images(root: Path, item_id: str, images: list[str], pool: list[str]) -> 
     เก็บเป็นชื่อไฟล์สัมพัทธ์เหมือนตอนบันทึกครั้งแรก — รูปทุกใบยังอยู่ในโฟลเดอร์เดิม
     การ "ลบ" คือย้ายออกจากชุดที่ใช้ไปไว้ในคลัง **ไม่ได้ลบไฟล์ทิ้ง** จะได้กดกลับมาได้
     """
-    folder = run_dir(root, item_id)
+    folder = target_dir(root, item_id)
     run = _read_json(folder / RUN_FILE)
     if not run:
         raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
@@ -195,12 +288,119 @@ def set_highlights(root: Path, item_id: str, highlights: list[str]) -> dict:
     จุดเด่นเป็นวัตถุดิบที่ส่งเข้า GPT คู่กับรูป — ตัวสกัดอัตโนมัติหยิบผิดได้บ่อย
     (ได้ข้อความโปรโมชันหรือเงื่อนไขร้านแทนคุณสมบัติจริง) ต้องแก้ได้ก่อนส่ง
     """
-    folder = run_dir(root, item_id)
+    folder = target_dir(root, item_id)
     run = _read_json(folder / RUN_FILE)
     if not run:
         raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
     run["highlights"] = [text for text in highlights if str(text).strip()]
     run["highlights_at"] = _now()
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
+def set_script(root: Path, item_id: str, lines: list[str]) -> dict:
+    """เขียนบทพูดที่ผู้ใช้พิมพ์แก้เองกลับลงงาน (ผู้ใช้สั่ง 26 ส.ค. 2026)
+
+    **จำนวนฉากต้องเท่าเดิมเสมอ** — แก้ข้อความได้ แต่เพิ่ม/ลบบรรทัดไม่ได้
+    เพราะบทพูดฉากที่ N ผูกกับภาพสตอรีบอร์ดใบที่ N และคำสั่ง Flow ของฉากนั้น
+    ถ้าจำนวนเพี้ยน ฉากจะเลื่อนกันทั้งแถบโดยไม่มีอะไรฟ้อง แล้วคลิปจะพูดเรื่องหนึ่ง
+    แต่ภาพเป็นอีกเรื่อง (ตัวแก้คำสั่งที่ผิดนโยบายก็บังคับข้อเดียวกันนี้อยู่แล้ว)
+
+    เขียน 3 ที่ให้ตรงกัน — `run["script"]` ที่ทุกคนอ่าน · `script_count` ที่ใช้โชว์
+    และตรวจจำนวนฉาก · ไฟล์ `script.json` ที่เก็บแยก ถ้าเขียนไม่ครบ จะมีที่หนึ่ง
+    เป็นของเก่าค้างไว้แล้วไล่ไม่เจอว่าทำไมได้บทพูดคนละชุด
+    """
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+
+    before = list(run.get("script") or [])
+    texts = [str(line or "").strip() for line in lines]
+    if any(not text for text in texts):
+        raise ClipStoreError("บทพูดต้องไม่มีฉากไหนว่าง")
+    if before and len(texts) != len(before):
+        raise ClipStoreError(
+            f"บทพูดต้องมี {len(before)} ฉากเท่าเดิม (ส่งมา {len(texts)} ฉาก) "
+            "— แก้ข้อความได้ แต่เพิ่ม/ลบฉากไม่ได้ เพราะผูกกับภาพสตอรีบอร์ด")
+
+    run["script"] = texts
+    run["script_count"] = len(texts)
+    run["script_at"] = _now()
+    _write_json(folder / RUN_FILE, run)
+    _write_json(folder / SCRIPT_FILE, texts)
+    return run
+
+
+def set_story_full_shot(root: Path, item_id: str, value: bool) -> dict:
+    """เก็บว่างานใบนี้ติ๊ก "เห็นสินค้าเต็มทุกฉาก" ไว้ไหม
+
+    เก็บรายใบ ไม่ใช่ค่ารวมของทั้งระบบ เพราะสินค้าคนละชิ้นต้องการคนละแบบ
+    (ทีวีต้องเห็นเต็มเครื่อง แต่หูฟังซูมเข้าไปดูเนื้องานได้)
+    ส่วน "ค่าที่จำไว้ล่าสุด" อยู่ที่ `clip_rules.remember()` ใช้เป็นค่าตั้งต้นเท่านั้น
+    """
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+    run["story_full_shot"] = bool(value)
+    run["story_full_shot_at"] = _now()
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
+def set_flow_prompts(root: Path, item_id: str, prompts: list[str]) -> dict:
+    """เขียนคำสั่ง Flow ชุดที่แก้แล้วกลับลงงาน
+
+    ใช้ตอนผู้ใช้กด "ลบแล้วเจนใหม่" พร้อมคอมเมนต์ — AI ดูคลิปแล้วแก้คำสั่งให้
+    **จำนวนชุดต้องเท่าเดิม** เพราะแต่ละชุดผูกกับฉากในคลิป ด่านจริงอยู่ที่
+    `clip_fix._finish()` ตรงนี้กันอีกชั้นเผื่อมีคนเรียกตรงๆ
+    """
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+    rows = [str(text) for text in prompts if str(text).strip()]
+    if not rows:
+        raise ClipStoreError("คำสั่ง Flow ว่างเปล่า")
+    before = list(run.get("flow_prompts") or [])
+    if before and len(rows) != len(before):
+        raise ClipStoreError(
+            f"คำสั่ง Flow ต้องมี {len(before)} ชุดเท่าเดิม (ส่งมา {len(rows)} ชุด)")
+    run["flow_prompts"] = rows
+    run["flow_prompts_at"] = _now()
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
+def read_detail(root: Path, item_id: str) -> str:
+    """ข้อความรายละเอียดสินค้าดิบที่เก็บไว้ตอนดึงมา
+
+    มีไว้ให้คัดจุดเด่นใหม่ได้โดย **ไม่ต้องเปิดเบราว์เซอร์ไปดึง Shopee ซ้ำ** ซึ่ง
+    ทั้งช้าและต้องแย่งเบราว์เซอร์กับงานเจนคลิป (Chrome โปรไฟล์เดียว เปิดซ้อนไม่ได้)
+    """
+    for folder in (run_dir(root, item_id), done_dir(root, item_id)):
+        path = folder / DETAIL_FILE
+        if path.is_file():
+            return path.read_text(encoding="utf-8", errors="replace")
+    return ""
+
+
+def save_features(root: Path, item_id: str, analysis: dict) -> dict:
+    """เก็บผลคัดจุดเด่นรอบใหม่ทับของเดิม — ทั้งรายการเต็ม 3 ข้อที่เลือก และเหตุผล"""
+    folder = run_dir(root, item_id)
+    if not folder.is_dir():
+        folder = done_dir(root, item_id)
+    if not folder.is_dir():
+        raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
+    run = _read_json(folder / RUN_FILE)
+    run.update({
+        "item_id": str(item_id),
+        "highlights": list(analysis.get("highlights") or []),
+        "features": list(analysis.get("features") or []),
+        "highlight_why": list(analysis.get("why") or []),
+        "highlights_at": _now(),
+    })
     _write_json(folder / RUN_FILE, run)
     return run
 
@@ -211,7 +411,7 @@ def save_storyboard(root: Path, data: dict, result: dict) -> Path:
     if not item_id:
         raise ClipStoreError("ไม่มีรหัสสินค้า เก็บไม่ได้")
 
-    folder = run_dir(root, item_id)
+    folder = target_dir(root, item_id)
     folder.mkdir(parents=True, exist_ok=True)
 
     frames = []
@@ -238,6 +438,15 @@ def save_storyboard(root: Path, data: dict, result: dict) -> Path:
         "refused": bool(result.get("refused")),
         "refusal_text": result.get("refusal_text", ""),
         "storyboard_at": _now(),
+        # **จำจุดเด่นชุดที่ใช้ทำรอบนี้ไว้ด้วย** (ผู้ใช้ถาม 23 ส.ค. 2026)
+        #
+        # จุดเด่นคือวัตถุดิบที่กำหนดว่าคลิปจะพูดเรื่องอะไร ถ้าแก้จุดเด่นทีหลัง
+        # สตอรีบอร์ด คำสั่ง Flow และบทพูดที่ทำไว้แล้วจะ**ไม่เปลี่ยนตาม** —
+        # ของพวกนั้นถูกสร้างครั้งเดียวจากจุดเด่นชุดเก่า
+        #
+        # เก็บสำเนาไว้เพื่อให้เทียบได้ว่า "ที่เห็นอยู่ตรงกับจุดเด่นตอนนี้หรือยัง"
+        # ไม่งั้นความไม่ตรงกันจะเงียบ — ผู้ใช้แก้จุดเด่นแล้วนึกว่าคลิปจะเปลี่ยนตาม
+        "storyboard_highlights": list(data.get("highlights") or []),
     })
     _write_json(folder / RUN_FILE, run)
 
@@ -252,7 +461,7 @@ def save_storyboard(root: Path, data: dict, result: dict) -> Path:
 
 def save_video(root: Path, item_id: str, videos: list[Path], note: str = "") -> Path:
     """บันทึกคลิปที่เจนได้จาก Google Flow ลงในงานของสินค้าชิ้นนั้น"""
-    folder = run_dir(root, item_id)
+    folder = target_dir(root, item_id)
     folder.mkdir(parents=True, exist_ok=True)
     names = []
     for path in videos:
@@ -274,8 +483,157 @@ def save_video(root: Path, item_id: str, videos: list[Path], note: str = "") -> 
     return folder
 
 
-# ปลายทางที่จะเอาคลิปไปโพสต์ — โครงไว้ก่อน ยังไม่ได้ต่อตัวโพสต์จริง
-PUBLISH_TARGETS = ("facebook_reels", "shopee_video")
+def clear_videos(root: Path, item_id: str) -> dict:
+    """ลบ **รายการ** คลิปออกจากสมุดบันทึก — ใช้คู่กับตอนลบไฟล์คลิปทิ้ง
+
+    **ลบไฟล์แล้วต้องลบรายการเสมอ** ไม่งั้นสมุดบันทึกจะบอกว่ามีคลิป แต่โฟลเดอร์ว่าง
+    ทุกอย่างที่อ่านสมุดบันทึกจะเชื่อผิดหมด
+
+    เกิดจริง 23 ส.ค. 2026: ปุ่ม 🔄 เจนใหม่ ลบไฟล์คลิปของทีวี 55 นิ้วทิ้ง แต่ไม่ได้
+    ลบรายการ พอเปิดดูงานนั้นระบบพยายามไปตรวจคลิปที่ไม่มีอยู่ แล้วขึ้น error
+    "งานนี้ยังไม่มีไฟล์คลิป" ซึ่งชี้สาเหตุผิดทาง (ฟังดูเหมือนยังไม่เคยเจน ทั้งที่
+    เจนไปแล้วและถูกลบทิ้งเอง)
+
+    ลบผลตรวจเก่าไปด้วย — ผลตรวจผูกกับไฟล์ที่ไม่มีแล้ว เก็บไว้ก็ทำให้เข้าใจผิด
+    """
+    for folder in (run_dir(root, item_id), done_dir(root, item_id)):
+        if not folder.is_dir():
+            continue
+        run = _read_json(folder / RUN_FILE)
+        if not run:
+            continue
+        run.update({
+            "item_id": str(item_id),
+            "videos": [],
+            "video_count": 0,
+            "video_cleared_at": _now(),
+        })
+        run.pop("video_check", None)
+        run.pop("video_check_at", None)
+        _write_json(folder / RUN_FILE, run)
+        return run
+    raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
+
+
+def save_video_check(root: Path, item_id: str, result: dict) -> dict:
+    """เก็บผลตรวจคลิป (ชัด 1080p ไหม · มีเสียงพูดไหม) — ผู้ใช้สั่ง 22 ส.ค. 2026
+
+    **เก็บไว้ ไม่ตรวจใหม่ทุกครั้งที่เปิดดู** เพราะชั้นที่ฟังเสียงต้องยิงไปหา Gemini
+    ทุกครั้ง ถ้าตรวจสดตอนกด /clips คนที่เปิดดูงานเดิมสิบรอบจะยิงสิบครั้ง แล้วโดน
+    429 (เจอจริง 22 ส.ค.: ยิง 15 ครั้งรวดเดียวโดนตัดตั้งแต่ครั้งที่ 4)
+
+    ผลผูกกับ **ไฟล์** ไม่ใช่กับงาน — เก็บชื่อไฟล์กับขนาดไว้ด้วย ถ้าวันหลังโหลด
+    คลิปใหม่ทับ (เช่นอัปเป็น 1080p) ขนาดจะไม่ตรงแล้วตัวเรียกรู้ว่าผลเก่าใช้ไม่ได้
+    """
+    folder = run_dir(root, item_id)
+    if not folder.is_dir():
+        folder = done_dir(root, item_id)
+    if not folder.is_dir():
+        raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
+    run = _read_json(folder / RUN_FILE)
+    data = dict(result or {})
+    data["at"] = _now()
+    run.update({
+        "item_id": str(item_id),
+        "video_check": data,
+        "video_check_at": data["at"],
+    })
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
+def save_fixed_prompt(
+    root: Path, item_id: str, scene: int, prompt: str, script: list[str] | None = None,
+) -> dict:
+    """เก็บคำสั่ง+บทพูดที่ Gemini แก้ให้ผ่านนโยบายแล้ว (ผู้ใช้สั่ง 22 ส.ค. 2026)
+
+    **เก็บแยก ไม่ทับของเดิม** — ของเดิมคือสิ่งที่ ChatGPT เขียนตามสตอรีบอร์ดที่
+    ผู้ใช้อนุมัติไปแล้ว ถ้าทับทิ้งจะไม่มีทางรู้ว่าเนื้อหาถูกเปลี่ยนไปตรงไหนบ้าง
+    ตัวที่แก้แล้วเก็บไว้ใช้ตอนเจนซ้ำ จะได้ไม่ต้องให้ Gemini แก้ใหม่ทุกครั้ง
+    """
+    folder = run_dir(root, item_id)
+    if not folder.is_dir():
+        folder = done_dir(root, item_id)
+    if not folder.is_dir():
+        raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
+    run = _read_json(folder / RUN_FILE)
+    fixed = dict(run.get("policy_fixed") or {})
+    fixed[str(scene)] = {
+        "prompt": prompt,
+        "script": list(script or []),
+        "at": _now(),
+    }
+    run.update({
+        "item_id": str(item_id),
+        "policy_fixed": fixed,
+        "policy_fixed_at": _now(),
+    })
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
+def save_project_url(root: Path, item_id: str, url: str, scene: int = 0) -> dict:
+    """เก็บลิงก์โปรเจกต์ Flow ของสินค้าชิ้นนี้ (ผู้ใช้สั่ง 22 ส.ค. 2026)
+
+    เก็บ **ทุกฉาก** เพราะระบบสร้างโปรเจกต์ใหม่ต่อฉาก (ดู `_clip_generate`) ถ้าเก็บ
+    ค่าเดียวจะรู้แค่ฉากสุดท้าย แล้วกลับไปโหลดฉากอื่นไม่ได้
+
+    ใช้ตอนอยากกลับเข้าไปโหลดคลิปความละเอียดสูงกว่าเดิม หรือเจนซ้ำในโปรเจกต์เดิม
+    โดยไม่ต้องเปิดไล่หาในหน้า Flow เอง
+    """
+    folder = run_dir(root, item_id)
+    if not folder.is_dir():
+        folder = done_dir(root, item_id)
+    if not folder.is_dir():
+        raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
+    run = _read_json(folder / RUN_FILE)
+    projects = dict(run.get("flow_projects") or {})
+    projects[str(scene)] = url
+    run.update({
+        "item_id": str(item_id),
+        "flow_projects": projects,
+        "flow_project_url": url,          # ฉากล่าสุด — ไว้เปิดเร็วๆ
+        "flow_project_at": _now(),
+    })
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
+def save_hashtags(root: Path, item_id: str, plan: dict) -> dict:
+    """เก็บชุดแฮชแท็ก 5 ตัวของสินค้าชิ้นนั้น (ผู้ใช้สั่ง 22 ส.ค. 2026)
+
+    เก็บ **ส่วนประกอบไว้ด้วย** ไม่ใช่แค่แท็กสำเร็จรูป — ผู้ใช้ต้องแก้ยี่ห้อ /
+    ชนิดสินค้า / จุดเด่นได้ทีละชิ้นแล้วให้ระบบประกอบใหม่ ถ้าเก็บแต่แท็กสำเร็จ
+    จะแก้ทีต้องพิมพ์ใหม่ทั้งตัว (เหตุผลเดียวกับที่ `hashtag.plan_for_run` คืน
+    ส่วนประกอบกลับมาด้วย)
+    """
+    folder = target_dir(root, item_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    run = _read_json(folder / RUN_FILE)
+    tags = [str(tag) for tag in (plan.get("tags") or []) if str(tag).strip()]
+    run.update({
+        "item_id": str(item_id),
+        "hashtags": tags,
+        "hashtag_count": len(tags),
+        "hashtag_parts": {
+            "brand": plan.get("brand", ""),
+            "kind": plan.get("kind", ""),
+            "details": plan.get("details") or [],
+        },
+        "hashtag_at": _now(),
+    })
+    _write_json(folder / RUN_FILE, run)
+    _to_drive(root, str(item_id))
+    return run
+
+
+# ปลายทางที่จะเอาคลิปไปโพสต์ — **เรียงตามลำดับที่ผู้ใช้สั่งให้ลง** (25 ส.ค. 2026)
+#
+#     Shopee Video → Facebook Reels → TikTok  ห่างกันอย่างน้อย 1 วัน (นับวันปฏิทิน)
+#
+# ลำดับกับระยะห่างบังคับใช้ที่ `publish_order.py` ที่เดียว ห้ามเขียนกติกาซ้ำที่อื่น
+# เพราะตัวโพสต์มีสองระบบที่ไม่รู้จักกัน (มือถือ = Shopee/Facebook · เบราว์เซอร์ = TikTok)
+PUBLISH_TARGETS = ("shopee_video", "facebook_reels", "tiktok")
 
 
 def build_caption(run: dict) -> str:
@@ -298,7 +656,7 @@ def set_hashtag_plan(root: Path, item_id: str, plan: dict) -> dict:
     เก็บ brand/kind/details แยกจาก tags เพราะผู้ใช้แก้ทีละชิ้นแล้วให้ระบบ
     ประกอบแท็กใหม่เอง ถ้าเก็บแต่แท็กสำเร็จรูปจะต้องพิมพ์ใหม่ทั้งตัวทุกครั้ง
     """
-    folder = run_dir(root, item_id)
+    folder = target_dir(root, item_id)
     run = _read_json(folder / RUN_FILE)
     if not run:
         raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
@@ -319,7 +677,7 @@ def mark_ready_to_post(root: Path, item_id: str) -> dict:
     เก็บสถานะแยกรายปลายทาง เพราะโพสต์ Reels สำเร็จแต่ Shopee Video ล้มได้
     ถ้าเก็บสถานะเดียวรวมกัน จะไม่รู้ว่าต้องตามเก็บอันไหน
     """
-    folder = run_dir(root, item_id)
+    folder = target_dir(root, item_id)
     run = _read_json(folder / RUN_FILE)
     if not run:
         raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
@@ -340,7 +698,7 @@ def mark_posted(
     """บันทึกผลการโพสต์ของปลายทางหนึ่ง"""
     if target not in PUBLISH_TARGETS:
         raise ClipStoreError(f"ไม่รู้จักปลายทาง {target}")
-    folder = run_dir(root, item_id)
+    folder = target_dir(root, item_id)
     run = _read_json(folder / RUN_FILE)
     if not run:
         raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
@@ -368,7 +726,7 @@ def list_runs(root: Path) -> list[dict]:
     อ่านแค่ run.json ของแต่ละสินค้า ไม่แตะไฟล์ดิบ — หน้ารายการจะได้ไม่ช้าลง
     เมื่อสินค้าสะสมมากขึ้น
     """
-    base = Path(root) / "shopee_products"
+    base = Path(root) / RUNS_DIR
     if not base.is_dir():
         return []
     runs: list[dict] = []
@@ -384,9 +742,41 @@ def list_runs(root: Path) -> list[dict]:
     return runs
 
 
+def list_done(root: Path) -> list[dict]:
+    """งานที่ติ๊กว่าทำแล้ว — ใหม่สุดขึ้นก่อน (อ่านจาก `shopee_products_done/`)
+
+    แยกเป็นฟังก์ชันของตัวเองแทนที่จะใส่ธงเลือกโฟลเดอร์ให้ `list_runs` เพราะที่
+    เรียก list_runs มีหลายจุดทั่วระบบ (คิว · หน้าเว็บ · บอท) ถ้าเผลอส่งธงผิด
+    จุดเดียว งานที่เก็บไปแล้วจะโผล่กลับมาปนในรายการหลักโดยไม่มีอะไรฟ้อง
+    """
+    base = Path(root) / DONE_DIR
+    if not base.is_dir():
+        return []
+    runs: list[dict] = []
+    for folder in base.iterdir():
+        if not folder.is_dir():
+            continue
+        run = _read_json(folder / RUN_FILE)
+        if not run:
+            continue
+        run["folder"] = str(folder)
+        runs.append(run)
+    runs.sort(key=lambda r: r.get("done_at") or r.get("video_at") or "", reverse=True)
+    return runs
+
+
 def load_run(root: Path, item_id: str) -> dict:
-    """งานหนึ่งชิ้นพร้อมของดิบ — ใช้ตอนเปิดดูรายละเอียด"""
+    """งานหนึ่งชิ้นพร้อมของดิบ — ใช้ตอนเปิดดูรายละเอียด
+
+    หาในโฟลเดอร์หลักก่อน ไม่เจอค่อยหาในโฟลเดอร์ที่ติ๊กว่าทำแล้ว — เพื่อให้ทุกอย่าง
+    ที่เปิดงานด้วยรหัสสินค้า (ส่งคลิปซ้ำ · ทำแฮชแท็ก · ดูรายละเอียด) ใช้กับงานที่
+    เก็บไปแล้วได้ด้วย โดยไม่ต้องไล่แก้ทีละจุด — รหัสสินค้าไม่ซ้ำกันจึงไม่กำกวม
+    """
     folder = run_dir(root, item_id)
+    if not (folder / RUN_FILE).is_file():
+        moved = done_dir(root, item_id)
+        if (moved / RUN_FILE).is_file():
+            folder = moved
     run = _read_json(folder / RUN_FILE)
     if not run:
         return {}
@@ -408,7 +798,7 @@ def file_path(root: Path, item_id: str, name: str) -> Path:
     ชื่อไฟล์มาจาก run.json ซึ่งเราเขียนเอง แต่คำขอมาจากหน้าเว็บ ถ้าไม่กันไว้
     จะยิง `../../` ไล่อ่านไฟล์อะไรในเครื่องก็ได้
     """
-    folder = run_dir(root, item_id).resolve()
+    folder = target_dir(root, item_id).resolve()
     target = (folder / name).resolve()
     if folder != target and folder not in target.parents:
         raise ClipStoreError("ขอไฟล์นอกโฟลเดอร์งานไม่ได้")

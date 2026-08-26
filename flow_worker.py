@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+import gemini_quota
 
 # Windows ตั้ง stdout เป็น cp1252 เมื่อไม่ได้ต่อกับ console (เช่นเขียนลงไฟล์ log)
 # ข้อความไทยจะทำให้โปรแกรมตายทั้งตัว — บังคับ UTF-8 ไว้ตั้งแต่ต้น
@@ -216,6 +217,8 @@ def step_prompt(job_dir: Path, state: dict, demo: bool) -> None:
             json={"contents": [{"parts": [{"text": instruction}]}]},
             timeout=60.0,
         )
+        gemini_quota.record(GEMINI_MODEL, ok=response.status_code == 200,
+                            response=response)
         if response.status_code != 200:
             raise RuntimeError(f"Gemini ตอบ {response.status_code}: {response.text[:200]}")
         payload = response.json()

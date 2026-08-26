@@ -28,6 +28,7 @@ import httpx
 
 import flow_driver
 import tiktok_post
+import gemini_quota
 from flow_driver import (
     FlowDriver,
     FlowError,
@@ -123,6 +124,8 @@ def generate_scenes(
             },
             timeout=flow_driver.TIMEOUTS["gemini_reply"],
         )
+        gemini_quota.record(model, ok=response.status_code == 200,
+                            response=response)
         if response.status_code != 200:
             last_error = f"HTTP {response.status_code}: {response.text[:200]}"
             continue

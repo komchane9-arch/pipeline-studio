@@ -117,8 +117,107 @@ class ProfileFarm:
             for folder, info in sorted(cache.items())
         ]
 
+    # ---- สแกน Chrome ครั้งเดียว ใช้ตอบได้ทั้ง "ใครเปิดอยู่" และ "Chrome ผู้ใช้เปิดไหม" ----
+    #
+    # **ตัดสินจากของจริง ไม่ใช่จากเลขที่จำไว้** (แก้ 26 ส.ค. 2026)
+    #
+    # ของเดิมดูว่า `entry["pid"]` ที่บันทึกไว้ยังมีชีวิตไหม ซึ่งพังเงียบๆ 2 ทาง
+    #   1. เลขนั้นเขียนโดย `launch()` เท่านั้น แต่บอทที่ทำงานจริงถูกเปิดโดย
+    #      `fb_posts_collect.py` / `fb_mass_bot.py` ซึ่งไม่ได้ผ่าน `launch()`
+    #      → ไม่มีใครเขียนเลข ระบบเลยเห็นเป็น "ไม่ได้รัน" ตลอด
+    #   2. เครื่องรีสตาร์ตแล้วเลขเก่าตายหมด แต่ไฟล์ยังจำไว้
+    #
+    # วัดจริง 26 ส.ค. 08:45 — Bot8/Bot9/Bot10 เปิด Chrome อยู่ 28 หน้าต่างและ
+    # เก็บโพสต์ได้จริง แต่ `running_count` ตอบ 0
+    #
+    # **ที่อันตรายคือมันไม่ได้แค่แสดงผิด** — `running` เป็นตัวคุมด่านกันพลาด 2 ด่าน
+    #   · `launch()`  กันไม่ให้เปิด Chrome ซ้อนบนโปรไฟล์เดิม (เสี่ยงโดน Facebook ตีธง)
+    #   · `restore_login()` กันไม่ให้ทับไฟล์ล็อกอินตอน Chrome ยังถืออยู่ (โปรไฟล์พัง)
+    # พอตัวตรวจตอบ "ไม่ได้รัน" ตลอด ด่านทั้งสองจึงเปิดโล่งมาตลอดโดยไม่มีใครรู้
+    #
+    # ทางแก้: อ่าน `--user-data-dir` จากคำสั่งของ chrome.exe ที่เปิดอยู่จริง
+    # ใครเปิดมันก็เห็น · เครื่องรีสตาร์ตก็ยังถูก · ไม่มีอะไรให้ค้างเก่า
+    _SCAN_PS = (
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+        "ConvertTo-Json -Compress -Depth 3 -InputObject @("
+        "Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\" "
+        "| Select-Object ProcessId,CommandLine)"
+    )
+
+    # เก็บผลไว้สั้นๆ เพราะหน้าเว็บถามซ้ำถี่ และการสแกนใช้เวลาราวครึ่งวินาที
+    # ด่านกันพลาดสั่ง fresh=True เสมอ — ที่นั่นข้อมูลเก่า 2 วินาทีก็ปล่อยของผิดได้
+    _scan_cache: tuple[float, dict] | None = None
+    _scan_lock = threading.Lock()
+    SCAN_TTL = 2.5
+
+    @classmethod
+    def _chrome_scan(cls, fresh: bool = False) -> dict:
+        """คืน {"by_profile": {รหัสโปรไฟล์: {"main": [pid], "all": [pid]}}, "user_chrome": bool}
+
+        `main` = หน้าต่างแม่ (คำสั่งไม่มี `--type=`) ปิดตัวนี้แบบสุภาพแล้วลูกตายตาม
+        และ Chrome ได้เขียนคุกกี้ลงดิสก์ก่อนตาย
+        """
+        with cls._scan_lock:
+            cached = cls._scan_cache
+            if not fresh and cached and (time.time() - cached[0]) < cls.SCAN_TTL:
+                return cached[1]
+
+        rows: list = []
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", cls._SCAN_PS],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=25, creationflags=studio_shared.NO_WINDOW)
+            raw = (result.stdout or "").strip()
+            if raw:
+                parsed = json.loads(raw)
+                rows = [parsed] if isinstance(parsed, dict) else list(parsed or [])
+        except Exception:                                    # noqa: BLE001
+            # สแกนไม่ได้ = **ไม่รู้** ไม่ใช่ "ไม่มีใครเปิด" — ตอบว่าไม่มีคือคำตอบที่
+            # อันตรายกว่า เพราะด่านกันพลาดจะปล่อยผ่านทันที ปล่อยให้ผลว่างแล้วให้
+            # ผู้เรียกเห็นว่าไม่มีข้อมูล ดีกว่าโกหกว่าปลอดภัย
+            rows = []
+
+        by_profile: dict[str, dict[str, list[int]]] = {}
+        user_chrome = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cmd = str(row.get("CommandLine") or "")
+            if not cmd.strip():
+                continue
+            pid = row.get("ProcessId")
+            if not isinstance(pid, int):
+                continue
+            if "--user-data-dir" not in cmd:
+                # ไม่มี --user-data-dir = Chrome ตัวจริงของผู้ใช้ (กติกาเดิม ไม่เปลี่ยน)
+                user_chrome = True
+                continue
+            found = re.search(r"bot_profiles[/\\]+([0-9A-Za-z_-]+)", cmd)
+            if not found:
+                continue
+            slot = by_profile.setdefault(found.group(1), {"main": [], "all": []})
+            slot["all"].append(pid)
+            if "--type=" not in cmd:
+                slot["main"].append(pid)
+
+        scan = {"by_profile": by_profile, "user_chrome": user_chrome}
+        with cls._scan_lock:
+            cls._scan_cache = (time.time(), scan)
+        return scan
+
+    @classmethod
+    def chrome_is_running(cls) -> bool:
+        """เช็คเฉพาะ Chrome ตัวจริงของผู้ใช้ (ที่ใช้ User Data หลัก)
+
+        เช็คแบบเหมารวม chrome.exe ไม่ได้ — บอทของ flow_worker และบอทฟาร์มเอง
+        ก็เป็น chrome.exe แต่เปิดด้วย --user-data-dir แยก ไม่แตะ User Data หลัก
+        จึงกรองเอาเฉพาะโปรเซสที่ *ไม่มี* --user-data-dir ใน command line
+        """
+        return cls._chrome_scan()["user_chrome"]
+
     @staticmethod
-    def chrome_is_running() -> bool:
+    def _chrome_is_running_old() -> bool:
         """เช็คเฉพาะ Chrome ตัวจริงของผู้ใช้ (ที่ใช้ User Data หลัก)
 
         เช็คแบบเหมารวม chrome.exe ไม่ได้ — บอทของ flow_worker และบอทฟาร์มเอง
@@ -387,24 +486,28 @@ class ProfileFarm:
             self._save(data)
 
     # ------------------------------------------------------------- สถานะ
-    def list_profiles(self) -> dict:
+    def list_profiles(self, fresh: bool = False) -> dict:
         with _registry_lock:
             data = self._load()
-        # เช็คจาก PID ที่บันทึกไว้ ไม่ใช่แค่ Popen ในหน่วยความจำ —
-        # เซิร์ฟเวอร์รีสตาร์ตแล้วต้องยังเห็น/สั่งปิดบอทที่เปิดค้างได้
-        alive = self._alive_chrome_pids()
+        # ดูจาก Chrome ที่เปิดอยู่จริง ไม่ใช่จากเลขโปรเซสที่บันทึกไว้
+        # (เหตุผลเต็มอยู่ที่ `_chrome_scan` — ของเดิมมองไม่เห็นบอทที่เปิดโดย
+        #  สคริปต์ตัวอื่น และเลขที่จำไว้ตายทุกครั้งที่เครื่องรีสตาร์ต)
+        scan = self._chrome_scan(fresh=fresh)
         profiles = []
         for entry in data["profiles"]:
-            pid = entry.get("pid")
-            running = pid in alive if pid else False
+            slot = scan["by_profile"].get(entry["id"]) or {}
+            pids = slot.get("all") or []
+            running = bool(pids)
             if not running:
                 _running.pop(entry["id"], None)
-            profiles.append({**entry, "running": running})
+            profiles.append({**entry, "running": running,
+                             "windows": len(pids),
+                             "pids": slot.get("main") or pids})
         return {
             "profiles": profiles,
             "max_concurrent": data.get("max_concurrent", 3),
             "running_count": sum(1 for p in profiles if p["running"]),
-            "chrome_running": self.chrome_is_running(),
+            "chrome_running": scan["user_chrome"],
         }
 
     def set_max_concurrent(self, value: int) -> None:
@@ -422,7 +525,9 @@ class ProfileFarm:
     # ------------------------------------------------------------- เปิด/ปิด
     @_with_bot_lock
     def launch(self, profile_id: str, url: str = "") -> dict:
-        state = self.list_profiles()
+        # fresh=True — ด่านนี้ยอมให้ข้อมูลเก่าไม่ได้ เปิด Chrome ซ้อนบนโปรไฟล์เดียว
+        # แปลว่าเสี่ยงโดน Facebook ตีธง และไฟล์โปรไฟล์อาจพังจากการเขียนชนกัน
+        state = self.list_profiles(fresh=True)
         if state["running_count"] >= state["max_concurrent"]:
             raise FarmError(
                 f"บอทวิ่งอยู่ {state['running_count']} ตัว ถึงเพดาน "
@@ -462,25 +567,34 @@ class ProfileFarm:
 
     @_with_bot_lock
     def stop(self, profile_id: str) -> dict:
-        with _registry_lock:
-            data = self._load()
-            pid = next((e.get("pid") for e in data["profiles"]
-                        if e["id"] == profile_id), None)
         _running.pop(profile_id, None)
-        if not pid or pid not in self._alive_chrome_pids():
+        # หาเลขโปรเซสจาก Chrome ที่เปิดอยู่จริง ไม่ใช่จากเลขที่บันทึกไว้ —
+        # บอทที่เปิดโดย fb_posts_collect.py / fb_mass_bot.py ไม่เคยเขียนเลขลงทะเบียน
+        # ของเดิมจึงตอบว่า "ไม่ได้เปิดอยู่" แล้วปิดไม่ได้เลยทั้งที่เห็นหน้าต่างอยู่ตรงหน้า
+        scan = self._chrome_scan(fresh=True)
+        slot = scan["by_profile"].get(profile_id) or {}
+        targets = slot.get("main") or slot.get("all") or []
+        if not targets:
             return {"message": "โปรไฟล์นี้ไม่ได้เปิดอยู่"}
+
+        def still_open() -> list[int]:
+            fresh = self._chrome_scan(fresh=True)["by_profile"].get(profile_id) or {}
+            return fresh.get("all") or []
 
         # ปิดแบบสุภาพก่อน (ไม่ใส่ /F) — Chrome ได้ WM_CLOSE แล้วเขียนคุกกี้/เซสชัน
         # ลงดิสก์ให้ครบก่อนตาย ถ้าฆ่าด้วย /F ทันที ล็อกอินรอบล่าสุดอาจหายไป
-        subprocess.run(["taskkill", "/PID", str(pid), "/T"], capture_output=True, creationflags=studio_shared.NO_WINDOW)
+        for pid in targets:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T"],
+                           capture_output=True, creationflags=studio_shared.NO_WINDOW)
         for _ in range(16):  # รอสูงสุด ~8 วิ
-            if pid not in self._alive_chrome_pids():
+            if not still_open():
                 break
             time.sleep(0.5)
         else:
             # ดื้อจริง (ค้าง/มี dialog) — จำเป็นต้องบังคับ
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, creationflags=studio_shared.NO_WINDOW)
+            for pid in still_open():
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, creationflags=studio_shared.NO_WINDOW)
             time.sleep(1.0)  # เผื่อคายล็อกไฟล์
 
         # โปรเซสตายแล้วค่อยสำรอง — ตอนเปิดอยู่ไฟล์ถูกล็อก copy ไปก็ได้ของเสีย
@@ -553,7 +667,7 @@ class ProfileFarm:
         if stamp not in snaps:
             raise FarmError(f"ไม่พบชุดสำรอง {stamp}")
         if any(p["id"] == profile_id and p["running"]
-               for p in self.list_profiles()["profiles"]):
+               for p in self.list_profiles(fresh=True)["profiles"]):
             raise FarmError("ปิดโปรไฟล์นี้ก่อน แล้วค่อยกู้คืน")
         src = self.root / "_backups" / profile_id / stamp
         dest = self._dir_of(profile_id) / "Default"

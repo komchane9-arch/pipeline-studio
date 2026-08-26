@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import httpx
+import gemini_quota
 
 UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 API_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -203,6 +204,8 @@ def _generate(
                 json=body,
                 timeout=GENERATE_TIMEOUT,
             )
+            gemini_quota.record(current, ok=response.status_code == 200,
+                                response=response)
             if response.is_success:
                 break
             if attempt < len(RETRY_WAITS) and _is_transient(response):

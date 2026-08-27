@@ -1,11 +1,16 @@
 """สร้างและคัดแฮชแท็กสำหรับโพสต์วิดีโอ
 
-กติกาที่ผู้ใช้กำหนด — แฮชแท็ก 5 ตัวประกอบจาก
+กติกาที่ผู้ใช้กำหนด (แก้ล่าสุด 22 ส.ค. 2026) — แฮชแท็ก 5 ตัว
     1. ยี่ห้อสินค้า
     2. ชนิดของสินค้า
-    3. ชนิดสินค้า + รายละเอียด 1
-    4. ชนิดสินค้า + รายละเอียด 2
-    5. ชนิดสินค้า + รายละเอียด 3
+    3. จุดเด่นสินค้า 1   (2-5 พยางค์)
+    4. จุดเด่นสินค้า 2   (2-5 พยางค์)
+    5. จุดเด่นสินค้า 3   (2-5 พยางค์)
+
+**เปลี่ยนจากสูตรเดิม** ข้อ 3-5 เดิมเป็น "ชนิดสินค้า + รายละเอียด" ต่อกัน
+(เช่น โซฟาเบด + ปรับนั่งนอนได้ = #โซฟาเบดปรับนั่งนอนได้) ซึ่งได้แท็กยาวและ
+ซ้ำคำว่าชนิดสินค้าทั้งสามตัว ตอนนี้ใช้ **จุดเด่นล้วนๆ สั้น 2-5 พยางค์**
+(#ปรับนั่งนอนได้) เพราะคนค้นหาด้วยคำสั้นที่เป็นคุณสมบัติ ไม่ได้พิมพ์ยาวขนาดนั้น
 
 แล้วพิมพ์ทีละตัวลงช่องแฮชแท็กของแอป พอพิมพ์ครบแอปจะโชว์ "ยอดพูดถึง"
 ของแท็กนั้น — **เอาเฉพาะตัวที่มากกว่า 10,000** ที่เหลือทิ้ง
@@ -22,12 +27,108 @@ from __future__ import annotations
 
 import json
 import re
+import gemini_quota
 
-# เกณฑ์ยอดพูดถึงขั้นต่ำ — ผู้ใช้กำหนดไว้ที่หมื่น
-MENTION_MIN = 10_000
+# ตัวอ่านยอดพูดถึงย้ายไป mention_count.py แล้ว (แยกของสายโพสต์ออกจากสายคลิป
+# ผู้ใช้สั่ง 27 ส.ค. 2026) — ดึงกลับมาไว้ที่นี่ด้วย เพื่อให้ของเดิมที่เรียก
+# `hashtag_lib.passes()` / `hashtag_lib.MENTION_MIN` ทำงานต่อได้โดยไม่ต้องแก้ตาม
+from mention_count import (                                    # noqa: F401
+    MENTION_MIN, looks_like_mention, parse_mention_count, passes,
+)
+
 
 TAG_COUNT = 5
 MAX_TAG_LENGTH = 40          # แท็กยาวเกินนี้แอปมักตัดเอง และไม่มีใครค้นหา
+
+# โมเดลที่ใช้แยกยี่ห้อ/ชนิดสินค้า — **ต้องมีทางถอย** (เพิ่ม 27 ส.ค. 2026)
+#
+# ของเดิมยิงโมเดลเดียวแล้วจบ ถ้าตัวนั้นล่มก็ตกไปใช้กฎเดาจากชื่อสินค้าทันที
+# ซึ่งได้ยี่ห้อผิดบ่อยกับชื่อที่ขึ้นต้นด้วยคำโปรโมชัน — **จุดเดียวที่พังแล้วพังทั้งระบบ**
+#
+# เหตุผลเดิมที่เลือก 3.1-flash-lite-preview คือ "ไม่ซ้ำถังโควตากับใคร" ซึ่งหมด
+# ความจำเป็นแล้วตั้งแต่เจ้าของเปิดการเรียกเก็บเงิน (27 ส.ค.) แต่ยังเก็บไว้เป็น
+# ตัวแรกเพราะงานนี้เป็นงานข้อความสั้น ตัว lite ทำได้ดีและเร็วที่สุด
+# (วัดกับงานข้อความจริง: 3.5-flash-lite 2.0 วิ · 3.6-flash 15.7 วิ)
+#
+# **ห้ามใส่ gemini-3.7-flash** — 27 ส.ค. ล้ม 68/68 ครั้ง ทั้งงานรูปและงานข้อความ
+MODELS = (
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
+)
+
+
+# ------------------------------------------------------- นับพยางค์ (ประมาณ)
+
+# เกณฑ์ความยาวของแท็กจุดเด่น ตามที่ผู้ใช้สั่ง 22 ส.ค. 2026
+DETAIL_MIN_SYLLABLES = 2
+DETAIL_MAX_SYLLABLES = 5
+# ตาข่ายชั้นสอง — พยางค์ไทยยาว ~2-4 ตัวอักษร 5 พยางค์จึงราว 20 ตัว
+# ใช้คู่กับตัวนับพยางค์เสมอ เพราะตัวนับเป็นการประมาณ ไม่ใช่การตัดคำจริง
+DETAIL_MAX_CHARS = 20
+
+_TONE_RE = re.compile(r"[่-๋๎]")        # ่ ้ ๊ ๋ ๎
+_KARAN_RE = re.compile(r"[ก-ฮ]์")       # พยัญชนะที่ถูก ์ ฆ่าเสียง
+_LEAD_VOWEL_RE = re.compile(r"[เแโใไ]")                # สระหน้า = ขึ้นพยางค์ใหม่เสมอ
+_FOLLOW_VOWEL_RE = re.compile(r"[ะัาำิีึืุูๅ็]+")       # สระบน/ล่าง/หลัง ติดกันนับเป็นตัวเดียว
+_CONSONANT_RUN_RE = re.compile(r"[ก-ฮ]{3,}")  # พยัญชนะเรียงยาว = มีสระลดรูปซ่อน
+# พยางค์ที่ขึ้นต้นด้วยสระหน้าและมีสระตามอยู่ในตัวเดียวกัน (เย็น · เหนียว · เร็ว)
+# ต้องยุบให้เหลือรอยเดียวก่อนนับ ไม่งั้นสระหน้ากับสระตามของ **พยางค์เดียวกัน**
+# ถูกนับเป็นสองพยางค์ (วัดจริง: "เย็นเร็ว" ได้ 4 ทั้งที่มี 2)
+#
+# ตัวสะกดท้ายพยางค์ต้อง **ไม่ตามด้วยสระ** ไม่งั้นจะไปกินพยัญชนะต้นของพยางค์
+# ถัดไป (วัดจริง: "โซฟาเบด" ได้ 2 ทั้งที่มี 3 เพราะ "ฟ" ของ "ฟา" ถูกกินไป
+# เป็นตัวสะกดของ "โซ") ส่วนพยัญชนะควบรับเฉพาะ ร ล ว ที่ควบได้จริง
+_LEAD_CLUSTER_RE = re.compile(
+    r"[เแโใไ][ก-ฮ][รลว]?[ะัาำิีึืุูๅ็]*(?:[ก-ฮ](?![ะัาำิีึืุูๅ็]))?"
+)
+
+
+def count_syllables(text: str) -> int:
+    """**ประมาณ** จำนวนพยางค์ไทย — ไม่ใช่การตัดคำจริง
+
+    ทำไมประมาณ: การนับพยางค์ไทยให้ถูกต้องต้องใช้พจนานุกรมตัดคำ (pythainlp)
+    ซึ่งโปรเจกต์นี้ไม่ได้ติดตั้งและไม่คุ้มจะเพิ่มเพื่องานนี้อย่างเดียว
+
+    **ค่านี้ใช้เป็นตัวกรองหยาบเท่านั้น ห้ามใช้ตัดแท็กทิ้ง** — ตัวคุมพยางค์ตัวจริง
+    คือคำสั่งที่ส่งให้ Gemini (ดู PARTS_PROMPT) ซึ่งเข้าใจภาษาไทยจริง ที่นี่แค่
+    กันของที่ยาวเกินจนเห็นได้ชัดหลุดออกไป
+
+    วิธีนับ: สระหน้า 1 ตัว = 1 พยางค์ · กลุ่มสระบน/ล่าง/หลัง = 1 พยางค์ ·
+    พยัญชนะเรียงกันตั้งแต่ 3 ตัว = มีสระลดรูปซ่อนอยู่ (นอน · คน) นับเพิ่ม
+    """
+    clean = _KARAN_RE.sub("", _TONE_RE.sub("", normalize(text)))
+    if not clean:
+        return 0
+    # ยุบพยางค์สระหน้าให้เหลือรอยเดียวก่อน แล้วค่อยนับสระที่เหลือ
+    clean = _LEAD_CLUSTER_RE.sub("เ", clean)
+    count = (
+        len(_LEAD_VOWEL_RE.findall(clean))
+        + len(_FOLLOW_VOWEL_RE.findall(clean))
+        + sum(len(run) // 3 for run in _CONSONANT_RUN_RE.findall(clean))
+    )
+    return max(count, 1)
+
+
+def detail_ok(text: str) -> bool:
+    """จุดเด่นนี้อยู่ในเกณฑ์ 2-5 พยางค์ไหม (วัดด้วยตัวประมาณ + ความยาวตัวอักษร)"""
+    clean = normalize(text)
+    if not clean or len(clean) > DETAIL_MAX_CHARS:
+        return False
+    return DETAIL_MIN_SYLLABLES <= count_syllables(clean) <= DETAIL_MAX_SYLLABLES
+
+
+def trim_to_syllables(text: str, limit: int = DETAIL_MAX_SYLLABLES) -> str:
+    """ตัดข้อความให้เหลือไม่เกิน `limit` พยางค์ — **ตัดที่ขอบพยางค์ ไม่ใช่กลางคำ**
+
+    ตัดด้วยจำนวนตัวอักษรตรงๆ ได้เศษคำที่ไม่มีใครค้นหา (วัดจริง: ตัดที่ 20 ตัว
+    ได้ "#ระบายอากาศได้ดีมากจร" — คำท้ายขาดครึ่ง) พอไล่ตัดทีละตัวจนพยางค์
+    เข้าเกณฑ์ จะได้ "#ระบายอากาศได้" ซึ่งยังอ่านรู้เรื่องและใช้ค้นหาได้จริง
+    """
+    clean = normalize(text)
+    while clean and count_syllables(clean) > limit:
+        clean = clean[:-1]
+    return clean
 
 
 # ------------------------------------------------------- แปลงข้อความเป็นแท็ก
@@ -59,15 +160,31 @@ def to_tag(*parts: str) -> str:
     return clean[:MAX_TAG_LENGTH]
 
 
-def build_candidates(brand: str, kind: str, details: list[str]) -> list[str]:
+def build_candidates(brand: str, kind: str, details: list[str], log=None) -> list[str]:
     """ประกอบแท็ก 5 ตัวตามสูตรของผู้ใช้ — คืนเป็นชื่อแท็กล้วน ไม่มี #
+
+        1 ยี่ห้อ · 2 ชนิดสินค้า · 3-5 จุดเด่น (2-5 พยางค์ ไม่ต่อชนิดสินค้านำหน้า)
 
     ตัวที่ประกอบแล้วว่างหรือซ้ำกับตัวก่อนหน้าจะถูกตัดทิ้ง เพราะพิมพ์ซ้ำ
     ในแอปจะได้แท็กเดิมสองครั้ง เปลืองช่องเปล่าๆ
+
+    จุดเด่นที่ยาวเกินเกณฑ์ **ไม่ทิ้ง** แต่ตัดให้สั้นลงแล้วยังใช้ — เพราะตัวนับ
+    พยางค์เป็นการประมาณ (ดู count_syllables) ถ้าเชื่อมันจนทิ้งแท็กดีไปเลย
+    จะเสียแท็กฟรีทั้งที่ของจริงอาจอยู่ในเกณฑ์
     """
     raw = [to_tag(brand), to_tag(kind)]
     for detail in (details or [])[:3]:
-        raw.append(to_tag(kind, detail))
+        tag = to_tag(detail)
+        if tag and not detail_ok(tag):
+            short = trim_to_syllables(tag)
+            # บอกทุกครั้งที่ตัด — การตัดที่ขอบพยางค์ยังทิ้งเศษพยัญชนะท้ายได้
+            # (แยก "แดด" ที่ถูกกับ "ได้ด" ที่เป็นเศษ ต้องใช้พจนานุกรมตัดคำ)
+            # ผู้ใช้จึงต้องเห็นว่าตัวไหนถูกตัด แล้วแก้เองในแชทได้
+            if log and short != tag:
+                log(f"จุดเด่น \"{tag}\" ยาวเกิน {DETAIL_MAX_SYLLABLES} พยางค์ "
+                    f"— ตัดเหลือ \"{short}\" (แก้เองได้ถ้าอ่านแล้วขาดคำ)")
+            tag = short
+        raw.append(tag)
     seen: set[str] = set()
     tags: list[str] = []
     for tag in raw:
@@ -77,70 +194,6 @@ def build_candidates(brand: str, kind: str, details: list[str]) -> list[str]:
         seen.add(key)
         tags.append(tag)
     return tags[:TAG_COUNT]
-
-
-# ------------------------------------------------------- อ่านยอดพูดถึงบนจอ
-
-
-# หน่วยย่อที่เคยเห็นบนแอปไทย/อังกฤษ — ตัวคูณของแต่ละหน่วย
-UNIT_MULTIPLIER = {
-    "พัน": 1_000, "หมื่น": 10_000, "แสน": 100_000, "ล้าน": 1_000_000,
-    "k": 1_000, "m": 1_000_000, "b": 1_000_000_000,
-}
-
-# ตัวเลขที่อาจมีจุดทศนิยม ตามด้วยหน่วย (เว้นวรรคหรือไม่ก็ได้)
-COUNT_RE = re.compile(
-    r"(\d[\d,]*(?:\.\d+)?)\s*(พัน|หมื่น|แสน|ล้าน|[KkMmBb])?",
-)
-
-
-def parse_mention_count(text: str) -> int | None:
-    """แปลงข้อความยอดพูดถึงเป็นจำนวนเต็ม — คืน None ถ้าไม่ใช่ตัวเลขยอด
-
-    รองรับที่เจอได้จริงบนแอป: `12,345` · `1.2 หมื่น` · `12K` · `3 ล้าน`
-    ตั้งใจ **ไม่เดา** เมื่ออ่านไม่ออก — คืน None แล้วให้ผู้เรียกรายงานตรงๆ
-    ว่าอ่านยอดไม่ได้ ดีกว่าเดาเป็น 0 แล้วทิ้งแท็กที่จริงๆ ยอดสูง
-    """
-    if not text:
-        return None
-    match = COUNT_RE.search(str(text).replace(" ", " "))
-    if not match:
-        return None
-    number_text, unit = match.group(1), (match.group(2) or "")
-    try:
-        number = float(number_text.replace(",", ""))
-    except ValueError:
-        return None
-    multiplier = UNIT_MULTIPLIER.get(unit.casefold(), 1) if unit else 1
-    return int(round(number * multiplier))
-
-
-# ข้อความรอบตัวเลขที่บอกว่านี่คือ "ยอดพูดถึง" ไม่ใช่ตัวเลขอย่างอื่นบนจอ
-MENTION_HINT_RE = re.compile(
-    r"(โพสต์|ครั้ง|มีการพูดถึง|พูดถึง|views?|posts?|mentions?)", re.I
-)
-
-
-def looks_like_mention(text: str) -> bool:
-    """ข้อความนี้น่าจะเป็นยอดพูดถึงไหม
-
-    ใช้กรองตัวเลขอื่นบนแถวเดียวกัน (เช่นลำดับที่ หรือราคา) ออกก่อนแปลง
-    ถ้าเป็นตัวเลขล้วนไม่มีคำใบ้ ก็ยังรับ — แอปบางรุ่นโชว์แค่ตัวเลขเปล่า
-    """
-    if not text:
-        return False
-    if MENTION_HINT_RE.search(text):
-        return True
-    return bool(re.fullmatch(r"[\d,.\s]*\d[\d,.\s]*(พัน|หมื่น|แสน|ล้าน|[KkMmBb])?", text.strip()))
-
-
-def passes(count: int | None, minimum: int = MENTION_MIN) -> bool:
-    """ผ่านเกณฑ์ไหม — อ่านยอดไม่ได้ถือว่า **ไม่ผ่าน**
-
-    เลือกทางนี้เพราะโพสต์แท็กที่ไม่รู้ยอดคือเดาสุ่ม ส่วนการตกหล่นไป 1 แท็ก
-    เสียหายน้อยกว่า และระบบรายงานให้เห็นทุกตัวว่าอ่านได้เท่าไร
-    """
-    return count is not None and count > minimum
 
 
 # ------------------------------------------------------- สกัดยี่ห้อ/ชนิดสินค้า
@@ -158,13 +211,13 @@ def _fallback_parts(name: str, highlights: list[str]) -> dict:
     words = [word for word in re.split(r"[\s/|,]+", text) if word]
     brand = words[0] if words else ""
     kind = words[1] if len(words) > 1 else ""
-    # จุดเด่นเป็นประโยคยาว 60 ตัวอักษร เอามาต่อท้ายชนิดสินค้าตรงๆ จะได้แท็กที่
-    # ถูกตัดกลางคำและไม่มีใครค้นหา — ตัดเหลือวรรคแรกสั้นๆ พอเป็นคำค้น
+    # จุดเด่นเป็นประโยคยาว 60 ตัวอักษร ใช้ทั้งประโยคจะได้แท็กที่ถูกตัดกลางคำ
+    # และไม่มีใครค้นหา — ตัดเหลือวรรคแรกสั้นๆ พอเป็นคำค้นตามเกณฑ์ 2-5 พยางค์
     details = []
     for item in (highlights or [])[:3]:
         short = re.split(r"[\s,·]+", str(item).strip())[0]
         if short:
-            details.append(short[:15])
+            details.append(short[:DETAIL_MAX_CHARS])
     return {"brand": brand, "kind": kind, "details": details}
 
 
@@ -178,8 +231,11 @@ PARTS_PROMPT = (
     "ถ้าชื่อสินค้าไม่ได้บอกยี่ห้อไว้ ให้ตอบเป็นสตริงว่าง\n"
     '  "kind"    = ชนิดของสินค้าแบบสั้นที่สุดที่คนใช้ค้นหา เช่น "โซฟาเบด" '
     '"เราเตอร์ใส่ซิม" (ห้ามใส่ยี่ห้อ ห้ามใส่รุ่น)\n'
-    '  "details" = อาร์เรย์ 3 ข้อความสั้นๆ ที่เป็นคุณสมบัติเด่นที่คนน่าจะค้นหา '
-    "ข้อละไม่เกิน 15 ตัวอักษร ห้ามมีเว้นวรรค ห้ามซ้ำกัน\n"
+    '  "details" = อาร์เรย์ 3 ข้อความสั้นๆ ที่เป็น**จุดเด่นของสินค้า**ที่คนน่าจะค้นหา '
+    "**ข้อละ 2-5 พยางค์เท่านั้น** (เช่น กันน้ำ · ปรับนั่งนอนได้ · ประหยัดไฟ) "
+    "ห้ามมีเว้นวรรค ห้ามซ้ำกัน "
+    "**ห้ามใส่ชนิดสินค้าหรือยี่ห้อนำหน้า** เพราะสองอย่างนั้นเป็นแท็กแยกอยู่แล้ว "
+    "(ผิด: โซฟาเบดปรับนั่งนอนได้ · ถูก: ปรับนั่งนอนได้)\n"
     "kind กับ details เป็นภาษาไทย ส่วน brand ใช้ตัวสะกดเดิมจากชื่อสินค้า "
     "ห้ามมีคำอธิบายอื่นนอก JSON"
 )
@@ -215,6 +271,11 @@ def extract_parts(
     if not api_key:
         log("ไม่มีคีย์ Gemini — แยกยี่ห้อ/ชนิดสินค้าด้วยกฎแทน")
         return _fallback_parts(name, highlights)
+    try:
+        gemini_quota.check_budget("ตั้งแฮชแท็ก")
+    except Exception as error:                               # noqa: BLE001
+        log(f"{error} — ใช้กฎตั้งแฮชแท็กแทน")
+        return _fallback_parts(name, highlights)
 
     import httpx
 
@@ -222,37 +283,45 @@ def extract_parts(
         name=(name or "")[:300],
         highlights=" · ".join(highlights or []) or "(ไม่มี)",
     )
-    try:
-        response = httpx.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            "gemini-3.5-flash:generateContent",
-            params={"key": api_key},
-            json={"contents": [{"parts": [{"text": instruction}]}]},
-            timeout=60.0,
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Gemini ตอบ {response.status_code}")
-        text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        found = re.search(r"\{.*\}", text, re.S)
-        if not found:
-            raise RuntimeError("Gemini ไม่ได้ตอบเป็น JSON")
-        data = json.loads(found.group(0))
-        details = [str(item).strip() for item in (data.get("details") or [])]
-        raw_brand = str(data.get("brand") or "").strip()
-        brand = verify_brand(raw_brand, name or "", " ".join(highlights or []))
-        if raw_brand and not brand:
-            log(f"ยี่ห้อ \"{raw_brand}\" ไม่มีอยู่ในชื่อสินค้า — ตัดทิ้งกันแท็กผิดตัว")
-        parts = {
-            "brand": brand,
-            "kind": str(data.get("kind") or "").strip(),
-            "details": [item for item in details if item][:3],
-        }
-        if not parts["kind"]:
-            raise RuntimeError("Gemini ไม่ได้บอกชนิดสินค้า")
-        return parts
-    except Exception as error:
-        log(f"แยกยี่ห้อ/ชนิดสินค้าด้วย Gemini ไม่สำเร็จ ({error}) — ใช้กฎแทน")
-        return _fallback_parts(name, highlights)
+    tried: list[str] = []
+    for pick in MODELS:
+        try:
+            response = httpx.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{pick}:generateContent",
+                params={"key": api_key},
+                json={"contents": [{"parts": [{"text": instruction}]}]},
+                timeout=60.0,
+            )
+            gemini_quota.record(pick, ok=response.status_code == 200,
+                                response=response)
+            if response.status_code != 200:
+                raise RuntimeError(f"{pick} ตอบ {response.status_code}")
+            text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            found = re.search(r"\{.*\}", text, re.S)
+            if not found:
+                raise RuntimeError(f"{pick} ไม่ได้ตอบเป็น JSON")
+            data = json.loads(found.group(0))
+            details = [str(item).strip() for item in (data.get("details") or [])]
+            raw_brand = str(data.get("brand") or "").strip()
+            brand = verify_brand(raw_brand, name or "", " ".join(highlights or []))
+            if raw_brand and not brand:
+                log(f"ยี่ห้อ \"{raw_brand}\" ไม่มีอยู่ในชื่อสินค้า — ตัดทิ้งกันแท็กผิดตัว")
+            parts = {
+                "brand": brand,
+                "kind": str(data.get("kind") or "").strip(),
+                "details": [item for item in details if item][:3],
+            }
+            if not parts["kind"]:
+                raise RuntimeError(f"{pick} ไม่ได้บอกชนิดสินค้า")
+            if pick != MODELS[0]:
+                log(f"แยกยี่ห้อ/ชนิดสินค้าด้วยโมเดลสำรอง {pick}")
+            return parts
+        except Exception as error:                           # noqa: BLE001
+            tried.append(f"{pick}: {error}")
+            log(f"  แยกยี่ห้อ/ชนิดสินค้าด้วย {pick} ไม่สำเร็จ ({error})")
+    log(f"ลองครบทุกโมเดลแล้วไม่สำเร็จ ({' · '.join(tried)}) — ใช้กฎแทน")
+    return _fallback_parts(name, highlights)
 
 
 def plan_for_run(run: dict, api_key: str | None, log=print) -> dict:
@@ -266,6 +335,6 @@ def plan_for_run(run: dict, api_key: str | None, log=print) -> dict:
         run.get("name", ""), run.get("highlights") or [], api_key, log=log
     )
     parts["tags"] = build_candidates(
-        parts["brand"], parts["kind"], parts["details"]
+        parts["brand"], parts["kind"], parts["details"], log=log
     )
     return parts

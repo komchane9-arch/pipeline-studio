@@ -5125,10 +5125,24 @@ MAIN_SERVER = "http://127.0.0.1:8866"
 
 
 def _post_devices() -> list[tuple[str, str]]:
-    """มือถือสายโพสต์ที่เปิดใช้อยู่ — [(serial, ชื่อที่คนอ่าน)]"""
+    """มือถือที่ลงคลิปได้ — [(serial, ชื่อที่คนอ่าน)] **สายคลิปมาก่อนเสมอ**
+
+    เจ้าของแยกเครื่องให้สายวิดีโอโดยเฉพาะเมื่อ 27 ส.ค. 2569
+    (`REDMI 15C — วิดีโอ` ล็อกอิน Shopee กับ Facebook Reels ไว้แล้ว)
+
+    **ถ้ามีเครื่องสายคลิป ให้ใช้เฉพาะเครื่องนั้น ไม่เอาเครื่องสายโพสต์มาปน**
+    เพราะเครื่องสายโพสต์ล็อกอินคนละบัญชี ลงผิดเครื่อง = ลงผิดบัญชี ถอนไม่ได้
+    (กติกาข้อ 8 ของโปรเจกต์)
+
+    ยังไม่ได้แยกเครื่อง (ทะเบียนไม่มีเครื่องสายคลิปเลย) ค่อยถอยไปใช้
+    สายโพสต์เหมือนเดิม — ไม่งั้นระบบเก่าที่ยังไม่ได้ตั้งจะกดปุ่มไม่ได้เลย
+    """
     try:
         import devices                                          # noqa: PLC0415
-        return [(s, devices.label(s)) for s in devices.enabled_serials("post")]
+        serials = devices.enabled_serials("clip")
+        if not serials:
+            serials = devices.enabled_serials("post")
+        return [(s, devices.label(s)) for s in serials]
     except Exception as error:                                  # noqa: BLE001
         _clip_log(f"อ่านทะเบียนมือถือไม่ได้: {type(error).__name__}: {error}")
         return []

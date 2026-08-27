@@ -366,6 +366,8 @@ CLIP_HELP = (
     "/clipsfb — <b>คลิปที่พร้อมลง Facebook Reels</b> (ลง Shopee แล้ว) · <code>/clipfb &lt;เลข&gt;</code> เปิดดู\n"
     "/clipstiktok — <b>คลิปที่พร้อมลง TikTok</b> (ลง Facebook แล้ว) · <code>/cliptiktok &lt;เลข&gt;</code> เปิดดู\n"
     "/archive — งานที่ติ๊กว่าทำแล้ว (เก็บออกจากรายการไปแล้ว)\n"
+    "/posted &lt;เลข&gt; — <b>ติ๊กว่าคลิปนั้นลงไปแล้ว</b> (สำหรับคลิปที่โพสต์เองด้วยมือ)\n"
+    "     ไม่ติ๊ก = ระบบไม่รู้ว่าลงแล้ว → /clipsfb กับ /clipstiktok จะว่างตลอด\n"
     "/wait — <b>งานที่พักไว้รอแก้ทั้งหมด</b> · <code>/wait &lt;เลข&gt;</code> เอากลับเข้าขั้นเดิม\n"
     "     แยกรายขั้น: <code>/waitstoryboard</code> · <code>/waitclip</code> · <code>/waitclips</code> · <code>/waitclipsfb</code> · <code>/waitclipstiktok</code>\n"
     "/clip &lt;เลข&gt; — เปิดดูงานนั้น (สตอรีบอร์ด + บทพูด)\n"
@@ -3327,7 +3329,7 @@ def _clip_list_bucket(chat_id: str, list_cmd: str) -> None:
             note += f"\n🅿 มีอีก {parked} ชิ้นที่พักไว้รอแก้ — ดูที่ /wait"
         _clip_say(chat_id, f"{title} — <b>ยังไม่มีสักชิ้น</b>\n{note}")
         return
-    _clip_render_runs(chat_id, runs, title, open_cmd)
+    _clip_render_runs(chat_id, runs, title, open_cmd, bucket)
 
 
 def _clip_open_from_list(chat_id: str, list_cmd: str, argument: str) -> None:
@@ -3361,7 +3363,8 @@ def _clip_list_runs(chat_id: str) -> None:
     _clip_list_bucket(chat_id, "/clips")
 
 
-def _clip_render_runs(chat_id: str, runs: list[dict], title: str, cmd: str) -> None:
+def _clip_render_runs(chat_id: str, runs: list[dict], title: str, cmd: str,
+                      target: str = "") -> None:
     """วาดรายการงาน — ใช้ร่วมกันทั้ง /clips และ /clipsfb
 
     `cmd` คือคำสั่งที่พิมพ์เปิดงานในรายการนั้น (`/clip` หรือ `/clipfb`) — ต้องแยก
@@ -3380,6 +3383,13 @@ def _clip_render_runs(chat_id: str, runs: list[dict], title: str, cmd: str) -> N
             marks.append(f"▶️{len(run.get('videos') or [])}")
         if run.get("refused"):
             marks.append("⚠️โดนปฏิเสธ")
+        # **รอลง ≠ ลงได้เดี๋ยวนี้** — คลิปเดียวกันต้องเว้นอย่างน้อย 1 วัน
+        # ระหว่างแต่ละที่ (กติกาข้อ 2.8) ถ้าไม่บอก คนจะกดแล้วโดนปฏิเสธ
+        # โดยไม่รู้ว่าเพราะอะไร แล้วคิดว่าปุ่มพัง
+        if target:
+            can, _why = publish_order.check(run, target)
+            if not can:
+                marks.append("⏳รอวันถัดไป")
         when = (run.get("storyboard_at") or run.get("product_at") or "")[5:16].replace("T", " ")
         lines.append(
             f"<b>{index}.</b> {escape(run.get('name', '')[:55])}\n"
@@ -3556,6 +3566,15 @@ def _clip_show_run(chat_id: str, argument: str) -> None:
             "text": "🚀 ลง Facebook Reels",
             "callback_data": f"clip:fbcard::{item_id}",
         }])
+        # ✅ ติ๊กว่าลงไปแล้วด้วยมือ — **ทางเดียวที่ระบบจะรู้**
+        # ว่าคลิปขึ้นไปแล้ว ถ้าคนโพสต์เองบนมือถือ (ดูคอมเมนต์ที่
+        # `_clip_mark_posted` ว่าทำไมถึงต้องมี)
+        nxt = publish_order.next_target(run)
+        if nxt:
+            rows.append([{
+                "text": f"✅ ลง {POSTED_LABEL.get(nxt, nxt)} ไปแล้ว (ติ๊กเอง)",
+                "callback_data": f"clip:posted:{nxt}:{item_id}",
+            }])
     # 🅿 พักไว้รอแก้ — งานที่ออกจากคิวไปแล้วก็ต้องพักได้ ไม่ใช่เฉพาะใบในคิว
     rows.append([{
         "text": "↩️ เอากลับจากรอแก้" if run.get("parked") else "🅿 รอแก้",
@@ -4863,6 +4882,9 @@ def _clip_telegram_command(chat_id: str, text: str) -> bool:
     if command == "/queue":
         _clip_queue_text(chat_id)
         return True
+    if command in ("/posted", "/ลงแล้ว"):
+        _clip_posted_command(chat_id, argument)
+        return True
     if command in ("/wait", "/รอแก้"):
         _clip_wait_list(chat_id, argument)
         return True
@@ -5111,6 +5133,14 @@ def _clip_send_fb_card(chat_id: str, item_id: str) -> str:
     rows: list[list[dict]] = []
     if not ok:
         lines += ["", f"⏳ <b>ยังลงไม่ได้</b> — {escape(why)}"]
+        # ติดเพราะระบบไม่รู้ว่าลง Shopee ไปแล้ว → ให้ติ๊กเองได้ตรงนี้
+        # (คลิปที่โพสต์ด้วยมือบนมือถือ ระบบไม่มีทางรู้เอง)
+        if ((run.get("publish") or {}).get("shopee_video") or {}).get(
+                "status") != "posted":
+            rows.append([{
+                "text": "✅ ลง Shopee ไปแล้ว (ติ๊กเอง)",
+                "callback_data": f"clip:posted:shopee_video:{item_id}",
+            }])
     elif not videos:
         lines += ["", "⛔ <b>ยังลงไม่ได้</b> — ไม่มีไฟล์คลิปในโฟลเดอร์งาน"]
     else:
@@ -5198,6 +5228,126 @@ def _clip_park_run(chat_id: str, item_id: str, park: bool) -> str:
         return str(error)
 
 
+# ============================================================================
+# ติ๊กว่า "ลงไปแล้ว" ด้วยมือ (ผู้ใช้ทัก 27 ส.ค. 2569)
+# ============================================================================
+#
+# *"ทำไมคลิป /clipsfb ถึงไม่มี มันมีงานที่ลง shopee แล้วและรอลง facebook
+#   อยู่แล้วสิ"*
+#
+# **ไล่หาสาเหตุแล้วพบว่าระบบไม่เคยรู้เลยว่ามีอะไรลงไปแล้วบ้าง**
+#
+#   อาการ    /clipsfb ว่างเปล่า ทั้งที่มีคลิปอยู่บน Shopee จริง
+#   ทำไม 1   ระบบดูจาก `publish.shopee_video.status` ในไฟล์งาน
+#            → วัดจริง: ทั้ง 23 ใบเป็น `pending` ไม่มีใบไหนเป็น `posted` เลย
+#   ทำไม 2   `mark_posted()` ถูกเรียกตอนเดินผังจบทั้งชุดเท่านั้น
+#   ทำไม 3   ไม่เคยมีการเดินผังจบสักครั้ง — log บอกว่าทุกครั้งเป็น
+#            "เดินผัง 1/22 ขั้น" กับ "1/28 ขั้น" ซึ่งคือการไล่เทรนพิกัดทีละขั้น
+#            (นับจาก log จริง: 26+10+6+3+1 = 46 ครั้ง ไม่มีครั้งไหนจบครบผัง)
+#   รากเหง้า **คลิปที่ขึ้น Shopee ไปแล้วถูกโพสต์ด้วยมือบนมือถือ**
+#            แล้ว **ไม่มีทางไหนเลยให้คนบอกระบบว่าใบนี้ลงไปแล้ว**
+#            มีแต่ทางเดินผังอัตโนมัติซึ่งยังใช้จริงไม่ได้
+#
+# ตัวนี้คือทางที่ขาดไป — ติ๊กเองได้ แล้วด่านลำดับกับรายการทั้งหมดจะเดินต่อถูก
+#
+# **ไม่ใช่การข้ามด่าน** ด่านลำดับยังทำงานเหมือนเดิมทุกอย่าง แค่รับข้อมูลจาก
+# คนแทนที่จะรับจากตัวกดจอ — คนคือผู้ที่รู้จริงว่าลงไปแล้วหรือยัง
+
+POSTED_LABEL = {"shopee_video": "🛍 Shopee Video",
+                "facebook_reels": "📘 Facebook Reels",
+                "tiktok": "🎵 TikTok"}
+
+
+def _clip_mark_posted(chat_id: str, item_id: str, target: str) -> str:
+    """ติ๊กว่าลงปลายทางนั้นไปแล้ว — สำหรับคลิปที่โพสต์ด้วยมือ"""
+    if target not in POSTED_LABEL:
+        return "ไม่รู้จักปลายทางนี้"
+    run = clip_store.load_run(DATA_DIR, item_id) or {}
+    if not run:
+        return "ไม่เจองานชิ้นนี้"
+    already = ((run.get("publish") or {}).get(target) or {}).get("status")
+    if already == "posted":
+        return f"ใบนี้จดว่าลง {POSTED_LABEL[target]} ไปแล้ว"
+    try:
+        fresh = clip_store.mark_posted(DATA_DIR, item_id, target, "")
+    except clip_store.ClipStoreError as error:
+        return str(error)
+    _clip_log(f"ติ๊กด้วยมือว่า {item_id} ลง {target} แล้ว")
+    nxt = publish_order.next_target(fresh)
+    _clip_say(chat_id,
+              f"✅ จดแล้วว่าลง <b>{POSTED_LABEL[target]}</b> ไปแล้ว" + '\n' +
+              f"{telegram_bot._escape(publish_order.summary(fresh))}" + '\n' + '\n' +
+              (f"ต่อไปคือ <b>{POSTED_LABEL.get(nxt, nxt)}</b> — "
+               "ลงได้ตั้งแต่พรุ่งนี้ (ต้องห่างกันอย่างน้อย 1 วัน)"
+               if nxt else "ลงครบทั้งสามที่แล้ว 🎉"))
+    return "จดแล้ว ✅"
+
+
+def _clip_posted_command(chat_id: str, argument: str) -> None:
+    """`/posted <เลข|รหัสสินค้า> [ปลายทาง]` — ติ๊กว่าลงไปแล้วด้วยมือ
+
+    ไม่ใส่ปลายทาง = ใช้ **ปลายทางถัดไปที่ควรลง** ของใบนั้น ซึ่งเป็นสิ่งที่
+    ถูกเกือบทุกครั้ง — คนติ๊กหลังเพิ่งลงเสร็จ ย่อมลงตามลำดับอยู่แล้ว
+    """
+    escape = telegram_bot._escape
+    parts = (argument or "").split()
+    if not parts:
+        # **โชว์รายการพร้อมปุ่มติ๊ก ไม่ใช่แค่บอกวิธีพิมพ์**
+        # คนที่เพิ่งลงคลิปเสร็จจำชื่อสินค้าได้ ไม่ได้จำเลขลำดับ
+        rows = _clips_in_bucket(clip_board.SHOPEE)
+        if not rows:
+            _clip_say(chat_id, "ไม่มีคลิปที่รอลง Shopee Video อยู่")
+            return
+        lines = ["✅ <b>ติ๊กว่าลงไปแล้ว</b> — สำหรับคลิปที่โพสต์เองด้วยมือ", "",
+                 "ระบบรู้ว่าคลิปขึ้นไปแล้วจากตรงนี้ที่เดียว "
+                 "<b>ไม่ติ๊ก = /clipsfb กับ /clipstiktok จะว่างตลอด</b>", ""]
+        buttons = []
+        for index, run in enumerate(rows, 1):
+            name = (run.get("name") or "")[:48]
+            lines.append(f"<b>{index}.</b> {escape(name)}")
+            if len(buttons) < 10:
+                buttons.append([{
+                    "text": f"✅ {index}. {name[:26]}",
+                    "callback_data":
+                        f"clip:posted:shopee_video:{run.get('item_id')}",
+                }])
+        if len(rows) > len(buttons):
+            lines.append(f"\n(ปุ่มแสดง {len(buttons)} อันแรก "
+                         f"ที่เหลือพิมพ์ <code>/posted &lt;เลข&gt;</code>)")
+        for part in _split_text("\n".join(lines), TELEGRAM_TEXT_LIMIT)[:-1]:
+            _clip_say(chat_id, part)
+        _clip_say(chat_id, _split_text("\n".join(lines), TELEGRAM_TEXT_LIMIT)[-1],
+                  {"inline_keyboard": buttons})
+        return
+
+    want = parts[0]
+    rows = _clips_in_bucket(clip_board.SHOPEE)
+    if want.isdigit() and 1 <= int(want) <= len(rows):
+        item_id = str(rows[int(want) - 1].get("item_id"))
+    else:
+        item_id = want
+    run = clip_store.load_run(DATA_DIR, item_id) or {}
+    if not run:
+        _clip_say(chat_id, f"ไม่เจองาน <code>{escape(item_id[:30])}</code> — "
+                           "พิมพ์ /clips ดูเลขก่อน")
+        return
+
+    if len(parts) > 1:
+        key = parts[1].lower()
+        target = next((t for t in POSTED_LABEL
+                       if key in t or t.startswith(key)), "")
+        if not target:
+            _clip_say(chat_id, "ปลายทางมี: <code>shopee_video</code> · "
+                               "<code>facebook_reels</code> · <code>tiktok</code>")
+            return
+    else:
+        target = publish_order.next_target(run)
+        if not target:
+            _clip_say(chat_id, "ใบนี้ลงครบทั้งสามที่แล้ว 🎉")
+            return
+    _clip_mark_posted(chat_id, item_id, target)
+
+
 def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
     """ปุ่มอนุมัติ/สั่งแก้ในแชทบอทคลิป (คำนำหน้า clip: ถูกตัดออกมาแล้ว)
 
@@ -5267,6 +5417,10 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
     # `clip:fbgo:<เครื่อง>:<รหัสสินค้า>` — **ต้องระบุเครื่องเสมอ** (กติกาข้อ 8)
     if action == "fbgo":
         return _clip_fb_post_now(chat_id, job_id, arg)
+
+    # ติ๊กว่าลงปลายทางนั้นไปแล้วด้วยมือ — `clip:posted:<ปลายทาง>:<รหัสสินค้า>`
+    if action == "posted":
+        return _clip_mark_posted(chat_id, arg, job_id)
 
     # พัก/เอากลับ งานที่เก็บไว้เป็นไฟล์แล้ว (ไม่มีใบงานในคิว)
     if action in ("rpark", "runpark"):

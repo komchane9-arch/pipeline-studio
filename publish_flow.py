@@ -1169,6 +1169,15 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
             # "ออกจากหน้าเดิมแล้ว" เป็นสัญญาณที่ตรงกว่า — หน้าโพสต์จะปิด
             # ตัวเองก็ต่อเมื่อรับงานแล้วเท่านั้น กดไม่ติดหน้าจะยังอยู่ที่เดิม
             where = foreground(context.run_adb)
+            # **แอปดับก็นับว่า "ออกจากหน้าเดิม" เหมือนกัน** ถ้าไม่กันไว้
+            # แอปแครชหลังกดโพสต์จะถูกนับว่าโพสต์สำเร็จ ซึ่งแย่กว่าตัวเดิม
+            landed = where.split("/")[0]
+            if context.app_package and landed and not landed.startswith(
+                    context.app_package):
+                raise StepError(
+                    f"ออกจากหน้าเดิมก็จริง แต่หลุดออกจากแอป "
+                    f"{context.app_package} ไปที่ {where} — "
+                    f"แอปอาจดับ ไม่ใช่โพสต์สำเร็จ")
             if step.verify_text and step.verify_text in where:
                 last = f"ยังอยู่หน้าเดิม ({where})"
             elif not step.verify_text and context.signature() == before:
@@ -1337,6 +1346,27 @@ def _clear_field(context: RunContext) -> None:
     except Exception:                                          # noqa: BLE001
         pass
     context.run_adb("shell", "input", "keyevent", *(["67"] * 60))
+
+
+def run_tags_step(context: RunContext, step: Step) -> str:
+    """ใส่แฮชแท็กแบบไม่คัดตามยอด — ใช้กับ Facebook Reels
+
+    **เคยหายไปเพราะผมลบทิ้งโดยไม่ตั้งใจ** (28 ส.ค. 2569) ตอนเขียน
+    `run_hashtag_step` ใหม่ ผมแทนที่โค้ดตั้งแต่หัวฟังก์ชันนั้นยาวไปถึง
+    `_put_tag` ซึ่ง `run_tags_step` นอนอยู่ตรงกลางพอดี — ไวยากรณ์ยังผ่าน
+    เพราะที่เรียกใช้อยู่ในฟังก์ชันอื่น Python จึงไม่ฟ้องจนกว่าจะรันถึงบรรทัดนั้น
+    **ผัง Facebook Reels จะพังทั้ง 27 ใบตอนรันจริง** ถ้าไม่เจอก่อน
+
+    **ทำไมต้องมีแยกจากของ Shopee ตั้งแต่แรก** (เหตุผลเดิม 25 ส.ค. 2569)
+    ตัวคัดตามยอดพูดถึงต้องอ่าน "ยอด" ที่แอปโชว์ท้ายแถวตัวเลือก ซึ่งเป็นของ
+    Shopee — **Facebook ไม่โชว์ตัวเลขนั้น** พออ่านไม่ได้ก็ตัดสินว่าไม่ผ่าน
+    ทุกตัวแล้วลบทิ้ง จบด้วย "ไม่มีแฮชแท็กตัวไหนผ่านเกณฑ์เลย" = โพสต์ไม่ออกเลย
+
+    **ตอนนี้ทั้งสองทางทำเหมือนกันแล้ว** เพราะเจ้าของสั่งให้ฝั่ง Shopee เลิกคัด
+    ตามยอดแล้วเปลี่ยนเป็นวางทีเดียวเหมือนกัน จึงเหลือทางเดียวจริงๆ
+    เก็บชื่อนี้ไว้เพราะผังที่บันทึกไว้แล้วอ้างชนิด `type_tags` อยู่
+    """
+    return run_hashtag_step(context, step)
 
 
 def _put_tag(context: RunContext, text: str) -> None:

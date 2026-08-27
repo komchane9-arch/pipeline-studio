@@ -2160,3 +2160,36 @@ button:disabled { opacity: 0.5; }
   .tab-bar { flex-wrap: wrap; max-width: 100%; }
   input, select, textarea { max-width: 100%; min-width: 0; }
 }
+
+/* ── หัวข้อคั่นกลุ่มในกอง "รอแก้" ─────────────────────────────────────────
+
+   ผู้ใช้สั่ง 27 ส.ค. 2569: *"รอแก้แต่ละขั้นให้เก็บแยกกันนะ ทั้งในเว็บและใน
+   telegram เพราะการแก้แต่ละอย่างไม่เหมือนกัน"*
+
+   หัวข้อนี้เป็น `li` เพราะมันอยู่ใน `ul` เดียวกับใบงาน — เอา `div` ไปแทรก
+   ในรายการไม่ได้ โครงจะผิดแล้วตัวอ่านหน้าจอไล่รายการไม่ถูก
+
+   วิธีแก้ (`hint`) กินเต็มบรรทัดของตัวเอง เพราะเป็นข้อความยาวที่ต้องอ่านจริง
+   ไม่ใช่ป้ายกำกับ ถ้าให้มันแย่งบรรทัดกับชื่อกลุ่มจะโดนบีบจนอ่านไม่รู้เรื่อง */
+.board-group {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin: 16px 0 2px;
+  padding: 10px 2px 6px;
+  border-top: 1px solid var(--line);
+  min-width: 0;
+}
+/* กลุ่มแรกไม่ต้องมีเส้นคั่น — ไม่มีอะไรอยู่เหนือมันให้คั่น */
+.board-group:first-child { margin-top: 2px; border-top: 0; }
+.board-group-name { font-size: 14px; min-width: 0; }
+.board-group-back { flex: 0 0 auto; margin-left: auto; font-size: 12px; }
+.board-group-hint {
+  flex: 1 1 100%;          /* กินเต็มบรรทัดของตัวเองเสมอ */
+  min-width: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+}

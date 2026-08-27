@@ -751,6 +751,56 @@ function boardBox() {
   return node;
 }
 
+/** หัวข้อคั่นกลุ่มในกอง "รอแก้" — ชื่อกลุ่ม · จำนวน · **วิธีแก้** · ปุ่มเอากลับทั้งกลุ่ม
+ *
+ *  **ผู้ใช้สั่ง 27 ส.ค. 2569** — *"รอแก้แต่ละขั้นให้เก็บแยกกันนะ ทั้งในเว็บและใน
+ *  telegram เพราะการแก้แต่ละอย่างไม่เหมือนกัน"*
+ *
+ *  บนกระดานปกติ ใบที่ค้างรอตรวจรูป · รอตรวจสตอรีบอร์ด · รอตรวจบทพูด อยู่กองเดียวกัน
+ *  เพราะกระดานมองจาก "ไปถึงไหนแล้ว" แต่พอจะลงมือแก้ มันคนละงานกันสิ้นเชิง
+ *  (หารูปเพิ่ม · พิมพ์คอมเมนต์สั่งแก้ · แก้ข้อความเอง · สั่งเจนใหม่ที่เสียเครดิต Veo)
+ *  เปิดมาเจอปนกันแล้วต้องสลับวิธีแก้ทีละใบ ช้ากว่าแก้ทีเดียวทั้งกลุ่มมาก
+ *
+ *  **`hint` ต้องโชว์เสมอ ไม่ใช่โชว์แค่ชื่อกลุ่ม** — ชื่อกลุ่มบอกได้แค่ว่า "ค้างตรงไหน"
+ *  ส่วน `hint` คือ "ต้องทำอะไรถึงจะผ่าน" ซึ่งเป็นเหตุผลทั้งหมดที่แยกกลุ่มตั้งแต่แรก
+ *
+ *  ชื่อกลุ่ม/วิธีแก้/การจัดกลุ่ม **มาจากเซิร์ฟเวอร์ที่เดียว** (`clip_board.group_parked`)
+ *  ที่เดียวกับที่แชท `/wait` ใช้ — ห้ามคิดชื่อกลุ่มเองฝั่งนี้ ไม่งั้นวันหนึ่ง
+ *  หน้าเว็บกับแชทจะจัดกลุ่มไม่ตรงกันแล้วไม่มีใครรู้ว่าอันไหนถูก
+ */
+function boardGroupHead(group) {
+  const head = el("li", { className: "board-group" });
+  head.append(
+    el("b", { className: "board-group-name",
+              textContent: `${group.title} · ${group.count} ใบ` }),
+  );
+
+  // เอากลับทั้งกลุ่มด้วยการยิงทีละใบผ่านทางเดิม — ไม่ต้องรอที่อยู่ใหม่ฝั่งเซิร์ฟเวอร์
+  // และถ้าใบไหนพลาดจะรู้ทันทีว่าใบไหน แทนที่จะล้มทั้งชุดโดยไม่รู้ว่าตกตรงไหน
+  if (group.count > 1) {
+    head.append(textBtn("↩ เอากลับทั้งกลุ่ม", "ghost board-group-back", async () => {
+      const ids = (group.jobs || []).map((job) => job.id);
+      if (!window.confirm(`เอางาน ${ids.length} ใบในกลุ่ม "${group.title}" `
+        + "กลับไปทำต่อทั้งหมด?")) return;
+      let done = 0;
+      const failed = [];
+      for (const id of ids) {
+        try { await jobPost(`${id}/unpark`); done += 1; }
+        catch (error) { failed.push(`${id} (${error.message})`); }
+      }
+      // **ต้องบอกว่าตกใบไหน** ถ้าบอกแค่ "ไม่สำเร็จ" ผู้ใช้ต้องไปไล่เปิดดูทีละใบเอง
+      $("#storyNote").textContent = failed.length
+        ? `เอากลับได้ ${done}/${ids.length} ใบ · ตกค้าง ${failed.length} ใบ — ${failed[0]}`
+        : `เอากลับแล้ว ${done} ใบ จากกลุ่ม ${group.title}`;
+      await loadJobQueue();
+    }));
+  }
+
+  head.append(el("small", { className: "board-group-hint",
+                            textContent: group.hint || "" }));
+  return head;
+}
+
 function paintBoard() {
   const box = boardBox();
   const list = $("#storyQueueList");
@@ -775,8 +825,15 @@ function paintBoard() {
     button.append(
       el("span", { className: "board-name", textContent: bucket.title }),
       // "(2/10)" = ค้างอยู่ 2 จากสต๊อกที่อยากให้มี 10
+      //
+      // **กองที่ไม่มีเส้นวัดต้องโชว์ตัวเลขเดียว** กอง "รอแก้" ตั้ง target = 0
+      // เพราะยิ่งน้อยยิ่งดี ไม่ใช่ของที่ต้องมีสำรอง ถ้าใช้รูปแบบเดียวกับกองอื่น
+      // จะขึ้นว่า "(3/0)" ซึ่งอ่านแล้วเหมือน "3 จาก 0" — ไม่มีความหมาย
+      // และขัดกับข้อความข้างล่างที่บอกว่ากองนี้ไม่มีเส้นวัด
       el("span", { className: "board-count",
-                   textContent: `(${bucket.count}/${bucket.target ?? 10})` }),
+                   textContent: (bucket.target ?? 10)
+                     ? `(${bucket.count}/${bucket.target ?? 10})`
+                     : `(${bucket.count})` }),
     );
     if (bucket.short) button.classList.add("is-short");
     button.addEventListener("click", () => {
@@ -818,10 +875,20 @@ function paintBoard() {
   }
   if (!short.isConnected) box.after(short);
 
-  const rows = (picked?.jobs || []).map((row) => {
-    const job = jobCards.find((j) => j.id === row.id) || row;
-    return jobRow(job);
-  });
+  // ใบงานบนกระดานเป็นข้อมูลย่อ ถ้ามีใบเต็มอยู่ในมือแล้วให้ใช้ใบเต็ม
+  const draw = (jobs) => (jobs || []).map((row) =>
+    jobRow(jobCards.find((j) => j.id === row.id) || row));
+
+  // **มีเฉพาะกอง "รอแก้" ที่ส่ง `groups` มา** กองอื่นวาดแบบเดิมทุกอย่าง
+  // เช็คก่อนวาดเสมอ อย่าเดาว่าทุกกองมีเหมือนกัน
+  const rows = [];
+  if (picked?.groups?.length) {
+    for (const group of picked.groups) {
+      rows.push(boardGroupHead(group), ...draw(group.jobs));
+    }
+  } else {
+    rows.push(...draw(picked?.jobs));
+  }
   if (!rows.length) {
     rows.push(el("li", { className: "note",
       textContent: `ไม่มีงานค้างที่ขั้น "${picked?.title || "นี้"}"` }));

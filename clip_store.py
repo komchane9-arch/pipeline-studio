@@ -763,6 +763,48 @@ def mark_posted(
     return run
 
 
+def park_run(root: Path, item_id: str, why: str = "", stage: str = "") -> dict:
+    """พักงานที่ **จบจากคิวไปแล้ว** ไว้รอแก้ (ผู้ใช้สั่ง 27 ส.ค. 2569)
+
+    **ทำไมต้องมีแยกจากการพักในคิว** — งานที่เจนคลิปเสร็จแล้วจะออกจากคิวไป
+    เหลือแต่ไฟล์งาน วัดจริง 27 ส.ค.: คลิปที่พร้อมลง Shopee มี 25 ใบ
+    **มีใบงานในคิวแค่ 2 ใบ อีก 23 ใบจบจากคิวไปแล้ว**
+
+    ถ้าปุ่มพักผูกกับคิวอย่างเดียว จะกดไม่ได้ 23 ใน 25 ใบ — ปุ่มที่กดแล้วขึ้น
+    error เกือบทุกครั้งแย่กว่าไม่มีปุ่ม
+
+    `stage` = ขั้นที่ค้างตอนถูกพัก ไม่ใส่มาจะเดาจากของที่มีในงาน (`clip_board`
+    เป็นคนบอก) เก็บไว้เพื่อให้รู้ว่าต้องไปแก้อะไร ไม่ใช่แค่รู้ว่าพักไว้
+
+    **ไม่ยกขึ้น Drive** ต่างจาก `mark_posted` โดยตั้งใจ — การพักไว้เป็นสถานะ
+    ชั่วคราวของการทำงาน ไม่ใช่ผลลัพธ์ที่ต้องเก็บถาวร
+    """
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+    run["parked"] = {
+        "at": _now(),
+        "from": str(stage or "").strip(),
+        "why": str(why or "").strip(),
+    }
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
+def unpark_run(root: Path, item_id: str) -> dict:
+    """เอางานที่พักไว้กลับมาอยู่ในรายการตามปกติ"""
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+    if not run.get("parked"):
+        raise ClipStoreError("งานนี้ไม่ได้พักไว้")
+    run.pop("parked", None)
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
 # ------------------------------------------------------------------- อ่าน
 
 def list_runs(root: Path) -> list[dict]:

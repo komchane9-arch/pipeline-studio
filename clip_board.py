@@ -121,11 +121,29 @@ FIX_GROUPS = (
 FIX_OTHER = ("other", "❓ อื่นๆ", "ขั้นที่ระบบยังไม่รู้จัก — เปิดใบงานดูเอง")
 
 
+# งานที่ออกจากคิวไปแล้วไม่มี "ขั้นในคิว" ให้จด — ตอนพักจึงจดเป็น **ชื่อกองบนกระดาน**
+# แทน (`shopee_video` · `facebook_reels` · `tiktok`) ตารางนี้แปลกลับให้ตัวจัดกลุ่ม
+#
+# **ถ้าไม่มีตารางนี้** ใบที่พักตอนรอลง Shopee จะแปลไม่ออกแล้วตกไปกอง 🎬 คลิป
+# ทั้งกอง — เจอจริงตอนทดสอบ 27 ส.ค. 2569 (พักใบรอลง Shopee แล้ว /waitclips
+# บอกว่าว่าง ส่วน /waitclip กลับมีใบนั้นอยู่)
+BOARD_KEY_FIX_GROUP = {
+    LINK: "link", STORY: "storyboard", CLIP: "clip",
+    SHOPEE: "post", REELS: "post", TIKTOK: "post",
+}
+
+
 def fix_group_of(stage: str) -> str:
-    """ใบที่พักไว้จากขั้นนี้ ควรอยู่กลุ่มการแก้ไหน"""
+    """ใบที่พักไว้จากขั้นนี้ ควรอยู่กลุ่มการแก้ไหน
+
+    รับได้ทั้ง **ขั้นในคิว** (`image_review`) และ **ชื่อกองบนกระดาน**
+    (`shopee_video`) เพราะสองที่เก็บจดคนละแบบ — ดู `BOARD_KEY_FIX_GROUP`
+    """
     for key, _label, _hint, stages in FIX_GROUPS:
         if stage in stages:
             return key
+    if stage in BOARD_KEY_FIX_GROUP:
+        return BOARD_KEY_FIX_GROUP[stage]
     return FIX_OTHER[0]
 
 
@@ -175,9 +193,11 @@ def parked_by_bucket(rows: list[dict]) -> list[dict]:
     รู้ว่าอันไหนถูก (บทเรียนเดียวกับตอน `/clips` เลขในรายการไม่ตรงกับเลขที่พิมพ์)
     """
     piles: dict[str, list[dict]] = {}
+    board_keys = {key for key, _t, _h in BOARD}
     for row in rows or []:
         came = (row.get("parked") or {}).get("from") or row.get("stage") or ""
-        key, _why = bucket_of({"stage": came}, None)
+        # จดมาเป็นชื่อกองอยู่แล้ว (งานที่ออกจากคิวไปแล้ว) ใช้ได้เลย ไม่ต้องแปล
+        key = came if came in board_keys else bucket_of({"stage": came}, None)[0]
         piles.setdefault(key or CLIP, []).append(row)
 
     out = []
@@ -243,19 +263,25 @@ def bucket_of(job: dict, run: dict | None = None) -> tuple[str, str]:
     if stage in CLIP_STAGES:
         return CLIP, clip_queue.STAGE_LABEL.get(stage, stage)
 
-    # ---- เลยขั้นคลิปแล้ว = ไปอยู่กองปลายทางที่ถึงคิวลง ---------------------
+    # ---- เลยขั้นคลิปแล้ว = ตัดสินจาก **ของที่มีอยู่จริงในโฟลเดอร์** -------
     #
-    # ใช้ `publish_order.next_target()` ตัวเดียวกับด่านก่อนโพสต์ ไม่คิดเอง
+    # **ต้องใช้ `bucket_of_run` ตัวเดียวกับที่ `/clips` ใช้ ห้ามคิดเองซ้ำ**
+    # ของเดิมกระโดดไป `publish_order.next_target()` เลย ซึ่งตอบว่า "รอลง Shopee"
+    # ให้ทุกใบที่ยังไม่ได้ลงที่ไหน **แม้ใบนั้นจะยังไม่มีคลิปด้วยซ้ำ**
+    #
+    # วัดจริง 27 ส.ค. 2569: กระดานนับกอง Shopee ได้ 27 ใบ แต่ `/clips` ได้ 25
+    # เพราะมี 2 ใบที่ยังอยู่ขั้นสตอรีบอร์ด/คลิป แต่ใบงานในคิวขึ้นสถานะ done
+    # เลยหลุดมากองปลายทาง — เลขสองที่ไม่ตรงกันแล้วไม่มีใครรู้ว่าฝั่งไหนถูก
     if run is None:
         return "", ""
-    target = publish_order.next_target(run)
-    if not target:
+    key = bucket_of_run(run)
+    if not key:
         return "", ""                       # ลงครบทั้งสามที่แล้ว
-    for key, name in POST_TARGET.items():
-        if name == target:
-            ok, why = publish_order.check(run, target)
-            return key, (why if not ok else "พร้อมลงได้เลย")
-    return "", ""
+    if key not in POST_TARGET:
+        # ของยังไม่ครบ — ยังอยู่ขั้นต้นน้ำ ถึงใบงานในคิวจะบอกว่าจบแล้วก็ตาม
+        return key, "ใบงานในคิวจบแล้ว แต่ของยังไม่ครบ"
+    ok, why = publish_order.check(run, POST_TARGET[key])
+    return key, (why if not ok else "พร้อมลงได้เลย")
 
 
 def bucket_of_run(run: dict) -> str:
@@ -284,8 +310,12 @@ def bucket_of_run(run: dict) -> str:
     return ""
 
 
-def build(jobs: list[dict], load_run) -> dict:
+def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
     """จัดงานทั้งหมดลง 6 กอง — `load_run(item_id)` คืน run.json ของงานนั้น
+
+    `runs` = ไฟล์งานทั้งหมด (`clip_store.list_runs`) ใส่มาด้วยเพื่อให้กองปลายทาง
+    นับงานที่ **จบจากคิวไปแล้ว** ด้วย ไม่งั้นกระดานจะบอกน้อยกว่าความจริง
+    ไม่ใส่มาก็ยังทำงานได้เหมือนเดิม (ของเก่าที่เรียกอยู่จึงไม่พัง)
 
     **โหลด run.json เฉพาะงานที่จำเป็น** งานที่ยังไม่ถึงขั้นโพสต์ตัดสินจากสถานะ
     ในคิวได้เลย ไม่ต้องอ่านไฟล์ — คิวมีเป็นร้อยใบ ถ้าอ่านหมดทุกครั้งที่เปิดหน้า
@@ -345,6 +375,12 @@ def build(jobs: list[dict], load_run) -> dict:
                 run = None
             if not run:
                 continue
+            # **งานที่ติ๊กว่าทำแล้วต้องไม่โผล่บนกระดาน** — ของถูกย้ายไปโฟลเดอร์
+            # เก็บ (`shopee_products_done/`) แล้ว แต่ `load_run` ยังหาเจอ
+            # (ตั้งใจ เพราะเปิดดูย้อนหลังได้) ผลคือใบที่เก็บไปแล้วกลับมานับซ้ำ
+            # วัดจริง 27 ส.ค. 2569: กองรอลง Shopee มี 2 ใบที่ /clips ไม่มี
+            if "shopee_products_done" in str(run.get("folder") or "").replace("\\", "/"):
+                continue
         key, why = bucket_of(job, run)
         if not key:
             continue
@@ -358,6 +394,48 @@ def build(jobs: list[dict], load_run) -> dict:
             "created_at": job.get("created_at") or "",
             "updated_at": job.get("updated_at") or "",
         })
+
+    # ---- เติมงานที่ **จบจากคิวไปแล้ว** เข้ากองปลายทาง -----------------------
+    #
+    # **ทำไมต้องมี** (ผู้ใช้ยืนยัน 27 ส.ค. 2569) กระดานเดิมนับจากคิวอย่างเดียว
+    # พองานเจนคลิปเสร็จก็ออกจากคิวไป กระดานจึงมองไม่เห็นมันอีกเลย ทั้งที่คลิป
+    # พร้อมลงอยู่ — วัดจริง **รายการ `/clips` บอก 25 ใบ แต่กระดานบอก 8 ใบ**
+    # หายไป 17 ใบ ซึ่งเป็นของที่ควรเห็นที่สุดเพราะรอแค่กดลง
+    #
+    # **กันนับซ้ำด้วยรหัสสินค้า** งานที่ยังอยู่ในคิวถูกนับไปแล้วข้างบน
+    if runs:
+        already = {str(r.get("item_id")) for rows in piles.values() for r in rows}
+        already |= {str(r.get("item_id")) for rows in parked_piles.values() for r in rows}
+        for run in runs:
+            item_id = str(run.get("item_id") or "")
+            if not item_id or item_id in already:
+                continue
+            key = bucket_of_run(run)
+            if key not in (SHOPEE, REELS, TIKTOK):
+                continue          # ขั้นต้นน้ำยังอยู่ในคิว ไม่ต้องเติมจากไฟล์
+            row = {
+                "id": "",                     # ไม่มีใบงานในคิวแล้ว
+                "item_id": item_id,
+                "name": run.get("name") or "(ยังไม่รู้ชื่อสินค้า)",
+                "stage": "",
+                "stage_label": "",
+                "why": "",
+                "created_at": run.get("product_at") or "",
+                "updated_at": run.get("video_at") or run.get("storyboard_at") or "",
+            }
+            park = run.get("parked") or {}
+            if park:
+                came = park.get("from") or key
+                group = fix_group_of(came)
+                title, hint = fix_group_meta(group)
+                row.update({
+                    "from_stage": came, "from_label": clip_queue.STAGE_LABEL.get(came, came),
+                    "fix_group": group, "fix_title": title, "fix_hint": hint,
+                    "why": str(park.get("why") or "").strip(), "parked": park,
+                })
+                parked_piles[key].append(row)
+            else:
+                piles[key].append(row)
 
     counts = {key: len(rows) for key, rows in piles.items()}
     return {

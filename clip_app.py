@@ -363,7 +363,11 @@ CLIP_HELP = (
     "/flow on | off — เปิด/ปิดขั้นเจนคลิปใน Google Flow\n"
     "/mode รวม | แยก — เจนคลิปเดียวจบทุกฉาก หรือแยกฉากละคลิป\n"
     "/clips — <b>คลิปที่พร้อมลง Shopee Video</b> (เจนเสร็จแล้ว ยังไม่ได้ลง)\n"
-    "/clipsfb — <b>งานที่ติ๊กว่าทำแล้ว</b> (แสดงเหมือน /clips) · <code>/clipfb &lt;เลข&gt;</code> เปิดดู\n"
+    "/clipsfb — <b>คลิปที่พร้อมลง Facebook Reels</b> (ลง Shopee แล้ว) · <code>/clipfb &lt;เลข&gt;</code> เปิดดู\n"
+    "/clipstiktok — <b>คลิปที่พร้อมลง TikTok</b> (ลง Facebook แล้ว) · <code>/cliptiktok &lt;เลข&gt;</code> เปิดดู\n"
+    "/archive — งานที่ติ๊กว่าทำแล้ว (เก็บออกจากรายการไปแล้ว)\n"
+    "/wait — <b>งานที่พักไว้รอแก้ทั้งหมด</b> · <code>/wait &lt;เลข&gt;</code> เอากลับเข้าขั้นเดิม\n"
+    "     แยกรายขั้น: <code>/waitstoryboard</code> · <code>/waitclip</code> · <code>/waitclips</code> · <code>/waitclipsfb</code> · <code>/waitclipstiktok</code>\n"
     "/clip &lt;เลข&gt; — เปิดดูงานนั้น (สตอรีบอร์ด + บทพูด)\n"
     "/gen &lt;เลข&gt; — <b>เจนคลิปต่อ</b>จากสตอรีบอร์ดที่ทำไว้แล้ว\n"
     "/genall — <b>ไล่เจนวิดีโอทุกงานที่ยังไม่มีคลิป</b> (ต้องมีสตอรีบอร์ด + บทพูดครบ)\n"
@@ -630,6 +634,10 @@ def _clip_send_images(job: dict) -> None:
     last.append({"text": "✅ ใช้ชุดนี้ ทำสตอรีบอร์ดต่อ",
                  "callback_data": f"clip:img_ok:{job['id']}:"})
     rows.append(last)
+    # 🅿 พักไว้รอแก้ — **ต้องมีในทุกการ์ดที่ต้องตัดสินใจ** (ผู้ใช้สั่ง 27 ส.ค. 2569)
+    # ค้างที่ชุดรูปคือ "ต้องไปหารูปมาเพิ่ม" ซึ่งทำเดี๋ยวนั้นไม่ได้เสมอไป
+    rows.append([{"text": "🅿 รอแก้",
+                  "callback_data": f"clip:park:{job['id']}:"}])
 
     note = (
         f"🖼 <b>ชุดรูปที่จะส่งเข้า GPT</b> — {len(images)} ใบ "
@@ -801,6 +809,8 @@ def _clip_send_highlights(job: dict) -> None:
     last.append({"text": "✅ ใช้จุดเด่นชุดนี้",
                  "callback_data": f"clip:hl_ok:{job['id']}:"})
     rows.append(last)
+    rows.append([{"text": "🅿 รอแก้",
+                  "callback_data": f"clip:park:{job['id']}:"}])
 
     lines = [f"✨ <b>คุณสมบัติเด่น</b> — {len(highlights)} ข้อ", ""]
     lines += [f"<b>{i}.</b> {escape(text)}" for i, text in enumerate(highlights, 1)]
@@ -2051,10 +2061,15 @@ def _tiktok_send_post_review(job: dict) -> None:
         "",
         "แก้แฮชแท็กได้ที่การ์ดจุดเด่นด้านบน · แก้คำพูดบนตะกร้าด้วย /basket &lt;ข้อความ&gt;",
     ]
-    keyboard = {"inline_keyboard": [[
-        {"text": "🚀 โพสต์เลย", "callback_data": f"clip:tt_post:{job['id']}"},
-        {"text": "🗑 ไม่โพสต์", "callback_data": f"clip:tt_skip:{job['id']}"},
-    ]]}
+    keyboard = {"inline_keyboard": [
+        [
+            {"text": "🚀 โพสต์เลย", "callback_data": f"clip:tt_post:{job['id']}"},
+            {"text": "🗑 ไม่โพสต์", "callback_data": f"clip:tt_skip:{job['id']}"},
+        ],
+        # 🅿 ค้างตอนจะโพสต์ = "ยังเอาอยู่ แต่ยังไม่พร้อมลง" — คนละอย่างกับ
+        # 🗑 ไม่โพสต์ ที่แปลว่าทิ้งเลย ต้องแยกปุ่มกัน ไม่งั้นจะกดทิ้งทั้งที่แค่อยากพัก
+        [{"text": "🅿 รอแก้", "callback_data": f"clip:park:{job['id']}:"}],
+    ]}
     _clip_say(job["chat_id"], "\n".join(lines), keyboard)
 
 
@@ -2990,6 +3005,13 @@ def _clip_features_buttons(run: dict, draft: dict | None = None) -> dict:
         # แก้ทีหลังจึงต้องสั่งทำใหม่ ปุ่มนี้คือที่สั่ง
         rows.append([{"text": "🎬 ทำสตอรีบอร์ดใหม่จากจุดเด่นชุดนี้",
                       "callback_data": f"clip:ft_sb:{item}:"}])
+
+    # 🅿 พักไว้รอแก้ — ใบที่ยังอยู่ในคิวพักที่ใบงาน ใบที่จบไปแล้วพักที่ไฟล์งาน
+    # (สองตัวคนละที่เก็บ ถ้าใช้ตัวเดียวปนกันจะหาใบงานไม่เจอแล้วปุ่มกดไม่ติดเงียบๆ)
+    rows.append([{
+        "text": "🅿 รอแก้",
+        "callback_data": (f"clip:park:{job['id']}:" if job else f"clip:rpark::{item}"),
+    }])
     return {"inline_keyboard": rows}
 
 
@@ -3239,50 +3261,104 @@ def _clip_list_done(chat_id: str) -> None:
     _clip_render_runs(chat_id, runs, "✅ <b>งานที่ทำแล้ว</b>", "/clipfb")
 
 
-def _clips_ready(runs: list[dict] | None = None) -> list[dict]:
-    """งานที่ **มีคลิปแล้วและยังไม่ได้ลง Shopee Video** — รายการเดียวที่ `/clips` ใช้
+def _clips_in_bucket(bucket: str, runs: list[dict] | None = None) -> list[dict]:
+    """งานที่รอลง **ปลายทางนั้น** — ใช้ร่วมกันทั้ง /clips, /clipsfb, /clipstiktok
 
-    **ต้องมีที่เดียวแล้วเรียกร่วมกัน** เพราะทั้งตอนแสดงรายการและตอนแปลง
-    `/clip <เลข>` กลับเป็นสินค้า ต้องนับจากรายการชุดเดียวกันเป๊ะ
-    ถ้ากรองแค่ฝั่งแสดงผล เลขที่พิมพ์จะไปโดนสินค้าคนละตัวโดยไม่มีอะไรฟ้อง
-    (คอมเมนต์ที่ `_clip_render_runs` เตือนเรื่องนี้ไว้แล้ว — เคยพลาดมาก่อน)
+    ผู้ใช้สั่ง 27 ส.ค. 2569 ให้แยกรายการตามปลายทาง:
+
+        /clips        มีคลิปแล้ว รอลง Shopee Video
+        /clipsfb      ลง Shopee แล้ว รอลง Facebook Reels
+        /clipstiktok  ลง Facebook แล้ว รอลง TikTok
+
+    **อ่านจากกระดานตัวเดียวกับหน้าเว็บ ไม่กรองเอง** (`clip_board.build`)
+    เดิมกรองเองด้วย `bucket_of_run` ซึ่งดูแต่ไฟล์ในโฟลเดอร์ ไม่ดูใบงานในคิว
+    วัดจริง 27 ส.ค. 2569: มี 2 ใบที่ **เจนคลิปเสร็จแล้วแต่ยังรออนุมัติคลิปอยู่**
+    กระดานจัดไว้กอง 🎬 คลิป (ถูก — ยังกดลงไม่ได้) แต่ `/clips` นับเป็นพร้อมลง
+    เลขสองที่จึงไม่ตรงกัน 23 กับ 25 แล้วไม่มีใครรู้ว่าฝั่งไหนถูก
+
+    **งานที่พักไว้รอแก้ไม่นับ** — กระดานแยกใส่ถัง `parked` ให้แล้ว
+    คนเปิดรายการนี้อยากได้ของที่ *กดลงได้เลย* ใบที่พักไว้ดูที่ /wait ของขั้นนั้น
     """
     rows = clip_store.list_runs(DATA_DIR) if runs is None else runs
-    return [r for r in rows if clip_board.bucket_of_run(r) == clip_board.SHOPEE]
+    board = clip_board.build(
+        clip_jobs.all(), lambda item: clip_store.load_run(DATA_DIR, item), rows)
+    wanted = next((b for b in board["buckets"] if b["key"] == bucket), None)
+    order = {str(r.get("item_id")): n for n, r in enumerate(wanted["jobs"] or [])}         if wanted else {}
+    picked = [r for r in rows if str(r.get("item_id")) in order]
+    picked.sort(key=lambda r: order[str(r.get("item_id"))])
+    return picked
+
+
+def _clips_ready(runs: list[dict] | None = None) -> list[dict]:
+    """งานที่มีคลิปแล้วและยังไม่ได้ลง Shopee Video — รายการที่ `/clips` ใช้"""
+    return _clips_in_bucket(clip_board.SHOPEE, runs)
+
+
+# ---- รายการแยกตามปลายทาง (ผู้ใช้สั่ง 27 ส.ค. 2569) -------------------------
+#
+# แต่ละรายการมี **คำสั่งเปิดงานของตัวเอง** เพราะเลขลำดับเป็นคนละชุดกัน
+# พิมพ์ `/clip 2` จากรายการ Facebook จะไปโดนสินค้าคนละตัว — เคยพลาดมาแล้ว
+CLIP_LISTS = {
+    "/clips": (clip_board.SHOPEE, "/clip",
+               "🎬 <b>คลิปที่พร้อมลง Shopee Video</b>",
+               "เจนคลิปเสร็จแล้วและยังไม่ได้ลง Shopee"),
+    "/clipsfb": (clip_board.REELS, "/clipfb",
+                 "📘 <b>คลิปที่พร้อมลง Facebook Reels</b>",
+                 "ลง Shopee Video แล้วและยังไม่ได้ลง Facebook"),
+    "/clipstiktok": (clip_board.TIKTOK, "/cliptiktok",
+                     "🎵 <b>คลิปที่พร้อมลง TikTok</b>",
+                     "ลง Facebook Reels แล้วและยังไม่ได้ลง TikTok"),
+}
+
+
+def _clip_list_bucket(chat_id: str, list_cmd: str) -> None:
+    """วาดรายการของปลายทางหนึ่ง — ตัวเดียวใช้ได้ทั้งสามคำสั่ง"""
+    bucket, open_cmd, title, need = CLIP_LISTS[list_cmd]
+    everything = clip_store.list_runs(DATA_DIR)
+    runs = _clips_in_bucket(bucket, everything)
+    if not runs:
+        # บอกด้วยว่าที่กรองออกไปมีเท่าไร ไม่งั้น "ว่าง" จะแยกไม่ออกจาก "พัง"
+        parked = sum(1 for r in everything
+                     if r.get("parked") and clip_board.bucket_of_run(r) == bucket)
+        note = (f"มีงานเก็บไว้ทั้งหมด {len(everything)} ชิ้น "
+                f"แต่ยังไม่มีชิ้นไหนที่ <b>{need}</b>"
+                if everything else "ส่งลิงก์ Shopee มาได้เลย")
+        if parked:
+            note += f"\n🅿 มีอีก {parked} ชิ้นที่พักไว้รอแก้ — ดูที่ /wait"
+        _clip_say(chat_id, f"{title} — <b>ยังไม่มีสักชิ้น</b>\n{note}")
+        return
+    _clip_render_runs(chat_id, runs, title, open_cmd)
+
+
+def _clip_open_from_list(chat_id: str, list_cmd: str, argument: str) -> None:
+    """`/clip <เลข>` `/clipfb <เลข>` `/cliptiktok <เลข>` — แปลงเลขเป็นรหัสสินค้า
+
+    **ต้องแปลงจากรายการของคำสั่งนั้นเท่านั้น** เลขลำดับของสามรายการไม่ตรงกัน
+    ใส่รหัสสินค้ามาตรงๆ ก็ได้ ไม่ต้องแปลง
+    """
+    target = (argument or "").strip()
+    if not target:
+        _clip_list_bucket(chat_id, list_cmd)
+        return
+    if target.isdigit():
+        rows = _clips_in_bucket(CLIP_LISTS[list_cmd][0])
+        index = int(target)
+        if 1 <= index <= len(rows):
+            _clip_show_run(chat_id, str(rows[index - 1].get("item_id", "")))
+            return
+        _clip_say(chat_id, f"รายการนี้มี {len(rows)} ชิ้น ไม่มีเลข {index} — "
+                           f"พิมพ์ <code>{list_cmd}</code> ดูรายการก่อน")
+        return
+    _clip_show_run(chat_id, target)
 
 
 def _clip_list_runs(chat_id: str) -> None:
-    """`/clips` — **เฉพาะงานที่มีคลิปแล้วและรอลง Shopee Video** (ผู้ใช้สั่ง 27 ส.ค. 2026)
+    """`/clips` — เฉพาะงานที่มีคลิปแล้วและรอลง Shopee Video
 
-    *"ฟังก์ชั่น /clips เรียกมั่วเลย ในนี้จะต้องมีแค่งานที่มีคลิปแล้ว
-      แล้วรอลง shopee video เท่านั้น"*
-
-    **ของเดิมโชว์ทุกงานที่เก็บไว้ทั้งหมด** ตั้งแต่ใบที่เพิ่งดึงลิงก์มายังไม่มีรูป
-    ไปจนถึงใบที่ลงครบสามที่แล้ว ปนกันหมดในรายการเดียว พอมีงานหลายสิบใบก็หา
-    ใบที่ "พร้อมลงจริง" ไม่เจอ — ซึ่งเป็นสิ่งเดียวที่คนเปิดคำสั่งนี้อยากรู้
-
-    **ใช้ตัวแบ่งกองเดียวกับกระดานบนหน้าเว็บ** (`clip_board.bucket_of_run`)
-    ห้ามเขียนเงื่อนไขซ้ำที่นี่ ไม่งั้นวันหนึ่งแชทกับหน้าเว็บจะบอกไม่ตรงกัน
-    แล้วไม่มีใครรู้ว่าอันไหนถูก
+    เหลือไว้เป็นทางเข้าเดิม ตัวจริงอยู่ที่ `_clip_list_bucket` ที่ใช้ร่วมกัน
+    ทั้งสามปลายทาง — ห้ามเขียนวิธีวาดรายการซ้ำที่นี่
     """
-    everything = clip_store.list_runs(DATA_DIR)
-    runs = _clips_ready(everything)
-    if not runs:
-        # บอกด้วยว่าที่กรองออกไปมีเท่าไร ไม่งั้น "ว่าง" จะแยกไม่ออกจาก "พัง"
-        other = len(everything)
-        _clip_say(
-            chat_id,
-            "🎬 <b>ยังไม่มีคลิปที่รอลง Shopee Video</b>\n"
-            + (f"มีงานเก็บไว้ทั้งหมด {other} ชิ้น แต่ยังไม่มีชิ้นไหนที่ "
-               "<b>เจนคลิปเสร็จแล้วและยังไม่ได้ลง Shopee</b>\n"
-               "ดูว่าแต่ละชิ้นค้างอยู่ขั้นไหนได้ที่กระดานบนหน้าเว็บ"
-               if other else "ส่งลิงก์ Shopee มาได้เลย"),
-        )
-        return
-    _clip_render_runs(
-        chat_id, runs,
-        "🎬 <b>คลิปที่พร้อมลง Shopee Video</b>", "/clip",
-    )
+    _clip_list_bucket(chat_id, "/clips")
 
 
 def _clip_render_runs(chat_id: str, runs: list[dict], title: str, cmd: str) -> None:
@@ -3471,6 +3547,20 @@ def _clip_show_run(chat_id: str, argument: str) -> None:
     rows.append([{
         "text": "🏷 ทำแฮชแท็กใหม่" if tags else "🏷 สร้างแฮชแท็ก",
         "callback_data": f"clip:tags::{item_id}",
+    }])
+    # 🚀 ลง Facebook Reels + 🅿 รอแก้ — **ต้องมีในใบงานหลักด้วย** (ผู้ใช้สั่ง
+    # 27 ส.ค. 2569: *"เพิ่มลงในใบงานหลักด้วย"*) จะได้ไม่ต้องย้อนไปเปิด /clipsfb
+    # ปุ่มขึ้นเฉพาะงานที่มีคลิปแล้ว — ไม่มีคลิปก็ไม่มีอะไรให้ลง
+    if videos:
+        rows.append([{
+            "text": "🚀 ลง Facebook Reels",
+            "callback_data": f"clip:fbcard::{item_id}",
+        }])
+    # 🅿 พักไว้รอแก้ — งานที่ออกจากคิวไปแล้วก็ต้องพักได้ ไม่ใช่เฉพาะใบในคิว
+    rows.append([{
+        "text": "↩️ เอากลับจากรอแก้" if run.get("parked") else "🅿 รอแก้",
+        "callback_data": (f"clip:runpark::{item_id}" if run.get("parked")
+                          else f"clip:rpark::{item_id}"),
     }])
     # ✅ ติ๊กว่าทำแล้ว — ต้องมีทุกงาน ไม่ใช่เฉพาะงานที่มีคลิป เพราะงานที่ตัดสินใจ
     # ว่าไม่เอาแล้วก็ต้องเก็บออกจากรายการได้เหมือนกัน
@@ -3713,7 +3803,50 @@ def _failed_jobs() -> list[dict]:
     return [job for job in reversed(clip_jobs.all()) if job.get("stage") in stages]
 
 
-def _clip_wait_list(chat_id: str, argument: str = "") -> None:
+# ช่องรอแก้ **แยกตามขั้น** (ผู้ใช้สั่ง 27 ส.ค. 2569)
+#
+# *"งานพักให้แยกแต่ละขั้น เช่น พักตอนรอลง shopee = /waitclips"*
+#
+# ชื่อคำสั่งจงใจให้ล้อกับรายการปกติ — จำได้ง่ายกว่าเพราะเป็นคู่กัน
+#     /clips → /waitclips  ·  /clipsfb → /waitclipsfb  ·  /clipstiktok → /waitclipstiktok
+WAIT_LISTS = {
+    "/waitlink": (clip_board.LINK, "🐣 ดึงข้อมูล"),
+    "/waitstoryboard": (clip_board.STORY, "🎨 สตอรีบอร์ด + บทพูด"),
+    "/waitclip": (clip_board.CLIP, "🎬 คลิป"),
+    "/waitclips": (clip_board.SHOPEE, "🛍 รอลง Shopee Video"),
+    "/waitclipsfb": (clip_board.REELS, "📘 รอลง Facebook Reels"),
+    "/waitclipstiktok": (clip_board.TIKTOK, "🎵 รอลง TikTok"),
+}
+
+
+def _clip_parked_all() -> list[dict]:
+    """ใบที่พักไว้ **ทั้งสองที่เก็บ** — ใบงานในคิว + ไฟล์งานที่จบจากคิวไปแล้ว
+
+    **ต้องรวมกัน ไม่งั้นช่องรอแก้จะเห็นแค่ครึ่งเดียว** งานขั้นโพสต์ออกจากคิว
+    ไปแล้วทุกใบ (เจนคลิปจบ = จบงาน) ถ้าอ่านแต่คิว กด 🅿 ที่การ์ด Facebook แล้ว
+    ใบนั้นจะหายไปเฉยๆ ไม่โผล่ใน /wait เลย
+
+    ใบจากไฟล์งานไม่มีรหัสงานในคิว จึงใส่ `item_id` ไว้ให้ปุ่มใช้แทน
+    """
+    rows = list(clip_jobs.parked())
+    seen = {str(r.get("item_id")) for r in rows}
+    for run in clip_store.list_runs(DATA_DIR):
+        item_id = str(run.get("item_id") or "")
+        if not run.get("parked") or not item_id or item_id in seen:
+            continue
+        park = run.get("parked") or {}
+        rows.append({
+            "id": "",                       # ไม่มีใบงานในคิว — ปุ่มใช้ item_id แทน
+            "item_id": item_id,
+            "name": run.get("name") or item_id,
+            "stage": park.get("from") or clip_board.bucket_of_run(run),
+            "parked": park,
+        })
+    return rows
+
+
+def _clip_wait_list(chat_id: str, argument: str = "",
+                    only: str = "") -> None:
     """`/wait` — งานที่พักไว้รอแก้ทั้งหมด พร้อมปุ่มเอากลับเข้าขั้นเดิม
 
     ผู้ใช้สั่ง 27 ส.ค. 2026: *"ฟังก์ชั่นรอแก้ ให้ลิ้งไปที่คำสั่ง /wait ใน telegram
@@ -3722,7 +3855,12 @@ def _clip_wait_list(chat_id: str, argument: str = "") -> None:
     `/wait <เลข>` = เอาใบนั้นกลับเข้าขั้นเดิมเลย · `/wait all` = เอากลับทั้งหมด
     """
     escape = telegram_bot._escape
-    rows_all = clip_jobs.parked()
+    rows_all = _clip_parked_all()
+    # `only` = ดูเฉพาะขั้นเดียว (มาจาก /waitclips ฯลฯ) — กรองก่อนนับทุกอย่าง
+    # ไม่งั้นเลขที่พิมพ์กับเลขในรายการจะคนละชุด แล้วกดไปโดนใบอื่น
+    if only:
+        rows_all = [r for r in rows_all
+                    if (clip_board.parked_by_bucket([r]) or [{}])[0].get("key") == only]
     target = (argument or "").strip().lower()
 
     if target:
@@ -3746,6 +3884,14 @@ def _clip_wait_list(chat_id: str, argument: str = "") -> None:
             return
         done = []
         for job in picked:
+            # ใบที่จบจากคิวไปแล้วไม่มีรหัสงาน ต้องเอากลับที่ไฟล์งานแทน
+            if not job.get("id"):
+                try:
+                    clip_store.unpark_run(DATA_DIR, str(job.get("item_id") or ""))
+                except clip_store.ClipStoreError:
+                    continue
+                done.append(str(job.get("stage") or ""))
+                continue
             try:
                 fresh = clip_jobs.unpark(job["id"])
             except clip_queue.ClipQueueError:
@@ -3759,14 +3905,18 @@ def _clip_wait_list(chat_id: str, argument: str = "") -> None:
         return
 
     if not rows_all:
-        _clip_say(chat_id, "✅ ไม่มีงานพักรอแก้เลย — ช่อง 🅿️ รอแก้ว่างอยู่")
+        head = next((t for c, (k, t) in WAIT_LISTS.items() if k == only), "")
+        _clip_say(chat_id, f"✅ ไม่มีงานพักรอแก้ในขั้น {head}" if head
+                  else "✅ ไม่มีงานพักรอแก้เลย — ช่อง 🅿️ รอแก้ว่างอยู่")
         return
 
     # **แยกกลุ่มตามชนิดของการแก้** (ผู้ใช้สั่ง 27 ส.ค. 2026)
     # ใช้ตัวจัดกลุ่มตัวเดียวกับหน้าเว็บ (`clip_board.parked_by_bucket`) ห้ามจัดเองซ้ำ
     # ไม่งั้นวันหนึ่งแชทกับหน้าเว็บจะบอกไม่ตรงกันแล้วไม่มีใครรู้ว่าอันไหนถูก
     groups = clip_board.parked_by_bucket(rows_all)
-    lines = [f"🅿️ <b>พักไว้รอแก้ {len(rows_all)} ใบ</b> · ค้างอยู่ {len(groups)} ขั้น",
+    head = next((t for c, (k, t) in WAIT_LISTS.items() if k == only), "")
+    lines = [f"🅿️ <b>พักไว้รอแก้ {len(rows_all)} ใบ</b>"
+             + (f" · เฉพาะ {head}" if head else f" · ค้างอยู่ {len(groups)} ขั้น"),
              "เครื่องไม่แตะใบพวกนี้ ของที่ทำไว้แล้วยังอยู่ครบ"]
     buttons = []
     index = 0
@@ -3795,7 +3945,9 @@ def _clip_wait_list(chat_id: str, argument: str = "") -> None:
             if len(buttons) < 8:
                 buttons.append([{
                     "text": f"↩️ {index}. {name[:22]}",
-                    "callback_data": f"clip:unpark:{job.get('id')}",
+                    # ใบในคิวเอากลับที่ใบงาน · ใบที่จบไปแล้วเอากลับที่ไฟล์งาน
+                    "callback_data": (f"clip:unpark:{job['id']}" if job.get("id")
+                                      else f"clip:runpark::{job.get('item_id')}"),
                 }])
         # ปุ่มเอากลับทั้งกลุ่ม — แก้เสร็จทั้งกองแล้วกดทีเดียวจบ
         if len(buttons) < 10 and group["count"] > 1:
@@ -4684,31 +4836,39 @@ def _clip_telegram_command(chat_id: str, text: str) -> bool:
     if command in ("/start", "/help"):
         _clip_say(chat_id, CLIP_HELP)
         return True
-    if command == "/clips":
-        _clip_list_runs(chat_id)
-        return True
-    if command in ("/clipsfb", "/ทำแล้ว"):
-        _clip_list_done(chat_id)
+    # ---- รายการคลิปแยกตามปลายทาง (ผู้ใช้สั่ง 27 ส.ค. 2569) ----------------
+    #
+    # สามรายการ · สามคำสั่งเปิดงาน **เลขลำดับเป็นคนละชุดกัน ห้ามใช้ปนกัน**
+    #   /clips        → /clip <เลข>        รอลง Shopee Video
+    #   /clipsfb      → /clipfb <เลข>      รอลง Facebook Reels
+    #   /clipstiktok  → /cliptiktok <เลข>  รอลง TikTok
+    #
+    # เดิม /clipsfb คือ "งานที่ติ๊กว่าทำแล้ว" — ผู้ใช้สั่งเลิก ("/done ไม่ต้องมี")
+    # กองที่เก็บไปแล้วยังเปิดดูได้ด้วย /archive และด้วยรหัสสินค้าเหมือนเดิม
+    if command in CLIP_LISTS:
+        _clip_list_bucket(chat_id, command)
         return True
     if command == "/clipfb":
-        # เลขในรายการงานที่ทำแล้วเป็นคนละชุดกับ /clips ต้องแปลงเป็นรหัสสินค้าก่อน
-        done = clip_store.list_done(DATA_DIR)
-        target = (argument or "").strip()
-        if target.isdigit() and 1 <= int(target) <= len(done):
-            _clip_show_run(chat_id, str(done[int(target) - 1].get("item_id", "")))
-        elif target:
-            _clip_show_run(chat_id, target)
-        else:
-            _clip_list_done(chat_id)
+        _clip_open_from_list(chat_id, "/clipsfb", argument)
+        return True
+    if command == "/cliptiktok":
+        _clip_open_from_list(chat_id, "/clipstiktok", argument)
+        return True
+    if command in ("/archive", "/ทำแล้ว"):
+        _clip_list_done(chat_id)
         return True
     if command == "/clip":
-        _clip_show_run(chat_id, argument)
+        _clip_open_from_list(chat_id, "/clips", argument)
         return True
     if command == "/queue":
         _clip_queue_text(chat_id)
         return True
     if command in ("/wait", "/รอแก้"):
         _clip_wait_list(chat_id, argument)
+        return True
+    # ช่องรอแก้แยกรายขั้น — /waitclips, /waitclipsfb, /waitstoryboard ฯลฯ
+    if command in WAIT_LISTS:
+        _clip_wait_list(chat_id, argument, only=WAIT_LISTS[command][0])
         return True
     if command in ("/pending", "/รออนุมัติ"):
         _clip_pending_list(chat_id, argument)
@@ -4901,6 +5061,143 @@ def _clip_after_approve(job_id: str, chat_id: str, note: str) -> str:
     return note
 
 
+# ============================================================================
+# การ์ดลง Facebook Reels — **มีปุ่มกดโพสต์จริง** (ผู้ใช้สั่ง 27 ส.ค. 2569)
+# ============================================================================
+#
+# *"เพิ่มการ์ดลง facebook ด้วย"* + เลือกแบบ ข = **กดแล้วโพสต์ได้เลย**
+#
+# **ทำไมต้องยิงไปที่เซิร์ฟเวอร์หลัก (พอร์ต 8866) ไม่ใช่กดมือถือเอง**
+# ตัวกดจอจริงอยู่ที่ `publish_flow.py` ฝั่งนั้น พร้อมด่านลำดับการลง
+# (`publish_order`) · บัตรคิวจอ (`phone_queue`) · การจดว่าลงแล้ว
+# (`clip_store.mark_posted`) ครบทุกอย่าง ถ้าฝั่งคลิปกดเอง จะต้องเขียนซ้ำทั้งชุด
+# แล้ววันหนึ่งสองฝั่งจะไม่ตรงกัน — กติกาข้อ 2.8 ห้ามเขียนกติกาลำดับซ้ำที่อื่น
+#
+# **ต้องเลือกเครื่องเสมอ ห้ามเดา** (กติกาข้อ 8) สายโพสต์มีมือถือหลายเครื่อง
+# ผูกคนละบัญชี — เดาผิด = โพสต์ขึ้นบัญชีผิด ซึ่งกู้คืนไม่ได้
+# จึงทำเป็นปุ่มแยกเครื่องละปุ่ม ไม่มีปุ่ม "โพสต์เลย" แบบไม่ระบุเครื่อง
+
+MAIN_SERVER = "http://127.0.0.1:8866"
+
+
+def _post_devices() -> list[tuple[str, str]]:
+    """มือถือสายโพสต์ที่เปิดใช้อยู่ — [(serial, ชื่อที่คนอ่าน)]"""
+    try:
+        import devices                                          # noqa: PLC0415
+        return [(s, devices.label(s)) for s in devices.enabled_serials("post")]
+    except Exception as error:                                  # noqa: BLE001
+        _clip_log(f"อ่านทะเบียนมือถือไม่ได้: {type(error).__name__}: {error}")
+        return []
+
+
+def _clip_send_fb_card(chat_id: str, item_id: str) -> str:
+    """การ์ด "ลง Facebook Reels" ของสินค้าหนึ่งชิ้น พร้อมปุ่มโพสต์รายเครื่อง"""
+    run = clip_store.load_run(DATA_DIR, item_id) or {}
+    if not run:
+        return "ไม่เจองานชิ้นนี้"
+    escape = telegram_bot._escape
+    videos = run.get("videos") or []
+    ok, why = publish_order.check(run, "facebook_reels")
+
+    lines = [
+        "📘 <b>ลง Facebook Reels</b>",
+        f"<b>{escape((run.get('name') or item_id)[:70])}</b>",
+        "",
+        f"🎥 คลิป {len(videos)} ไฟล์"
+        + (f" — {escape(str(videos[0]))}" if videos else " — ⛔ ยังไม่มีคลิป"),
+        "",
+        escape(publish_order.summary(run)),
+    ]
+    rows: list[list[dict]] = []
+    if not ok:
+        lines += ["", f"⏳ <b>ยังลงไม่ได้</b> — {escape(why)}"]
+    elif not videos:
+        lines += ["", "⛔ <b>ยังลงไม่ได้</b> — ไม่มีไฟล์คลิปในโฟลเดอร์งาน"]
+    else:
+        phones = _post_devices()
+        if not phones:
+            lines += ["", "⛔ <b>ไม่มีมือถือสายโพสต์ที่เปิดใช้อยู่</b> — "
+                          "เปิดเครื่องในหน้าตั้งค่าก่อน"]
+        else:
+            lines += ["", "เลือกเครื่องที่จะโพสต์ — <b>แต่ละเครื่องคนละบัญชี</b>"]
+            for serial, label in phones:
+                rows.append([{"text": f"🚀 ลงเครื่อง {label}"[:60],
+                              "callback_data": f"clip:fbgo:{serial}:{item_id}"}])
+    rows.append([
+        {"text": "🅿 รอแก้", "callback_data": f"clip:rpark::{item_id}"},
+        {"text": "📄 ใบงาน", "callback_data": f"clip:open::{item_id}"},
+    ])
+    _clip_say(chat_id, "\n".join(lines), {"inline_keyboard": rows})
+    return "เปิดการ์ดลง Facebook ให้แล้ว"
+
+
+def _clip_fb_post_now(chat_id: str, serial: str, item_id: str) -> str:
+    """กดโพสต์จริง — ส่งงานให้เซิร์ฟเวอร์หลักเดินผังกดจอมือถือ
+
+    **ไม่กดมือถือเองที่นี่** เหตุผลอยู่ในคอมเมนต์หัวหมวดข้างบน
+    ตอบกลับด้วยผลจริงที่เซิร์ฟเวอร์หลักคืนมา ไม่ใช่ "ส่งคำสั่งแล้ว" ลอยๆ —
+    ถ้าด่านลำดับปฏิเสธ (409) ต้องเห็นเหตุผลทันที ไม่ใช่ไปรู้เอาตอนเปิด log
+    """
+    if not serial:
+        return "ไม่ได้บอกว่าจะลงเครื่องไหน — เปิดการ์ดใหม่แล้วกดปุ่มของเครื่องนั้น"
+    run = clip_store.load_run(DATA_DIR, item_id) or {}
+    name = (run.get("name") or item_id)[:40]
+    _clip_say(chat_id, f"🚀 กำลังลง Facebook Reels — <b>{telegram_bot._escape(name)}</b>"
+                       f"\nเครื่อง <code>{telegram_bot._escape(serial)}</code> · รอสักครู่…")
+
+    body = json.dumps({"serial": serial, "target": "facebook_reels",
+                       "item_id": item_id}).encode("utf-8")
+    request = urllib.request.Request(
+        MAIN_SERVER + "/api/publish/flow/run", data=body,
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=900) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:400]
+        try:
+            detail = json.loads(detail).get("detail") or detail
+        except Exception:                                       # noqa: BLE001
+            pass
+        _clip_log(f"ลง Facebook ไม่สำเร็จ {item_id} — {error.code} {detail}")
+        _clip_say(chat_id, f"❌ <b>ลงไม่สำเร็จ</b>\n{telegram_bot._escape(str(detail))}")
+        return "ลงไม่สำเร็จ"
+    except Exception as error:                                  # noqa: BLE001
+        _clip_log(f"ลง Facebook ไม่สำเร็จ {item_id} — {type(error).__name__}: {error}")
+        _clip_say(chat_id, "❌ <b>ติดต่อเซิร์ฟเวอร์หลักไม่ได้</b>\n"
+                           f"{telegram_bot._escape(str(error))}\n"
+                           "เซิร์ฟเวอร์พอร์ต 8866 เปิดอยู่หรือเปล่า")
+        return "ติดต่อเซิร์ฟเวอร์หลักไม่ได้"
+
+    done, total = result.get("done", 0), result.get("total", 0)
+    if result.get("ok"):
+        _clip_say(chat_id, f"✅ <b>ลง Facebook Reels แล้ว</b> ({done}/{total} ขั้น)")
+        return "ลงแล้ว ✅"
+    _clip_say(chat_id, f"⚠️ <b>เดินผังไม่จบ</b> — ทำได้ {done}/{total} ขั้น\n"
+                       f"{telegram_bot._escape(str(result.get('error') or ''))}")
+    return "เดินผังไม่จบ"
+
+
+def _clip_park_run(chat_id: str, item_id: str, park: bool) -> str:
+    """พัก/เอากลับ งานที่ **ออกจากคิวไปแล้ว** (มีแต่ไฟล์งาน ไม่มีใบงานในคิว)
+
+    คนละตัวกับ `clip_jobs.park` ที่ใช้กับใบงานในคิว — งานขั้นโพสต์ส่วนใหญ่
+    จบจากคิวไปแล้ว ถ้าใช้ตัวเดิมจะหาใบงานไม่เจอแล้วปุ่มกดไม่ติดเฉยๆ
+    """
+    try:
+        if park:
+            came = clip_board.bucket_of_run(
+                clip_store.load_run(DATA_DIR, item_id) or {})
+            clip_store.park_run(DATA_DIR, item_id, "กดพักจากแชท", came)
+            _clip_log(f"พักงานเก็บไว้ {item_id} รอแก้ (กอง {came})")
+            return "🅿️ พักไว้รอแก้แล้ว — ดูทั้งหมดที่ /wait"
+        clip_store.unpark_run(DATA_DIR, item_id)
+        _clip_log(f"เอางานเก็บไว้ {item_id} ออกจากช่องรอแก้")
+        return "↩️ เอากลับเข้ารายการแล้ว"
+    except clip_store.ClipStoreError as error:
+        return str(error)
+
+
 def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
     """ปุ่มอนุมัติ/สั่งแก้ในแชทบอทคลิป (คำนำหน้า clip: ถูกตัดออกมาแล้ว)
 
@@ -4959,6 +5256,21 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
     # ปุ่ม "ดูคลิป" ก็ผูกกับรหัสสินค้าเหมือนกัน — งานในคิวจบไปแล้วแต่ไฟล์ยังอยู่
     if action == "vid":
         return _clip_send_videos(chat_id, arg)
+
+    # ---- การ์ดลง Facebook Reels — ผูกกับ **รหัสสินค้า** ไม่ใช่รหัสงานในคิว --
+    #
+    # งานขั้นโพสต์ส่วนใหญ่ออกจากคิวไปแล้ว (เจนคลิปจบ = จบงาน) ถ้าปล่อยให้ไหล
+    # ไปหาใบงานในคิวข้างล่าง จะเจอ "ไม่มีงานนี้" แล้วปุ่มกดไม่ติดโดยไม่มีอะไรฟ้อง
+    if action == "fbcard":
+        return _clip_send_fb_card(chat_id, arg)
+
+    # `clip:fbgo:<เครื่อง>:<รหัสสินค้า>` — **ต้องระบุเครื่องเสมอ** (กติกาข้อ 8)
+    if action == "fbgo":
+        return _clip_fb_post_now(chat_id, job_id, arg)
+
+    # พัก/เอากลับ งานที่เก็บไว้เป็นไฟล์แล้ว (ไม่มีใบงานในคิว)
+    if action in ("rpark", "runpark"):
+        return _clip_park_run(chat_id, arg, action == "rpark")
 
     # ปุ่มจาก /clips — กดเปิดดูงานได้เลย ไม่ต้องพิมพ์ /clip <เลข> เอง
     if action == "open":
@@ -5909,7 +6221,11 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
     """
     def work() -> dict:
         jobs = clip_jobs.all()
-        return clip_board.build(jobs, lambda item: clip_store.load_run(DATA_DIR, item))
+        # **ส่งไฟล์งานเข้าไปด้วย** ไม่งั้นกองปลายทางจะนับได้แค่ใบที่ยังอยู่ในคิว
+        # วัดจริง 27 ส.ค. 2569: `/clips` บอก 25 ใบ แต่กระดานบอก 8 ใบ — หายไป 17
+        runs = clip_store.list_runs(DATA_DIR)
+        return clip_board.build(
+            jobs, lambda item: clip_store.load_run(DATA_DIR, item), runs)
 
     return {"ok": True, **await asyncio.to_thread(work)}
 

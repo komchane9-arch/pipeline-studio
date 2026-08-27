@@ -1628,6 +1628,23 @@ async def publish_flow_run(request: Request) -> dict:
             append_log("publish", f"[{target}] ไม่ได้เดินผัง — {why}")
             raise HTTPException(status_code=409, detail=why)
 
+        # ---- ต้องมีแฮชแท็กก่อนถึงจะลงได้ (เพิ่ม 28 ส.ค. 2569) --------
+        #
+        # **ตรวจก่อนแตะมือถือ ไม่ใช่ไปตายกลางผัง** ผังใช้เวลา 10 นาทีต่อใบ
+        # ถ้าปล่อยให้เดินไปจนถึงขั้นที่ 12 แล้วค่อยรู้ = เสีย 6 นาทีฟรี
+        # และมือถือค้างอยู่กลางหน้าโพสต์ที่ต้องมาเก็บกวาดต่อ
+        #
+        # **เจอจริง 28 ส.ค. 02:27** คลิป Pocket WiFi6 ขึ้น Shopee โดย
+        # ไม่มีแฮชแท็กสักตัว แล้วระบบรายงานว่า "22/22 สำเร็จ" —
+        # ถ้าเจ้าของไม่ทักว่า "ทำไมยังไม่มีแฮชแท็ก" ก็ไม่มีใครรู้เลย
+        tags = ((run.get("hashtag_plan") or {}).get("tags")
+                or run.get("hashtags") or [])
+        if not tags:
+            detail = ("สินค้านี้ยังไม่มีแฮชแท็ก — ลงไปก็ไม่มีแท็กสักตัว "
+                      "สร้างก่อนด้วยปุ่ม 🏷 ในใบงาน หรือ /tags ในแชท")
+            append_log("publish", f"[{target}] ไม่ได้เดินผัง — {detail}")
+            raise HTTPException(status_code=409, detail=detail)
+
     if not _publish_run_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="มีงานโพสต์รันอยู่แล้ว รอให้จบก่อน")
 

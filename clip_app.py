@@ -4921,17 +4921,26 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
                       if g["key"] == key), None)
         if not group:
             return "ไม่มีกลุ่มนี้ในช่องรอแก้แล้ว — พิมพ์ /wait ดูใหม่"
-        done = []
+        # **ต้องบอกได้ว่าใบไหนตกค้าง ไม่ใช่แค่นับจำนวนที่สำเร็จ**
+        # (เลน main ทำแบบนี้ฝั่งหน้าเว็บแล้ว ดีกว่าของเดิมที่ผมเขียนไว้)
+        # ถ้าบอกแค่ "สำเร็จ 3 จาก 4" คนอ่านต้องไปไล่หาเองว่าใบไหนตก
+        done, stuck = [], []
         for item in group["jobs"]:
             try:
                 fresh = clip_jobs.unpark(item["id"])
-            except clip_queue.ClipQueueError:
+            except clip_queue.ClipQueueError as error:
+                stuck.append((item.get("name") or item["id"], str(error)[:50]))
                 continue
             done.append(clip_queue.STAGE_LABEL.get(fresh.get("stage") or "",
                                                    fresh.get("stage") or ""))
         clip_runner.wake()
-        _clip_log(f"เอางานกลุ่ม {key} ออกจากช่องรอแก้ {len(done)} ใบ")
-        return f"↩️ เอากลับเข้าขั้นเดิมแล้ว {len(done)} ใบ ({group['title']})"
+        _clip_log(f"เอางานกลุ่ม {key} ออกจากช่องรอแก้ {len(done)} ใบ"
+                  + (f" · ตกค้าง {len(stuck)} ใบ" if stuck else ""))
+        if not stuck:
+            return f"↩️ เอากลับเข้าขั้นเดิมแล้ว {len(done)} ใบ ({group['title']})"
+        names = " · ".join(f"{n} ({why})" for n, why in stuck[:3])
+        return (f"↩️ เอากลับได้ {len(done)}/{len(group['jobs'])} ใบ ({group['title']})\n"
+                f"ตกค้าง {len(stuck)} ใบ — {names}")
 
     # แยกสองจังหวะชัดๆ: `ask` = ขอดูก่อน (จากปุ่มใน /pending) · `go` = ยืนยันแล้ว
     # ค่าอื่น/ไม่ระบุถือเป็น `ask` เสมอ — **ผิดพลาดแล้วต้องไม่กลายเป็นการจ่ายเงิน**

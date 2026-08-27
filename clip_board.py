@@ -341,6 +341,68 @@ def publish_options(run: dict | None) -> list[dict]:
     return out
 
 
+# ============================================================================
+# โฟลเดอร์แยกตามสถานะ (ผู้ใช้สั่ง 27 ส.ค. 2569)
+# ============================================================================
+#
+# *"ให้แยก folder เลยนะ จะได้แยกจากกันชัดเจน พอทำเสร็จแต่ละขั้นค่อยย้าย folder"*
+#
+# **ตำแหน่งโฟลเดอร์ไม่ใช่ความจริง เป็นเงาของความจริง** ความจริงอยู่ใน `run.json`
+# (ช่อง `publish` กับ `parked`) โฟลเดอร์แค่เดินตาม
+#
+# ถ้าให้ตำแหน่งโฟลเดอร์เป็นความจริงอีกชุด วันหนึ่งย้ายพลาดหรือย้ายไม่ทัน
+# สองอย่างจะขัดกันแล้วไม่มีใครรู้ว่าอันไหนถูก — บทเรียนเดียวกับตอนกระดาน
+# กับ `/clips` นับไม่ตรงกัน ตอนนั้นแก้ด้วยการให้ทั้งคู่อ่านจากที่เดียว
+#
+# ขั้นต้นน้ำทั้งสาม (ดึงลิงก์ · สตอรีบอร์ด · รออนุมัติคลิป) อยู่โฟลเดอร์เดิม
+# เพราะยังไม่มีคลิปพร้อมลง — แยกไปอีกสามโฟลเดอร์จะเสียงน้อยกว่าที่ได้
+FOLDER_OF_BUCKET = {
+    SHOPEE: "clips",
+    REELS: "clipsfb",
+    TIKTOK: "clipstiktok",
+}
+
+# ใบที่พักไว้ — ต้นน้ำทั้งสามขั้นรวมเป็น waitstory ตามที่ผู้ใช้ตั้งชื่อมา
+PARKED_FOLDER_OF_BUCKET = {
+    LINK: "waitstory", STORY: "waitstory", CLIP: "waitstory",
+    SHOPEE: "waitclips",
+    REELS: "waitclipsfb",
+    TIKTOK: "waitclipstiktok",
+}
+
+# โฟลเดอร์ของงานที่ยังทำอยู่ (ยังไม่มีคลิปพร้อมลง) และงานที่ลงครบสามที่แล้ว
+WORKING_FOLDER = "shopee_products"
+FINISHED_FOLDER = "shopee_products_done"
+
+
+def folder_of_run(run: dict, stage: str = "") -> str:
+    """งานชิ้นนี้ **ควรอยู่โฟลเดอร์ไหน** ตามสถานะปัจจุบัน
+
+    ไม่ดูว่าตอนนี้ไฟล์อยู่ที่ไหน — ตัวเรียก (`clip_store.refile`) ย้ายให้ตรงเอง
+
+    `stage` = ขั้นของ **ใบงานที่ยังเปิดอยู่ในคิว** ของสินค้าชิ้นนี้ (ถ้ามี)
+    **ต้องส่งมาด้วย ไม่งั้นโฟลเดอร์กับกระดานจะไม่ตรงกัน** — งานที่เจนคลิปเสร็จ
+    แต่ยังรอคนอนุมัติ ไฟล์บอกว่า "มีคลิปแล้ว" (น่าจะอยู่ `clips/`) ส่วนคิวบอกว่า
+    "ยังรออนุมัติ" (กระดานจัดไว้กอง 🎬 คลิป) วัดจริง 27 ส.ค. 2569 มี 6 ใบแบบนี้
+    ทำให้โฟลเดอร์ 37 แต่กระดานนับ 31 — คิวชนะเสมอเพราะยังมีคนต้องตัดสินใจอยู่
+    """
+    if not run:
+        return WORKING_FOLDER
+    if stage in LINK_STAGES | STORY_STAGES | CLIP_STAGES:
+        return WORKING_FOLDER           # ยังทำอยู่ในคิว ยังไม่พร้อมลงที่ไหน
+    if run.get("parked"):
+        came = (run.get("parked") or {}).get("from") or ""
+        if came in PARKED_FOLDER_OF_BUCKET:
+            return PARKED_FOLDER_OF_BUCKET[came]
+        # จดมาเป็นขั้นในคิว ไม่ใช่ชื่อกอง — แปลก่อน
+        key, _why = bucket_of({"stage": came}, None)
+        return PARKED_FOLDER_OF_BUCKET.get(key or CLIP, "waitstory")
+    key = bucket_of_run(run)
+    if not key:
+        return FINISHED_FOLDER          # ลงครบทั้งสามที่แล้ว
+    return FOLDER_OF_BUCKET.get(key, WORKING_FOLDER)
+
+
 def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
     """จัดงานทั้งหมดลง 6 กอง — `load_run(item_id)` คืน run.json ของงานนั้น
 

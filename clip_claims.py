@@ -124,8 +124,14 @@ def summary(found: list[dict]) -> str:
     return "\n".join(rows)
 
 
+# งานถูกแยกโฟลเดอร์ตามสถานะตั้งแต่ 27 ส.ค. 2569 — ต้องไล่ให้ครบทุกอัน
+_PRODUCT_DIRS = ("shopee_products", "clips", "clipsfb", "clipstiktok",
+                 "waitstory", "waitclips", "waitclipsfb", "waitclipstiktok")
+
+
 def _run_dirs(root: Path):
-    for folder in sorted((root / "shopee_products").glob("*")):
+    folders = [f for name in _PRODUCT_DIRS for f in (root / name).glob("*")]
+    for folder in sorted(folders, key=lambda f: f.name):
         run_file = folder / "run.json"
         if run_file.is_file():
             try:

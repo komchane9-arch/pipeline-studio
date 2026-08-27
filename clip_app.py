@@ -552,6 +552,23 @@ def _clip_send_product(chat_id: str, data: dict) -> None:
 
 clip_jobs = clip_queue.ClipQueue(DATA_DIR / "clip_queue.json")
 
+# ---- บอกที่เก็บงานว่า "ชิ้นนี้ยังมีใบงานเปิดอยู่ในคิวที่ขั้นไหน" -----------
+#
+# ที่เก็บงาน (`clip_store`) ต้องรู้ตอนย้ายโฟลเดอร์ ไม่งั้นงานที่เจนคลิปเสร็จแล้ว
+# แต่ยังรอคนอนุมัติจะถูกย้ายไป `clips/` ทั้งที่กระดานยังจัดไว้กอง "รออนุมัติคลิป"
+# แล้วโฟลเดอร์กับกระดานจะบอกไม่ตรงกัน (วัดจริง 27 ส.ค. 2569: โฟลเดอร์ 37 กระดาน 31)
+#
+# เสียบเป็นฟังก์ชันแทนที่จะให้ `clip_store` เรียกคิวเอง เพราะที่เก็บงานไม่ควร
+# รู้จักคิว — ใครเอา `clip_store` ไปใช้ที่อื่นจะได้ไม่ต้องลากคิวไปด้วย
+def _open_stage_of(item_id: str) -> str:
+    """ขั้นของใบงานที่ยังเปิดอยู่ของสินค้าชิ้นนี้ — คืน "" ถ้าไม่มีใบงานเปิดอยู่"""
+    job = next((j for j in clip_jobs.all()
+                if str(j.get("item_id")) == str(item_id)
+                and j.get("stage") in clip_queue.OPEN_STAGES), None)
+    return (job or {}).get("stage") or ""
+
+clip_store.stage_lookup = _open_stage_of
+
 
 def _clip_log(message: str) -> None:
     append_log("input", f"[คลิป] {message}")

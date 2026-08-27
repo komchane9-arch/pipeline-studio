@@ -9116,11 +9116,24 @@ async def chatgpt_prompts(request: Request) -> dict:
 
 @app.get("/api/shopee/image")
 async def shopee_image(path: str) -> FileResponse:
-    """เสิร์ฟรูปสินค้าที่โหลดเก็บไว้แล้ว — จำกัดให้อยู่ในโฟลเดอร์ของเราเท่านั้น"""
+    """เสิร์ฟรูปสินค้าที่โหลดเก็บไว้แล้ว — จำกัดให้อยู่ในโฟลเดอร์ของเราเท่านั้น
+
+    **ต้องยอมทุกโฟลเดอร์งาน ไม่ใช่แค่ `shopee_products/`** ตั้งแต่ 27 ส.ค. 2569
+    งานถูกแยกโฟลเดอร์ตามสถานะ (`clips/` `clipsfb/` `waitclips/` …) ตามที่เจ้าของ
+    สั่ง ถ้ายังจำกัดไว้ที่เดียว **รูปของงานที่ย้ายแล้วจะขึ้น 404 ทั้งหมด**
+    ซึ่งคือของส่วนใหญ่ แล้วหน้าเว็บจะโชว์กรอบว่างโดยไม่มีอะไรบอกว่าเพราะอะไร
+
+    ด่านกัน path traversal ยังอยู่ครบ — ต้องอยู่ใต้โฟลเดอร์ใดโฟลเดอร์หนึ่งในรายการ
+    ที่อนุญาตเท่านั้น ไม่ใช่ปล่อยให้อ่านอะไรก็ได้ใน `data/`
+    """
     target = Path(path).resolve()
-    root = (DATA_DIR / "shopee_products").resolve()
-    # กัน path traversal: ต้องอยู่ใต้ shopee_products เท่านั้น ไม่งั้นอ่านไฟล์อะไรก็ได้ในเครื่อง
-    if not target.is_file() or root not in target.parents:
+    allowed = ("shopee_products", "shopee_products_done", "clips", "clipsfb",
+               "clipstiktok", "waitstory", "waitclips", "waitclipsfb",
+               "waitclipstiktok")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="ไม่พบรูปนี้")
+    parents = set(target.parents)
+    if not any((DATA_DIR / name).resolve() in parents for name in allowed):
         raise HTTPException(status_code=404, detail="ไม่พบรูปนี้")
     return FileResponse(target)
 

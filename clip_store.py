@@ -31,9 +31,48 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# โฟลเดอร์งาน — ที่แสดงในรายการ กับที่เก็บงานที่ติ๊กว่าทำแล้ว (ย้ายไป ไม่ลบ)
+# โฟลเดอร์งาน — ที่แสดงในรายการ กับที่เก็บงานที่ลงครบแล้ว (ย้ายไป ไม่ลบ)
 RUNS_DIR = "shopee_products"
 DONE_DIR = "shopee_products_done"
+
+# ============================================================================
+# โฟลเดอร์แยกตามสถานะ (ผู้ใช้สั่ง 27 ส.ค. 2569)
+# ============================================================================
+#
+# *"ให้แยก folder เลยนะ จะได้แยกจากกันชัดเจน พอทำเสร็จแต่ละขั้นค่อยย้าย folder"*
+#
+#     shopee_products/       ยังทำอยู่ — ดึงลิงก์ · สตอรีบอร์ด · รออนุมัติคลิป
+#     clips/                 มีคลิปแล้ว รอลง Shopee Video
+#     clipsfb/               ลง Shopee แล้ว รอลง Facebook Reels
+#     clipstiktok/           ลง Facebook แล้ว รอลง TikTok
+#     waitstory/             พักไว้รอแก้ ตอนยังทำไม่เสร็จ
+#     waitclips/             พักไว้รอแก้ ตอนรอลง Shopee
+#     waitclipsfb/           พักไว้รอแก้ ตอนรอลง Facebook
+#     waitclipstiktok/       พักไว้รอแก้ ตอนรอลง TikTok
+#     shopee_products_done/  ลงครบทั้งสามที่แล้ว
+#
+# **ตำแหน่งโฟลเดอร์เป็นเงาของ `run.json` ไม่ใช่ความจริงอีกชุด**
+# ความจริงคือช่อง `publish` กับ `parked` ในไฟล์งาน — `refile()` ย้ายโฟลเดอร์
+# ให้ตรงตามนั้น ถ้าสองอย่างไม่ตรงกันเมื่อไร **เชื่อไฟล์งานแล้วย้ายโฟลเดอร์ตาม**
+# (บทเรียนจากตอนกระดานกับ /clips นับไม่ตรงกัน — แก้ด้วยการมีที่มาที่เดียว)
+STATE_DIRS = ("clips", "clipsfb", "clipstiktok",
+              "waitstory", "waitclips", "waitclipsfb", "waitclipstiktok")
+
+# ทุกที่ที่งานหนึ่งชิ้นอยู่ได้ — ตัวอ่านต้องไล่ให้ครบ ไม่งั้นงานที่ย้ายแล้วจะ "หาย"
+ALL_DIRS = (RUNS_DIR, *STATE_DIRS, DONE_DIR)
+
+# โฟลเดอร์ที่ยังนับว่า "ยังไม่จบ" — `list_runs` อ่านจากพวกนี้
+ACTIVE_DIRS = (RUNS_DIR, *STATE_DIRS)
+
+# ตัวถามว่า "สินค้าชิ้นนี้ยังมีใบงานเปิดอยู่ในคิวที่ขั้นไหน" — คืน "" ถ้าไม่มี
+#
+# **ต้องเสียบจากข้างนอก** (`clip_app` ทำให้ตอนเริ่มเซิร์ฟเวอร์) เพราะที่เก็บงาน
+# ไม่ควรรู้จักคิว — แต่การย้ายโฟลเดอร์ต้องรู้ ไม่งั้นงานที่เจนคลิปเสร็จแล้วแต่
+# ยังรอคนอนุมัติจะถูกย้ายไป `clips/` ทั้งที่กระดานยังจัดไว้กอง "รออนุมัติคลิป"
+# แล้วสองที่จะบอกไม่ตรงกัน (เจอจริง 6 ใบ เมื่อ 27 ส.ค. 2569)
+#
+# ไม่เสียบก็ยังทำงานได้ แค่ตัดสินจากไฟล์อย่างเดียว
+stage_lookup = None
 
 RUN_FILE = "run.json"
 PROMPTS_FILE = "prompts.json"
@@ -100,7 +139,9 @@ def mark_done(root: Path, item_id: str) -> dict:
     `list_runs()` อ่านเฉพาะ `shopee_products/` งานที่ย้ายแล้วจึงหายจากทุกรายการ
     เองโดยไม่ต้องเพิ่มธงกรองที่ไหนอีก — ที่เดียวจบ ไม่มีจุดที่ลืมกรอง
     """
-    source = run_dir(root, item_id)
+    # **หาจากทุกโฟลเดอร์** งานอาจอยู่ที่ clips/ หรือ clipsfb/ แล้ว
+    # ถ้าหาแต่ shopee_products/ จะขึ้นว่า "ไม่พบโฟลเดอร์งาน" ทั้งที่ของอยู่ครบ
+    source = target_dir(root, item_id)
     if not source.is_dir():
         raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
     run = _read_json(source / RUN_FILE)
@@ -128,6 +169,8 @@ def restore_done(root: Path, item_id: str) -> dict:
     source = done_dir(root, item_id)
     if not source.is_dir():
         raise ClipStoreError(f"ไม่พบงาน {item_id} ในโฟลเดอร์ที่ทำแล้ว")
+    # เอากลับไปวางที่ `shopee_products/` ก่อน แล้วให้ `refile` ย้ายต่อไปโฟลเดอร์
+    # ที่ถูกตามสถานะจริง — ไม่ต้องคิดเองว่าควรไปกองไหน
     target = run_dir(root, item_id)
     if target.exists():
         raise ClipStoreError(f"งาน {item_id} อยู่ในรายการอยู่แล้ว")
@@ -142,6 +185,7 @@ def restore_done(root: Path, item_id: str) -> dict:
         )
     except OSError:
         pass
+    run["folder"] = str(refile(root, str(item_id)))
     return run
 
 
@@ -187,15 +231,109 @@ def target_dir(root: Path, item_id: str) -> Path:
     run.json ไปที่โฟลเดอร์เดิมซึ่งว่างเปล่า ผลคือระบบรายงานว่า "ยังไม่มีไฟล์คลิป"
     ทั้งที่เพิ่งจ่ายเครดิตไป 15 หน่วย และแฮชแท็กออกมา 0 ตัวเพราะอ่านเจอแต่ record เปล่า
 
-    ยังไม่เคยมีทั้งสองที่ = งานใหม่ ให้สร้างที่โฟลเดอร์ปกติ
+    ตั้งแต่ 27 ส.ค. 2569 มีโฟลเดอร์แยกตามสถานะอีก 7 อัน (ดู `STATE_DIRS`)
+    ตัวนี้จึงต้องไล่หาให้ครบทุกที่ **ไม่งั้นงานที่ย้ายไปแล้วจะถูกมองว่าไม่มี
+    แล้วโค้ดจะสร้างโฟลเดอร์เปล่าทับที่เดิม** — อาการเดียวกับบั๊ก 23 ส.ค. ข้างบน
+    แต่เกิดกับทุกงานที่ย้าย ไม่ใช่แค่งานที่ติ๊กว่าทำแล้ว
+
+    ยังไม่เคยมีที่ไหนเลย = งานใหม่ ให้สร้างที่โฟลเดอร์ปกติ
     """
-    active = run_dir(root, item_id)
-    if active.is_dir():
-        return active
-    done = done_dir(root, item_id)
-    if done.is_dir():
-        return done
-    return active
+    for name in ALL_DIRS:
+        folder = Path(root) / name / str(item_id)
+        if folder.is_dir():
+            return folder
+    return run_dir(root, item_id)
+
+
+def refile(root: Path, item_id: str) -> Path:
+    """ย้ายโฟลเดอร์งานไปให้ตรงกับสถานะใน `run.json` — คืนที่อยู่ใหม่
+
+    เรียกทุกครั้งที่สถานะเปลี่ยน (จดว่าลงแล้ว · พัก · เอากลับ) โฟลเดอร์จะได้
+    ตามทันเสมอ **เรียกซ้ำได้ ไม่เกิดผลข้างเคียง** อยู่ถูกที่แล้วก็ไม่ทำอะไร
+
+    **ย้ายไม่สำเร็จไม่ใช่เหตุให้ล้มทั้งงาน** — สถานะจริงอยู่ใน `run.json`
+    ซึ่งเขียนไปแล้ว โฟลเดอร์แค่ตามไม่ทัน สั่ง `refile` ใหม่เมื่อไรก็ได้
+    (คำสั่งตรวจ-ซ่อมทั้งชุดอยู่ที่ `refile_all`)
+    """
+    return refile_folder(root, target_dir(root, item_id))
+
+
+def refile_folder(root: Path, here: Path) -> Path:
+    """ย้าย **โฟลเดอร์ที่ระบุ** ไปให้ตรงกับสถานะข้างใน — คืนที่อยู่ใหม่
+
+    **ต้องมีแยกจาก `refile`** เพราะมีรหัสสินค้าที่มีโฟลเดอร์อยู่สองที่พร้อมกัน
+    (เกิดตอนส่งลิงก์เดิมซ้ำหลังงานเก่าถูกเก็บไปแล้ว) ถ้า `refile_all` ค้นด้วย
+    รหัสสินค้า มันจะเจอตัวแรกเสมอแล้วย้ายตัวเดิมซ้ำๆ ส่วนอีกตัวไม่เคยถูกแตะ
+
+    เจอจริงตอนย้ายชุดแรก 27 ส.ค. 2569: 4 โฟลเดอร์ค้างอยู่ที่เดิมโดยไม่มีอะไรฟ้อง
+    """
+    import clip_board                                          # noqa: PLC0415
+    if not here.is_dir():
+        return here
+    run = _read_json(here / RUN_FILE)
+    if not run:
+        return here
+    item_id = here.name
+    stage = ""
+    if stage_lookup:
+        try:
+            stage = stage_lookup(item_id) or ""
+        except Exception:                                      # noqa: BLE001
+            stage = ""      # ถามคิวไม่ได้ก็ตัดสินจากไฟล์ไปก่อน ดีกว่าล้มทั้งงาน
+    want = clip_board.folder_of_run(run, stage)
+    if here.parent.name == want:
+        return here                     # อยู่ถูกที่แล้ว
+
+    target = Path(root) / want / str(item_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        # ที่ปลายทางมีของชื่อเดียวกันอยู่แล้ว — **ห้ามทับ** ของในนั้นคือรูปกับคลิป
+        # ที่จ่ายเครดิตไปแล้ว เก็บของเก่าไว้ข้างๆ ให้คนมาดูเองว่าจะเอาอันไหน
+        target = target.with_name(f"{item_id}-ซ้ำ-{int(time.time())}")
+    shutil.move(str(here), str(target))
+    run["folder"] = str(target)
+    try:
+        (target / RUN_FILE).write_text(
+            json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass        # ย้ายสำเร็จแล้ว แค่ประทับที่อยู่ใหม่ไม่ติด ไม่ใช่เหตุให้ล้ม
+    return target
+
+
+def refile_all(root: Path, dry: bool = False) -> list[dict]:
+    """ตรวจทั้งชุดว่าทุกโฟลเดอร์อยู่ถูกที่ไหม — คืนรายการที่ย้าย (หรือที่ควรย้าย)
+
+    `dry=True` = ดูอย่างเดียวไม่ย้ายจริง ใช้ก่อนย้ายของจริงทุกครั้ง
+
+    **นี่คือตัวซ่อมเมื่อโฟลเดอร์กับไฟล์งานไม่ตรงกัน** ซึ่งเกิดได้จากย้ายพลาด ·
+    เซิร์ฟเวอร์ดับกลางคัน · หรือมีคนย้ายด้วยมือ — ไม่ต้องไล่ซ่อมเอง
+    """
+    import clip_board                                          # noqa: PLC0415
+    moves = []
+    for name in ALL_DIRS:
+        base = Path(root) / name
+        if not base.is_dir():
+            continue
+        for folder in list(base.iterdir()):
+            if not folder.is_dir():
+                continue
+            run = _read_json(folder / RUN_FILE)
+            if not run:
+                continue
+            stage = ""
+            if stage_lookup:
+                try:
+                    stage = stage_lookup(folder.name) or ""
+                except Exception:                              # noqa: BLE001
+                    stage = ""
+            want = clip_board.folder_of_run(run, stage)
+            if want == name:
+                continue
+            moves.append({"item_id": folder.name, "name": run.get("name", ""),
+                          "from": name, "to": want})
+            if not dry:
+                refile_folder(root, folder)
+    return moves
 
 
 def save_product(root: Path, data: dict) -> Path:
@@ -379,7 +517,7 @@ def read_detail(root: Path, item_id: str) -> str:
     มีไว้ให้คัดจุดเด่นใหม่ได้โดย **ไม่ต้องเปิดเบราว์เซอร์ไปดึง Shopee ซ้ำ** ซึ่ง
     ทั้งช้าและต้องแย่งเบราว์เซอร์กับงานเจนคลิป (Chrome โปรไฟล์เดียว เปิดซ้อนไม่ได้)
     """
-    for folder in (run_dir(root, item_id), done_dir(root, item_id)):
+    for folder in (target_dir(root, item_id),):
         path = folder / DETAIL_FILE
         if path.is_file():
             return path.read_text(encoding="utf-8", errors="replace")
@@ -388,9 +526,7 @@ def read_detail(root: Path, item_id: str) -> str:
 
 def save_features(root: Path, item_id: str, analysis: dict) -> dict:
     """เก็บผลคัดจุดเด่นรอบใหม่ทับของเดิม — ทั้งรายการเต็ม 3 ข้อที่เลือก และเหตุผล"""
-    folder = run_dir(root, item_id)
-    if not folder.is_dir():
-        folder = done_dir(root, item_id)
+    folder = target_dir(root, item_id)
     if not folder.is_dir():
         raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
     run = _read_json(folder / RUN_FILE)
@@ -541,7 +677,7 @@ def clear_videos(root: Path, item_id: str) -> dict:
 
     ลบผลตรวจเก่าไปด้วย — ผลตรวจผูกกับไฟล์ที่ไม่มีแล้ว เก็บไว้ก็ทำให้เข้าใจผิด
     """
-    for folder in (run_dir(root, item_id), done_dir(root, item_id)):
+    for folder in (target_dir(root, item_id),):
         if not folder.is_dir():
             continue
         run = _read_json(folder / RUN_FILE)
@@ -570,9 +706,7 @@ def save_video_check(root: Path, item_id: str, result: dict) -> dict:
     ผลผูกกับ **ไฟล์** ไม่ใช่กับงาน — เก็บชื่อไฟล์กับขนาดไว้ด้วย ถ้าวันหลังโหลด
     คลิปใหม่ทับ (เช่นอัปเป็น 1080p) ขนาดจะไม่ตรงแล้วตัวเรียกรู้ว่าผลเก่าใช้ไม่ได้
     """
-    folder = run_dir(root, item_id)
-    if not folder.is_dir():
-        folder = done_dir(root, item_id)
+    folder = target_dir(root, item_id)
     if not folder.is_dir():
         raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
     run = _read_json(folder / RUN_FILE)
@@ -596,9 +730,7 @@ def save_fixed_prompt(
     ผู้ใช้อนุมัติไปแล้ว ถ้าทับทิ้งจะไม่มีทางรู้ว่าเนื้อหาถูกเปลี่ยนไปตรงไหนบ้าง
     ตัวที่แก้แล้วเก็บไว้ใช้ตอนเจนซ้ำ จะได้ไม่ต้องให้ Gemini แก้ใหม่ทุกครั้ง
     """
-    folder = run_dir(root, item_id)
-    if not folder.is_dir():
-        folder = done_dir(root, item_id)
+    folder = target_dir(root, item_id)
     if not folder.is_dir():
         raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
     run = _read_json(folder / RUN_FILE)
@@ -626,9 +758,7 @@ def save_project_url(root: Path, item_id: str, url: str, scene: int = 0) -> dict
     ใช้ตอนอยากกลับเข้าไปโหลดคลิปความละเอียดสูงกว่าเดิม หรือเจนซ้ำในโปรเจกต์เดิม
     โดยไม่ต้องเปิดไล่หาในหน้า Flow เอง
     """
-    folder = run_dir(root, item_id)
-    if not folder.is_dir():
-        folder = done_dir(root, item_id)
+    folder = target_dir(root, item_id)
     if not folder.is_dir():
         raise ClipStoreError(f"ไม่พบโฟลเดอร์งาน {item_id}")
     run = _read_json(folder / RUN_FILE)
@@ -756,6 +886,8 @@ def mark_posted(
     }
     run["publish"] = publish
     _write_json(folder / RUN_FILE, run)
+    # **ย้ายโฟลเดอร์ตามสถานะใหม่ทันที** ลง Shopee แล้วต้องไปอยู่ clipsfb/
+    refile(root, str(item_id))
     # ยกขึ้น Drive ทันที — หมวด 4 บน Drive ("โพสต์ช่องทางไหน เวลาเท่าไร") มีข้อมูล
     # ได้จากตรงนี้ที่เดียว ถ้าไม่ยกตรงนี้ ตารางการโพสต์จะค้างว่างจนกว่าจะมีคนสั่ง
     # sync เอง ซึ่งไม่มีทางรู้ว่าต้องสั่งเมื่อไร
@@ -823,6 +955,7 @@ def unmark_posted(root: Path, item_id: str, target: str) -> dict:
     }
     run["publish"] = publish
     _write_json(folder / RUN_FILE, run)
+    refile(root, str(item_id))          # ถอนแล้วต้องย้ายกลับกองเดิม
     _to_drive(root, str(item_id))
     return run
 
@@ -853,6 +986,8 @@ def park_run(root: Path, item_id: str, why: str = "", stage: str = "") -> dict:
         "why": str(why or "").strip(),
     }
     _write_json(folder / RUN_FILE, run)
+    # พักแล้วย้ายเข้าโฟลเดอร์ wait* ของขั้นนั้น — เปิดดูแล้วรู้ทันทีว่าค้างตรงไหน
+    run["folder"] = str(refile(root, str(item_id)))
     return run
 
 
@@ -866,6 +1001,7 @@ def unpark_run(root: Path, item_id: str) -> dict:
         raise ClipStoreError("งานนี้ไม่ได้พักไว้")
     run.pop("parked", None)
     _write_json(folder / RUN_FILE, run)
+    run["folder"] = str(refile(root, str(item_id)))     # กลับกองเดิม
     return run
 
 
@@ -877,18 +1013,19 @@ def list_runs(root: Path) -> list[dict]:
     อ่านแค่ run.json ของแต่ละสินค้า ไม่แตะไฟล์ดิบ — หน้ารายการจะได้ไม่ช้าลง
     เมื่อสินค้าสะสมมากขึ้น
     """
-    base = Path(root) / RUNS_DIR
-    if not base.is_dir():
-        return []
     runs: list[dict] = []
-    for folder in base.iterdir():
-        if not folder.is_dir():
+    for name in ACTIVE_DIRS:
+        base = Path(root) / name
+        if not base.is_dir():
             continue
-        run = _read_json(folder / RUN_FILE)
-        if not run:
-            continue
-        run["folder"] = str(folder)
-        runs.append(run)
+        for folder in base.iterdir():
+            if not folder.is_dir():
+                continue
+            run = _read_json(folder / RUN_FILE)
+            if not run:
+                continue
+            run["folder"] = str(folder)
+            runs.append(run)
     runs.sort(key=lambda r: r.get("storyboard_at") or r.get("product_at") or "", reverse=True)
     return runs
 
@@ -919,15 +1056,11 @@ def list_done(root: Path) -> list[dict]:
 def load_run(root: Path, item_id: str) -> dict:
     """งานหนึ่งชิ้นพร้อมของดิบ — ใช้ตอนเปิดดูรายละเอียด
 
-    หาในโฟลเดอร์หลักก่อน ไม่เจอค่อยหาในโฟลเดอร์ที่ติ๊กว่าทำแล้ว — เพื่อให้ทุกอย่าง
-    ที่เปิดงานด้วยรหัสสินค้า (ส่งคลิปซ้ำ · ทำแฮชแท็ก · ดูรายละเอียด) ใช้กับงานที่
-    เก็บไปแล้วได้ด้วย โดยไม่ต้องไล่แก้ทีละจุด — รหัสสินค้าไม่ซ้ำกันจึงไม่กำกวม
+    **ไล่หาทุกโฟลเดอร์** (`ALL_DIRS`) — เพื่อให้ทุกอย่างที่เปิดงานด้วยรหัสสินค้า
+    (ส่งคลิปซ้ำ · ทำแฮชแท็ก · ดูรายละเอียด) ใช้ได้กับงานที่ย้ายไปโฟลเดอร์ไหนแล้ว
+    ก็ตาม โดยไม่ต้องไล่แก้ทีละจุด — รหัสสินค้าไม่ซ้ำกันจึงไม่กำกวม
     """
-    folder = run_dir(root, item_id)
-    if not (folder / RUN_FILE).is_file():
-        moved = done_dir(root, item_id)
-        if (moved / RUN_FILE).is_file():
-            folder = moved
+    folder = target_dir(root, item_id)
     run = _read_json(folder / RUN_FILE)
     if not run:
         return {}

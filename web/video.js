@@ -872,10 +872,14 @@ function paintBoard() {
     button.addEventListener("click", () => {
       boardPick = bucket.key;
       try { localStorage.setItem(BOARD_KEY, boardPick); } catch { /* โหมดส่วนตัว */ }
-      paintBoard();
+      paintBoard();      // วาดจากของที่มีอยู่ก่อน กดแล้วต้องเปลี่ยนทันที ไม่หน่วง
       // รายการ "งานที่เก็บไว้" กรองตามหัวข้อเดียวกัน ต้องวาดใหม่ด้วย
       // ไม่งั้นกดสลับหัวข้อแล้วข้างบนเปลี่ยน ข้างล่างยังเป็นของหัวข้อเดิม
       loadStoryRuns();
+      // **แล้วดึงของสดมาทับ** — ของที่พักไว้เปลี่ยนเฉพาะตอนคนกดปุ่ม 🅿 หรือ ↩
+      // ซึ่งแปลว่าคนที่กดคือคนที่กำลังดูอยู่ ถ้าเขาพักใบหนึ่งแล้วสลับกองไปมา
+      // ควรเห็นผลทันที ไม่ใช่รอรอบดึงถัดไปแล้วนึกว่าปุ่มไม่ทำงาน
+      loadJobQueue();
     });
     return button;
   }));
@@ -923,7 +927,12 @@ function paintBoard() {
   if (picked?.parked_count) {
     rows.push(parkedHead(picked));
     // ขึ้นหัวข้อย่อยใหม่เมื่อ `fix_group` เปลี่ยน — **เดินตามลำดับที่เซิร์ฟเวอร์
-    // ส่งมาเท่านั้น ห้ามเรียงใหม่** ไม่งั้นจะไม่ตรงกับที่แชท /wait แสดง
+    // ส่งมาเท่านั้น ห้ามเรียงใหม่เอง** ไม่งั้นจะไม่ตรงกับที่แชท /wait แสดง
+    //
+    // **เคยมีฟิลด์ `groups` ที่จัดกลุ่มมาให้เสร็จ แต่เลน video ถอดออกไปแล้ว**
+    // (เพราะข้อมูลชุดเดียวส่งสองรูปแล้ววันหลังจะเพี้ยนกันเงียบๆ) ชื่อกลุ่มกับ
+    // วิธีแก้ยังมาจากเซิร์ฟเวอร์เหมือนเดิม ติดมากับแต่ละใบเป็น `fix_title`/`fix_hint`
+    // — ฝั่งนี้แค่ตัดท่อนตามที่เขาเรียงมา ไม่ได้ตั้งชื่อหรือเรียงเอง
     let mark = null;
     let bunch = [];
     const flush = () => {
@@ -931,7 +940,7 @@ function paintBoard() {
       rows.push(fixGroupHead(bunch), ...bunch.map(parkedRow));
       bunch = [];
     };
-    for (const item of picked.parked) {
+    for (const item of picked.parked || []) {
       if (item.fix_group !== mark) { flush(); mark = item.fix_group; }
       bunch.push(item);
     }

@@ -1401,12 +1401,52 @@ def _wake_for_publish(serial: str):
     `fb_screen.wake()` ยืนยันด้วยว่า**แตะจอได้จริง** ไม่ใช่แค่สั่งปลุกแล้วเชื่อ
     """
     def work() -> str:
+        notes = []
+        # ---- ปิดแอนิเมชันของ Android ก่อนเสมอ (บทเรียน 28 ส.ค. 2569) ----
+        #
+        # **นี่คือตัวที่ทำให้อ่านหน้าจอไม่ได้เลยทั้งคืน** `uiautomator dump`
+        # รอให้หน้าจอ "นิ่ง" ก่อนถึงจะอ่าน ถ้าแอนิเมชันเปิดอยู่ หน้าจอไม่เคย
+        # นิ่ง มันจึงตอบ "could not get idle state" ทุกครั้ง แล้วทุกขั้นที่
+        # ต้องอ่านจอจะล้มหมด — ตัวอ่านยอดแฮชแท็กพังทั้งชุดเพราะข้อนี้
+        #
+        # วัดผลหลังปิด: ขั้น "แตะช่องแคปชัน" เร็วขึ้นจาก **193 วินาที
+        # เหลือ 16 วินาที** และอ่านผังจอได้ทุกครั้ง
+        #
+        # ตั้งทุกครั้งไม่ต้องเช็คก่อน — คำสั่งนี้เบามากและไม่มีผลข้างเคียง
+        # ถ้าค่าเป็น 0 อยู่แล้ว
+        try:
+            for key in ("window_animation_scale", "transition_animation_scale",
+                        "animator_duration_scale"):
+                run_adb("-s", serial, "shell", "settings", "put", "global",
+                        key, "0", timeout=15)
+        except Exception as error:                             # noqa: BLE001
+            # ปิดไม่ได้ไม่ใช่เหตุให้ล้มทั้งงาน แต่ต้องดัง เพราะถ้าเปิดอยู่
+            # ขั้นที่ต้องอ่านจอจะพังทีหลังแล้วไล่หาสาเหตุยาก
+            append_log("publish", f"⚠️ ปิดแอนิเมชันมือถือไม่สำเร็จ: {error} — "
+                                  f"ขั้นที่ต้องอ่านหน้าจออาจล้ม")
+
         shell = _screen_shell(serial)
-        if fb_screen.is_awake(shell):
-            return ""                    # จอติดอยู่แล้ว ไม่ต้องรายงานให้รก
-        if not fb_screen.wake(shell, log=lambda x: append_log("publish", x)):
-            raise RuntimeError("ปลุกจอไม่ขึ้น — จออาจติดหน้าล็อกที่ต้องใส่รหัส")
-        return f"ปลุกจอ {device_book.label(serial)} แล้ว"
+        if not fb_screen.is_awake(shell):
+            if not fb_screen.wake(shell, log=lambda x: append_log("publish", x)):
+                raise RuntimeError("ปลุกจอไม่ขึ้น — จออาจติดหน้าล็อกที่ต้องใส่รหัส")
+            notes.append(f"ปลุกจอ {device_book.label(serial)} แล้ว")
+
+        # ---- กันจอดับระหว่างเดินผัง (เจ้าของสั่ง 28 ส.ค. 2569) ----------
+        #
+        # *"ให้รู้ว่าเรากำลังใช้เครื่องอยู่ ห้ามปิด"*
+        #
+        # บัตรคิวจอกันตัวหรี่จอได้ก็จริง **แต่กันได้เฉพาะตอนที่ถือบัตรอยู่**
+        # ระหว่างเดินผังทีละขั้น (`only`) บัตรถูกคืนทุกครั้งที่จบขั้น
+        # ตัวหรี่จอจึงเห็นว่าจอว่างแล้วดับจอกลางงาน — เกิดจริงคืน 27 ส.ค.
+        #
+        # `stay_on_while_plugged_in=7` = ห้ามดับจอตราบใดที่เสียบสายอยู่
+        # (มือถือที่ใช้โพสต์เสียบสายตลอดอยู่แล้ว) ปลดล็อกเมื่อจบงาน
+        try:
+            run_adb("-s", serial, "shell", "settings", "put", "global",
+                    "stay_on_while_plugged_in", "7", timeout=15)
+        except Exception as error:                             # noqa: BLE001
+            append_log("publish", f"⚠️ สั่งห้ามจอดับไม่สำเร็จ: {error}")
+        return " · ".join(notes)
     return work
 
 
@@ -1478,6 +1518,47 @@ def _clip_sender(serial: str, item_id: str, run: dict):
     return work
 
 
+def _shot_after_step(serial: str, target: str, item_id: str):
+    """เก็บภาพหน้าจอ **หลังจบทุกขั้น** (เจ้าของสั่ง 28 ส.ค. 2569)
+
+    *"ให้ทำการ capture ภาพไว้ทุกครั้งหลังทำแต่ละขั้นตอนเสร็จ"*
+
+    **ทำไมคุ้มแม้จะเปลืองที่** การโพสต์เป็นสิ่งที่ถอนไม่ได้ พอมีอะไรผิดแล้ว
+    ย้อนดูไม่ได้ว่าตอนนั้นหน้าจอเป็นยังไง จะตอบไม่ได้เลยว่าพลาดตรงไหน —
+    เจอมาแล้ว 25 ส.ค. ที่ล้มรวด 13 ใบแล้วไม่มีภาพสักใบให้ดู (กติกาข้อ 2.6.1)
+
+    เก็บผ่าน `evidence.py` ตัวเดียวกับที่ระบบใช้อยู่ — มันกลืน error เองหมด
+    ถ้าแคปไม่ได้ก็จดว่าแคปไม่ได้ **ไม่ทำให้งานโพสต์ล้มตาม**
+    """
+    import evidence                                            # noqa: PLC0415
+
+    def shot(step, ok: bool, message: str) -> None:
+        mark = "ผ่าน" if ok else "ไม่ผ่าน"
+        try:
+            xml = run_adb("-s", serial, "shell", "uiautomator", "dump",
+                          "/sdcard/step.xml", timeout=30)
+            markup = run_adb("-s", serial, "shell", "cat", "/sdcard/step.xml",
+                             timeout=30).stdout.decode("utf-8", "replace")
+        except Exception:                                      # noqa: BLE001
+            markup = ""
+        try:
+            png = run_adb("-s", serial, "exec-out", "screencap", "-p",
+                          timeout=60).stdout
+        except Exception:                                      # noqa: BLE001
+            png = b""
+        saved = evidence.capture(
+            f"{target} {step.id} {mark}", tag="publish", markup=markup,
+            note=(f"สินค้า {item_id} · เครื่อง {serial}"
+                  f"\n{step.name}\n{message}"))
+        if saved and png:
+            try:
+                Path(str(saved).replace(".txt", ".png")).write_bytes(png)
+            except Exception:                                  # noqa: BLE001
+                pass
+
+    return shot
+
+
 def _build_context(
     serial: str, target: str, item_id: str, report
 ) -> "publish_flow.RunContext":
@@ -1505,7 +1586,17 @@ def _build_context(
         # ต้องเป็นลิงก์ที่ผู้ใช้ส่งมาทาง Telegram เท่านั้น — ลิงก์ที่ระบบแปลงเอง
         # ไม่มีรหัสผู้แนะนำ โพสต์ไปก็ไม่ได้ค่าคอม
         link=(run or {}).get("affiliate_url") or "",
-        hashtags=list(plan.get("tags") or []),
+        # **อ่านสองที่ ไม่ใช่ที่เดียว** (แก้ 27 ส.ค. 2569)
+        #
+        # แฮชแท็กถูกเก็บสองแบบตามที่มาของมัน
+        #   hashtag_plan.tags  มาจากตัววางแผนแท็ก (มี 21 จาก 103 งาน)
+        #   hashtags           มาจากขั้นทำแฮชแท็กในสายคลิป (มี 27 งาน)
+        #
+        # ของเดิมอ่านแค่ `hashtag_plan.tags` ผลคืองานที่มีแท็กจากอีกทาง
+        # จะโพสต์ขึ้นโดย **ไม่มีแฮชแท็กเลยสักตัว** และไม่มีอะไรฟ้อง —
+        # ตัวเดินผังแค่บอกว่า "ไม่มีแฮชแท็กให้ใส่ ข้ามไป" แล้วเดินต่อ
+        # เจอตอนไล่เดินผังทีละขั้นกับของจริง (จอ 27P2A มีแท็ก 5 ตัวแต่ไม่ถูกพิมพ์)
+        hashtags=list(plan.get("tags") or (run or {}).get("hashtags") or []),
         log=lambda message: append_log("publish", message),
         report=report,
         # เตรียมของก่อนแตะจอขั้นแรก (ผู้ใช้สั่ง 26 ส.ค. 2026) — อยู่นอกผัง
@@ -1564,7 +1655,8 @@ async def publish_flow_run(request: Request) -> dict:
         try:
             with phone_queue.slot(serial, owner="งานโพสต์คลิป", task=what,
                                   lane="post", timeout=600.0):
-                context = _build_context(serial, target, item_id, lambda *a: None)
+                context = _build_context(serial, target, item_id,
+                                         _shot_after_step(serial, target, item_id))
                 if only:
                     number = int(only)
                     # ทดลองทีละขั้น = กำลังพิสูจน์ว่าพิกัดที่เทรนไว้ถูกจริง
@@ -1576,6 +1668,9 @@ async def publish_flow_run(request: Request) -> dict:
                         context, start_at=number, stop_after=number)
                 return publish_flow.run_flow(context)
         finally:
+            # คืนคีย์บอร์ดเดิมเสมอ แม้ผังจะล้มกลางคัน — ทิ้งไว้ที่
+            # ADBKeyboard เจ้าของหยิบมือถือขึ้นมาจะพิมพ์อะไรไม่ได้เลย
+            adb_restore_keyboard(serial)
             _publish_run_lock.release()
 
     try:
@@ -1885,6 +1980,53 @@ async def tap(request: Request) -> dict:
 ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
 
 
+# คีย์บอร์ดเดิมของแต่ละเครื่องก่อนที่เราจะสลับไป ADBKeyboard
+#
+# **ต้องคืนให้เจ้าของเครื่องเมื่อจบงานเสมอ** ADBKeyboard ไม่มีปุ่มให้คนกด
+# ถ้าทิ้งไว้ เจ้าของหยิบมือถือขึ้นมาแล้วพิมพ์อะไรไม่ได้เลย
+_ime_before: dict[str, str] = {}
+
+
+def adb_use_thai_keyboard(serial: str) -> bool:
+    """สลับไปใช้ ADBKeyboard เพื่อพิมพ์ไทย — คืน True ถ้าพร้อมพิมพ์แล้ว
+
+    **ต้องสลับให้เอง ไม่ใช่โยน error ทิ้ง** (แก้ 27 ส.ค. 2569)
+
+    ของเดิมแค่ตรวจว่าคีย์บอร์ดที่ใช้อยู่ใช่ ADBKeyboard ไหม ไม่ใช่ก็โยน
+    "ต้องติดตั้งและเปิดใช้ ADBKeyboard บนมือถือก่อน" ทั้งที่ **ติดตั้งไว้แล้ว**
+    แค่ไม่ได้เปิดใช้ — เจอตอนไล่เดินผังจริง แฮชแท็กไทยจึงพิมพ์ไม่ลงสักตัว
+    """
+    current = adb_current_ime(serial)
+    if current == ADB_KEYBOARD_IME:
+        return True
+    installed = run_adb("-s", serial, "shell", "ime", "list", "-a", "-s",
+                        timeout=15).stdout.decode("utf-8", "replace")
+    if ADB_KEYBOARD_IME not in installed:
+        return False                    # ไม่ได้ติดตั้งไว้จริงๆ ตัวเรียกจะบอกเอง
+    _ime_before.setdefault(serial, current)
+    run_adb("-s", serial, "shell", "ime", "enable", ADB_KEYBOARD_IME, timeout=15)
+    run_adb("-s", serial, "shell", "ime", "set", ADB_KEYBOARD_IME, timeout=15)
+    time.sleep(1.0)                     # ระบบต้องใช้เวลาสลับ พิมพ์ทันทีจะหลุด
+    ok = adb_current_ime(serial) == ADB_KEYBOARD_IME
+    append_log("publish", f"สลับไปใช้ ADBKeyboard เพื่อพิมพ์ไทย"
+                          + ("" if ok else " — สลับไม่สำเร็จ"))
+    return ok
+
+
+def adb_restore_keyboard(serial: str) -> None:
+    """คืนคีย์บอร์ดเดิมให้เจ้าของเครื่อง — เรียกเมื่อจบงานเสมอ"""
+    before = _ime_before.pop(serial, "")
+    if not before or before == ADB_KEYBOARD_IME:
+        return
+    try:
+        run_adb("-s", serial, "shell", "ime", "set", before, timeout=15)
+        append_log("publish", f"คืนคีย์บอร์ดเดิมให้เครื่องแล้ว ({before.split('/')[0]})")
+    except Exception as error:                                 # noqa: BLE001
+        # คืนไม่ได้ต้องดัง — เจ้าของจะพิมพ์อะไรไม่ได้เลยถ้าค้างที่ ADBKeyboard
+        append_log("publish", f"⚠️ คืนคีย์บอร์ดเดิมไม่สำเร็จ: {error} — "
+                              f"ตั้งเองที่ ตั้งค่า > ภาษาและการป้อนข้อมูล")
+
+
 def adb_current_ime(serial: str) -> str:
     result = run_adb(
         "-s", serial, "shell", "settings", "get", "secure", "default_input_method",
@@ -1969,6 +2111,8 @@ def adb_type_text(serial: str, text: str) -> None:
     """พิมพ์ข้อความลงมือถือ — ไทย/อีโมจิส่งเป็น base64 ผ่าน ADBKeyboard"""
     if not text:
         return
+    if not text.isascii() and adb_current_ime(serial) != ADB_KEYBOARD_IME:
+        adb_use_thai_keyboard(serial)      # ติดตั้งไว้แล้วแค่ยังไม่ได้เปิดใช้
     if adb_current_ime(serial) == ADB_KEYBOARD_IME:
         encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
         run_adb(

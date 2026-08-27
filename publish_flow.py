@@ -138,6 +138,9 @@ VERIFY_KINDS = {
     "app_frontmost":  "แอปนี้ขึ้นมาอยู่หน้าสุด",
     "field_has_text": "ข้อความที่พิมพ์ไปอยู่บนจอจริง",
     "tags_present":   "แฮชแท็กที่เลือกอยู่บนจอครบ",
+    "left_screen":    "ออกจากหน้าเดิมไปแล้ว (ใช้กับปุ่มโพสต์)",
+    "keyboard_open":  "คีย์บอร์ดเด้งขึ้นมาแล้ว (ใช้กับการแตะช่องพิมพ์)",
+    "toggle_moved":   "สวิตช์เปลี่ยนสถานะแล้ว",
     "none":           "ไม่ตรวจ (ใช้เมื่อขั้นนั้นไม่มีผลให้เห็น)",
 }
 
@@ -1151,6 +1154,44 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
                 return f"เห็นข้อความบนจอแล้ว ({needle[:18]}…)"
             last = "ยังไม่เห็นข้อความที่พิมพ์บนจอ"
 
+        elif kind == "left_screen":
+            # **ใช้กับปุ่มโพสต์ — ห้ามใช้ "เจอข้อความสำเร็จ"**
+            #
+            # วัดจากของจริง 28 ส.ค. 2569: กดโพสต์แล้ว Shopee **เด้งกลับ
+            # หน้าฟีดเงียบๆ ไม่ขึ้นข้อความว่าสำเร็จเลย** ตัวตรวจเดิมที่รอ
+            # คำว่า "สำเร็จ|โพสต์แล้ว|เผยแพร่" จึงตอบว่าไม่ผ่านทั้งที่คลิป
+            # ขึ้นจริงแล้ว (ยืนยันจากโปรไฟล์)
+            #
+            # **อันตรายมาก** เพราะตัวรันจะคิดว่าล้มแล้วกดโพสต์ซ้ำ
+            # = คลิปเดียวขึ้นสองรอบ ซึ่งถอนไม่ได้ ต้องไปลบเองในแอป
+            #
+            # "ออกจากหน้าเดิมแล้ว" เป็นสัญญาณที่ตรงกว่า — หน้าโพสต์จะปิด
+            # ตัวเองก็ต่อเมื่อรับงานแล้วเท่านั้น กดไม่ติดหน้าจะยังอยู่ที่เดิม
+            where = foreground(context.run_adb)
+            if step.verify_text and step.verify_text in where:
+                last = f"ยังอยู่หน้าเดิม ({where})"
+            elif not step.verify_text and context.signature() == before:
+                last = "หน้าจอยังเหมือนเดิม"
+            else:
+                return f"ออกจากหน้าเดิมแล้ว → {where or 'อ่านชื่อหน้าจอไม่ได้'}"
+
+        elif kind == "keyboard_open":
+            # แตะช่องพิมพ์ **ไม่ทำให้เปลี่ยนหน้า** ตัวตรวจ "หน้าจอเปลี่ยน"
+            # จึงตอบว่าไม่ผ่านทุกครั้งทั้งที่กดติดแล้ว (เจอจริง 27 ส.ค. 2569
+            # — ขั้นแตะช่องแคปชันเสียเวลา 193 วินาทีไปกับการลองซ้ำเปล่าๆ)
+            shown = context.run_adb("shell", "dumpsys", "input_method")
+            text = shown if isinstance(shown, str) else str(shown)
+            if "mInputShown=true" in text:
+                return "คีย์บอร์ดเด้งขึ้นแล้ว"
+            last = "คีย์บอร์ดยังไม่ขึ้น"
+
+        elif kind == "toggle_moved":
+            # สวิตช์เปิด/ปิดไม่เปลี่ยนข้อความบนจอ แต่เปลี่ยน checked=
+            # ในผังจอ — เทียบผังทั้งก้อนจึงจับได้
+            if context.signature() != before:
+                return "สวิตช์เปลี่ยนสถานะแล้ว"
+            last = "สวิตช์ยังไม่ขยับ"
+
         elif kind == "tags_present":
             wanted = [item["tag"] for item in context.tag_results if item.get("used")]
             if not wanted:
@@ -1179,15 +1220,30 @@ def _mention_count_for(xml: str, tag: str) -> tuple[int | None, str]:
     ไม่ไล่หาตัวเลขทั้งจอ ไม่งั้นจะไปหยิบยอดของแท็กแถวอื่นมาตอบ
     """
     needle = re.sub(r"\s+", "", tag).casefold()
-    anchor = None
-    for text, x1, y1, x2, y2 in iter_nodes(xml):
-        flat = re.sub(r"\s+", "", text).lstrip("#").casefold()
-        if flat == needle:
-            anchor = (x1, y1, x2, y2)
-            break
-    if anchor is None:
+    # **ต้องลองทุกตัวที่ชื่อตรง ไม่ใช่หยุดที่ตัวแรก** (แก้ 27 ส.ค. 2569)
+    #
+    # ชื่อแท็กโผล่บนจอ **สองที่พร้อมกัน** — ตัวที่เราเพิ่งพิมพ์ลงช่อง
+    # กับตัวที่อยู่ในแถวรายการแนะนำ วัดจากผังจอจริง:
+    #
+    #     #TCL                 ซ้าย 256  บน 195   ← ข้อความในช่องพิมพ์
+    #     #TCL                 ซ้าย  32  บน 516   ← แถวรายการแนะนำ
+    #     31.2ล้าน การมองเห็น  ซ้าย 480  บน 522   ← ยอด อยู่แถวเดียวกับตัวล่าง
+    #
+    # ของเดิมหยุดที่ตัวแรก (ตัวในช่องพิมพ์) แล้วหายอดในแถวนั้นไม่เจอ
+    # จึงตอบว่า "อ่านยอดไม่ได้" ทุกแท็ก แล้วโดนข้ามหมด
+    anchors = [(x1, y1, x2, y2) for text, x1, y1, x2, y2 in iter_nodes(xml)
+               if re.sub(r"\s+", "", text).lstrip("#").casefold() == needle]
+    if not anchors:
         return None, ""
+    for anchor in anchors:
+        found = _count_on_row(xml, anchor)
+        if found[0] is not None:
+            return found
+    return None, ""
 
+
+def _count_on_row(xml: str, anchor: tuple[int, int, int, int]) -> tuple[int | None, str]:
+    """หายอดที่อยู่ **แถวเดียวกัน** กับจุดยึดที่ให้มา"""
     ax1, ay1, ax2, ay2 = anchor
     center = (ay1 + ay2) / 2
     tolerance = max(24, (ay2 - ay1))
@@ -1211,94 +1267,88 @@ def _mention_count_for(xml: str, tag: str) -> tuple[int | None, str]:
 
 
 def run_hashtag_step(context: RunContext, step: Step) -> str:
-    """พิมพ์แท็กทีละตัว อ่านยอดพูดถึง เก็บเฉพาะตัวที่ผ่านเกณฑ์
+    """ใส่แฮชแท็ก — **คัดลอกทั้งชุดแล้ววางทีเดียว** (เจ้าของสั่ง 27 ส.ค. 2569)
 
-    ตัวที่ไม่ผ่านต้องลบข้อความที่พิมพ์ทิ้งก่อนพิมพ์ตัวถัดไป ไม่งั้นตัวถัดไป
-    จะไปต่อท้ายของเดิมกลายเป็นแท็กประหลาด
+    *"เอาใหม่ คัดลอกแฮชแทกมาทั้งหมด แล้ววางเลย ทีเดียว"*
+
+    **ของเดิมพิมพ์ทีละตัวแล้วอ่านยอดพูดถึงจากรายการแนะนำ** ซึ่งพังสามชั้นซ้อน
+    เมื่อไล่ทดสอบกับของจริง 27 ส.ค. 2569:
+
+        · ต้องพิมพ์ `#` นำหน้า รายการแนะนำถึงโผล่ (ของเดิมพิมพ์ชื่อเปล่า)
+        · Shopee เปลี่ยนคำเป็น "การมองเห็น" ตัวอ่านยอดจึงหาไม่เจอ
+        · ชื่อแท็กโผล่สองที่ (ในช่องพิมพ์ + ในรายการ) ระบบยึดผิดตัว
+
+    แก้ครบทั้งสามแล้วยังได้แค่ 2 จาก 5 ตัว เพราะรายการแนะนำโผล่ไม่ทันบ้าง
+    กดเลือกไม่ติดบ้าง — **การวางทีเดียวไม่ต้องพึ่งรายการแนะนำเลย** จึงไม่มี
+    ชั้นไหนให้พังอีก
+
+    ⚠️ **แลกมาด้วยการเลิกคัดตามยอดพูดถึง** แท็กทุกตัวที่เตรียมไว้จะถูกใส่หมด
+    ไม่ได้กรองว่าตัวไหนคนค้นเยอะ — ถ้าอยากกรอง ต้องไปกรองตั้งแต่ตอนคิดแท็ก
     """
     if not context.hashtags:
         return "ไม่มีแฮชแท็กให้ใส่ ข้ามไป"
 
-    context.tag_results = []
-    used = 0
-    for tag in context.hashtags:
-        if context.stop():
-            raise StepError("ถูกสั่งหยุดระหว่างใส่แฮชแท็ก")
-        clean = hashtag_lib.normalize(tag)
-        if not clean:
-            continue
-
-        context.type_text(clean)
-        # รอ suggestion โผล่ ห้าม sleep ตายตัว — เวลาโหลดไม่คงที่
-        deadline = time.time() + SUGGESTION_TIMEOUT
-        count, raw = None, ""
-        while time.time() < deadline:
-            xml = context.dump()
-            count, raw = _mention_count_for(xml, clean)
-            if count is not None:
-                break
-            time.sleep(0.5)
-
-        ok = hashtag_lib.passes(count, context.mention_min)
-        context.tag_results.append(
-            {"tag": clean, "count": count, "raw": raw, "used": ok}
-        )
-        if ok:
-            point = find_node(context.dump(), rf"#?\s*{re.escape(clean)}\b")
-            if point is None:
-                context.log(f"  #{clean} ผ่านเกณฑ์แต่กดเลือกไม่ได้ — ข้าม")
-                context.tag_results[-1]["used"] = False
-            else:
-                context.tap_at(*point)
-                used += 1
-                context.log(f"  #{clean} ยอด {count:,} — เลือกแล้ว")
-        else:
-            shown = f"{count:,}" if count is not None else "อ่านไม่ได้"
-            context.log(f"  #{clean} ยอด {shown} — ไม่ถึงเกณฑ์ ข้าม")
-            _clear_typed(context, clean)
-        context.pause(step.settle)
-
-    if used == 0:
-        raise StepError("ไม่มีแฮชแท็กตัวไหนผ่านเกณฑ์เลย")
-    return f"ใส่แฮชแท็กที่ผ่านเกณฑ์แล้ว {used} จาก {len(context.hashtags)} ตัว"
-
-
-def run_tags_step(context: RunContext, step: Step) -> str:
-    """พิมพ์แฮชแท็กที่คัดไว้แล้วลงไปตรงๆ — ไม่อ่านยอดพูดถึง ไม่กดเลือกจากรายการ
-
-    **ผู้ใช้สั่งไว้ 25 ส.ค. 2026** — "ให้เอา hash tag ที่ได้มาพิมพ์ใส่ในนี้"
-
-    ทำไมขั้นตอนของ Facebook ใช้ `type_hashtag` แบบเดิมไม่ได้:
-      ตัวคัดตามยอดพูดถึงต้องอ่าน "ยอด" ที่แอปโชว์ไว้ท้ายแถวตัวเลือก ซึ่งเป็นของ
-      Shopee **Facebook ไม่ได้โชว์ตัวเลขนั้น** พออ่านไม่ได้ `hashtag_lib.passes()`
-      ตอบว่าไม่ผ่านทุกตัวโดยตั้งใจ (อ่านยอดไม่ได้ = ไม่ผ่าน) แล้วลบที่พิมพ์ทิ้ง
-      ครบทุกตัว จบด้วย StepError "ไม่มีแฮชแท็กตัวไหนผ่านเกณฑ์เลย"
-      → คือ **โพสต์ Facebook ไม่ออกเลยสักครั้ง** และเสียเวลารอตัวละ 8 วินาทีฟรีๆ
-
-    แท็กชุดนี้ถูกคัดมาแล้วตั้งแต่ตอนสร้าง `hashtag_plan` ของสินค้า จึงไม่ต้องคัดซ้ำ
-    """
-    if not context.hashtags:
-        if step.optional:
-            return "ไม่มีแฮชแท็กให้ใส่ ข้ามไป"
-        raise StepError("ไม่มีแฮชแท็กให้ใส่ — สร้างชุดแท็กของสินค้านี้ก่อน")
-
-    tags: list[str] = []
+    tags = []
     for tag in context.hashtags:
         clean = hashtag_lib.normalize(tag)
         if clean and clean not in tags:
             tags.append(clean)
     if not tags:
-        raise StepError("แฮชแท็กที่มีอยู่ใช้ไม่ได้สักตัว (เหลือแต่อักขระที่แท็กรับไม่ได้)")
+        return "แฮชแท็กที่ให้มาใช้ไม่ได้สักตัว"
 
-    # พิมพ์รวดเดียวทั้งชุด ไม่ทีละตัว — ทีละตัวต้องรอตัวเลือกโผล่ทุกครั้ง
-    # ซึ่งที่นี่ไม่ได้ใช้ประโยชน์อะไรเลย มีแต่ทำให้ช้าและมีจังหวะให้พลาดเพิ่ม
-    context.type_text(" ".join(f"#{tag}" for tag in tags))
-    # ตัวตรวจ `tags_present` อ่านจากตรงนี้ — ต้องเติมให้ ไม่งั้นมันจะตอบว่า
-    # "ไม่มีแท็กที่ผ่านเกณฑ์ให้ตรวจ" แล้วผ่านฉลุยโดยไม่ได้ตรวจอะไรเลย
-    context.tag_results = [
-        {"tag": tag, "count": None, "raw": "", "used": True} for tag in tags
-    ]
-    return f"พิมพ์แฮชแท็กที่คัดไว้ {len(tags)} ตัว"
+    # **ล้างช่องให้เกลี้ยงก่อนวางเสมอ** (27 ส.ค. 2569)
+    #
+    # การวางเป็นการ "แทรกตรงเคอร์เซอร์" ไม่ใช่ "เขียนทับ" ถ้ามีของเก่าค้าง
+    # อยู่ในช่อง (ลองรอบก่อนแล้วล้ม · ผู้ใช้พิมพ์ค้างไว้) แท็กใหม่จะไปต่อท้าย
+    # กลายเป็นข้อความเละ — เจอจริงตอนทดสอบ ได้ "#ตอบสนองไวอมพิวเตอร์#ภาพสวยคมชัด"
+    _clear_field(context)
+
+    # เว้นวรรคระหว่างแท็ก — ติดกันแอปจะอ่านเป็นแท็กเดียวยาวๆ
+    text = " ".join("#" + t for t in tags)
+    context.tag_results = [{"tag": t, "count": None, "raw": "", "used": True}
+                           for t in tags]
+    _put_tag(context, text)
+    context.pause(step.settle)
+    context.log(f"  วางแฮชแท็กทีเดียว {len(tags)} ตัว: {text}")
+    return f"วางแฮชแท็กแล้ว {len(tags)} ตัว"
+
+
+def _clear_field(context: RunContext) -> None:
+    """ล้างข้อความในช่องที่กำลังโฟกัสให้เกลี้ยง
+
+    เลือกทั้งหมดแล้วลบทีเดียว (Ctrl+A → Del) ถ้าเครื่องไม่รองรับก็ถอยไปกดลบรัวๆ
+    เพดาน 200 ครั้งพอสำหรับช่องที่จำกัด 150 ตัวอักษร
+    """
+    try:
+        context.run_adb("shell", "input", "keycombination", "113", "29")
+        context.run_adb("shell", "input", "keyevent", "67")
+        return
+    except Exception:                                          # noqa: BLE001
+        pass
+    context.run_adb("shell", "input", "keyevent", *(["67"] * 60))
+
+
+def _put_tag(context: RunContext, text: str) -> None:
+    """ใส่แฮชแท็กลงช่อง — **คัดลอกมาวาง ไม่พิมพ์** (เจ้าของสั่ง 27 ส.ค. 2569)
+
+    *"เปลี่ยนใหม่ให้ copy มาทีละแฮชแทกแล้วเอามาวางเลยไม่ต้องพิมพ์"*
+
+    **ทำไมวางดีกว่าพิมพ์** การพิมพ์ผ่าน ADBKeyboard ส่งตัวอักษรเข้าไปทีละชุด
+    ซึ่งแอปมองเป็นการพิมพ์จริง แล้วรายการแนะนำจะไล่โหลดใหม่ทุกตัวอักษร
+    ส่วนการวางเป็นเหตุการณ์เดียวจบ แอปเห็นข้อความเต็มทันที
+
+    ผลพลอยได้: ไม่ต้องสลับคีย์บอร์ดไป ADBKeyboard เลยสำหรับขั้นนี้
+
+    วางไม่ได้ก็ถอยไปพิมพ์ **แต่ต้องขึ้น log ว่าถอย** ไม่ใช่เงียบ —
+    ถ้าคลิปบอร์ดใช้ไม่ได้ถาวร ต้องรู้ตั้งแต่ครั้งแรก
+    """
+    if context.set_clipboard:
+        try:
+            context.set_clipboard(text, True)
+            return
+        except Exception as error:                             # noqa: BLE001
+            context.log(f"  วางผ่านคลิปบอร์ดไม่ได้ ({error}) — ถอยไปพิมพ์แทน")
+    context.type_text(text)
 
 
 def _clear_typed(context: RunContext, text: str) -> None:
@@ -1308,6 +1358,19 @@ def _clear_typed(context: RunContext, text: str) -> None:
 
 
 # ------------------------------------------------------------------ ตัวรัน
+
+
+# ระยะจากขอบขวาถึงกึ่งกลางสวิตช์ — วัดจากของจริง (จอ 720 กว้าง สวิตช์อยู่ที่ 641)
+ROW_RIGHT_INSET = 79
+
+
+def find_row_right(xml: str, label: str, width: int) -> tuple[int, int] | None:
+    """หาป้ายชื่อ แล้วคืนจุด **ปลายขวาของแถวเดียวกัน** — ใช้กับสวิตช์เปิด/ปิด"""
+    regex = re.compile(label, re.I)
+    for text, x1, y1, x2, y2 in iter_nodes(xml):
+        if regex.search(text):
+            return (max(0, width - ROW_RIGHT_INSET), (y1 + y2) // 2)
+    return None
 
 
 def locate(
@@ -1320,9 +1383,24 @@ def locate(
     (Shopee 38% ของปุ่มบนหน้าแรกไม่มีทั้ง id ทั้ง desc ทั้ง text)
     """
     if step.find:
-        point = find_target(context.dump(), step.find)
-        if point:
-            return point, f"หาเจอจากป้าย “{step.find}”"
+        # `แถวขวา:ข้อความ` = หาป้ายก่อน แล้วแตะที่ **ปลายขวาของแถวนั้น**
+        #
+        # ใช้กับสวิตช์เปิด/ปิดที่ไม่มีป้ายอะไรเลยบนตัวมันเอง แต่มีข้อความ
+        # อธิบายอยู่ซ้ายมือในแถวเดียวกัน — แตะที่ป้ายตรงๆ ไม่ทำให้สวิตช์ขยับ
+        #
+        # **ทำไมต้องมี** (27 ส.ค. 2569) ขั้นปิด duet กับติ๊ก AI ใช้พิกัดตายตัว
+        # พอมีการ์ดสินค้าเพิ่มเข้ามา ทุกอย่างเลื่อนลง **205 จุด** พิกัดเลยพลาด
+        # ทั้งสองขั้น — เกาะป้ายแล้วเลื่อนตามได้เอง ไม่ต้องเทรนใหม่ทุกครั้ง
+        # ที่หน้าตาแอปขยับ
+        if step.find.startswith("แถวขวา:"):
+            label = step.find.split(":", 1)[1]
+            spot = find_row_right(context.dump(), label, width)
+            if spot:
+                return spot, f"ปลายขวาของแถว “{label}”"
+        else:
+            point = find_target(context.dump(), step.find)
+            if point:
+                return point, f"หาเจอจากป้าย “{step.find}”"
     trained = context.store.point_for(context.target, step.id, width, height)
     if trained:
         return trained, "พิกัดที่เทรนไว้"

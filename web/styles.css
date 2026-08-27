@@ -2193,3 +2193,34 @@ button:disabled { opacity: 0.5; }
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* ── ของที่พักไว้รอแก้ ใต้ขั้นของตัวเอง ─────────────────────────────────
+
+   ผู้ใช้สั่ง 27 ส.ค. 2569: *"ตัวรอแก้ให้ใส่ในแต่ละใต้ stage แยกกันเลย
+   ว่ารอแก้ stage ไหน"* — ของเดิมกองรวมเป็นกองที่ 7 ต้องสลับกองไปมาถึงจะเห็น
+
+   หัวเรื่องต้องหนักกว่าหัวข้อย่อยชนิดการแก้ เพราะเป็นการเปลี่ยนเรื่อง
+   จาก "งานที่ยังเดินอยู่" เป็น "งานที่หยุดรอคน" ไม่ใช่แค่แบ่งหมวดย่อย */
+.board-parked-head {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  margin: 20px 0 0;
+  padding: 10px 2px 4px;
+  border-top: 2px solid var(--line);
+  min-width: 0;
+}
+.board-parked-head b { font-size: 14px; min-width: 0; }
+.board-parked-head small {
+  flex: 1 1 100%;
+  min-width: 0;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* ใต้หัวเรื่องแล้วไม่ต้องมีเส้นคั่นซ้ำอีกชั้น — สองเส้นติดกันอ่านแล้วสับสน */
+.board-parked-head + .board-group { margin-top: 6px; border-top: 0; }
+/* เยื้องเข้าให้เห็นว่าอยู่ใต้หัวเรื่อง ไม่ใช่รายการระดับเดียวกับงานที่ยังเดิน */
+.board-parked-item { margin-left: 10px; }

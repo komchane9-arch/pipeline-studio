@@ -751,36 +751,45 @@ function boardBox() {
   return node;
 }
 
-/** หัวข้อคั่นกลุ่มในกอง "รอแก้" — ชื่อกลุ่ม · จำนวน · **วิธีแก้** · ปุ่มเอากลับทั้งกลุ่ม
+/** หัวเรื่อง "ของที่พักไว้รอแก้ในขั้นนี้" — คั่นระหว่างงานที่ยังเดินกับงานที่ถูกพัก
  *
- *  **ผู้ใช้สั่ง 27 ส.ค. 2569** — *"รอแก้แต่ละขั้นให้เก็บแยกกันนะ ทั้งในเว็บและใน
- *  telegram เพราะการแก้แต่ละอย่างไม่เหมือนกัน"*
+ *  **ผู้ใช้สั่ง 27 ส.ค. 2569** — *"ตัวรอแก้ให้ใส่ในแต่ละใต้ stage แยกกันเลย
+ *  ว่ารอแก้ stage ไหน"*
  *
- *  บนกระดานปกติ ใบที่ค้างรอตรวจรูป · รอตรวจสตอรีบอร์ด · รอตรวจบทพูด อยู่กองเดียวกัน
- *  เพราะกระดานมองจาก "ไปถึงไหนแล้ว" แต่พอจะลงมือแก้ มันคนละงานกันสิ้นเชิง
- *  (หารูปเพิ่ม · พิมพ์คอมเมนต์สั่งแก้ · แก้ข้อความเอง · สั่งเจนใหม่ที่เสียเครดิต Veo)
- *  เปิดมาเจอปนกันแล้วต้องสลับวิธีแก้ทีละใบ ช้ากว่าแก้ทีเดียวทั้งกลุ่มมาก
- *
- *  **`hint` ต้องโชว์เสมอ ไม่ใช่โชว์แค่ชื่อกลุ่ม** — ชื่อกลุ่มบอกได้แค่ว่า "ค้างตรงไหน"
- *  ส่วน `hint` คือ "ต้องทำอะไรถึงจะผ่าน" ซึ่งเป็นเหตุผลทั้งหมดที่แยกกลุ่มตั้งแต่แรก
- *
- *  ชื่อกลุ่ม/วิธีแก้/การจัดกลุ่ม **มาจากเซิร์ฟเวอร์ที่เดียว** (`clip_board.group_parked`)
- *  ที่เดียวกับที่แชท `/wait` ใช้ — ห้ามคิดชื่อกลุ่มเองฝั่งนี้ ไม่งั้นวันหนึ่ง
- *  หน้าเว็บกับแชทจะจัดกลุ่มไม่ตรงกันแล้วไม่มีใครรู้ว่าอันไหนถูก
+ *  เดิมของรอแก้ถูกกองรวมเป็นกองที่ 7 แยกออกมาต่างหาก ทำให้ต้องสลับกองไปมา
+ *  เพื่อดูว่าขั้นที่กำลังสนใจมีอะไรค้างบ้าง ตอนนี้อยู่ใต้ขั้นของตัวเองแล้ว
+ *  เห็นพร้อมกันในที่เดียว
  */
-function boardGroupHead(group) {
-  const head = el("li", { className: "board-group" });
-  head.append(
-    el("b", { className: "board-group-name",
-              textContent: `${group.title} · ${group.count} ใบ` }),
+function parkedHead(bucket) {
+  return el("li", { className: "board-parked-head" },
+    el("b", { textContent: `🅿️ รอแก้ในขั้นนี้ ${bucket.parked_count} ใบ` }),
+    el("small", { textContent: "เครื่องไม่แตะ ของที่ทำไว้ยังอยู่ครบ · ดูในแชท /wait" }),
   );
+}
+
+/** หัวข้อย่อยตามชนิดของการแก้ — ชื่อ · จำนวน · **วิธีแก้** · ปุ่มเอากลับทั้งกลุ่ม
+ *
+ *  **`fix_hint` ต้องโชว์เสมอ ไม่ใช่โชว์แค่ชื่อ** — ชื่อบอกได้แค่ "ค้างตรงไหน"
+ *  ส่วนวิธีแก้คือ "ต้องทำอะไรถึงจะผ่าน" ซึ่งเป็นเหตุผลทั้งหมดที่ผู้ใช้สั่งให้แยก
+ *  (หารูปเพิ่ม · พิมพ์คอมเมนต์สั่งแก้ · แก้ข้อความเอง · สั่งเจนใหม่ที่เสียเครดิต Veo)
+ *
+ *  **ชื่อกับวิธีแก้มาจากเซิร์ฟเวอร์ทั้งคู่** (`fix_title` · `fix_hint`) ห้ามคิดเองฝั่งนี้
+ *  และ **ห้ามเรียงใหม่** — เดินตามลำดับที่เซิร์ฟเวอร์ส่งมา แล้วขึ้นหัวข้อใหม่เมื่อ
+ *  `fix_group` เปลี่ยนเท่านั้น ไม่งั้นวันหนึ่งหน้าเว็บกับแชท `/wait` จะจัดไม่ตรงกัน
+ *  แล้วไม่มีใครรู้ว่าอันไหนถูก
+ */
+function fixGroupHead(items) {
+  const first = items[0];
+  const head = el("li", { className: "board-group" });
+  head.append(el("b", { className: "board-group-name",
+                        textContent: `${first.fix_title} · ${items.length} ใบ` }));
 
   // เอากลับทั้งกลุ่มด้วยการยิงทีละใบผ่านทางเดิม — ไม่ต้องรอที่อยู่ใหม่ฝั่งเซิร์ฟเวอร์
   // และถ้าใบไหนพลาดจะรู้ทันทีว่าใบไหน แทนที่จะล้มทั้งชุดโดยไม่รู้ว่าตกตรงไหน
-  if (group.count > 1) {
+  if (items.length > 1) {
     head.append(textBtn("↩ เอากลับทั้งกลุ่ม", "ghost board-group-back", async () => {
-      const ids = (group.jobs || []).map((job) => job.id);
-      if (!window.confirm(`เอางาน ${ids.length} ใบในกลุ่ม "${group.title}" `
+      const ids = items.map((job) => job.id);
+      if (!window.confirm(`เอางาน ${ids.length} ใบในกลุ่ม "${first.fix_title}" `
         + "กลับไปทำต่อทั้งหมด?")) return;
       let done = 0;
       const failed = [];
@@ -791,14 +800,38 @@ function boardGroupHead(group) {
       // **ต้องบอกว่าตกใบไหน** ถ้าบอกแค่ "ไม่สำเร็จ" ผู้ใช้ต้องไปไล่เปิดดูทีละใบเอง
       $("#storyNote").textContent = failed.length
         ? `เอากลับได้ ${done}/${ids.length} ใบ · ตกค้าง ${failed.length} ใบ — ${failed[0]}`
-        : `เอากลับแล้ว ${done} ใบ จากกลุ่ม ${group.title}`;
+        : `เอากลับแล้ว ${done} ใบ จากกลุ่ม ${first.fix_title}`;
       await loadJobQueue();
     }));
   }
 
   head.append(el("small", { className: "board-group-hint",
-                            textContent: group.hint || "" }));
+                            textContent: first.fix_hint || "" }));
   return head;
+}
+
+/** แถวของใบที่ถูกพักไว้ — ต้องบอก **ขั้นที่ค้างตอนถูกพัก** ไม่ใช่สถานะตอนนี้
+ *
+ *  ใบที่ล้มก่อนถูกพักจะมี `stage: "failed"` ซึ่งแปลว่า "ล้มเหลว" — ไม่ได้บอกเลยว่า
+ *  ต้องไปแก้ตรงไหน ต้องใช้ `from_label` ที่บอกว่าค้างขั้นไหนตอนถูกพัก
+ */
+function parkedRow(item) {
+  const row = el("li", { className: "story-queue-item review board-parked-item" });
+  if (item.id === openJobId) row.classList.add("active");
+  const why = (item.why || "").trim();
+  row.append(
+    el("b", { textContent: item.name || item.id }),
+    el("small", { textContent: `ค้างที่ ${item.from_label}${why ? ` · ${why}` : ""}` }),
+  );
+  const tools = el("span", { className: "story-queue-tools" });
+  tools.append(iconBtn("↩", `เอากลับเข้าขั้น ${item.from_label}`,
+    () => act(() => jobPost(`${item.id}/unpark`))));
+  row.append(tools);
+  row.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    showJob(item.id);
+  });
+  return row;
 }
 
 function paintBoard() {
@@ -856,14 +889,10 @@ function paintBoard() {
    * แล้วคนอ่านจะเข้าใจว่าต้องไปหางานพังมาเติม
    *
    * ผู้ใช้สั่ง 27 ส.ค. 2026: *"ให้ลิ้งไปที่คำสั่ง /wait ใน telegram เวลาเรียกดู"*
-   * — หน้าเว็บกับแชทต้องเห็นรายการเดียวกัน ไม่ใช่คนละชุด */
-  if (picked?.key === "fix") {
-    short.textContent = picked.count
-      ? `🅿️ พักไว้รอแก้ ${picked.count} ใบ — เครื่องไม่แตะ ของที่ทำไว้ยังอยู่ครบ · `
-        + `ดูในแชทด้วยคำสั่ง /wait (เอากลับทั้งหมด: /wait all)`
-      : "✅ ไม่มีงานพักรอแก้ · กด 🅿 ที่ใบงานเพื่อพักไว้ก่อนได้ · ดูในแชท: /wait";
-    short.hidden = false;
-  } else if (picked?.short) {
+   * — หน้าเว็บกับแชทต้องเห็นรายการเดียวกัน ไม่ใช่คนละชุด
+   *   ตอนนี้ลิงก์ไป /wait ย้ายไปอยู่ที่หัวเรื่อง "รอแก้ในขั้นนี้" ใต้แต่ละกองแทน
+   *   เพราะกองรวม "รอแก้" ถูกยกเลิกไปแล้ว (ผู้ใช้สั่งใหม่ 27 ส.ค. เย็น) */
+  if (picked?.short) {
     short.textContent = `⚠️ ขั้นนี้ค้างอยู่ ${picked.count} ใบ `
       + `— เส้นวัดคือ ${picked.target} ใบ ขาดอีก ${picked.short} · ${picked.refill || ""}`;
     short.hidden = false;
@@ -879,19 +908,34 @@ function paintBoard() {
   const draw = (jobs) => (jobs || []).map((row) =>
     jobRow(jobCards.find((j) => j.id === row.id) || row));
 
-  // **มีเฉพาะกอง "รอแก้" ที่ส่ง `groups` มา** กองอื่นวาดแบบเดิมทุกอย่าง
-  // เช็คก่อนวาดเสมอ อย่าเดาว่าทุกกองมีเหมือนกัน
-  const rows = [];
-  if (picked?.groups?.length) {
-    for (const group of picked.groups) {
-      rows.push(boardGroupHead(group), ...draw(group.jobs));
-    }
-  } else {
-    rows.push(...draw(picked?.jobs));
-  }
+  const rows = draw(picked?.jobs);
   if (!rows.length) {
     rows.push(el("li", { className: "note",
       textContent: `ไม่มีงานค้างที่ขั้น "${picked?.title || "นี้"}"` }));
+  }
+
+  // ---- ของที่พักไว้รอแก้ในขั้นนี้ ----
+  //
+  // **ไม่มีของพัก = ไม่ต้องขึ้นอะไรเลย** ไม่ต้องมีหัวข้อ ไม่ต้องมีเส้นคั่น
+  // หัวข้อเปล่าที่โผล่ทุกกองทำให้ต้องกวาดตาผ่านของที่ไม่มีอยู่จริงทุกครั้ง
+  //
+  // ทุกกองส่ง `parked` มาเสมอ (ว่างก็เป็นลิสต์เปล่า) จึงไม่ต้องเช็คว่ามีฟิลด์ไหม
+  if (picked?.parked_count) {
+    rows.push(parkedHead(picked));
+    // ขึ้นหัวข้อย่อยใหม่เมื่อ `fix_group` เปลี่ยน — **เดินตามลำดับที่เซิร์ฟเวอร์
+    // ส่งมาเท่านั้น ห้ามเรียงใหม่** ไม่งั้นจะไม่ตรงกับที่แชท /wait แสดง
+    let mark = null;
+    let bunch = [];
+    const flush = () => {
+      if (!bunch.length) return;
+      rows.push(fixGroupHead(bunch), ...bunch.map(parkedRow));
+      bunch = [];
+    };
+    for (const item of picked.parked) {
+      if (item.fix_group !== mark) { flush(); mark = item.fix_group; }
+      bunch.push(item);
+    }
+    flush();
   }
   // **โชว์เฉพาะงานของหัวข้อที่เลือกเท่านั้น** (ผู้ใช้สั่ง 26 ส.ค. 2026)
   //
@@ -939,8 +983,10 @@ export async function loadJobQueue() {
     boardData = await api(`${CLIP_API}/api/board`);
   } catch (error) {
     boardData = null;
+    // **ต้องบอกทางออกด้วย** ข้อความที่บอกแค่ว่าพังทำให้ผู้ใช้ได้แต่นั่งดู
     boardBox().replaceChildren(el("p", { className: "note",
-      textContent: `อ่านกระดานขั้นตอนไม่ได้: ${error.message}` }));
+      textContent: `โหลดกระดานไม่สำเร็จ: ${error.message}`
+        + " — กด 🔄 โหลดใหม่ หรือดูใน Telegram ด้วย /wait" }));
     list.replaceChildren(...open.map(jobRow));
     return;
   }

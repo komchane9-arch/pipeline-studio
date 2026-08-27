@@ -470,9 +470,37 @@ python file_claims.py list
 
 | สาย | ไฟล์ที่เป็นเจ้าของ |
 |---|---|
-| **post** | `fb_*.py` · `facebook_*.py` · `publish_flow.py` · `shopee_*.py` · `hashtag.py` · **`web/post.js`** |
-| **video** | `flow_*.py` · `clip_*.py` · `chatgpt_driver.py` · `gem*.py` · `tiktok_*.py` · **`web/video.js`** |
-| **main / ส่วนกลาง** | `app.py` · `studio_shared.py` · `access_control.py` · `bot_profiles.py` · `web/core.js` · `web/phone.js` · `web/boot.js` · `web/index.html` |
+| **post** | `fb_*.py` · `fbx_*.py` · `facebook_*.py` · `publish_flow.py` · `shopee_*.py` · `check_shopee.py` · `solve_captcha.py` · `mention_count.py` · `scalp_*.py` · **`web/post.js`** |
+| **video** | `flow_*.py` · `clip_*.py` · `chatgpt_driver.py` · `gem*.py` · `tiktok_*.py` · `policy_fix.py` · `thai_speech.py` · `telegram_bot.py` |
+| **main / ส่วนกลาง** | `app.py` · `studio_shared.py` · `access_control.py` · `bot_profiles.py` · `hashtag.py` · `publish_order.py` · `devices.py` · `phone_queue.py` · `phone_watch.py` · `scrcpy_control.py` · `dispatcher.py` · `file_claims.py` · `orders.py` · `heartbeat.py` · `evidence.py` · `chat_log.py` · `cost_ledger.py` · `qr_code.py` · `css_check.py` · `restart_studio.py` · `workboard.py` · **`web/*` ทุกไฟล์** |
+
+**กติกาเดาสำหรับไฟล์ที่ไม่มีชื่อในตาราง** (วัดเมื่อ 27 ส.ค. 2569: ตารางเดิมครอบคลุม
+ไฟล์ `.py` แค่ **65 จาก 98 ไฟล์ = 66%** ที่เหลือไม่มีใครเป็นเจ้าของเลย)
+
+1. **ชื่อขึ้นต้นตรงกับตระกูลไหน = ของสายนั้น** (`fb_` → post · `clip_` → video …)
+2. **`test_*.py` เป็นของสายเดียวกับไฟล์ที่มันทดสอบ** — `test_scalp.py` = post ·
+   `test_clip_drive.py` = video · `test_phone_queue.py` = ส่วนกลาง
+3. **เดาไม่ออก = ถือว่าเป็นของส่วนกลาง** ต้องประกาศก่อนแตะ
+   — เดาผิดแล้วประกาศเกินจำเป็น เสียแค่เวลาพิมพ์ ส่วนเดาผิดแล้วแก้ทับกัน เสียงาน
+
+⚠️ **ตารางนี้บอกได้แค่ "ปกติใครดูแล" ไม่ใช่ความจริง ณ วินาทีนี้** ตัวที่รู้ของจริงคือ
+`python dispatcher.py board` ซึ่งอ่านจากการจองจริง เจอตารางขัดกับกระดานเมื่อไร
+**เชื่อกระดาน** แล้วมาแก้ตารางให้ตรง
+
+**ทำไม `hashtag.py` ถึงอยู่แถวส่วนกลาง** (ย้ายมาจากแถว post เมื่อ 27 ส.ค. 2569)
+— ตรวจของจริงแล้วพบว่า **ใช้ทั้งสามสาย คนละหน้าที่**
+
+```
+สายคลิป    plan_for_run · build_candidates      แต่งแฮชแท็ก
+สายโพสต์   normalize · passes · parse_mention   พิมพ์ลงจอ + คัดตามยอดพูดถึง
+ส่วนกลาง   plan_for_run · build_candidates      ส่งให้หน้าเว็บ
+```
+
+ตอนติดป้ายว่าเป็นของ post อย่างเดียว **อีกสาย commit ไม่ได้เพราะติดงานคนอื่นค้างทั้งไฟล์**
+จนต้องผ่าไฟล์ออกเป็นสองไฟล์เพื่อให้เข้ากับตาราง — **นั่นคือตารางเริ่มไปสั่งว่าโค้ด
+ควรแบ่งยังไง ทั้งที่ตารางควรเป็นแค่คนจดว่าใครทำอะไร** ระวังอาการนี้ให้มาก
+(ส่วน `mention_count.py` ที่แยกออกมายังคุ้ม เพราะการอ่านยอดบนจอเป็นคนละเรื่องกับ
+การแต่งแฮชแท็กจริงๆ ไม่ได้แยกเพราะตารางบังคับอย่างเดียว)
 
 **หน้าเว็บแยกไฟล์แล้ว (ระยะ 2.3)** — เดิมทุกสายแก้ `web/app.js` ไฟล์เดียว 3,101 บรรทัด
 ตอนนี้เป็น 5 โมดูล ES โหลดต่อกันเป็นทอดๆ ผ่าน `web/boot.js`

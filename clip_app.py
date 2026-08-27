@@ -5222,7 +5222,8 @@ def _clip_park_run(chat_id: str, item_id: str, park: bool) -> str:
                 clip_store.load_run(DATA_DIR, item_id) or {})
             clip_store.park_run(DATA_DIR, item_id, "กดพักจากแชท", came)
             _clip_log(f"พักงานเก็บไว้ {item_id} รอแก้ (กอง {came})")
-            return "🅿️ พักไว้รอแก้แล้ว — ดูทั้งหมดที่ /wait"
+            return (f"🅿️ พักไว้รอแก้แล้ว (ค้างที่ {_stage_words(came)}) "
+                    "— ดูทั้งหมดที่ /wait")
         clip_store.unpark_run(DATA_DIR, item_id)
         _clip_log(f"เอางานเก็บไว้ {item_id} ออกจากช่องรอแก้")
         return "↩️ เอากลับเข้ารายการแล้ว"
@@ -6932,6 +6933,25 @@ async def jobs_highlight(job_id: str, request: Request) -> dict:
     return {"ok": True, "message": message}
 
 
+def _stage_words(code: str) -> str:
+    """แปลรหัสขั้น/รหัสกอง เป็นชื่อที่คนอ่านรู้เรื่อง
+
+    **ต้องแปลทุกจุดที่ข้อความไปถึงคน** สายกลางทักมา 27 ส.ค. 2569 ว่าปุ่มเอากลับ
+    ขึ้นว่า *"เอากลับเข้าขั้น shopee_video"* ซึ่งเป็นรหัสดิบ ไม่ใช่ชื่อไทย
+
+    สาเหตุ: มีรหัสสองชุดปนกัน — **ขั้นในคิว** (`image_review`) กับ **ชื่อกอง
+    บนกระดาน** (`shopee_video`) แต่ละที่แปลด้วยตารางของตัวเองแล้วไม่รู้จักอีกชุด
+    ตัวนี้ลองทั้งสองตาราง เจอไหนเอาไหน ไม่เจอค่อยคืนรหัสดิบ
+    """
+    code = str(code or "").strip()
+    if not code:
+        return ""
+    known = clip_queue.STAGE_LABEL.get(code)
+    if known:
+        return known
+    return next((t for k, t, _h in clip_board.BOARD if k == code), code)
+
+
 def _park_target(key: str) -> tuple[dict | None, str]:
     """แปลงรหัสที่หน้าเว็บส่งมาเป็นงานจริง — คืน (ใบงานในคิว, รหัสสินค้า)
 
@@ -7011,7 +7031,7 @@ async def jobs_park(job_id: str, request: Request) -> dict:
             clip_store.park_run, DATA_DIR, item_id, why, came)
     except clip_store.ClipStoreError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    label = next((t for k, t, _h in clip_board.BOARD if k == came), came)
+    label = _stage_words(came)
     _clip_log(f"พักงานเก็บไว้ {item_id} รอแก้ (กอง {came}) — {why or 'ไม่ได้บอกเหตุผล'}")
     return {"ok": True, "run": fresh, "item_id": item_id,
             "message": f"พักไว้ในช่อง 🅿️ รอแก้แล้ว (ค้างที่ {label}) "
@@ -7039,15 +7059,17 @@ async def jobs_unpark(job_id: str) -> dict:
         clip_runner.wake()      # อาจเป็นงานที่เครื่องหยิบไปทำต่อได้ทันที
         _clip_log(f"เอางาน {job['id']} กลับเข้าขั้น {came} แล้ว")
         return {"ok": True, "job": fresh, "item_id": item_id,
-                "message": f"เอากลับเข้าขั้น “{came}” แล้ว"}
+                "message": f"เอากลับเข้าขั้น “{_stage_words(came)}” แล้ว"}
 
     try:
         fresh = await asyncio.to_thread(clip_store.unpark_run, DATA_DIR, item_id)
     except clip_store.ClipStoreError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    _clip_log(f"เอางานเก็บไว้ {item_id} ออกจากช่องรอแก้แล้ว")
-    return {"ok": True, "run": fresh, "item_id": item_id,
-            "message": "เอากลับเข้ารายการแล้ว"}
+    back = _stage_words(clip_board.bucket_of_run(fresh))
+    _clip_log(f"เอางานเก็บไว้ {item_id} ออกจากช่องรอแก้แล้ว → {back}")
+    return {"ok": True, "run": fresh, "item_id": item_id, "bucket": back,
+            "message": f"เอากลับเข้า {back} แล้ว" if back
+                       else "เอากลับเข้ารายการแล้ว"}
 
 
 @app.post("/api/jobs/{job_id}/cancel")

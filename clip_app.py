@@ -5186,9 +5186,18 @@ def _clip_send_fb_card(chat_id: str, item_id: str) -> str:
                           "เปิดเครื่องในหน้าตั้งค่าก่อน"]
         else:
             lines += ["", "เลือกเครื่องที่จะโพสต์ — <b>แต่ละเครื่องคนละบัญชี</b>"]
+            import devices                                       # noqa: PLC0415
             for serial, label in phones:
-                rows.append([{"text": f"🚀 ลงเครื่อง {label}"[:60],
+                # **บอกชื่อบัญชีบนปุ่ม ไม่ใช่แค่ชื่อเครื่อง** (27 ส.ค. 2569)
+                # ชื่อเครื่องบอกไม่ได้ว่าคลิปจะขึ้นไอดีไหน ซึ่งเป็นสิ่งเดียว
+                # ที่กดผิดแล้วกู้ไม่ได้ — ชื่อบัญชีต่างหากที่ต้องเห็นก่อนกด
+                who = devices.account(serial) or ""
+                text = f"🚀 ลง {who}" if who else f"🚀 ลงเครื่อง {label}"
+                rows.append([{"text": text[:60],
                               "callback_data": f"clip:fbgo:{serial}:{item_id}"}])
+                lines.append(f"   • {escape(label)}"
+                             + (f" → บัญชี <b>{escape(who)}</b>" if who
+                                else " → ⚠️ <b>ยังไม่ได้ผูกบัญชี</b> — ไม่รู้ว่าจะขึ้นไอดีไหน"))
     rows.append([
         {"text": "🅿 รอแก้", "callback_data": f"clip:rpark::{item_id}"},
         {"text": "📄 ใบงาน", "callback_data": f"clip:open::{item_id}"},

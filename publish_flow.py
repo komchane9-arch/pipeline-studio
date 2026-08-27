@@ -140,7 +140,8 @@ VERIFY_KINDS = {
     "tags_present":   "แฮชแท็กที่เลือกอยู่บนจอครบ",
     "left_screen":    "ออกจากหน้าเดิมไปแล้ว (ใช้กับปุ่มโพสต์)",
     "keyboard_open":  "คีย์บอร์ดเด้งขึ้นมาแล้ว (ใช้กับการแตะช่องพิมพ์)",
-    "toggle_moved":   "สวิตช์เปลี่ยนสถานะแล้ว",
+    "toggle_on":      "สวิตช์ถูกเปิดแล้ว (ดูจากสีบนจอจริง)",
+    "toggle_off":     "สวิตช์ถูกปิดแล้ว (ดูจากสีบนจอจริง)",
     "none":           "ไม่ตรวจ (ใช้เมื่อขั้นนั้นไม่มีผลให้เห็น)",
 }
 
@@ -1185,12 +1186,22 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
                 return "คีย์บอร์ดเด้งขึ้นแล้ว"
             last = "คีย์บอร์ดยังไม่ขึ้น"
 
-        elif kind == "toggle_moved":
-            # สวิตช์เปิด/ปิดไม่เปลี่ยนข้อความบนจอ แต่เปลี่ยน checked=
-            # ในผังจอ — เทียบผังทั้งก้อนจึงจับได้
-            if context.signature() != before:
-                return "สวิตช์เปลี่ยนสถานะแล้ว"
-            last = "สวิตช์ยังไม่ขยับ"
+        elif kind in ("toggle_on", "toggle_off"):
+            # **ต้องดูสีจริงบนภาพ ไม่ใช่ผังจอ** สวิตช์ของ Shopee ไม่มี
+            # `checked` ในผังจอเลย เทียบลายเซ็นหน้าจอจึงไม่มีวันจับได้
+            # (ของเดิมตอบ "สวิตช์ยังไม่ขยับ" ตลอดแม้กดติดแล้ว)
+            #
+            # ตรวจ **สถานะที่ต้องการ** ไม่ใช่ "เปลี่ยนไปจากเดิมไหม" —
+            # กดสองครั้งกลับมาที่เดิมจะได้ผลถูกต้องด้วย
+            label = (step.find or "").split(":", 1)[-1]
+            found = find_row_toggle(context, label, context.screen[0])
+            if found is None:
+                last = "หาสวิตช์บนจอไม่เจอ"
+            else:
+                want_on = kind == "toggle_on"
+                if found[2] == want_on:
+                    return f"สวิตช์{'เปิด' if want_on else 'ปิด'}แล้ว"
+                last = f"สวิตช์ยัง{'ปิด' if want_on else 'เปิด'}อยู่"
 
         elif kind == "tags_present":
             wanted = [item["tag"] for item in context.tag_results if item.get("used")]
@@ -1362,15 +1373,64 @@ def _clear_typed(context: RunContext, text: str) -> None:
 
 # ระยะจากขอบขวาถึงกึ่งกลางสวิตช์ — วัดจากของจริง (จอ 720 กว้าง สวิตช์อยู่ที่ 641)
 ROW_RIGHT_INSET = 79
+# สีพื้นหลังของหน้า — ใช้แยกว่าตรงไหนคือตัวสวิตช์ ตรงไหนคือที่ว่าง
+PAGE_BG = (255, 255, 255)
+# สีของสวิตช์ตอนปิด (เทาอ่อน) วัดจากของจริง 28 ส.ค. 2569
+SWITCH_OFF = (224, 224, 224)
+COLOR_SLACK = 12                # ยอมให้เพี้ยนได้เท่านี้ต่อช่องสี
 
 
-def find_row_right(xml: str, label: str, width: int) -> tuple[int, int] | None:
-    """หาป้ายชื่อ แล้วคืนจุด **ปลายขวาของแถวเดียวกัน** — ใช้กับสวิตช์เปิด/ปิด"""
+def _near(a, b, slack: int = COLOR_SLACK) -> bool:
+    return all(abs(int(x) - int(y)) <= slack for x, y in zip(a, b))
+
+
+def screen_pixels(context: "RunContext"):
+    """ภาพหน้าจอตอนนี้ในรูปที่อ่านสีทีละจุดได้ — คืน None ถ้าอ่านไม่ได้"""
+    try:
+        import io                                              # noqa: PLC0415
+        from PIL import Image                                  # noqa: PLC0415
+        raw_png = context.run_adb("exec-out", "screencap", "-p")
+        return Image.open(io.BytesIO(raw_png)).convert("RGB")
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def find_row_toggle(context: "RunContext", label: str, width: int):
+    """หาสวิตช์เปิด/ปิดของแถวที่มีป้ายนี้ — คืน (x, y, เปิดอยู่ไหม)
+
+    **หาจากสีบนภาพจริง ไม่ใช่จากผังจอ** เพราะสวิตช์ของ Shopee
+    ไม่มี `checkable` ในผังจอเลยสักตัว (ยืนยัน 28 ส.ค. 2569 — ไล่ทั้งผัง
+    ได้ 0 รายการ) ผังจอจึงบอกไม่ได้ทั้งว่าสวิตช์อยู่ตรงไหนและเปิดอยู่ไหม
+
+    **ทำไมเอาแค่กึ่งกลางป้ายไม่พอ** ป้ายอยู่บรรทัดบน ส่วนสวิตช์วางกึ่งกลาง
+    ของทั้งรายการ (ป้าย + คำอธิบายใต้ป้าย) วัดจริง: ป้ายกึ่งกลางที่ y=846
+    แต่ตัวสวิตช์อยู่ y 845–885 กึ่งกลางจริงคือ 865 — แตะที่ 846 คือ
+    **ขอบบนสุดพอดี** พอบวกการสุ่มเยื้องนิดเดียวก็หลุดออกนอกปุ่ม
+    ซึ่งเป็นเหตุที่ขั้นปิด duet กดไม่ติดทั้งที่พิกัดดู "ใกล้เคียง"
+    """
     regex = re.compile(label, re.I)
-    for text, x1, y1, x2, y2 in iter_nodes(xml):
+    top = None
+    for text, _x1, y1, _x2, _y2 in iter_nodes(context.dump()):
         if regex.search(text):
-            return (max(0, width - ROW_RIGHT_INSET), (y1 + y2) // 2)
-    return None
+            top = y1
+            break
+    if top is None:
+        return None
+    image = screen_pixels(context)
+    if image is None:
+        return None
+    x = max(0, width - ROW_RIGHT_INSET)
+    hits = []
+    for y in range(max(0, top - 20), min(image.size[1], top + 180)):
+        if not _near(image.getpixel((x, y)), PAGE_BG):
+            hits.append(y)
+        elif hits:
+            break                   # เจอครบหนึ่งก้อนแล้ว พอ
+    if not hits:
+        return None
+    middle = (hits[0] + hits[-1]) // 2
+    on = not _near(image.getpixel((x, middle)), SWITCH_OFF)
+    return (x, middle, on)
 
 
 def locate(
@@ -1394,9 +1454,11 @@ def locate(
         # ที่หน้าตาแอปขยับ
         if step.find.startswith("แถวขวา:"):
             label = step.find.split(":", 1)[1]
-            spot = find_row_right(context.dump(), label, width)
-            if spot:
-                return spot, f"ปลายขวาของแถว “{label}”"
+            found = find_row_toggle(context, label, width)
+            if found:
+                x, y, on = found
+                return (x, y), (f"สวิตช์ของแถว “{label}” "
+                                f"(ตอนนี้{'เปิด' if on else 'ปิด'}อยู่)")
         else:
             point = find_target(context.dump(), step.find)
             if point:

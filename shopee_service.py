@@ -34,8 +34,28 @@ def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
         # ของเดิมโหลดรูปหลังปิดเบราว์เซอร์ จึงต้องใช้ตัวโหลดของ Python ซึ่งจาก
         # ฝั่ง Shopee เห็นเป็นคนละโปรแกรมยิงมาจากที่อยู่เดียวกัน 129 ครั้งใน
         # 10 นาที — ร่องรอยที่หนักที่สุดในบรรดาที่วิเคราะห์เจอ
-        image_root = shared.DATA_DIR / "shopee_products"
-        data = shopee_scrape.scrape(link, open_browser, log=say,
+        # ---- หาที่เก็บของสินค้าชิ้นนี้ **ก่อน** เริ่มดึง ------------------
+        #
+        # **ห้ามต่อพาธ `shopee_products` ตรงๆ** (แก้ 27 ส.ค. 2569)
+        #
+        # ของเดิมสร้างโฟลเดอร์ที่ `shopee_products/` เสมอ ไม่ถามว่าสินค้าชิ้นนี้
+        # มีของเก่าอยู่ไหน พอส่งลิงก์เดิมเข้ามาซ้ำหลังทำคลิปเสร็จแล้ว
+        # จะได้ **สองชุดต่อสินค้าหนึ่งชิ้น** — ชุดใหม่มีแต่รูป ส่วนชุดเก่าที่มี
+        # คลิป (จ่ายเครดิต Veo ไปแล้ว) หายจากทุกรายการเงียบๆ เพราะตัวค้นเจอ
+        # ชุดใหม่ที่ว่างกว่าก่อน — เจอของจริง 4 คู่ ตอนย้ายที่เก็บ
+        #
+        # `clip_store.target_dir()` รู้จักโฟลเดอร์ทั้ง 9 อัน (clips/ · clipsfb/
+        # · waitclips/ …) เจอของเก่าที่ไหนก็เขียนทับที่นั่น ไม่เจอค่อยสร้างใหม่
+        #
+        # คลี่ลิงก์เองตรงนี้แล้วส่ง **ลิงก์เต็ม** ให้ `scrape` ไปเลย
+        # `resolve_link` ไม่ยิงซ้ำถ้าอ่านรหัสจากลิงก์ได้อยู่แล้ว = ไม่เสียคำขอเพิ่ม
+        import clip_store                                       # noqa: PLC0415
+        full_url = shopee_scrape.resolve_link(link)
+        _shop_id, item_id = shopee_scrape.parse_ids(full_url)
+        image_root = clip_store.target_dir(shared.DATA_DIR, item_id).parent
+        if image_root.name != "shopee_products":
+            say(f"สินค้านี้มีของเก่าอยู่แล้วที่ {image_root.name}/ — เขียนต่อที่เดิม")
+        data = shopee_scrape.scrape(full_url, open_browser, log=say,
                                     image_root=image_root, want_all=want_all)
         api_key = load_gemini_api_key()
         candidates = data["images"] if want_all else data["selected"]

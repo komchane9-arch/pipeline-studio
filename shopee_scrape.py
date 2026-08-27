@@ -127,10 +127,26 @@ class ShopeeNeedsLogin(ShopeeError):
 
 
 def resolve_link(link: str) -> str:
-    """คลี่ลิงก์สั้น s.shopee.co.th ให้เป็นลิงก์สินค้าเต็ม"""
+    """คลี่ลิงก์สั้น s.shopee.co.th ให้เป็นลิงก์สินค้าเต็ม
+
+    **ลิงก์ที่อ่านรหัสได้อยู่แล้วไม่ต้องยิงถามใหม่** (27 ส.ค. 2569)
+
+    ของเดิมยิงคำขอไป Shopee ทุกครั้งแม้ลิงก์จะเต็มอยู่แล้ว ซึ่ง
+    **นับเป็นคำขอสะสมเหมือนกัน** — และยอดสะสมคือตัวที่ทำให้โดนบล็อก
+    ไม่ใช่ความถี่ต่อใบ (วัดจริง: 158 คำขอ/11 นาที แล้วโดน)
+
+    ยังยิงอยู่ในสองกรณี — ลิงก์สั้น `s.shopee.co.th` (ไม่คลี่ก็ไม่รู้รหัส)
+    และลิงก์เต็มที่อ่านรหัสไม่ออก (หน้าร้าน · หน้าค้นหา · ลิงก์แปลกๆ)
+    """
     clean = link.strip()
     if not PRODUCT_URL_RE.match(clean) and not SHORT_LINK_RE.match(clean):
         raise ShopeeError("ไม่ใช่ลิงก์ Shopee")
+    if not SHORT_LINK_RE.match(clean):
+        try:
+            parse_ids(clean)
+            return clean          # อ่านรหัสได้แล้ว ไม่ต้องถาม Shopee ซ้ำ
+        except ShopeeError:
+            pass                  # อ่านไม่ออก ต้องให้ Shopee พาไปหน้าจริง
     request = urllib.request.Request(clean, headers=BROWSER_HEADERS)
     try:
         with urllib.request.urlopen(request, timeout=25) as response:

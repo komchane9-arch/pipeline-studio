@@ -3731,13 +3731,13 @@ def _clip_wait_list(chat_id: str, argument: str = "") -> None:
             picked = list(rows_all)
         elif target.isdigit() and 1 <= int(target) <= len(rows_all):
             picked = [rows_all[int(target) - 1]]
-        elif any(g["key"] == target for g in clip_board.group_parked(rows_all)):
+        elif any(g["key"] == target for g in clip_board.parked_by_bucket(rows_all)):
             # `/wait images` = เอากลับทั้งกลุ่มเดียว (ผู้ใช้สั่งแยกกลุ่ม 27 ส.ค.)
             # มีประโยชน์ตอนแก้เสร็จทั้งกอง เช่นหารูปมาเพิ่มครบแล้วทุกใบ
-            picked = next(g["jobs"] for g in clip_board.group_parked(rows_all)
+            picked = next(g["jobs"] for g in clip_board.parked_by_bucket(rows_all)
                           if g["key"] == target)
         else:
-            keys = " · ".join(g["key"] for g in clip_board.group_parked(rows_all))
+            keys = " · ".join(g["key"] for g in clip_board.parked_by_bucket(rows_all))
             _clip_say(chat_id,
                       f"ไม่มีใบที่ {escape(target)} ในช่องรอแก้\n"
                       f"ใส่ได้: เลขใบ · <code>all</code>"
@@ -3763,17 +3763,25 @@ def _clip_wait_list(chat_id: str, argument: str = "") -> None:
         return
 
     # **แยกกลุ่มตามชนิดของการแก้** (ผู้ใช้สั่ง 27 ส.ค. 2026)
-    # ใช้ตัวจัดกลุ่มตัวเดียวกับหน้าเว็บ (`clip_board.group_parked`) ห้ามจัดเองซ้ำ
+    # ใช้ตัวจัดกลุ่มตัวเดียวกับหน้าเว็บ (`clip_board.parked_by_bucket`) ห้ามจัดเองซ้ำ
     # ไม่งั้นวันหนึ่งแชทกับหน้าเว็บจะบอกไม่ตรงกันแล้วไม่มีใครรู้ว่าอันไหนถูก
-    groups = clip_board.group_parked(rows_all)
-    lines = [f"🅿️ <b>พักไว้รอแก้ {len(rows_all)} ใบ</b> · {len(groups)} กลุ่ม",
+    groups = clip_board.parked_by_bucket(rows_all)
+    lines = [f"🅿️ <b>พักไว้รอแก้ {len(rows_all)} ใบ</b> · ค้างอยู่ {len(groups)} ขั้น",
              "เครื่องไม่แตะใบพวกนี้ ของที่ทำไว้แล้วยังอยู่ครบ"]
     buttons = []
     index = 0
+    last_fix = ""
     for group in groups:
-        lines += ["", f"━━ {group['title']} · {group['count']} ใบ ━━",
-                  f"<i>{escape(group['hint'])}</i>"]
+        lines += ["", f"━━ {group['title']} · {group['count']} ใบ ━━"]
+        last_fix = ""
         for job in group["jobs"]:
+            # หัวข้อย่อยตามชนิดการแก้ — โผล่เมื่อเปลี่ยนชนิดเท่านั้น ไม่ซ้ำทุกบรรทัด
+            came = (job.get("parked") or {}).get("from") or job.get("stage") or ""
+            gkey = clip_board.fix_group_of(came)
+            if gkey != last_fix:
+                title, hint = clip_board.fix_group_meta(gkey)
+                lines.append(f"  <b>{title}</b> — <i>{escape(hint)}</i>")
+                last_fix = gkey
             index += 1
             if index > 20:
                 continue
@@ -4909,7 +4917,7 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
     # จึงต้องดักก่อนไปหางานในคิวเหมือนกับ apvall
     if action == "unpkg":
         key = job_id                       # ตำแหน่งนี้เป็นชื่อกลุ่ม ไม่ใช่รหัสงาน
-        group = next((g for g in clip_board.group_parked(clip_jobs.parked())
+        group = next((g for g in clip_board.parked_by_bucket(clip_jobs.parked())
                       if g["key"] == key), None)
         if not group:
             return "ไม่มีกลุ่มนี้ในช่องรอแก้แล้ว — พิมพ์ /wait ดูใหม่"

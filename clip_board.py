@@ -165,6 +165,34 @@ def group_parked(rows: list[dict]) -> list[dict]:
     return out
 
 
+def parked_by_bucket(rows: list[dict]) -> list[dict]:
+    """จัดใบที่พักไว้ตาม **กองบนกระดาน** แล้วแยกย่อยตามชนิดการแก้ข้างใน
+
+    ใช้โดยฝั่งแชท (`/wait`) เพื่อให้เห็นโครงเดียวกับหน้าเว็บเป๊ะ — หน้าเว็บได้
+    ของนี้มาจาก `build()` อยู่แล้ว แต่แชทมีแค่รายการใบที่พักไว้ล้วนๆ
+
+    **ห้ามฝั่งแชทจัดกลุ่มเอง** ไม่งั้นวันหนึ่งจะบอกไม่ตรงกับหน้าเว็บแล้วไม่มีใคร
+    รู้ว่าอันไหนถูก (บทเรียนเดียวกับตอน `/clips` เลขในรายการไม่ตรงกับเลขที่พิมพ์)
+    """
+    piles: dict[str, list[dict]] = {}
+    for row in rows or []:
+        came = (row.get("parked") or {}).get("from") or row.get("stage") or ""
+        key, _why = bucket_of({"stage": came}, None)
+        piles.setdefault(key or CLIP, []).append(row)
+
+    out = []
+    for key, title, _hint in BOARD:
+        items = piles.get(key)
+        if not items:
+            continue
+        # เรียงในกองตามชนิดการแก้ ต้นน้ำก่อนปลายน้ำ — แก้ทีเดียวทั้งชนิดได้
+        order = {g: i for i, (g, _l, _h, _s) in enumerate(FIX_GROUPS)}
+        items.sort(key=lambda r: order.get(
+            fix_group_of((r.get("parked") or {}).get("from") or r.get("stage") or ""), 99))
+        out.append({"key": key, "title": title, "count": len(items), "jobs": items})
+    return out
+
+
 # อีโมจิ + ชื่อของแต่ละกอง
 #
 # **สีอยู่ฝั่งหน้าเว็บ ไม่ได้ส่งมาจากที่นี่** — สีเป็นเรื่องของการแสดงผล ถ้าส่งค่าสี
@@ -177,14 +205,12 @@ BOARD = (
     (SHOPEE, "🛍️ Shopee Video",    "อนุมัติคลิปแล้ว รอลง Shopee Video"),
     (REELS,  "💙 Facebook Reels",  "ลง Shopee แล้ว รอลง Facebook Reels"),
     (TIKTOK, "🎵 TikTok",          "ลง Facebook แล้ว รอลง TikTok"),
-    (FIX,    "🅿️ รอแก้",           "พักไว้ก่อน รอคุณกลับมาแก้ — เครื่องจะไม่แตะจนกว่าจะเอากลับ"),
 )
 
-# กองที่ **ไม่มีเส้นวัด 10** — รอแก้ยิ่งน้อยยิ่งดี ไม่ใช่ของที่ต้องมีสำรองไว้
-#
-# ถ้าใส่เส้นวัดให้ด้วย หน้าเว็บจะขึ้นว่า "ขาดอีก 10 ใบ" ซึ่งกลับหัวกลับหางกับ
-# ความจริง แล้วคนอ่านจะเข้าใจว่าต้องไปหางานพังมาเติม
-NO_TARGET = {FIX}
+# **ไม่มีกอง "รอแก้" แยกต่างหากแล้ว** (ผู้ใช้สั่งแก้ 27 ส.ค. 2026)
+# ใบที่พักไว้ไปอยู่ใต้กองของขั้นที่มันค้าง แยกถังในฟิลด์ `parked` ของกองนั้น
+# `FIX` ยังเก็บไว้เป็นรหัสของ "ชนิดการแก้" ที่ `FIX_GROUPS` ใช้ ไม่ใช่กองบนกระดาน
+NO_TARGET: set[str] = set()
 
 # ปลายทางของกองที่ 4-6 → ชื่อที่ `publish_order` ใช้
 POST_TARGET = {SHOPEE: "shopee_video", REELS: "facebook_reels", TIKTOK: "tiktok"}
@@ -196,17 +222,20 @@ def bucket_of(job: dict, run: dict | None = None) -> tuple[str, str]:
     คืนกองว่างถ้างานจบ/ล้ม/ยกเลิก หรือยังตอบไม่ได้
     """
     stage = (job or {}).get("stage") or ""
-    # **พักไว้รอแก้ = ไปกองรอแก้เสมอ ไม่ว่าค้างอยู่ขั้นไหน** (ผู้ใช้สั่ง 27 ส.ค. 2026)
+    # **ใบที่พักไว้รอแก้ อยู่ใต้กองของขั้นที่มันค้าง** (ผู้ใช้สั่งแก้ 27 ส.ค. 2026)
     #
-    # ต้องตรวจก่อนทุกข้ออื่น เพราะใบที่พักไว้ยังคงสถานะเดิมของมันไว้ครบ (ตั้งใจ
-    # ให้เป็นแบบนั้น จะได้เอากลับเข้าขั้นเดิมได้โดยไม่ต้องเดา) ถ้าตรวจทีหลัง
-    # มันจะไปโผล่ในกองเดิมด้วย = อยู่สองที่พร้อมกัน แล้วตัวเลขในวงเล็บจะเกินจริง
+    # *"ตัวรอแก้ให้ใส่ในแต่ละใต้ stage แยกกันเลย ว่ารอแก้ stage ไหน"*
+    #
+    # รอบแรกทำเป็นกองที่ 7 รวมทุกขั้นไว้ด้วยกัน **ซึ่งผิดที่** เพราะพอเปิดกองนั้น
+    # ต้องมาไล่อ่านอีกทีว่าใบไหนค้างขั้นไหน ทั้งที่ข้อมูลนั้นมีอยู่แล้ว
+    # ตอนนี้อยู่ในกองของขั้นที่ค้าง แต่ `build()` แยกออกจากงานที่เดินได้คนละถัง
+    # (ฟิลด์ `parked`) — เห็นทันทีว่าขั้นนี้มีของรอแก้กี่ใบ โดยตัวเลขงานที่เดินได้ไม่เพี้ยน
+    #
+    # ตัดสินจาก **ขั้นที่ค้างตอนถูกพัก** ไม่ใช่สถานะปัจจุบัน เพราะใบที่ล้มแล้วถูกพัก
+    # จะมีสถานะเป็น failed ซึ่งไม่ได้บอกอะไรเลยว่าต้องไปแก้ตรงไหน
     parked = (job or {}).get("parked") or {}
     if parked:
-        why = parked.get("why") or "พักไว้รอแก้"
-        came = clip_queue.STAGE_LABEL.get(parked.get("from") or stage,
-                                          parked.get("from") or stage)
-        return FIX, f"ค้างที่ขั้น “{came}” · {why}"
+        stage = parked.get("from") or stage
     if stage in LINK_STAGES:
         return LINK, clip_queue.STAGE_LABEL.get(stage, stage)
     if stage in STORY_STAGES:
@@ -263,23 +292,43 @@ def build(jobs: list[dict], load_run) -> dict:
     จะช้าโดยไม่จำเป็น
     """
     piles: dict[str, list[dict]] = {key: [] for key, _, _ in BOARD}
+    # ใบที่พักไว้รอแก้ — **คนละถังกับงานที่เดินได้ แต่อยู่ใต้กองเดียวกัน**
+    #
+    # แยกถังเพราะตัวเลขในวงเล็บบนหัวกองต้องหมายถึง "งานที่เดินได้จริง" เท่านั้น
+    # ถ้านับรวมของที่พักไว้ ตัวเลขจะบอกว่ามีของเยอะทั้งที่แตะไม่ได้สักใบ
+    parked_piles: dict[str, list[dict]] = {key: [] for key, _, _ in BOARD}
     for job in jobs or []:
         stage = job.get("stage") or ""
         run = None
-        # **ใบที่พักไว้รอแก้เข้ากองรอแก้เสมอ ไม่ต้องไปอ่านไฟล์อะไรทั้งนั้น**
+        # **ใบที่พักไว้ไม่ต้องอ่าน run.json** ขั้นที่มันค้างบอกกองได้อยู่แล้ว
         #
         # ต้องดักก่อนด่านข้างล่าง เพราะใบที่ "ล้มแล้วพักไว้รอแก้" จะโดนกรองทิ้ง
         # ตรงบรรทัด failed/cancelled — ซึ่งเป็นเคสที่ผู้ใช้อยากเห็นที่สุด
         if job.get("parked"):
-            key, why = bucket_of(job, None)
-            piles[key].append({
+            park = job.get("parked") or {}
+            came = park.get("from") or stage
+            key, _why = bucket_of(job, None)
+            if not key:
+                # ค้างที่ขั้นที่แมปกองไม่ได้ (เช่นล้มตอนโพสต์ หรือล้มก่อนได้รูป)
+                # ลงกองคลิปไว้ก่อน ดีกว่าหายเงียบจากทุกกองแล้วไม่มีใครเห็น
+                key = CLIP
+            group = fix_group_of(came)
+            title, hint = fix_group_meta(group)
+            parked_piles[key].append({
                 "id": job.get("id"),
                 "item_id": job.get("item_id") or "",
                 "name": job.get("name") or job.get("link") or "(ยังไม่รู้ชื่อสินค้า)",
                 "stage": stage,
                 "stage_label": clip_queue.STAGE_LABEL.get(stage, stage),
-                "why": why,
-                "parked": job.get("parked"),
+                # ขั้นที่ค้างตอนถูกพัก — ต่างจาก `stage` เมื่อใบนั้นล้มก่อนถูกพัก
+                "from_stage": came,
+                "from_label": clip_queue.STAGE_LABEL.get(came, came),
+                # ชนิดของการแก้ + **วิธีแก้** — หน้าเว็บเอาไปจัดกลุ่มย่อยได้ถ้าต้องการ
+                "fix_group": group,
+                "fix_title": title,
+                "fix_hint": hint,
+                "why": str(park.get("why") or "").strip(),
+                "parked": park,
                 "created_at": job.get("created_at") or "",
                 "updated_at": job.get("updated_at") or "",
             })
@@ -321,9 +370,11 @@ def build(jobs: list[dict], load_run) -> dict:
              "short": 0 if key in NO_TARGET else max(0, STOCK_TARGET - counts[key]),
              # **บอกวิธีเติมด้วย ไม่ใช่บอกแค่ว่าขาด**
              "refill": "" if key in NO_TARGET else refill_hint(key, counts),
-             # กองรอแก้แยกย่อยตามชนิดของการแก้ (ผู้ใช้สั่ง 27 ส.ค. 2026)
-             # กองอื่นไม่มี `groups` — หน้าเว็บเช็คว่ามีไหมแล้วค่อยวาด
-             **({"groups": group_parked(piles[key])} if key == FIX else {}),
+             # **ของรอแก้ของขั้นนี้ แยกถังจากงานที่เดินได้**
+             # (ผู้ใช้สั่ง 27 ส.ค. 2026: "ใส่ในแต่ละใต้ stage แยกกันเลย")
+             # ทุกกองมีฟิลด์นี้เสมอ ว่างก็เป็นลิสต์เปล่า — หน้าเว็บไม่ต้องเช็คว่ามีไหม
+             "parked": parked_piles[key],
+             "parked_count": len(parked_piles[key]),
              "jobs": piles[key]}
             for key, title, hint in BOARD
         ],

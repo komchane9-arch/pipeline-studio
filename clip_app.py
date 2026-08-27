@@ -362,7 +362,7 @@ CLIP_HELP = (
     "/cancel [เลข] — ยกเลิกงาน (ไม่ใส่เลข = ยกเลิกทั้งหมด)\n"
     "/flow on | off — เปิด/ปิดขั้นเจนคลิปใน Google Flow\n"
     "/mode รวม | แยก — เจนคลิปเดียวจบทุกฉาก หรือแยกฉากละคลิป\n"
-    "/clips — รายการงานที่เก็บไว้\n"
+    "/clips — <b>คลิปที่พร้อมลง Shopee Video</b> (เจนเสร็จแล้ว ยังไม่ได้ลง)\n"
     "/clipsfb — <b>งานที่ติ๊กว่าทำแล้ว</b> (แสดงเหมือน /clips) · <code>/clipfb &lt;เลข&gt;</code> เปิดดู\n"
     "/clip &lt;เลข&gt; — เปิดดูงานนั้น (สตอรีบอร์ด + บทพูด)\n"
     "/gen &lt;เลข&gt; — <b>เจนคลิปต่อ</b>จากสตอรีบอร์ดที่ทำไว้แล้ว\n"
@@ -3216,13 +3216,50 @@ def _clip_list_done(chat_id: str) -> None:
     _clip_render_runs(chat_id, runs, "✅ <b>งานที่ทำแล้ว</b>", "/clipfb")
 
 
+def _clips_ready(runs: list[dict] | None = None) -> list[dict]:
+    """งานที่ **มีคลิปแล้วและยังไม่ได้ลง Shopee Video** — รายการเดียวที่ `/clips` ใช้
+
+    **ต้องมีที่เดียวแล้วเรียกร่วมกัน** เพราะทั้งตอนแสดงรายการและตอนแปลง
+    `/clip <เลข>` กลับเป็นสินค้า ต้องนับจากรายการชุดเดียวกันเป๊ะ
+    ถ้ากรองแค่ฝั่งแสดงผล เลขที่พิมพ์จะไปโดนสินค้าคนละตัวโดยไม่มีอะไรฟ้อง
+    (คอมเมนต์ที่ `_clip_render_runs` เตือนเรื่องนี้ไว้แล้ว — เคยพลาดมาก่อน)
+    """
+    rows = clip_store.list_runs(DATA_DIR) if runs is None else runs
+    return [r for r in rows if clip_board.bucket_of_run(r) == clip_board.SHOPEE]
+
+
 def _clip_list_runs(chat_id: str) -> None:
-    """รายการงานที่เก็บไว้ ใหม่สุดขึ้นก่อน"""
-    runs = clip_store.list_runs(DATA_DIR)
+    """`/clips` — **เฉพาะงานที่มีคลิปแล้วและรอลง Shopee Video** (ผู้ใช้สั่ง 27 ส.ค. 2026)
+
+    *"ฟังก์ชั่น /clips เรียกมั่วเลย ในนี้จะต้องมีแค่งานที่มีคลิปแล้ว
+      แล้วรอลง shopee video เท่านั้น"*
+
+    **ของเดิมโชว์ทุกงานที่เก็บไว้ทั้งหมด** ตั้งแต่ใบที่เพิ่งดึงลิงก์มายังไม่มีรูป
+    ไปจนถึงใบที่ลงครบสามที่แล้ว ปนกันหมดในรายการเดียว พอมีงานหลายสิบใบก็หา
+    ใบที่ "พร้อมลงจริง" ไม่เจอ — ซึ่งเป็นสิ่งเดียวที่คนเปิดคำสั่งนี้อยากรู้
+
+    **ใช้ตัวแบ่งกองเดียวกับกระดานบนหน้าเว็บ** (`clip_board.bucket_of_run`)
+    ห้ามเขียนเงื่อนไขซ้ำที่นี่ ไม่งั้นวันหนึ่งแชทกับหน้าเว็บจะบอกไม่ตรงกัน
+    แล้วไม่มีใครรู้ว่าอันไหนถูก
+    """
+    everything = clip_store.list_runs(DATA_DIR)
+    runs = _clips_ready(everything)
     if not runs:
-        _clip_say(chat_id, "ยังไม่มีงานที่เก็บไว้ — ส่งลิงก์ Shopee มาได้เลย")
+        # บอกด้วยว่าที่กรองออกไปมีเท่าไร ไม่งั้น "ว่าง" จะแยกไม่ออกจาก "พัง"
+        other = len(everything)
+        _clip_say(
+            chat_id,
+            "🎬 <b>ยังไม่มีคลิปที่รอลง Shopee Video</b>\n"
+            + (f"มีงานเก็บไว้ทั้งหมด {other} ชิ้น แต่ยังไม่มีชิ้นไหนที่ "
+               "<b>เจนคลิปเสร็จแล้วและยังไม่ได้ลง Shopee</b>\n"
+               "ดูว่าแต่ละชิ้นค้างอยู่ขั้นไหนได้ที่กระดานบนหน้าเว็บ"
+               if other else "ส่งลิงก์ Shopee มาได้เลย"),
+        )
         return
-    _clip_render_runs(chat_id, runs, "🎬 <b>งานที่เก็บไว้</b>", "/clip")
+    _clip_render_runs(
+        chat_id, runs,
+        "🎬 <b>คลิปที่พร้อมลง Shopee Video</b>", "/clip",
+    )
 
 
 def _clip_render_runs(chat_id: str, runs: list[dict], title: str, cmd: str) -> None:
@@ -3274,9 +3311,15 @@ def _clip_show_run(chat_id: str, argument: str) -> None:
     runs = clip_store.list_runs(DATA_DIR)
     argument = (argument or "").strip()
     run = None
-    if argument.isdigit() and 1 <= int(argument) <= len(runs):
-        run = runs[int(argument) - 1]
-    else:
+    if argument.isdigit():
+        # **เลขต้องนับจากรายการเดียวกับที่ /clips แสดง** ไม่ใช่รายการเต็ม
+        # (แก้ 27 ส.ค. 2026 พร้อมกับตอนกรอง /clips — ไม่งั้นเลข 2 ไปโดนคนละตัว)
+        ready = _clips_ready(runs)
+        if 1 <= int(argument) <= len(ready):
+            run = ready[int(argument) - 1]
+    if run is None:
+        # หาด้วยรหัสสินค้ายัง **หาได้จากทุกงาน** ไม่ใช่แค่ที่พร้อมลง
+        # เพราะรหัสระบุตัวได้แน่นอนอยู่แล้ว ไม่มีทางกำกวมเหมือนเลขลำดับ
         run = next((r for r in runs if str(r.get("item_id")) == argument), None)
         # ไม่เจอในรายการหลัก = อาจเป็นงานที่เก็บไปแล้ว ลองหาในโฟลเดอร์ที่ทำแล้ว
         if run is None and argument:

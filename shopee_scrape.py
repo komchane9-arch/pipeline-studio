@@ -766,6 +766,7 @@ def judge_images(
         want = ""
     chain = (want,) if want else tuple(IMAGE_JUDGE_MODELS)
 
+    gemini_quota.check_budget("เลือกรูปเข้าคลิป")
     tried: list[str] = []
     for pick in chain:
         try:
@@ -897,6 +898,184 @@ ANALYSE_PROMPT = (
     "    เป็นผลลัพธ์ที่คนเห็นภาพได้ก่อนเสมอ\n\n"
     '{{"features": ["..."], "picked": [{{"text": "...", "why": "..."}}]}}'
 )
+
+
+# ============================================================================
+# ให้ Gemini คัดให้ก่อนคนตรวจ — **ดูทั้งรูปและรายละเอียดพร้อมกันในครั้งเดียว**
+# ============================================================================
+#
+# ผู้ใช้สั่ง 27 ส.ค. 2026: *"ตรงตรวจชุดรูปสั่งให้เพิ่มขั้นตอน ส่งไปให้ Gemini
+# ทั้งหมด ทั้งรูปและรายละเอียด … เพื่อให้ gemini ช่วยกรองก่อน และผมจะเข้าไป
+# approve อีกที ขั้นตอน gemini นี้ให้ทำต่อเลยหลังจากได้รูปและรายละเอียด"*
+#
+# **ทำไมของเดิมไม่พอ** เดิมแยกเป็นสองงานที่ไม่รู้จักกัน
+#
+#   judge_images()      ดู**รูปอย่างเดียว** → เลือกรูป      (ไม่รู้ว่าสินค้ามีดีอะไร)
+#   analyse_features()  อ่าน**ข้อความอย่างเดียว** → จุดเด่น  (ไม่รู้ว่ารูปมีอะไรให้ดู)
+#
+# ผลคือรูปที่เลือกกับจุดเด่นที่เขียน **ไม่เกี่ยวกันเลย** — คลิปจึงพูดถึงของที่
+# คนดูไม่เห็น และฉากที่เห็นก็ไม่มีใครพูดถึง (เจอจริงหลายใบ)
+#
+# รวมเป็นครั้งเดียวแล้ว Gemini เห็นทั้งสองอย่างพร้อมกัน จึงจับคู่ได้ว่า
+# **"จุดขายข้อนี้ ดูได้จากรูปใบนี้"** ซึ่งเป็นสิ่งเดียวที่ทำให้คลิปสั้นทำงาน
+#
+# ยังประหยัดโควตาด้วย — จาก 2 ครั้ง/สินค้า เหลือ 1 ครั้ง
+AD_CURATE_PROMPT = (
+    "ให้คิดว่าตัวเองเป็นนักสร้างวีดีโอที่เก่งที่สุดในโลก "
+    "ที่สามารถทำยอดวิวได้ 1 ล้านวิว\n\n"
+    "ให้เลือกรูปมาจำนวน 3-5 รูป เพื่อดึงจุดเด่นทั้งหมดของสินค้านี้ "
+    "และนำจุดเด่นมาอธิบายเป็นภาษาโฆษณาที่เข้าใจได้ทีละข้อตามจำนวนรูป\n\n"
+    "─────────────────────────────\n"
+    'สินค้า: "{name}"\n\n'
+    "รายละเอียดจากหน้าขาย:\n{detail}\n"
+    "─────────────────────────────\n\n"
+    "รูปที่ส่งให้มี {count} ใบ กำกับหมายเลขตามลำดับที่ส่ง\n\n"
+    "**วิธีคิด**\n"
+    "1. อ่านรายละเอียดก่อน แล้วไล่ออกมาว่าสินค้านี้มีจุดขายอะไรบ้าง\n"
+    "2. ดูรูปทุกใบ แล้วจับคู่ว่าจุดขายข้อไหน **เห็นได้จากรูปใบไหน**\n"
+    "3. เลือก 3-5 ใบที่รวมกันแล้วครอบคลุมจุดเด่นได้มากที่สุด "
+    "โดยไม่เอารูปที่เล่าเรื่องเดียวกันซ้ำ\n"
+    "4. เขียนคำโฆษณาให้รูปละ 1 ข้อ ตรงกับสิ่งที่เห็นในรูปใบนั้น\n\n"
+    "**คำโฆษณาต้องเป็นแบบนี้**\n"
+    "• พูดเป็นภาษาคนซื้อ ไม่ใช่ภาษาสเปก — บอกว่า**ได้อะไร** ไม่ใช่บอกว่ามีอะไร\n"
+    "• สั้น อ่านจบใน 1 ลมหายใจ (ไม่เกิน 18 คำ)\n"
+    "• ห้ามอ้างสิ่งที่ไม่มีในรายละเอียด — อ้างเกินจริงโดน Shopee หัก 3 คะแนน\n"
+    "• ห้ามพูดถึงยี่ห้ออื่นหรือแบรนด์ที่ไม่ใช่สินค้านี้\n\n"
+    "ตอบเป็น JSON อย่างเดียว ห้ามมีข้อความอื่น\n"
+    '{{"features": ["จุดขายทั้งหมดที่ไล่ได้"], '
+    '"picked": [{{"image": 1, "text": "คำโฆษณา", "why": "เห็นอะไรในรูปนี้"}}]}}'
+)
+
+# ขอกี่ใบ — ผู้ใช้กำหนด 3-5 ใบ
+AD_PICK_MIN, AD_PICK_MAX = 3, 5
+
+# ส่งรูปให้ดูมากสุดกี่ใบ — ผู้ใช้สั่งว่า "ส่งไปให้ Gemini **ทั้งหมด**"
+# จึงตั้งสูงกว่า `CANDIDATE_LIMIT` (12) ที่ใช้กับตัวเลือกรูปแบบเดิม
+#
+# ไม่ใช่ไม่จำกัด เพราะรูปถูกแปลงเป็นข้อความก่อนส่ง 20 ใบ ≈ 5-6 MB ต่อคำขอ
+# ซึ่งยังไหว แต่ถ้าปล่อยไม่จำกัดแล้วเจอสินค้าที่มีรูป 60 ใบ จะหมดเวลาแน่นอน
+# ใบที่เกินยังอยู่ในคลังให้ผู้ใช้เลือกเองได้อยู่ ไม่ได้หายไปไหน
+AD_CURATE_MAX = 20
+
+
+def curate_for_ad(
+    name: str, detail: str, paths: list[str], api_key: str | None,
+    log=print, model: str = "",
+) -> dict:
+    """คัดรูป + เขียนคำโฆษณาให้ในครั้งเดียว โดยดูทั้งรูปและรายละเอียดพร้อมกัน
+
+    คืน `{"indexes": [...], "highlights": [...], "why": [...], "features": [...],
+    "model": "ตัวที่ตอบจริง"}` โดย `indexes` เป็นลำดับใน `paths` (เริ่มที่ 0)
+    และ `highlights[i]` คือคำโฆษณาของ `indexes[i]` — **เรียงตรงกันเสมอ**
+
+    **ล้มแล้วโยน ไม่ถอยเงียบ** ผู้เรียกเป็นคนตัดสินว่าจะถอยไปทางไหน เพราะ
+    ทางถอยของแต่ละที่ไม่เหมือนกัน และการถอยเงียบในนี้จะทำให้ไม่มีใครรู้ว่า
+    ขั้นตอนที่ผู้ใช้สั่งให้เพิ่มนั้น **ไม่เคยทำงานเลย**
+    """
+    import base64
+
+    import httpx
+
+    if not paths:
+        raise RuntimeError("ไม่มีรูปให้ดู")
+    if not api_key:
+        raise RuntimeError("ยังไม่ได้ใส่คีย์ Gemini")
+
+    shots: list[dict] = []
+    keep: list[int] = []            # ใบที่ส่งได้จริง ชี้กลับไปที่ paths เดิม
+    for index, path in enumerate(paths[:AD_CURATE_MAX]):
+        try:
+            payload = Path(path).read_bytes()
+        except OSError as error:
+            log(f"  อ่านรูป {Path(path).name} ไม่ได้ ({error}) — ข้ามใบนี้")
+            continue
+        keep.append(index)
+        shots.append({"inline_data": {
+            "mime_type": "image/jpeg",
+            "data": base64.b64encode(payload).decode("ascii"),
+        }})
+    if not shots:
+        raise RuntimeError("เปิดไฟล์รูปไม่ได้สักใบ")
+
+    # ตัดรายละเอียดไม่ให้คำขอบวมจนหมดเวลา — หัวเรื่องอยู่ต้นข้อความอยู่แล้ว
+    body = (detail or "").strip()[:4000] or "(หน้าขายไม่มีคำบรรยาย)"
+    parts: list[dict] = [{"text": AD_CURATE_PROMPT.format(
+        name=name or "(ไม่ทราบชื่อ)", detail=body, count=len(shots))}]
+    for spot, shot in enumerate(shots, start=1):
+        parts.append({"text": f"รูปที่ {spot}"})
+        parts.append(shot)
+
+    want = str(model or "").strip()
+    if want and want not in IMAGE_HIGHLIGHT_CHOICES:
+        log(f"ไม่รู้จักโมเดล {want} — ใช้สายพานอัตโนมัติแทน")
+        want = ""
+    chain = (want,) if want else tuple(IMAGE_JUDGE_MODELS)
+
+    gemini_quota.check_budget("ให้ Gemini กรองชุดรูป")
+    tried: list[str] = []
+    for pick in chain:
+        try:
+            response = httpx.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{pick}:generateContent",
+                params={"key": api_key},
+                json={"contents": [{"parts": parts}],
+                      "generationConfig": {"responseMimeType": "application/json"}},
+                timeout=IMAGE_HIGHLIGHT_TIMEOUT,
+            )
+            gemini_quota.record(pick, ok=response.status_code == 200,
+                                response=response)
+            if response.status_code != 200:
+                raise RuntimeError(f"{pick} ตอบ {response.status_code}")
+            text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            found = re.search(r"\{.*\}", text, re.S)
+            data = json.loads(found.group(0)) if found else {}
+
+            rows = []
+            for spot, item in enumerate(data.get("picked") or []):
+                if not isinstance(item, dict):
+                    continue
+                line = str(item.get("text") or "").strip()
+                if not line:
+                    continue
+                try:
+                    shot = int(item.get("image"))
+                except (TypeError, ValueError):
+                    shot = len(shots) + spot + 1
+                # หมายเลขที่มันตอบคือลำดับ**ที่ส่งให้** ต้องแปลงกลับเป็นลำดับใน paths
+                if not 1 <= shot <= len(keep):
+                    continue
+                rows.append((shot, spot, keep[shot - 1], line,
+                             str(item.get("why") or "").strip()))
+            # เรียงตามเลขรูป ไม่ใช่ตามลำดับที่มันตอบ — ฉากในคลิปต้องไล่ตามลำดับรูป
+            rows.sort(key=lambda row: (row[0], row[1]))
+
+            indexes, highlights, why, seen = [], [], [], set()
+            for _, _, real, line, reason in rows:
+                if real in seen or line in highlights:
+                    continue       # รูปซ้ำหรือคำซ้ำ = เสียฉากไปเปล่าๆ
+                seen.add(real)
+                indexes.append(real)
+                highlights.append(line)
+                why.append(reason)
+            if len(indexes) < AD_PICK_MIN:
+                raise RuntimeError(
+                    f"{pick} เลือกมาแค่ {len(indexes)} ใบ (ขอไว้ {AD_PICK_MIN}-{AD_PICK_MAX})")
+            indexes = indexes[:AD_PICK_MAX]
+            highlights = highlights[:AD_PICK_MAX]
+            why = why[:AD_PICK_MAX]
+
+            features = [str(x).strip() for x in (data.get("features") or [])
+                        if str(x).strip()]
+            extra = "" if pick == chain[0] else f" [ตัวสำรอง {pick}]"
+            log(f"Gemini กรองให้แล้ว — เลือกรูปที่ {[i + 1 for i in indexes]} "
+                f"พร้อมคำโฆษณา {len(highlights)} ข้อ · ไล่จุดขายได้ {len(features)} ข้อ{extra}")
+            return {"indexes": indexes, "highlights": highlights, "why": why,
+                    "features": features, "model": pick}
+        except Exception as error:                           # noqa: BLE001
+            tried.append(f"{pick}: {error}")
+            log(f"  ให้ Gemini กรองด้วย {pick} ไม่สำเร็จ ({error})")
+    raise RuntimeError("Gemini กรองชุดรูปไม่สำเร็จ — " + " · ".join(tried))
 
 
 def analyse_features(name: str, detail: str, api_key: str | None, log=print) -> dict:
@@ -1192,6 +1371,7 @@ def analyse_features_from_images(
     # **จดทุกตัวที่ลอง ไม่ใช่จำแค่ตัวสุดท้าย** — ของเดิมรายงานแค่ error ตัวท้าย
     # ผู้ใช้จึงเห็นแค่ "gemini-3.7-flash ตอบ 503" ทั้งที่ตัวแรกล้มเพราะโควตาหมด
     # ซึ่งเป็นคนละเรื่องและแก้คนละแบบ (รอ vs เปลี่ยนโมเดล)
+    gemini_quota.check_budget("คิดจุดเด่นจากรูป")
     tried: list[str] = []
     for pick in chain:
         try:

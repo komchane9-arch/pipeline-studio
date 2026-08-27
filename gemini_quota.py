@@ -57,6 +57,90 @@ MODEL_JOBS = {
 }
 
 
+# ============================================================================
+# ค่าใช้จ่ายเป็นเงินบาท + เพดานต่อวัน (ผู้ใช้สั่ง 27 ส.ค. 2026)
+# ============================================================================
+#
+# *"API gemini ผมมีเติมเงินไว้อยู่นะ สามารถใช้ได้ ตั้งโชว์ไว้หน่อยว่าตอนนี้ใช้ไป
+#   กี่บาท ตั้ง limit ไว้ที่ วันละไม่เกิน 100"*
+#
+# **Google ไม่มีที่ให้ถามว่าใช้เงินไปเท่าไรแบบสดๆ** เหมือนกับที่ไม่มีที่ให้ถาม
+# โควตา ตัวเลขที่ได้จึงมาจากการ **คูณเองจากจำนวนโทเคนที่คำตอบบอกมา**
+# (`usageMetadata` ติดมากับทุกคำตอบที่สำเร็จ) แล้วคูณด้วยราคาต่อล้านโทเคน
+#
+# ⚠️ **เป็นตัวเลขประมาณการ ไม่ใช่ใบเสร็จ** — คลาดเคลื่อนได้จาก
+#   • ราคาที่ Google ปรับเปลี่ยน (ตารางข้างล่างต้องมาอัปเดตเอง)
+#   • อัตราแลกเงินที่ตรึงไว้ ไม่ได้ดึงสด
+#   • ส่วนลดแคช / โปรโมชัน ที่เราไม่รู้
+# ของจริงต้องดูที่ https://console.cloud.google.com/billing เสมอ
+#
+# ตรึงอัตราแลกไว้ **ไม่ดึงสด** เพราะถ้าดึงแล้วเน็ตล่ม ตัวนับจะพังตามไปด้วย
+# ทั้งที่มันเป็นแค่ของเสริม — และเลขที่เพี้ยนวันละไม่กี่สตางค์ไม่คุ้มกับความเสี่ยงนั้น
+USD_TO_THB = 36.5
+
+# ราคาต่อล้านโทเคน (ดอลลาร์) — [เข้า, ออก]
+#
+# **โมเดลที่ไม่มีในตารางจะไม่ถูกคิดเงิน** และจะขึ้นป้ายบอกว่ายังไม่รู้ราคา
+# ดีกว่าเดาราคาให้แล้วผู้ใช้วางแผนตามเลขที่ผิด (กติกาข้อ 2.3)
+MODEL_PRICE = {
+    "gemini-3.7-flash":              (0.30, 2.50),
+    "gemini-3.6-flash":              (0.30, 2.50),
+    "gemini-3.5-flash":              (0.30, 2.50),
+    "gemini-3-flash-preview":        (0.30, 2.50),
+    "gemini-2.5-flash":              (0.30, 2.50),
+    "gemini-3.5-flash-lite":         (0.10, 0.40),
+    "gemini-3.1-flash-lite":         (0.10, 0.40),
+    "gemini-3.1-flash-lite-preview": (0.10, 0.40),
+    "gemini-flash-lite-latest":      (0.10, 0.40),
+}
+
+# เพดานที่ผู้ใช้กำหนด — บาทต่อวัน
+DAILY_LIMIT_THB = 100.0
+
+
+class BudgetExceeded(RuntimeError):
+    """ใช้เงินครบเพดานของวันแล้ว — ห้ามยิงเพิ่ม"""
+
+
+def _cost_thb(model: str, usage: dict) -> float:
+    """คิดเงินของการยิงหนึ่งครั้งจากจำนวนโทเคนที่คำตอบบอกมา"""
+    price = MODEL_PRICE.get(str(model or "").strip())
+    if not price or not isinstance(usage, dict):
+        return 0.0
+    inp = int(usage.get("promptTokenCount") or 0)
+    out = int(usage.get("candidatesTokenCount") or 0)
+    # บางรุ่นแยกโทเคนความคิดออกมา ซึ่งคิดเงินอัตราขาออก
+    out += int(usage.get("thoughtsTokenCount") or 0)
+    usd = (inp * price[0] + out * price[1]) / 1_000_000
+    return usd * USD_TO_THB
+
+
+def spent_today() -> float:
+    """ใช้ไปกี่บาทแล้ววันนี้ (ประมาณการ)"""
+    day = _read()["days"].get(_today(), {})
+    return round(sum(float(r.get("thb", 0.0)) for r in day.values()), 4)
+
+
+def budget_left() -> float:
+    """เหลืออีกกี่บาทถึงจะชนเพดานของวัน"""
+    return max(0.0, DAILY_LIMIT_THB - spent_today())
+
+
+def check_budget(what: str = "") -> None:
+    """เรียกก่อนยิง Gemini — ชนเพดานแล้วโยน `BudgetExceeded`
+
+    **ต้องกันที่ต้นทาง ไม่ใช่แค่โชว์ตัวเลข** ถ้าโชว์อย่างเดียว วันที่มีงานเยอะ
+    ผิดปกติ (หรือมีวนซ้ำที่ไม่ตั้งใจ) เงินจะไหลออกจนกว่าจะมีคนบังเอิญมาเห็น
+    """
+    used = spent_today()
+    if used >= DAILY_LIMIT_THB:
+        raise BudgetExceeded(
+            f"ใช้ Gemini ครบเพดานวันละ {DAILY_LIMIT_THB:.0f} บาทแล้ว "
+            f"(ใช้ไป {used:.2f} บาท){' — ' + what if what else ''} "
+            f"· รอพรุ่งนี้ หรือแก้เพดานที่ gemini_quota.DAILY_LIMIT_THB"
+        )
+
+
 def _today() -> str:
     return _dt.datetime.now(_TZ).strftime("%Y-%m-%d")
 
@@ -113,6 +197,19 @@ def record(model: str, ok: bool = True, response=None) -> None:
     if not ok and response is not None:
         daily, limit, why = _quota_from_429(response)
 
+    # คิดเงินจากจำนวนโทเคนที่คำตอบบอกมา — คำตอบที่ล้มไม่มี usageMetadata
+    # จึงไม่ถูกคิดเงิน ซึ่งตรงกับความจริง (Google ไม่คิดเงินคำขอที่ปฏิเสธ)
+    thb, tok_in, tok_out = 0.0, 0, 0
+    if ok and response is not None:
+        try:
+            usage = response.json().get("usageMetadata") or {}
+            tok_in = int(usage.get("promptTokenCount") or 0)
+            tok_out = (int(usage.get("candidatesTokenCount") or 0)
+                       + int(usage.get("thoughtsTokenCount") or 0))
+            thb = _cost_thb(name, usage)
+        except Exception:                                    # noqa: BLE001
+            pass
+
     def mutate(data: dict) -> dict:
         if not isinstance(data, dict) or "days" not in data:
             data = _blank()
@@ -121,6 +218,10 @@ def record(model: str, ok: bool = True, response=None) -> None:
         row["calls"] = int(row.get("calls", 0)) + 1
         if not ok:
             row["fails"] = int(row.get("fails", 0)) + 1
+        if thb or tok_in or tok_out:
+            row["thb"] = round(float(row.get("thb", 0.0)) + thb, 6)
+            row["tok_in"] = int(row.get("tok_in", 0)) + tok_in
+            row["tok_out"] = int(row.get("tok_out", 0)) + tok_out
         if daily:
             row["dry_at"] = _now()
             if limit:
@@ -163,13 +264,29 @@ def today() -> dict:
             "dry": bool(row.get("dry_at")),
             "dry_at": row.get("dry_at", ""),
             "why": row.get("why", ""),
+            # เงินที่ใช้ไปกับโมเดลนี้วันนี้ (ประมาณการ)
+            "thb": round(float(row.get("thb", 0.0)), 4),
+            "tok_in": int(row.get("tok_in", 0)),
+            "tok_out": int(row.get("tok_out", 0)),
+            # ไม่มีราคาในตาราง = คิดเงินไม่ได้ ต้องบอกให้รู้ ไม่ใช่แสดง 0 บาท
+            "priced": name in MODEL_PRICE,
         })
     dry = [r["model"] for r in rows if r["dry"]]
+    spent = round(sum(r["thb"] for r in rows), 4)
     return {
         "date": _today(),
         "rows": rows,
         "total": sum(r["calls"] for r in rows),
         "dry": dry,
+        # ---- ค่าใช้จ่ายเป็นเงินบาท (ผู้ใช้สั่ง 27 ส.ค. 2026) ----
+        "thb": spent,
+        "limit_thb": DAILY_LIMIT_THB,
+        "left_thb": round(max(0.0, DAILY_LIMIT_THB - spent), 4),
+        "over": spent >= DAILY_LIMIT_THB,
+        "rate": USD_TO_THB,
+        "money_note": ("ประมาณการจากจำนวนโทเคนที่คำตอบบอกมา × ราคาต่อล้านโทเคน "
+                       f"(ตรึงอัตราแลกไว้ที่ {USD_TO_THB} บาท/ดอลลาร์) "
+                       "ไม่ใช่ใบเสร็จ — ของจริงดูที่หน้า Billing ของ Google"),
         # เขียนไว้ให้คนอ่านเข้าใจข้อจำกัด ไม่ใช่ให้เข้าใจผิดว่าเป็นตัวเลขทางการ
         "note": ("นับจากที่ระบบนี้ยิงเอง — Google ไม่มีที่ให้ถามว่าเหลือกี่ครั้ง "
                  "เพดานจะรู้ก็ต่อเมื่อโดนปฏิเสธเพราะหมดโควตาแล้วเท่านั้น "

@@ -2377,6 +2377,130 @@ _watching: dict[str, float] = {}
 _watching_lock = threading.Lock()
 WATCHING_GRACE_SECONDS = 12.0     # ไม่มีสัญญาณเกินเท่านี้ = เลิกดูแล้ว
 MAX_STREAM_REVIVALS = 5           # ปลุกช่องวิดีโอคืนได้กี่ครั้งก่อนยอมแพ้
+STREAM_HANDOVER_SECONDS = 3.0     # รอรุ่นก่อนออกจากลูปนานสุดเท่าไรก่อนเดินหน้า
+STREAM_SUPERSEDED_CODE = 4409     # รหัสปิดที่แปลว่า "มีคนอื่นมาดูแทนแล้ว อย่าต่อใหม่"
+STREAM_TAKEOVER_COOLDOWN = 10.0   # เปลี่ยนมือได้ถี่สุดเท่าไร (กันผลัดกันเตะออก)
+# **ช่วงตั้งท่อ** — ตั้งแต่ได้สิทธิ์จนภาพเริ่มไหลใช้เวลาจริงหลายวินาที
+# (ปลุกจอ → ถามขนาดจอ → ล้างของค้าง → เปิดช่อง scrcpy) ถ้าช่วงนี้ยังนับว่า
+# "ไม่มีใครดูอยู่" คนถัดไปจะแทรกเข้ามาได้ทันทีแล้วแย่งตัวเข้ารหัสกันเหมือนเดิม
+# วัดจริง 27 ส.ค. 2569: คนที่สองเข้ามาตอนวินาทีที่ 4 แล้ว **ได้สิทธิ์ไปทั้งที่
+# คนแรกยังตั้งท่ออยู่** — ด่านจึงเหมือนไม่มีอยู่จริง
+#
+# ตั้งเป็นเวลาหมดอายุ ไม่ใช่ธงค้าง เพื่อไม่ให้เครื่องถูกล็อกถาวรถ้าคนตั้งท่อ
+# ล้มกลางคัน (เช่น adb ค้าง) — แย่สุดคือรอ 20 วินาทีแล้วปล่อยเอง
+STREAM_SETUP_GRACE = 20.0
+
+# ---- หนึ่งเครื่อง = หนึ่งช่องวิดีโอ ----------------------------------------
+#
+# **รากเหง้าที่ไล่เจอ 27 ส.ค. 2569** มือถือมีตัวเข้ารหัสวิดีโอ **ชุดเดียว**
+# (เขียนไว้เองแล้วที่ scrcpy_control.py — "ตัวเข้ารหัสมีชุดเดียว") แต่ไม่มีด่านไหน
+# กันไม่ให้เปิดช่องที่สองต่อเครื่อง พอเปิดสองช่องมันแย่งตัวเข้ารหัสกันจนตัวหนึ่งหลุด
+#
+# ที่ทำให้กลายเป็นวนไม่จบคือ **มีสองระบบกู้คืนที่ไม่รู้จักกัน**
+#     ฝั่งเซิร์ฟเวอร์  ปลุกช่องคืนเองสูงสุด MAX_STREAM_REVIVALS ครั้ง
+#     ฝั่งหน้าเว็บ     ต่อ WebSocket ใหม่เองเมื่อท่อปิด (phone.js)
+# หลุดหนึ่งครั้งจึงได้ช่องใหม่ **สองช่อง** → แย่งกันอีก → หลุดอีก → วนไม่จบ
+#
+# วัดจริงตอน 13:57 น. — มือถือ 3 เครื่องมี forward ของ scrcpy อยู่ 5 ช่อง
+# (สองเครื่องมีเครื่องละ 2 ช่อง) และบันทึกเซิร์ฟเวอร์นับ "scrcpy พร้อม" ได้ 795 ครั้ง
+#
+# ทางแก้ที่รากคือ **ให้มีเจ้าของช่องได้ทีละคน** ใครมาใหม่ได้สิทธิ์ไป ส่วนคนเก่า
+# ถูกปิดด้วยรหัสถาวรเพื่อไม่ให้หน้าเว็บต่อกลับมาแย่งอีก (ไม่งั้นจะกลายเป็นผลัดกัน
+# เตะออกไปมาไม่จบ ซึ่งแย่กว่าเดิม)
+_stream_generation: dict[str, int] = {}   # รุ่นล่าสุดที่ได้สิทธิ์ดูจอเครื่องนั้น
+_stream_running: dict[str, int] = {}      # ตอนนี้มีลูปสตรีมวิ่งอยู่กี่ตัว
+_stream_video: dict[str, object] = {}     # ช่องวิดีโอที่รุ่นล่าสุดถืออยู่
+_stream_handover_at: dict[str, float] = {}  # เปลี่ยนมือครั้งล่าสุดเมื่อไร
+_stream_claim_at: dict[str, float] = {}   # ได้สิทธิ์ล่าสุดเมื่อไร (ใช้คุมช่วงตั้งท่อ)
+_stream_gate = threading.Lock()
+
+
+def _stream_claim(serial: str, *, force: bool = False) -> int:
+    """ขอสิทธิ์ดูจอเครื่องนี้ — คืนหมายเลขรุ่น หรือ 0 ถ้ายังไม่ถึงคิว
+
+    **แย่งจอได้เฉพาะตอนคนกดปุ่มเอง** (`force`) การต่อใหม่อัตโนมัติของหน้าเว็บ
+    ไม่มีสิทธิ์ — ไม่งั้นแท็บที่เปิดค้างทิ้งไว้จะคอยดึงจอกลับไปเรื่อยๆ ทั้งที่
+    ไม่มีคนนั่งดู แล้วคนที่กำลังใช้งานจริงจะถูกเตะออกเป็นระยะโดยไม่รู้สาเหตุ
+    วัดจริง 27 ส.ค. 2569: แท็บค้างแท็บเดียวดันให้เปิดช่องใหม่ 6.1 ครั้ง/นาที
+    (ปกติควรเปิดเฉพาะตอนคนกด = เกือบ 0)
+
+    หน้าเว็บรุ่นเก่าที่ค้างในเบราว์เซอร์ไม่รู้จักธงนี้ จึงกลายเป็นไม่มีพิษภัย
+    โดยอัตโนมัติ — ไม่ต้องไล่ปิดทีละแท็บ
+
+    **ต้องมีช่วงพักระหว่างการเปลี่ยนมือ** ไม่งั้นสองหน้าต่างที่ต่างคนต่างต่อใหม่
+    อัตโนมัติจะผลัดกันเตะกันออกด้วยความเร็วสูงสุดที่เครื่องทำได้ ซึ่ง **แย่กว่า
+    ตอนไม่มีด่านเสียอีก** — วัดจริง 27 ส.ค. 2569 ตอนใส่ด่านแต่ยังไม่มีช่วงพัก
+    เปิดช่องใหม่พุ่งเป็น 24 ครั้ง/นาที เทียบกับก่อนใส่ด่าน 1.13 ครั้ง/นาที
+    (ตัวเลขก่อนแก้จากเลน video: 12:40 น. 708 ครั้ง → 13:57 น. 795 ครั้ง)
+
+    กติกาจึงเป็น: **ไม่มีใครดูอยู่ = ให้เลย** (กรณีรีเฟรชหน้าเว็บ ซึ่งพบบ่อยสุด)
+    ส่วน **มีคนดูอยู่ = แย่งได้ แต่ห้ามถี่กว่าทุก STREAM_TAKEOVER_COOLDOWN วินาที**
+    คนที่มาไม่ทันได้รหัสปิดถาวรกลับไป จะได้ไม่ต่อวนอีก
+    """
+    now = time.time()
+    with _stream_gate:
+        # "มีคนดูอยู่" = กำลังดูจริง **หรือ** เพิ่งได้สิทธิ์ไปแล้วยังตั้งท่อไม่เสร็จ
+        busy = (_stream_running.get(serial, 0) > 0
+                or now - _stream_claim_at.get(serial, 0.0) < STREAM_SETUP_GRACE)
+        if busy and not force:
+            return 0
+        if busy and (now - _stream_handover_at.get(serial, 0.0)
+                     < STREAM_TAKEOVER_COOLDOWN):
+            return 0
+        if busy:
+            _stream_handover_at[serial] = now
+        _stream_claim_at[serial] = now
+        generation = _stream_generation.get(serial, 0) + 1
+        _stream_generation[serial] = generation
+        old = _stream_video.pop(serial, None)
+    # ปิดช่องของรุ่นก่อนทันที ไม่ต้องรอให้มันรู้ตัวเอง — ตัวเข้ารหัสจะได้ว่าง
+    # ให้รุ่นใหม่ทันที ปิดซ้ำไม่เป็นไร close() ของ scrcpy ทนการเรียกซ้ำอยู่แล้ว
+    if old is not None:
+        with contextlib.suppress(Exception):
+            old.close()
+    return generation
+
+
+def _stream_is_current(serial: str, generation: int) -> bool:
+    with _stream_gate:
+        return _stream_generation.get(serial, 0) == generation
+
+
+def _stream_enter(serial: str) -> None:
+    with _stream_gate:
+        _stream_running[serial] = _stream_running.get(serial, 0) + 1
+
+
+def _stream_leave(serial: str, generation: int = 0) -> None:
+    with _stream_gate:
+        left = _stream_running.get(serial, 0) - 1
+        if left > 0:
+            _stream_running[serial] = left
+        else:
+            _stream_running.pop(serial, None)
+        # ออกหมดแล้ว = เครื่องว่างจริง อย่าให้ "ช่วงตั้งท่อ" ค้างกั้นคนถัดไป
+        # **แต่ต้องเป็นรุ่นล่าสุดเท่านั้น** คนที่เพิ่งถูกเตะออกห้ามมาล้างของ
+        # คนที่มาแทน ไม่งั้นคนใหม่จะเสียเกราะช่วงตั้งท่อไปทั้งที่ยังตั้งไม่เสร็จ
+        if left <= 0 and _stream_generation.get(serial, 0) == generation:
+            _stream_claim_at.pop(serial, None)
+
+
+def _stream_running_count(serial: str) -> int:
+    with _stream_gate:
+        return _stream_running.get(serial, 0)
+
+
+def _stream_hold(serial: str, generation: int, video: object) -> None:
+    """จดว่าช่องนี้เป็นของรุ่นไหน — รุ่นเก่าที่โดนเตะแล้วห้ามมาจดทับ"""
+    with _stream_gate:
+        if _stream_generation.get(serial, 0) == generation:
+            _stream_video[serial] = video
+
+
+def _stream_drop(serial: str, generation: int) -> None:
+    with _stream_gate:
+        if _stream_generation.get(serial, 0) == generation:
+            _stream_video.pop(serial, None)
 
 
 def _watching_start(serial: str) -> None:
@@ -2437,7 +2561,7 @@ async def phone_queue_board() -> dict:
 
 
 @app.websocket("/ws/phone/stream")
-async def phone_stream(websocket: WebSocket, serial: str) -> None:
+async def phone_stream(websocket: WebSocket, serial: str, take: str = "") -> None:
     """สตรีมหน้าจอ H.264 หน่วงต่ำ — ฝั่งหน้าเว็บถอดด้วย WebCodecs"""
     if not _websocket_is_allowed(websocket):
         await websocket.close(code=1008, reason="เครื่องนี้ยังไม่ได้รับอนุญาต")
@@ -2454,6 +2578,22 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
         await websocket.send_json({"error": error.detail})
         await websocket.close(code=4404, reason=_close_reason(error.detail))
         return
+
+    # ---- ขอสิทธิ์ดูจอก่อนแตะอะไรทั้งนั้น ----
+    # ต้องอยู่ **ก่อน** ปลุกจอและก่อนเปิดช่องวิดีโอ ไม่งั้นสองรุ่นจะไปสั่ง
+    # `pkill -f screenrecord` ใส่กันเองระหว่างที่อีกฝั่งกำลังเปิดช่องอยู่พอดี
+    generation = _stream_claim(cleaned, force=take not in ("", "0", "false"))
+    if not generation:
+        # เพิ่งเปลี่ยนมือไปหมาดๆ — ปฏิเสธด้วยรหัสถาวรเพื่อหยุดวงจรผลัดกันเตะ
+        await websocket.close(
+            code=STREAM_SUPERSEDED_CODE,
+            reason="มีหน้าต่างอื่นกำลังดูจอเครื่องนี้อยู่")
+        return
+    # รอรุ่นก่อนออกจากลูปให้เรียบร้อย — ตัวเข้ารหัสบนมือถือมีชุดเดียว
+    # เปิดซ้อนตอนที่ตัวเก่ายังไม่ปล่อย = ได้ช่องที่เปิดไม่ขึ้นหรือภาพเสีย
+    deadline = time.time() + STREAM_HANDOVER_SECONDS
+    while _stream_running_count(cleaned) and time.time() < deadline:
+        await asyncio.sleep(0.1)
 
     # **ต้องปลุกจอก่อนสตรีม** — ตั้งแต่มีตัวดับจออัตโนมัติ ถ้าไม่ปลุก
     # `screenrecord` จะได้แต่ภาพดำ ผู้ใช้กด "เริ่มดูจอ" แล้วเห็นจอว่างเปล่า
@@ -2484,6 +2624,9 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
             video = await asyncio.to_thread(
                 scrcpy_control.open_video, ADB, cleaned, 1024, 30)
             _live_scids.setdefault(cleaned, set()).add(getattr(video, "scid", ""))
+            # จดว่าช่องนี้เป็นของรุ่นเรา — ถ้าระหว่างที่เปิดอยู่มีรุ่นใหม่มาแทน
+            # การจดจะไม่เกิดขึ้น แล้วด่านต้นลูปข้างล่างจะพาเราออกไปเองทันที
+            _stream_hold(cleaned, generation, video)
             print(f"[stream] scrcpy พร้อม {video.width}x{video.height}", flush=True)
         except scrcpy_control.ScrcpyUnavailable as error:
             # app.py ไม่มี logger — เขียนลง stdout ซึ่ง restart_studio ต่อเข้า
@@ -2496,6 +2639,7 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
     process: subprocess.Popen | None = None
     revivals = 0
     _watching_start(cleaned)
+    _stream_enter(cleaned)
     try:
         while True:
             process = None if video is not None else subprocess.Popen(
@@ -2529,6 +2673,16 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
 
             buffer = bytearray()
             while True:
+                # ---- ด่านสละสิทธิ์ ----
+                # มีหน้าต่างอื่นมาขอดูจอเครื่องนี้แล้ว = เราต้องออกทันที
+                # **ห้ามสู้กลับ** ถ้าเราต่อใหม่อีกจะกลายเป็นผลัดกันเตะออกไม่จบ
+                # ปิดด้วยรหัสถาวรเพื่อบอกหน้าเว็บว่า "อย่าต่อกลับมา"
+                if not _stream_is_current(cleaned, generation):
+                    with contextlib.suppress(Exception):
+                        await websocket.close(
+                            code=STREAM_SUPERSEDED_CODE,
+                            reason="มีหน้าต่างอื่นเปิดดูจอเครื่องนี้แทนแล้ว")
+                    return
                 read_task = asyncio.create_task(asyncio.to_thread(read_available))
                 done, _ = await asyncio.wait(
                     {read_task, receive_task}, return_when=asyncio.FIRST_COMPLETED
@@ -2597,6 +2751,14 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
                 # **ห้ามเงียบ** ของเดิม break ทิ้งเฉยๆ หน้าเว็บเลยตกไปใช้ภาพนิ่ง
                 # ถาวรโดยไม่มีใครรู้ว่าเพราะอะไร (ภาพนิ่งช้ากว่าท่อวิดีโอ ~9 เท่า:
                 # วัดจริง 1,500 ms/ภาพ เทียบกับ 169 ms) — ต้องบอกให้รู้เสมอ
+                # ช่องปิดเพราะ "มีคนอื่นมาดูแทน" ไม่ใช่ความผิดพลาด — ห้ามปลุกคืน
+                # และห้ามเขียนบันทึกให้รก (นี่คือบรรทัดที่เคยท่วม log 795 ครั้ง)
+                if not _stream_is_current(cleaned, generation):
+                    with contextlib.suppress(Exception):
+                        await websocket.close(
+                            code=STREAM_SUPERSEDED_CODE,
+                            reason="มีหน้าต่างอื่นเปิดดูจอเครื่องนี้แทนแล้ว")
+                    return
                 print(f"[stream] ช่องวิดีโอของ {cleaned} ปิดตัว "
                       f"(ปลุกคืนมาแล้ว {revivals} ครั้ง)", flush=True)
                 if revivals >= MAX_STREAM_REVIVALS:
@@ -2611,6 +2773,7 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
                     video = await asyncio.to_thread(
                         scrcpy_control.open_video, ADB, cleaned, 1024, 30)
                     _live_scids.setdefault(cleaned, set()).add(getattr(video, "scid", ""))
+                    _stream_hold(cleaned, generation, video)
                     print(f"[stream] ปลุกช่องวิดีโอคืนแล้ว (ครั้งที่ {revivals}) "
                           f"{video.width}x{video.height}", flush=True)
                 except scrcpy_control.ScrcpyUnavailable as error:
@@ -2621,6 +2784,10 @@ async def phone_stream(websocket: WebSocket, serial: str) -> None:
         return
     finally:
         _watching_stop(cleaned)
+        # คืนสิทธิ์เสมอ ไม่ว่าออกทางไหน — ถ้าลืมคืน คนถัดไปจะต้องรอครบ
+        # STREAM_HANDOVER_SECONDS ทุกครั้งโดยไม่มีใครรู้ว่าเพราะอะไร
+        _stream_drop(cleaned, generation)
+        _stream_leave(cleaned, generation)
         receive_task.cancel()
         if video is not None:
             _live_scids.get(cleaned, set()).discard(getattr(video, "scid", ""))

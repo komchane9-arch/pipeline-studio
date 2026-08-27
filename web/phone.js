@@ -31,7 +31,11 @@ const supportsWebCodecs = typeof window.VideoDecoder === "function";
 // หลุดแล้วต่อใหม่กี่ครั้งก่อนยอมถอยไปภาพนิ่ง — มีเพดานเสมอ ห้ามวนไม่จบ
 const STREAM_RETRIES = 3;
 // รหัสปิดที่ "ต่อใหม่ไปก็ไม่ติด" — 1008 เซิร์ฟเวอร์ไม่อนุญาต · 4404 เครื่องไม่พร้อม
-const PERMANENT_CLOSE = new Set([1008, 4404]);
+// 4409 = มีหน้าต่างอื่นมาขอดูจอเครื่องนี้แทนเรา **ห้ามต่อกลับไปแย่ง**
+// มือถือมีตัวเข้ารหัสวิดีโอชุดเดียว สองหน้าต่างดูพร้อมกันไม่ได้ ถ้าต่างคนต่างต่อใหม่
+// จะกลายเป็นผลัดกันเตะออกไม่จบ (บั๊กที่ทำให้เซิร์ฟเวอร์วนเปิดสตรีม 795 ครั้ง)
+const PERMANENT_CLOSE = new Set([1008, 4404, 4409]);
+const SUPERSEDED_CLOSE = 4409;
 // ตกไปใช้ภาพนิ่งแล้ว ยังลองกลับมาใช้ท่อเร็วทุกกี่มิลลิวินาที
 const STREAM_RECOVER_MS = 15000;
 // ภาพนิ่ง: ถ่ายหนึ่งใบใช้ ~600 ms อยู่แล้ว รออีก 900 ms คือเสียเปล่า
@@ -137,6 +141,10 @@ class PhoneScreen {
   async start() {
     if (this.live) return;
     this.live = true;
+    // **คนกดเองเท่านั้นถึงมีสิทธิ์แย่งจอ** การต่อใหม่อัตโนมัติไม่มีสิทธิ์
+    // ไม่งั้นหน้าต่างที่เปิดค้างไว้จะคอยแย่งจอกลับไปเรื่อยๆ ทั้งที่ไม่มีคนดู
+    // (วัดจริง 27 ส.ค. 2569: แท็บค้าง 1 แท็บทำให้เปิดช่องใหม่ 6.1 ครั้ง/นาที)
+    this.forceTake = true;
     this.toggle.textContent = "หยุด";
     this.card.classList.add("is-live");
     this.say("กำลังเปิด…");
@@ -243,9 +251,13 @@ class PhoneScreen {
     }
 
     const protocol = location.protocol === "https:" ? "wss" : "ws";
+    // ใช้สิทธิ์แย่งจอได้ครั้งเดียวต่อการกดหนึ่งครั้ง — ต่อใหม่อัตโนมัติหลังจากนี้
+    // จะไม่มีธงนี้ติดไป เซิร์ฟเวอร์จึงปฏิเสธแทนที่จะเตะคนที่ดูอยู่ออก
+    const take = this.forceTake ? "&take=1" : "";
+    this.forceTake = false;
     this.socket = new WebSocket(
       `${protocol}://${location.host}/ws/phone/stream`
-      + `?serial=${encodeURIComponent(this.serial)}`,
+      + `?serial=${encodeURIComponent(this.serial)}${take}`,
     );
     this.socket.binaryType = "arraybuffer";
     // เซิร์ฟเวอร์ส่งมาทีละ NAL แต่ VideoDecoder ต้องได้ "ทั้งเฟรม" ต่อ chunk
@@ -301,6 +313,13 @@ class PhoneScreen {
       // จากเครื่องอื่นที่เซิร์ฟเวอร์ไม่อนุญาต ต่อใหม่ 3 ครั้งมีแต่ทำให้ข้อความจริง
       // ถูกกลบ ผู้ใช้เห็นแต่ "สตรีมหลุด (รหัส 1008)" แล้วไล่สาเหตุไม่ได้
       const why = event.reason || this.lastStreamError || "";
+      if (event.code === SUPERSEDED_CLOSE) {
+        // ไม่ใช่ความผิดพลาด — บอกให้รู้ว่าเกิดอะไรขึ้นและกดกลับมาดูได้เมื่อไร
+        this.say(`👀 ${why || "มีหน้าต่างอื่นกำลังดูจอเครื่องนี้อยู่"}`
+          + " — กด “เริ่มดูจอ” อีกครั้งเพื่อดึงกลับมาดูที่นี่");
+        this.stop();
+        return;
+      }
       if (PERMANENT_CLOSE.has(event.code)) {
         this.say(`⛔ เปิดจอไม่ได้ — ${why || "เซิร์ฟเวอร์ปฏิเสธ (รหัส " + event.code + ")"}`);
         this.stop();

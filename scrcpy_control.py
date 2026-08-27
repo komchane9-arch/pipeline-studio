@@ -39,6 +39,34 @@ SCRCPY_SERVER_VERSION = "4.1"
 SCRCPY_JAR = Path(__file__).resolve().parent / "tools" / "scrcpy-server-4.1.jar"
 # ตั้งชื่อไม่ให้ชนกับ scrcpy ตัวจริงที่ผู้ใช้อาจเปิดเองอยู่
 JAR_ON_DEVICE = "/data/local/tmp/scrcpy-server-webapp.jar"
+
+# ---- ทะเบียนช่องวิดีโอที่ยังเปิดอยู่จริง -------------------------------------
+#
+# **ทำไมต้องมี** `_clean_stale()` ข้างล่างลบ `adb forward` ที่ขึ้นต้น `scrcpy_`
+# **ทุกอันบนเครื่องนั้น** โดยแยกไม่ออกว่าอันไหนเป็นของค้างจากรอบก่อน อันไหนกำลัง
+# สตรีมอยู่เดี๋ยวนี้ — พอเซสชันควบคุมเปิดใหม่เมื่อไร (เช่นตัวเก่าตายแล้วมีคนกดจอ)
+# ช่องวิดีโอที่กำลังฉายอยู่จะถูกตัดสายทันทีโดยไม่มีใครรู้สาเหตุ
+#
+# เจอตอนไล่บั๊ก "สตรีมวนเปิดใหม่ 795 ครั้ง" เมื่อ 27 ส.ค. 2569 ตัวนี้ยังไม่ใช่
+# ต้นเหตุของรอบนั้น แต่เป็นระเบิดเวลาที่รอจังหวะอยู่ — จดไว้ว่าอันไหนของเรา
+# แล้วข้ามไป จึงเหลือแต่ของค้างจริงที่ถูกกวาด
+_live_video_scids: set[str] = set()
+_live_video_lock = threading.Lock()
+
+
+def _remember_video(scid: str) -> None:
+    with _live_video_lock:
+        _live_video_scids.add(scid)
+
+
+def _forget_video(scid: str) -> None:
+    with _live_video_lock:
+        _live_video_scids.discard(scid)
+
+
+def _video_in_use(scid: str) -> bool:
+    with _live_video_lock:
+        return scid in _live_video_scids
 DEVICE_NAME_FIELD_LENGTH = 64
 CONNECT_TIMEOUT_SECONDS = 8.0
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -225,13 +253,19 @@ class _Session:
             ).stdout.decode("utf-8", errors="replace")
         except (OSError, subprocess.SubprocessError):
             return
+        mark = "localabstract:scrcpy_"
         for line in listing.splitlines():
             parts = line.split()
-            if len(parts) >= 3 and parts[2].startswith("localabstract:scrcpy_"):
-                try:
-                    self._adb("forward", "--remove", parts[1], timeout=6)
-                except (OSError, subprocess.SubprocessError):
-                    pass
+            if len(parts) < 3 or not parts[2].startswith(mark):
+                continue
+            # **ข้ามช่องที่กำลังฉายอยู่** ไม่งั้นการเปิดเซสชันควบคุมหนึ่งครั้ง
+            # จะไปตัดสายคนที่ดูจออยู่พอดี แล้วเขาจะเห็นแค่ "สตรีมหลุด" ลอยๆ
+            if _video_in_use(parts[2][len(mark):].strip()):
+                continue
+            try:
+                self._adb("forward", "--remove", parts[1], timeout=6)
+            except (OSError, subprocess.SubprocessError):
+                pass
         try:
             # ฆ่าเฉพาะ server ที่ push จากเว็บแอปนี้ (ชื่อไฟล์เฉพาะ)
             # ไม่แตะ scrcpy ตัวจริงที่ผู้ใช้อาจเปิดเองอยู่
@@ -508,6 +542,9 @@ class VideoStream:
                            f"localabstract:scrcpy_{self.scid}")
         if result.returncode != 0:
             raise ScrcpyUnavailable("ตั้ง adb forward สำหรับวิดีโอไม่สำเร็จ")
+        # จดทันทีที่ตั้งสายสำเร็จ ไม่ใช่รอจนต่อติด — ระหว่างนั้นถ้ามีเซสชันควบคุม
+        # เปิดขึ้นมาพอดี มันจะได้ไม่ไปลบสายที่เรากำลังจะใช้
+        _remember_video(self.scid)
 
         options = [
             self.adb_executable, "-s", self.serial, "shell",
@@ -619,6 +656,7 @@ class VideoStream:
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
         self.process = None
+        _forget_video(self.scid)
         try:
             self._adb("forward", "--remove", f"tcp:{self.port}", timeout=10)
         except (OSError, subprocess.SubprocessError):

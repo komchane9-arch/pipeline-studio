@@ -1,0 +1,254 @@
+"""ลำดับและจังหวะการลงคลิป — คลิปเดียวลงได้ทีละที่ ห่างกันอย่างน้อยข้ามวัน
+
+**กติกาที่ผู้ใช้สั่ง 25 ส.ค. 2026**
+
+    1. Shopee Video   →   2. Facebook Reels   →   3. TikTok
+
+    คลิปเดียวกันต้องลงห่างกัน **อย่างน้อย 1 วัน** และ **นับเป็นวันในปฏิทิน
+    ไม่ใช่ 24 ชั่วโมงเป๊ะ** — ลงวันที่ 21 กี่โมงก็ได้ วันที่ 22 ลงที่ถัดไปได้เลย
+    ไม่ต้องรอให้ครบ 24 ชั่วโมง (ผู้ใช้ระบุเอง: "นับแค่วัน เช่น 21 22
+    ไม่ต้องนับเวลา 24 ชม เป้ะๆ")
+
+**ทำไมต้องแยกเป็นไฟล์ของตัวเอง** — ตอนนี้มีตัวโพสต์ **สองระบบที่ไม่รู้จักกัน**
+
+    publish_flow.py   กดบนจอมือถือจริง   → Shopee Video · Facebook Reels
+    tiktok_post.py    เปิดหน้าเว็บบนคอม   → TikTok
+
+    ถ้าเอากติกาไปฝังในตัวใดตัวหนึ่ง อีกตัวจะไม่รู้แล้วลงข้ามลำดับได้ทันที
+    ไฟล์นี้จึงเป็นที่เดียวที่ตอบว่า "ตอนนี้คลิปนี้ลงที่ไหนได้" และทั้งสองระบบ
+    ต้องถามที่นี่ก่อนลงเสมอ
+
+**ทำไมนับวันปฏิทิน ไม่นับชั่วโมง** — คนทำงานคิดเป็นวัน ไม่ได้จับเวลา ถ้าใช้
+24 ชั่วโมงเป๊ะ คลิปที่ลงตอน 22:00 จะลงต่อไม่ได้จนถึง 22:00 ของอีกวัน
+ทั้งที่ในความรู้สึกคนมันคือ "คนละวันแล้ว" ตั้งแต่เที่ยงคืน
+
+    python publish_order.py <item_id>     คลิปนี้ลงอะไรไปแล้ว ลงอะไรต่อได้
+"""
+
+from __future__ import annotations
+
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+# ลำดับที่ต้องลง — **ห้ามสลับ ห้ามข้าม** (ผู้ใช้กำหนดเอง 25 ส.ค. 2026)
+ORDER = ("shopee_video", "facebook_reels", "tiktok")
+
+NAMES = {
+    "shopee_video": "Shopee Video",
+    "facebook_reels": "Facebook Reels",
+    "tiktok": "TikTok",
+}
+
+# กี่วันในปฏิทินที่ต้องเว้นระหว่างสองปลายทางของคลิปเดียวกัน
+GAP_DAYS = 1
+
+
+class OrderError(RuntimeError):
+    """ลงตอนนี้ไม่ได้ตามกติกาลำดับ — ไม่ใช่ความผิดพลาดของระบบ"""
+
+
+def _as_date(stamp) -> date | None:
+    """แปลงเวลาที่บันทึกไว้เป็น **วันที่** อย่างเดียว ทิ้งเวลาทิ้งไป
+
+    รับได้ทั้ง `2026-08-21T14:03:00` และ `2026-08-21` เพราะของเก่าในไฟล์งาน
+    เคยเก็บมาแล้วทั้งสองแบบ อ่านไม่ออก = คืน None แล้วให้ผู้เรียกตัดสิน
+    ห้ามเดาเป็นวันนี้ เพราะจะกลายเป็นปล่อยให้ลงซ้อนวันได้
+    """
+    if isinstance(stamp, datetime):
+        return stamp.date()
+    if isinstance(stamp, date):
+        return stamp
+    text = str(stamp or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "")).date()
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def posted_rows(run: dict) -> list[tuple[str, date | None]]:
+    """ปลายทางที่ลงสำเร็จแล้ว คู่กับวันที่ลง เรียงตามลำดับที่กำหนด"""
+    publish = (run or {}).get("publish") or {}
+    rows = []
+    for target in ORDER:
+        info = publish.get(target) or {}
+        if info.get("status") == "posted":
+            rows.append((target, _as_date(info.get("posted_at"))))
+    return rows
+
+
+def last_posted(run: dict) -> tuple[str, date | None] | None:
+    """ปลายทางล่าสุดที่ลงไปแล้ว — ตัวที่กำหนดว่าต้องรอถึงวันไหน
+
+    เอา **วันที่ล่าสุด** ไม่ใช่ตัวท้ายสุดตามลำดับ เพราะถ้ามีของเก่าที่ลงข้ามลำดับ
+    มาก่อนกติกานี้ ตัวท้ายตามลำดับอาจลงก่อนตัวอื่นก็ได้
+    """
+    rows = [r for r in posted_rows(run) if r[1] is not None]
+    if not rows:
+        return None
+    return max(rows, key=lambda r: r[1])
+
+
+def next_target(run: dict) -> str | None:
+    """ปลายทางถัดไปที่ควรลง — None = ลงครบทุกที่แล้ว"""
+    publish = (run or {}).get("publish") or {}
+    for target in ORDER:
+        if (publish.get(target) or {}).get("status") != "posted":
+            return target
+    return None
+
+
+def check(run: dict, target: str, today: date | None = None) -> tuple[bool, str]:
+    """ลงปลายทางนี้ตอนนี้ได้ไหม — คืน (ได้ไหม, เหตุผลเป็นภาษาคน)
+
+    **ห้ามให้ผู้เรียกเดาเอง** ทุกกรณีที่ตอบว่าไม่ได้ ต้องบอกด้วยว่าเพราะอะไร
+    และต้องรอถึงเมื่อไร ไม่งั้นผู้ใช้จะเห็นแค่ "ลงไม่ได้" แล้วไม่รู้จะทำยังไงต่อ
+    """
+    today = today or date.today()
+    if target not in ORDER:
+        return False, f"ไม่รู้จักปลายทาง {target}"
+
+    # ---- คลิปที่แพลตฟอร์มลบไปแล้ว ห้ามลงซ้ำเด็ดขาด (26 ส.ค. 2026) ----------
+    #
+    # เกิดจริง: คลิปทีวี 85 นิ้ว (24842141705) โดน Shopee ลบเพราะ
+    # "Intellectual Property Rights Violation" — บนจอทีวีในคลิปมีภาพถ่ายทอดสด
+    # อเมริกันฟุตบอล และหน้า Google TV ที่โชว์โลโก้ Netflix/Disney+/HBO
+    #
+    # **ลงซ้ำไม่ใช่แค่โดนลบซ้ำ แต่คะแนนความประพฤติสะสม** ครบ 15 คะแนนเมื่อไร
+    # ถูกระงับการโพสต์บน Shopee Video **ถาวร** และการรีเซตคะแนนรายไตรมาส
+    # ไม่ช่วยคนที่โดนแบนถาวรแล้ว (ดู SHOPEE-VIDEO-RULES.md)
+    #
+    # ด่านอยู่ที่นี่เพราะเป็นทางผ่านเดียวที่ทั้งตัวโพสต์บนมือถือและตัวโพสต์ TikTok
+    # ต้องเรียกก่อนลงเสมอ — ใส่ไว้ที่อื่นอีกตัวจะรอด
+    banned = (run or {}).get("banned") or {}
+    if banned:
+        why = banned.get("reason") or "ผิดนโยบายของแพลตฟอร์ม"
+        where = banned.get("by") or "แพลตฟอร์ม"
+        return False, (f"คลิปนี้เคยถูก {where} ลบไปแล้วเพราะ “{why}” "
+                       "— ลงซ้ำจะโดนลบอีกและสะสมคะแนนจนโดนแบนถาวร "
+                       "ต้องเจนคลิปใหม่ที่แก้ต้นเหตุก่อน")
+
+    # ไม่มีไฟล์คลิปก็ลงไม่ได้ — ต้องดักที่นี่ ไม่ใช่ปล่อยให้ไปรู้ตอนแตะจอ
+    #
+    # **อันตรายกว่าที่คิด** ขั้น "เลือกคลิปที่จะโพสต์" แตะพิกัดที่เทรนไว้เฉยๆ
+    # มันไม่ได้อ่านว่าช่องนั้นเป็นคลิปอะไร ถ้าไม่มีคลิปของงานอยู่ในเครื่อง
+    # มันจะหยิบ**คลิปเก่าของสินค้าอื่น**มาโพสต์แล้วเดินจนจบโดยไม่มีอะไรฟ้อง
+    if not (run or {}).get("videos"):
+        return False, ("งานนี้ยังไม่มีไฟล์คลิป — เจนคลิปให้เสร็จก่อนถึงจะลงได้ "
+                       "(ถ้าคลิปเคยมีแล้วหายไป ให้เช็คว่าถูกย้ายไป data/banned/ หรือเปล่า)")
+
+    publish = (run or {}).get("publish") or {}
+    if (publish.get(target) or {}).get("status") == "posted":
+        return False, f"{NAMES[target]} ลงไปแล้ว ไม่ต้องลงซ้ำ"
+
+    # ต้องลงตามลำดับ — ที่อยู่ก่อนหน้ายังไม่ลง ห้ามข้าม
+    for earlier in ORDER[:ORDER.index(target)]:
+        if (publish.get(earlier) or {}).get("status") != "posted":
+            return False, (f"ต้องลง {NAMES[earlier]} ก่อน "
+                           f"แล้วค่อยลง {NAMES[target]}")
+
+    recent = last_posted(run)
+    if recent is None:
+        rows = posted_rows(run)
+        if rows:            # ลงไปแล้วแต่ไม่มีวันที่ = ของเก่าก่อนมีกติกานี้
+            return True, (f"ลง {NAMES[target]} ได้ "
+                          f"(ของเดิมไม่ได้บันทึกวันที่ไว้ จึงไม่นับระยะห่าง)")
+        return True, f"ยังไม่เคยลงที่ไหน — เริ่มที่ {NAMES[target]} ได้เลย"
+
+    name, when = recent
+    waited = (today - when).days
+    if waited < GAP_DAYS:
+        allowed = when.toordinal() + GAP_DAYS
+        allowed_date = date.fromordinal(allowed)
+        return False, (
+            f"เพิ่งลง {NAMES[name]} ไปวันที่ {when:%d/%m} "
+            f"— คลิปเดียวกันต้องเว้นอย่างน้อย {GAP_DAYS} วัน "
+            f"ลง {NAMES[target]} ได้ตั้งแต่วันที่ {allowed_date:%d/%m} เป็นต้นไป"
+        )
+    return True, (f"ลง {NAMES[target]} ได้ — ลง {NAMES[name]} ไปเมื่อวันที่ "
+                  f"{when:%d/%m} ห่างมาแล้ว {waited} วัน")
+
+
+def require(run: dict, target: str, today: date | None = None) -> None:
+    """เหมือน `check` แต่โยน `OrderError` ถ้าลงไม่ได้ — ใช้ที่ต้นทางการโพสต์"""
+    ok, why = check(run, target, today)
+    if not ok:
+        raise OrderError(why)
+
+
+def rows(run: dict, today: date | None = None) -> list[dict]:
+    """สถานะทั้งสามปลายทางในรูปที่เอาไปวาดปุ่มได้เลย — **คิดที่นี่ที่เดียว**
+
+    หน้าเว็บห้ามคำนวณเองว่า "กดลงได้ไหม / ต้องรอถึงเมื่อไร" ไม่งั้นกติกาจะมีสองชุด
+    แล้วเพี้ยนกันเงียบๆ ตอนแก้ข้างเดียว — `summary()` ข้างล่างก็ประกอบจากตัวนี้
+
+    ทุกแถวมี `can_post` (กดได้ไหม) คู่กับ `why` (เพราะอะไร) เสมอ **ห้ามส่งอันเดียว**
+    ปุ่มที่กดไม่ได้โดยไม่บอกเหตุผล ผู้ใช้แยกไม่ออกจากระบบพัง
+    """
+    today = today or date.today()
+    publish = (run or {}).get("publish") or {}
+    out: list[dict] = []
+    for index, target in enumerate(ORDER, start=1):
+        info = publish.get(target) or {}
+        status = info.get("status") or "pending"
+        when = _as_date(info.get("posted_at"))
+        ok, why = check(run, target, today)
+        if status == "posted":
+            mark = f"✅ ลงแล้ว{f' {when:%d/%m}' if when else ''}"
+        elif status == "failed":
+            mark = f"❌ ล้มเหลว — {info.get('error') or 'ไม่ทราบสาเหตุ'}"
+        else:
+            mark = ("⏭ ลงได้เลย" if ok else f"⏳ {why}")
+        out.append({
+            "step": index,
+            "target": target,
+            "name": NAMES[target],
+            "status": status,
+            "posted_at": info.get("posted_at") or "",
+            "url": info.get("url") or "",
+            "error": info.get("error") or "",
+            "can_post": ok,
+            "why": why,
+            "mark": mark,
+        })
+    return out
+
+
+def summary(run: dict, today: date | None = None) -> str:
+    """สรุปสถานะคลิปนี้ให้คนอ่าน — ใช้ในแชทและหน้าเว็บ"""
+    return "\n".join(
+        f"{row['step']}. {row['name']} — {row['mark']}"
+        for row in rows(run, today)
+    )
+
+
+# ------------------------------------------------------------------ คำสั่ง
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        print("ใช้: python publish_order.py <item_id>")
+        print("ลำดับที่กำหนดไว้: " + " → ".join(NAMES[t] for t in ORDER))
+        print(f"เว้นระยะอย่างน้อย {GAP_DAYS} วัน (นับวันในปฏิทิน)")
+        return 0
+    import clip_store
+    root = Path(__file__).resolve().parent / "data"
+    run = clip_store.load_run(root, argv[0])
+    if not run:
+        print(f"ไม่พบงานของสินค้า {argv[0]}")
+        return 1
+    print(f"สินค้า: {run.get('name') or argv[0]}")
+    print(summary(run))
+    nxt = next_target(run)
+    print("\nถัดไป: " + (NAMES[nxt] if nxt else "ลงครบทุกที่แล้ว"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -661,6 +661,24 @@ function jobRow(job) {
       iconBtn("↓", "เลื่อนลงทีหลัง", () => act(() => jobPost(`${job.id}/move`, { delta: 1 }))),
     );
   }
+  /* ปุ่มพักไว้รอแก้ / เอากลับ (ผู้ใช้สั่ง 27 ส.ค. 2026)
+   *
+   * **ต่างจาก ✕ ยกเลิก ตรงที่กลับมาทำต่อได้** ยกเลิกคือทิ้ง ส่วนพักคือ
+   * "ยังเอาอยู่ แต่ยังไม่พร้อม" — ก่อนหน้านี้มีแค่สองทางคือปล่อยค้างในกองเดิม
+   * จนปนกับงานที่เดินได้จริง หรือยกเลิกทิ้งซึ่งแรงเกินไป
+   *
+   * งานที่เครื่องกำลังทำอยู่ (`running`) พักไม่ได้ — เบราว์เซอร์เปิดค้างอยู่
+   * และอาจใช้เครดิตไปแล้ว ปุ่มจึงไม่โผล่เลย ดีกว่าโผล่แล้วกดไม่ได้ */
+  if (job.parked) {
+    tools.append(iconBtn("↩", "เอากลับเข้าขั้นเดิม", () =>
+      act(() => jobPost(`${job.id}/unpark`))));
+  } else if (job.open && !job.running) {
+    tools.append(iconBtn("🅿", "พักไว้รอแก้ — เครื่องจะไม่แตะจนกว่าจะเอากลับ", () => {
+      const why = window.prompt("พักไว้เพราะอะไร (เว้นว่างได้)") ?? null;
+      if (why === null) return;              // กดยกเลิกในกล่อง = ไม่ต้องพัก
+      act(() => jobPost(`${job.id}/park`, { why }));
+    }));
+  }
   if (job.open && !job.running) {
     tools.append(iconBtn("✕", "ยกเลิกงานนี้", () => act(() => jobPost(`${job.id}/cancel`))));
   }
@@ -699,6 +717,126 @@ function queueLoadNote() {
   return node;
 }
 
+/** กระดาน 6 ขั้น — งานไหนค้างอยู่ตรงไหน (ผู้ใช้สั่ง 26 ส.ค. 2026)
+ *
+ *  *"ตอนนี้ผมงงกับงานมากไม่รู้ว่าอันไหนอยู่ stage ไหนเท่าไรบ้าง"*
+ *
+ *  **ตัวเลขและการจัดกองมาจากเซิร์ฟเวอร์ทั้งหมด หน้าเว็บไม่คิดเอง**
+ *  เพราะกอง Shopee/Facebook/TikTok ใช้กติกาเดียวกับด่านที่กั้นก่อนโพสต์จริง
+ *  ถ้าหน้าเว็บคิดเอง วันหลังจะกลายเป็น "กระดานบอกว่าลงได้ แต่กดแล้วโดนปฏิเสธ"
+ *
+ *  **จำกองที่เลือกไว้** เพราะหน้านี้วาดใหม่เองทุก 6 วินาที ถ้าไม่จำ พอถึงรอบวาด
+ *  ใหม่มันจะเด้งกลับกองแรกทุกครั้ง แล้วใช้งานไม่ได้เลย
+ */
+const BOARD_KEY = "clipBoardPick";
+let boardPick = localStorage.getItem(BOARD_KEY) || "";
+let boardData = null;
+
+/** กล่องแถบ 6 ขั้น — **วางพาดเต็มความกว้างเหนือสองคอลัมน์** (ผู้ใช้สั่ง 26 ส.ค.)
+ *
+ *  ครั้งแรกผมวางไว้ในคอลัมน์คิวซึ่งกว้างราว 380 px เลยต้องจัดเป็นตาราง 2 แถว
+ *  ผู้ใช้บอกว่า *"ไม่ใช่แบบนี้ เอาแต่ละหัวข้อเรียงกันเป็น flow ยาว ต่อกันด้านบนเลย"*
+ *  — ตรงกับที่เขาวาดมา คือ 6 กล่องเรียงแถวเดียวพาดด้านบน แล้วรายการอยู่ข้างล่าง
+ *
+ *  จึงต้องแทรก**ก่อน `.story-layout`** ไม่ใช่ในคอลัมน์ เพื่อให้กินความกว้างเต็ม
+ */
+function boardBox() {
+  let node = $("#clipBoard");
+  if (!node) {
+    node = el("div", { className: "clip-board", id: "clipBoard" });
+    const layout = document.querySelector("#tab-story .story-layout");
+    if (layout) layout.before(node);
+    else $("#storyQueueList")?.before(node);
+  }
+  return node;
+}
+
+function paintBoard() {
+  const box = boardBox();
+  const list = $("#storyQueueList");
+  if (!boardData) { box.replaceChildren(); return; }
+  const buckets = boardData.buckets || [];
+
+  // ยังไม่เคยเลือก หรือกองที่เลือกไว้หายไป → ไปกองแรกที่มีงานค้าง
+  if (!buckets.some((b) => b.key === boardPick)) {
+    boardPick = (buckets.find((b) => b.count > 0) || buckets[0] || {}).key || "";
+  }
+
+  box.replaceChildren(...buckets.map((bucket) => {
+    const button = el("button", {
+      type: "button",
+      className: "board-tab"
+        + (bucket.key === boardPick ? " is-on" : "")
+        + (bucket.count ? "" : " is-empty"),
+    });
+    button.title = bucket.hint;
+    // สีประจำขั้นผูกกับ **รหัสกอง** ไม่ใช่ลำดับ — สลับลำดับวันหลังสีจะไม่เพี้ยนตาม
+    button.dataset.key = bucket.key;
+    button.append(
+      el("span", { className: "board-name", textContent: bucket.title }),
+      // "(2/10)" = ค้างอยู่ 2 จากสต๊อกที่อยากให้มี 10
+      el("span", { className: "board-count",
+                   textContent: `(${bucket.count}/${bucket.target ?? 10})` }),
+    );
+    if (bucket.short) button.classList.add("is-short");
+    button.addEventListener("click", () => {
+      boardPick = bucket.key;
+      try { localStorage.setItem(BOARD_KEY, boardPick); } catch { /* โหมดส่วนตัว */ }
+      paintBoard();
+      // รายการ "งานที่เก็บไว้" กรองตามหัวข้อเดียวกัน ต้องวาดใหม่ด้วย
+      // ไม่งั้นกดสลับหัวข้อแล้วข้างบนเปลี่ยน ข้างล่างยังเป็นของหัวข้อเดิม
+      loadStoryRuns();
+    });
+    return button;
+  }));
+
+  const picked = buckets.find((b) => b.key === boardPick);
+  // บรรทัดบอกว่าขาดเท่าไรและ**ต้องทำอะไรถึงจะเติมได้** — ตัวเลขเฉยๆ ตอบไม่ได้
+  // ว่าต้องทำอะไรต่อ และแต่ละขั้นเติมด้วยวิธีคนละอย่าง
+  const short = $("#boardShort") || el("p", { className: "note", id: "boardShort" });
+  /* กองรอแก้ไม่มีเส้นวัด — ยิ่งน้อยยิ่งดี ไม่ใช่ของที่ต้องมีสำรอง
+   * ถ้าใช้ข้อความชุดเดียวกับกองอื่นจะขึ้นว่า "ขาดอีก 10 ใบ" ซึ่งกลับหัวกลับหาง
+   * แล้วคนอ่านจะเข้าใจว่าต้องไปหางานพังมาเติม
+   *
+   * ผู้ใช้สั่ง 27 ส.ค. 2026: *"ให้ลิ้งไปที่คำสั่ง /wait ใน telegram เวลาเรียกดู"*
+   * — หน้าเว็บกับแชทต้องเห็นรายการเดียวกัน ไม่ใช่คนละชุด */
+  if (picked?.key === "fix") {
+    short.textContent = picked.count
+      ? `🅿️ พักไว้รอแก้ ${picked.count} ใบ — เครื่องไม่แตะ ของที่ทำไว้ยังอยู่ครบ · `
+        + `ดูในแชทด้วยคำสั่ง /wait (เอากลับทั้งหมด: /wait all)`
+      : "✅ ไม่มีงานพักรอแก้ · กด 🅿 ที่ใบงานเพื่อพักไว้ก่อนได้ · ดูในแชท: /wait";
+    short.hidden = false;
+  } else if (picked?.short) {
+    short.textContent = `⚠️ ขั้นนี้ค้างอยู่ ${picked.count} ใบ `
+      + `— เส้นวัดคือ ${picked.target} ใบ ขาดอีก ${picked.short} · ${picked.refill || ""}`;
+    short.hidden = false;
+  } else {
+    short.textContent = picked
+      ? `✅ ขั้นนี้มีงานค้าง ${picked.count} ใบ ถึงเส้นวัด ${picked.target} แล้ว`
+      : "";
+    short.hidden = !picked;
+  }
+  if (!short.isConnected) box.after(short);
+
+  const rows = (picked?.jobs || []).map((row) => {
+    const job = jobCards.find((j) => j.id === row.id) || row;
+    return jobRow(job);
+  });
+  if (!rows.length) {
+    rows.push(el("li", { className: "note",
+      textContent: `ไม่มีงานค้างที่ขั้น "${picked?.title || "นี้"}"` }));
+  }
+  // **โชว์เฉพาะงานของหัวข้อที่เลือกเท่านั้น** (ผู้ใช้สั่ง 26 ส.ค. 2026)
+  //
+  // ตอนแรกผมเอางานที่ปิดไปแล้ว (ล้ม/ยกเลิก) มาต่อท้ายไว้ใต้เส้นแบ่งด้วย
+  // ผู้ใช้บอกว่า *"โชว์แค่งานที่ค้างหัวข้อนั้นๆ ไม่เอามารวม"* — ถูกของเขา
+  // เพราะจุดประสงค์ของกระดานคือ "กองนี้มีอะไรค้าง" การเอาของที่จบแล้วมาปน
+  // ทำให้นับด้วยตาไม่ตรงกับตัวเลขในวงเล็บ ซึ่งทำลายประโยชน์ของตัวเลขไปเลย
+  //
+  // งานที่ปิดไปแล้วยังดูได้ที่รายการ "งานที่เก็บไว้" ข้างล่าง ไม่ได้หายไปไหน
+  list.replaceChildren(...rows);
+}
+
 export async function loadJobQueue() {
   const list = $("#storyQueueList");
   if (!list) return;
@@ -708,6 +846,7 @@ export async function loadJobQueue() {
   } catch {
     $("#storyQueueCount").textContent = "ต่อไม่ติด";
     queueLoadNote().textContent = "";
+    boardBox().replaceChildren();
     list.replaceChildren(el("li", {
       className: "note",
       textContent: `เปิดเซิร์ฟเวอร์สายคลิปก่อน — python clip_app.py`,
@@ -718,7 +857,6 @@ export async function loadJobQueue() {
   $("#storyFlowOn").checked = !!payload.flow_enabled;
 
   const open = jobCards.filter((job) => job.open);
-  const closed = jobCards.filter((job) => !job.open).slice(-8).reverse();
   const load = payload.load || null;
   // ป้ายหัวคิวสั้นๆ ให้เห็นเพดานทันที ส่วนเหตุผลเต็มอยู่บรรทัดใต้ลงไป
   $("#storyQueueCount").textContent = load
@@ -727,7 +865,19 @@ export async function loadJobQueue() {
   const note = queueLoadNote();
   note.textContent = payload.load_text || "";
   note.classList.toggle("warn", !!load?.full);
-  list.replaceChildren(...open.map(jobRow), ...closed.map(jobRow));
+
+  // อ่านกระดานแยกอีกคำขอ — **ล้มแล้วต้องไม่ลากคิวตายตาม**
+  // ถ้ากระดานอ่านไม่ได้ ยังต้องเห็นรายการงานแบบเดิมได้อยู่
+  try {
+    boardData = await api(`${CLIP_API}/api/board`);
+  } catch (error) {
+    boardData = null;
+    boardBox().replaceChildren(el("p", { className: "note",
+      textContent: `อ่านกระดานขั้นตอนไม่ได้: ${error.message}` }));
+    list.replaceChildren(...open.map(jobRow));
+    return;
+  }
+  paintBoard();
 }
 
 /** แถวอนุมัติ + ช่องสั่งแก้ ของสตอรีบอร์ดหรือบทพูด */
@@ -861,6 +1011,43 @@ const editDraft = {};
  *  ตัวหมุนจะหายไปกลางทางแล้วกลับไปเหมือนไม่มีอะไรเกิดขึ้น
  */
 const aiBusy = {};
+
+/** งานไหน "เพิ่งกด AI แล้วล้ม" — เก็บเหตุผลไว้โชว์ตรงปุ่ม (ผู้ใช้สั่ง 26 ส.ค. 2026)
+ *
+ *  **ที่ต้องมีเพราะข้อความล้มไปโผล่ผิดที่** ของเดิมเขียนลง `#storyNote` ซึ่งอยู่
+ *  **ใต้กรอบสองฝั่งทั้งหมด** (web/index.html บรรทัด 579) คนละที่กับปุ่มที่เพิ่งกด
+ *  แถมสองฝั่งเลื่อนแยกกันตั้งแต่ 26 ส.ค. บรรทัดนั้นจึงอยู่นอกจอไปเลย
+ *
+ *  ผลที่เกิดจริง: 22:28 กดเจนจุดเด่นของทีวี 55 นิ้ว (26577901113) แล้ว Gemini
+ *  ล้มสองรอบ (หมดเวลา 141 วิ · แล้ว 503 ทั้งสองโมเดล) ระบบเขียน error ไว้ครบ
+ *  ใน log แต่ **บนหน้าจอไม่มีอะไรขึ้นเลย** ผู้ใช้เห็นแค่จุดเด่นไม่เพิ่ม
+ *
+ *  เก็บนอกฟังก์ชันวาดเหมือน `aiBusy` เพราะหน้าจอวาดใหม่เองทุก 6 วินาที
+ *  **ไม่ล้างเองตามเวลา** — ล้างเมื่อกดใหม่หรือสำเร็จเท่านั้น ความล้มเหลวที่
+ *  หายไปเองคือความล้มเหลวที่ไม่มีใครเห็น
+ */
+const aiError = {};
+
+/** กล่องแดงบอกว่าล้มเพราะอะไร — วางไว้ติดปุ่มที่กด ไม่ใช่ท้ายหน้า */
+function aiErrorBox(jobId) {
+  const why = aiError[jobId];
+  if (!why) return null;
+  const box = el("div", { className: "ai-error" });
+  box.append(
+    el("p", { className: "ai-error-head", textContent: "❌ ให้ AI คิดจุดเด่นไม่สำเร็จ" }),
+    el("p", { className: "ai-error-why", textContent: why }),
+    el("p", { className: "note", textContent:
+      "ส่วนใหญ่เป็นฝั่ง Google ขัดข้องชั่วคราว (503 = เครื่องเขาแน่น · "
+      + "หมดเวลา = ตอบช้าเกิน) กดใหม่อีกครั้งได้เลย · "
+      + "ถ้าขึ้นว่าโควตาหมด ต้องรอวันถัดไป" }),
+  );
+  box.append(el("div", { className: "inline-row" },
+    textBtn("✕ ปิดข้อความนี้", "ghost", () => {
+      delete aiError[jobId];
+      box.remove();
+    })));
+  return box;
+}
 
 /** ที่แก้ค้างของงานนี้ — ผูกกับของฝั่งเซิร์ฟเวอร์ตอนเริ่มแก้
  *
@@ -1068,8 +1255,15 @@ function imageReviewParts(job, meta, draft, paint) {
   pair.append(picked, bank);
   out.push(pair);
 
+  // **ปุ่มไปต่อเป็นสีเทาธรรมดาเมื่อยังไม่มีอะไรค้าง** (ผู้ใช้สั่ง 26 ส.ค. 2026)
+  //
+  // ของเดิมเป็นสีเข้มทึบ (`primary`) ตลอดเวลา ซึ่งในงานที่เพิ่งเปิดมาและยังไม่ได้
+  // แตะอะไรเลย มันดูเหมือน **ปุ่มที่ถูกกดไปแล้ว** ทำให้ไม่รู้ว่าต้องกดหรือกดไปแล้ว
+  // เปลี่ยนเป็น: เทาธรรมดาเมื่อยังไม่มีอะไรแก้ค้าง · เข้มขึ้นเมื่อมีของค้างรอบันทึก
+  // สีจึงกลายเป็นข้อมูลว่า "มีอะไรรออยู่ไหม" แทนที่จะเป็นแค่การตกแต่ง
   out.push(el("div", { className: "inline-row" },
-    textBtn("✅ ใช้ชุดรูปนี้ ไปต่อ", "primary", () => commitDraft(job, draft, "img_ok"))));
+    textBtn("✅ ใช้ชุดรูปนี้ ไปต่อ", draftDirty(draft) ? "primary" : "ghost",
+            () => commitDraft(job, draft, "img_ok"))));
 
   // ── จุดเด่น: ซ้ายคือที่เลือกไว้ · ขวาคือจุดขายทั้งหมดที่ AI ไล่ไว้ ─────
   out.push(el("h4", { textContent: `✨ จุดเด่นที่จะส่งเข้า GPT (${highlights.length} ข้อ)` }));
@@ -1170,11 +1364,16 @@ function imageReviewParts(job, meta, draft, paint) {
     hlTools.append(textBtn(
       `✨ ให้ AI ดูรูปแล้วเขียนจุดเด่นใหม่ (${Math.min(images.length, meta.max_highlights)} ข้อ)`,
       "ghost", () => regenHighlights(job, draft, meta.max_highlights, paint)));
+    hlTools.append(modelPicker(meta.highlight_models));
   }
   out.push(framingPicker(job, meta));
-  hlTools.append(textBtn("✅ ใช้จุดเด่นชุดนี้ ไปต่อ", "primary",
-    () => commitDraft(job, draft, "hl_ok")));
+  hlTools.append(textBtn("✅ ใช้จุดเด่นชุดนี้ ไปต่อ",
+                         draftDirty(draft) ? "primary" : "ghost",
+                         () => commitDraft(job, draft, "hl_ok")));
   out.push(hlTools);
+  // กล่องแดงบอกว่า AI ล้มเพราะอะไร — อยู่ติดปุ่มที่กด ไม่ใช่ท้ายหน้า
+  const oops = aiErrorBox(job.id);
+  if (oops) out.push(oops);
   // บอกจำนวนที่จะได้จริง ไม่ใช่จำนวนรูป — ถ้าเลือกรูปเกินเพดานจุดเด่น
   // ต้องเห็นตั้งแต่ก่อนกด ไม่ใช่ไปงงตอนได้ผลมาไม่ครบตามจำนวนรูป
   const willGet = Math.min(images.length, meta.max_highlights);
@@ -1247,6 +1446,97 @@ function framingPicker(job, meta) {
  *  ยิงหนึ่งครั้ง = เสียโควตา Gemini หนึ่งครั้ง จึงต้องถามยืนยันก่อนเสมอ และต้อง
  *  บอกให้ชัดว่าของเดิมจะหายไป ไม่ใช่เพิ่มต่อท้าย
  */
+/* ---------------------------------------- เลือกโมเดลที่จะให้ดูรูป
+ *
+ * ผู้ใช้สั่ง 27 ส.ค. 2026: "ด้านข้างในทำ drop down เลือกเปลี่ยน model ได้"
+ *
+ * **ที่มา** วันนั้นกดปุ่ม ✨ แล้วล้มทุกครั้ง เพราะโมเดลทั้งสองตัวในสายพานตายพร้อมกัน
+ * — 3.5-flash โควตาหมด (ชั้นฟรีให้ 20 ครั้ง/วัน **แยกถังรายโมเดล**) ส่วน 3.7-flash
+ * ฝั่ง Google แน่นเอง (503) ทั้งที่ยังมีโมเดลอื่นที่ยิงจริงแล้วตอบได้อีก 5 ตัว
+ *
+ * เพราะโควตาแยกถังรายโมเดล การเลือกเองจึงไม่ใช่แค่ทางหนีตอนล่ม แต่คือการเพิ่ม
+ * จำนวนครั้งที่กดได้ต่อวันด้วย
+ *
+ * **จำที่เลือกไว้ในเครื่อง** ไม่ใช่ผูกกับใบงาน — เป็นความชอบของคนใช้ ไม่ใช่
+ * คุณสมบัติของสินค้า เลือกครั้งเดียวแล้วใช้ยาวกับทุกใบ
+ */
+const HL_MODEL_KEY = "clipHighlightModel";
+let hlModel = localStorage.getItem(HL_MODEL_KEY) || "";
+
+/* โควตาที่ใช้ไปวันนี้ **แยกรายโมเดล** (ผู้ใช้สั่ง 27 ส.ค. 2026 "ให้โชว์โควต้าแต่ละตัว")
+ *
+ * **ทำไมถึงสำคัญพอที่จะโชว์** โควตาชั้นฟรีของ Google คือ 20 ครั้ง/วัน **ต่อโมเดล
+ * แยกถังกัน** ไม่ใช่ถังรวม — ตัวหนึ่งหมดไม่ได้แปลว่าตัวอื่นหมด
+ * ถ้าไม่โชว์ คนเลือกจะเดาไม่ออกเลยว่าทำไมกดแล้วล้ม แล้วจะกดซ้ำที่ตัวเดิมเรื่อยๆ
+ *
+ * **เพดานรู้ได้ทางเดียวคือโดนปฏิเสธมาแล้ว** Google ไม่มีที่ให้ถามว่าเหลือเท่าไร
+ * โมเดลที่ยังไม่เคยหมดจึงบอกได้แค่ "ยิงไปกี่ครั้ง" — **ห้ามเดาเลขที่เหลือให้**
+ * เพราะคนจะวางแผนตามเลขที่เดา แล้วผิดแผนโดยไม่รู้ตัว
+ */
+let hlQuota = null;              // {model: {calls, left, limit, dry}}
+
+async function loadHlQuota() {
+  try {
+    const data = await api("/api/gemini-quota");
+    const map = {};
+    (data.rows || []).forEach((row) => { map[row.model] = row; });
+    hlQuota = map;
+  } catch {
+    hlQuota = null;              // ถามไม่ได้ = ไม่โชว์ ดีกว่าโชว์เลขมั่ว
+  }
+}
+
+/** ป้ายโควตาต่อท้ายชื่อโมเดล — คืนค่าว่างถ้ายังไม่รู้ */
+function quotaTag(id) {
+  if (!id || !hlQuota) return "";
+  const row = hlQuota[id];
+  if (!row) return " · ยังไม่ได้ใช้วันนี้";
+  if (row.dry) return " · ⛔ หมดโควตาแล้ววันนี้";
+  if (row.left !== null && row.left !== undefined) return ` · เหลือ ${row.left}/${row.limit}`;
+  return ` · ใช้ไป ${row.calls} ครั้ง`;
+}
+
+function modelPicker(menu) {
+  const rows = Array.isArray(menu) && menu.length ? menu : null;
+  if (!rows) return null;               // เซิร์ฟเวอร์รุ่นเก่ายังไม่ส่งเมนูมา
+  // ที่เลือกไว้หายจากเมนู (เราถอดโมเดลนั้นออก) = ถอยไปอัตโนมัติ ไม่ใช่ยิงชื่อที่ตายแล้ว
+  if (hlModel && !rows.some((row) => row.id === hlModel)) hlModel = "";
+
+  const box = el("label", { className: "model-pick" },
+    el("span", { className: "model-pick-tag", textContent: "โมเดล" }));
+  const select = el("select", { className: "model-pick-sel" });
+  rows.forEach((row) => {
+    const option = el("option", { value: row.id, textContent: row.label + quotaTag(row.id) });
+    option.title = row.note || "";
+    if (row.id === hlModel) option.selected = true;
+    select.append(option);
+  });
+  const note = el("span", { className: "model-pick-note" });
+  const paintNote = () => {
+    const row = rows.find((item) => item.id === select.value);
+    note.textContent = row ? row.note || "" : "";
+  };
+  paintNote();
+  select.addEventListener("change", () => {
+    hlModel = select.value;
+    try { localStorage.setItem(HL_MODEL_KEY, hlModel); } catch { /* โหมดส่วนตัว */ }
+    paintNote();
+  });
+  box.append(select, note);
+
+  // ถามโควตาครั้งแรกแล้ววาดป้ายใหม่ — ไม่หน่วงการวาดรอบแรกให้ช้าลง
+  if (hlQuota === null) {
+    loadHlQuota().then(() => {
+      if (!hlQuota) return;
+      [...select.options].forEach((option) => {
+        const row = rows.find((item) => item.id === option.value);
+        if (row) option.textContent = row.label + quotaTag(row.id);
+      });
+    });
+  }
+  return box;
+}
+
 async function regenHighlights(job, draft, maxHighlights, paint = null) {
   const images = [...draft.images];
   if (!images.length) {
@@ -1283,6 +1573,7 @@ async function regenHighlights(job, draft, maxHighlights, paint = null) {
 
   const done = [];
   aiBusy[job.id] = true;
+  delete aiError[job.id];       // เริ่มรอบใหม่ = ล้างคำบ่นรอบเก่า
   paint?.();                    // เปลี่ยนปุ่มเป็นตัวหมุนทันที ไม่ต้องรอวาดรอบถัดไป
   try {
     if (needSave) {
@@ -1294,7 +1585,7 @@ async function regenHighlights(job, draft, maxHighlights, paint = null) {
       (done.length ? `${done.join(" · ")} · ` : "")
       + `🔎 กำลังให้ AI ดูรูป ${images.length} ใบแล้วเขียนจุดเด่น ${willGet} ข้อ… `
       + "(ราว 15–30 วินาที อย่าเพิ่งปิดหน้า)";
-    const result = await jobPost(`${job.id}/features`, { images });
+    const result = await jobPost(`${job.id}/features`, { images, model: hlModel });
     // ทิ้งที่พักได้แล้ว — ทั้งชุดรูปและจุดเด่นถูกเขียนลงฝั่งเซิร์ฟเวอร์เรียบร้อย
     delete editDraft[job.id];
     done.push(result.message);
@@ -1303,9 +1594,13 @@ async function regenHighlights(job, draft, maxHighlights, paint = null) {
   } catch (error) {
     // บอกให้ชัดว่าขั้นไหนผ่านไปแล้ว ไม่ใช่ "ไม่สำเร็จ" ลอยๆ แล้วผู้ใช้กดซ้ำจนรูปซ้อน
     delete editDraft[job.id];
-    $("#storyNote").textContent = done.length
+    const why = done.length
       ? `${done.join(" · ")} — แต่ขั้นถัดไปไม่สำเร็จ: ${error.message}`
-      : `คิดจุดเด่นจากรูปไม่สำเร็จ: ${error.message}`;
+      : error.message;
+    // เขียนสองที่: บรรทัดล่างเหมือนเดิม **และกล่องแดงติดปุ่ม** ซึ่งเป็นที่ที่
+    // ผู้ใช้มองอยู่จริง (บรรทัดล่างอยู่นอกกรอบที่เลื่อนอยู่ จึงพลาดได้ง่าย)
+    aiError[job.id] = why;
+    $("#storyNote").textContent = `คิดจุดเด่นจากรูปไม่สำเร็จ: ${why}`;
   } finally {
     // **ต้องปลดใน finally** ไม่งั้นถ้าล้มกลางทาง ตัวหมุนจะค้างตลอดกาล
     // แล้วปุ่มจะกดไม่ได้อีกเลยจนกว่าจะโหลดหน้าใหม่
@@ -1370,13 +1665,44 @@ function fold(job, key, title, parts, openDefault = true) {
   return box;
 }
 
+/** ปุ่มลบภาพสตอรีบอร์ดที่ไม่เอา (ผู้ใช้สั่ง 26 ส.ค. 2026)
+ *
+ *  **ทำไมถึงมีภาพเกินมา** — ChatGPT สุ่มเอากล่องทดลองของ OpenAI มาแทรก
+ *  ("Which image do you like more? / Image 1 is better") แล้ววาดสองแบบมาให้
+ *  เทียบกัน ทั้งสองใบเป็นสตอรีบอร์ดเต็มคนละแบบ ไม่ใช่ใบเก่ากับใบใหม่
+ *  ตัวโหลดของเราเห็นเป็น "รูปในคำตอบล่าสุด" เหมือนกันทั้งคู่ จึงเก็บมาทั้งคู่
+ *  (วัดแล้ว: เกิด 1 ใน 27 งาน · หลักฐานอยู่ใน gpt-storyboard.md ของงานนั้น)
+ *
+ *  **ปุ่มโผล่เฉพาะตอนมีเกิน 1 ใบ** เหมือนกริดรูปสินค้า — เหลือใบเดียวแล้วลบอีก
+ *  จะได้ขั้นตรวจที่ว่างเปล่า ซึ่งแก้อะไรไม่ได้เลย ต้องไปสั่งวาดใหม่แทน
+ *  ด่านจริงอยู่ฝั่งเซิร์ฟเวอร์อีกชั้น เผื่อมีคนยิงตรงเข้ามา
+ */
 function storyboardReview(job, run, meta = {}) {
   const frames = run.storyboard || [];
   const script = run.script || [];
-  const shots = frames.map((name) => el("img", {
-    className: "story-frame", loading: "lazy", alt: "สตอรีบอร์ด",
-    src: clipFile(run.item_id, name),
-  }));
+  const shots = frames.map((name, index) => {
+    const tools = el("span", { className: "story-cell-tools" });
+    tools.append(zoomBtn(clipFile(run.item_id, name), `สตอรีบอร์ดใบที่ ${index + 1}`));
+    if (frames.length > 1) {
+      tools.append(iconBtn("🗑", "ลบใบนี้ทิ้ง (ย้ายลงถังขยะ กู้ได้)", () => {
+        if (!confirm(`ลบสตอรีบอร์ดใบที่ ${index + 1} ทิ้ง?\n\n`
+                     + "ไฟล์ย้ายลงถังขยะ กู้คืนได้ที่ storyboard/_trash")) return;
+        act(() => jobPost(`${job.id}/storyboard`, { drop: name }));
+      }));
+    }
+    return el("figure", { className: "story-shot" },
+      el("img", {
+        className: "story-frame", loading: "lazy",
+        alt: `สตอรีบอร์ดใบที่ ${index + 1}`,
+        src: clipFile(run.item_id, name),
+      }), tools);
+  });
+  if (frames.length > 1) {
+    shots.unshift(el("p", { className: "note warn-note", textContent:
+      `⚠️ ได้มา ${frames.length} ใบ — ChatGPT แอบวาดสองแบบมาให้เลือก `
+      + "ไม่ใช่เราสั่ง เลือกใบที่จะใช้แล้วกด 🗑 ลบใบที่เหลือทิ้ง "
+      + "(คำสั่ง Flow กับบทพูดอ้างอิงใบล่างสุดใบเดียว)" }));
+  }
   const out = [
     fold(job, "storyboard", `🖼 สตอรีบอร์ด (${frames.length} ภาพ)`, shots),
     approveBlock(job, "storyboard", job.storyboard_ok),
@@ -1838,9 +2164,22 @@ export async function loadStoryRuns() {
       $("#storyNote").textContent = "ยังไม่มีงานที่เก็บไว้";
       return;
     }
-    $("#storyNote").textContent = `${storyRuns.length} ชิ้น`;
+    // **กรองตามหัวข้อที่เลือกอยู่** (ผู้ใช้สั่ง 26 ส.ค. 2026)
+    //
+    // ป้ายขั้นมาจากเซิร์ฟเวอร์ (`run.bucket`) ตัวเดียวกับที่จัดกระดาน
+    // ถ้าหน้าเว็บมาเดาเองจากข้อมูลใน run จะกลายเป็นสองสูตรที่วันหลังไม่ตรงกัน
+    //
+    // งานที่ลงครบสามที่แล้วจะได้ `bucket` เป็นค่าว่าง = ไม่เข้ากองไหน
+    // ยังดูได้โดยกดหัวข้อไหนก็ได้แล้วเลื่อนหา — ไม่ได้หายไป แค่ไม่ปนกับของที่ค้าง
+    const mine = boardPick
+      ? storyRuns.filter((run) => (run.bucket || "") === boardPick)
+      : storyRuns;
+    const done = storyRuns.length - mine.length;
+    $("#storyNote").textContent = boardPick
+      ? `${mine.length} ชิ้นในขั้นนี้` + (done ? ` · อีก ${done} ชิ้นอยู่ขั้นอื่น` : "")
+      : `${storyRuns.length} ชิ้น`;
     list.replaceChildren(
-      ...storyRuns.map((run) => {
+      ...mine.map((run) => {
         const item = document.createElement("li");
         item.className = "story-item";
         item.dataset.itemId = run.item_id;

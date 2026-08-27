@@ -459,6 +459,51 @@ def save_storyboard(root: Path, data: dict, result: dict) -> Path:
     return folder
 
 
+def drop_storyboard(root: Path, item_id: str, name: str) -> dict:
+    """เอาภาพสตอรีบอร์ดใบหนึ่งออกจากงาน (ผู้ใช้สั่ง 26 ส.ค. 2026)
+
+    มีไว้เพราะ **บางครั้ง ChatGPT ส่งภาพมาสองใบให้เลือก** — เป็นกล่องทดลองของ
+    OpenAI ที่ถามว่า "Which image do you like more?" แล้ววาดสองแบบมาเทียบกัน
+    ตัวโหลดของเราไม่รู้จักกล่องนั้น จึงเก็บมาทั้งคู่ (เจอจริง 1 ใน 27 งาน)
+    ผู้ใช้ต้องมีทางเลือกใบที่ไม่เอาออกเอง ไม่ใช่ปล่อยให้สองใบไปคาที่ขั้นตรวจ
+
+    **ย้ายลงถังขยะ ไม่ลบถาวร** — ภาพนี้ต้องเสียโควตา ChatGPT กว่าจะได้มา
+    ถ้าลบผิดใบแล้วกู้ไม่ได้ ต้องเจนใหม่ทั้งรอบ ถังขยะอยู่ที่
+    `<งาน>/storyboard/_trash/` ลบเองได้เมื่อแน่ใจแล้ว
+
+    **ลบไฟล์แล้วต้องลบรายการในสมุดบันทึกด้วยเสมอ** (บทเรียนเดียวกับ
+    `clear_videos`) ไม่งั้นสมุดบอกว่ามีภาพ แต่โฟลเดอร์ไม่มี แล้วทุกอย่างที่
+    อ่านสมุดจะเชื่อผิดตามกันหมด
+    """
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+
+    frames = list(run.get("storyboard") or [])
+    key = str(name or "").strip()
+    if key not in frames:
+        raise ClipStoreError(f"ไม่มีภาพสตอรีบอร์ดชื่อ {key} ในงานนี้")
+    if len(frames) <= 1:
+        raise ClipStoreError(
+            "เหลือภาพใบเดียว ลบไม่ได้ — ถ้าไม่ชอบใบนี้ให้กด "
+            "\"สั่งแก้สตอรีบอร์ด\" เพื่อให้ GPT วาดใหม่แทน")
+
+    target = folder / key
+    if target.is_file():
+        trash = folder / STORYBOARD_DIR / "_trash"
+        trash.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target.replace(trash / f"{stamp}-{target.name}")
+
+    frames.remove(key)
+    run["storyboard"] = frames
+    run["storyboard_count"] = len(frames)
+    run["storyboard_dropped_at"] = _now()
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
 def save_video(root: Path, item_id: str, videos: list[Path], note: str = "") -> Path:
     """บันทึกคลิปที่เจนได้จาก Google Flow ลงในงานของสินค้าชิ้นนั้น"""
     folder = target_dir(root, item_id)

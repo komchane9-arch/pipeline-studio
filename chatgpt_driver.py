@@ -230,6 +230,102 @@ class ChatGPTSession:
 
         self.log(f"เปิดแชทแล้ว ({state['url'][:70]})")
 
+    # --------------------------------------------------- เคลียร์แผ่นคลุมหน้าจอ
+
+    # แผ่นคลุมเต็มจอที่ดักการคลิกไว้หมด — ChatGPT ใช้กับกล่องโต้ตอบทุกชนิด
+    # (โฆษณาฟีเจอร์ใหม่ · ขอให้ยืนยันอะไรบางอย่าง · เมนูที่เปิดค้าง)
+    #
+    # จับที่ **inset-0 + z-index สูง + กว้างเกือบเต็มจอ** ไม่ใช่ชื่อคลาสตรงตัว
+    # เพราะคลาสของ ChatGPT เป็นชุดยาวที่เปลี่ยนทุก deploy (ของจริงที่เจอ:
+    # "fixed inset-0 z-50 before:starting:backdrop-blur-0 …" ยาว 12 คลาส)
+    OVERLAY_JS = r"""
+    () => {
+      const hits = [];
+      for (const el of document.querySelectorAll('div,section')) {
+        const st = getComputedStyle(el);
+        if (st.position !== 'fixed' && st.position !== 'absolute') continue;
+        if (st.pointerEvents === 'none') continue;
+        if (st.display === 'none' || st.visibility === 'hidden') continue;
+        const z = parseInt(st.zIndex || '0', 10) || 0;
+        if (z < 10) continue;
+        const r = el.getBoundingClientRect();
+        // ต้องคลุมเกือบเต็มจอถึงจะนับว่าเป็นแผ่นดักคลิก
+        if (r.width < innerWidth * 0.9 || r.height < innerHeight * 0.9) continue;
+        hits.push({
+          z,
+          state: el.getAttribute('data-state') || '',
+          testid: el.getAttribute('data-testid') || '',
+          label: (el.innerText || '').trim().slice(0, 80),
+        });
+      }
+      return hits;
+    }
+    """
+
+    # ปุ่มปิด/รับทราบที่เคยเห็นบนกล่องโต้ตอบของ ChatGPT ทั้งไทยและอังกฤษ
+    DISMISS_LABELS = re.compile(
+        r"^(ปิด|ตกลง|รับทราบ|ไว้ทีหลัง|ข้าม|ไม่เป็นไร|"
+        r"close|dismiss|got it|okay|ok|no thanks|maybe later|skip|continue)$",
+        re.I,
+    )
+
+    def overlays(self) -> list[dict]:
+        """แผ่นคลุมเต็มจอที่ดักคลิกอยู่ตอนนี้ — ว่างเปล่า = หน้าจอโล่ง"""
+        try:
+            return self.page.evaluate(self.OVERLAY_JS) or []
+        except Exception:                                    # noqa: BLE001
+            return []          # อ่านไม่ได้ = อย่าไปขวางงาน ปล่อยให้คลิกลองดู
+
+    def clear_overlays(self, tries: int = 3) -> bool:
+        """ปิดแผ่นคลุมหน้าจอก่อนจะไปกดอะไร — คืน True เมื่อหน้าจอโล่งแล้ว
+
+        **ทำไมต้องมี** ChatGPT เด้งกล่องโต้ตอบคลุมทั้งจอเป็นครั้งคราว ช่องพิมพ์
+        ยังมองเห็นและ "enabled" อยู่ทุกประการ Playwright จึงพยายามคลิกซ้ำจนหมด
+        เวลาแล้วรายงานว่า **Timeout** ซึ่งอ่านแล้วนึกว่าเน็ตช้าหรือหน้าโหลดไม่จบ
+        ทั้งที่สาเหตุจริงคือมีแผ่นใสคลุมอยู่
+
+        วัดจริง 22 ส.ค. 2026 เวลา 10:02:37 — งาน TCL BreezeIN Pro ล้มด้วย
+        `Timeout 30000ms` โดย log ของ Playwright บอกเองว่า
+        `<div class="fixed inset-0 z-50 …"> … intercepts pointer events`
+        กดซ้ำไป 57 ครั้งใน 30 วินาที ส่วนงานถัดมาที่ทำต่อทันทีผ่านฉลุย
+        (แผ่นคลุมหายไปเอง) — เกิดเป็นครั้งคราว ไม่ใช่ทุกครั้ง
+
+        ไล่จากเบาไปหนัก: Escape ก่อน แล้วค่อยหาปุ่มปิดในกล่องนั้น
+        """
+        for attempt in range(1, tries + 1):
+            found = self.overlays()
+            if not found:
+                return True
+            top = max(found, key=lambda item: item.get("z", 0))
+            label = (top.get("label") or "").replace("\n", " ")[:60]
+            self.log(f"  มีแผ่นคลุมหน้าจอบังอยู่ (รอบ {attempt}/{tries}) {label}")
+
+            self.page.keyboard.press("Escape")
+            time.sleep(0.6)
+            if not self.overlays():
+                self.log("  ปิดด้วย Escape แล้ว")
+                return True
+
+            # Escape ไม่ยอมปิด — กล่องบางแบบบังคับให้กดปุ่มรับทราบเท่านั้น
+            for button in self.page.get_by_role("button").all()[:40]:
+                try:
+                    name = (button.inner_text() or "").strip()
+                    aria = (button.get_attribute("aria-label") or "").strip()
+                except Exception:                            # noqa: BLE001
+                    continue
+                if not (self.DISMISS_LABELS.match(name)
+                        or self.DISMISS_LABELS.match(aria)):
+                    continue
+                try:
+                    button.click(timeout=3000)
+                    time.sleep(0.6)
+                except Exception:                            # noqa: BLE001
+                    continue
+                if not self.overlays():
+                    self.log(f"  ปิดด้วยปุ่ม \"{name or aria}\" แล้ว")
+                    return True
+        return not self.overlays()
+
     # ------------------------------------------------------------- ส่งข้อความ
 
     def attach(self, images: list[Path]) -> int:
@@ -279,10 +375,45 @@ class ChatGPTSession:
         # ไม่มี id ก็เอาตัวท้ายสุดของหน้า — ช่องพิมพ์อยู่ล่างสุดเสมอ
         return self.page.locator('div[contenteditable="true"]').last
 
+    # รอ ChatGPT พิมพ์คำตอบเก่าให้จบก่อนส่งคำถามใหม่ได้นานสุดกี่วินาที
+    SETTLE_TIMEOUT = 240.0
+
+    def wait_idle(self) -> bool:
+        """รอจนกว่า ChatGPT จะพิมพ์คำตอบเก่าจบ — คืน True ถ้าว่างแล้ว
+
+        **ต้องเรียกก่อนส่งคำถามใหม่ทุกครั้ง** ระหว่างที่มันกำลังพิมพ์ ช่องพิมพ์ถูก
+        ล็อก ข้อความที่เราพิมพ์ลงไปจะหายเฉยๆ แล้วเราจะยืนรอคำตอบที่ไม่มีวันมา
+
+        เจอจริง 23 ส.ค. 2026 เวลา 01:32 — ตัวรอคำตอบออกก่อนกำหนดตอนข้อความมี
+        2,738 ตัว (เพราะทางลัด "รูปนิ่งแล้ว") แล้วเราส่งคำถามถัดไปทันที ทั้งที่
+        GPT ยังพิมพ์ต่อจนถึง 5,084 ตัว ผลคืองานค้างรอ 10 นาทีแล้วล้ม
+        """
+        start = time.time()
+        told = False
+        while time.time() - start < self.SETTLE_TIMEOUT:
+            if not self.state().get("streaming"):
+                if told:
+                    self.log(f"  GPT พิมพ์จบแล้ว ({int(time.time() - start)} วิ) — ส่งคำถามต่อได้")
+                return True
+            if not told:
+                told = True
+                self.log("  GPT ยังพิมพ์คำตอบก่อนหน้าไม่จบ — รอให้จบก่อนค่อยถามต่อ")
+            time.sleep(1.0)
+        self.log(f"  รอ {self.SETTLE_TIMEOUT:.0f} วิแล้ว GPT ยังพิมพ์ไม่จบ — ส่งคำถามต่อเลย")
+        return False
+
     def send(self, text: str) -> None:
+        # ห้ามพิมพ์ทับตอนมันยังตอบอยู่ — ดูเหตุผลเต็มที่ wait_idle
+        self.wait_idle()
         box = self.composer()
         if not box.count():
             raise ChatGPTError("ไม่พบช่องพิมพ์ข้อความ")
+        # เคลียร์แผ่นคลุมก่อนกดเสมอ — ถ้าไม่ทำจะได้ Timeout ที่ไม่บอกสาเหตุจริง
+        if not self.clear_overlays():
+            raise ChatGPTError(
+                "มีกล่องโต้ตอบของ ChatGPT คลุมหน้าจออยู่ ปิดเองไม่สำเร็จ — "
+                "เปิดหน้าต่างเบราว์เซอร์ ปิดกล่องนั้นด้วยมือ แล้วสั่ง /retry"
+            )
         box.click()
         time.sleep(0.4)
         # พิมพ์ทีละบรรทัดแล้วขึ้นบรรทัดใหม่ด้วย Shift+Enter
@@ -355,7 +486,7 @@ class ChatGPTSession:
             f"กดส่งแล้วแต่ ChatGPT ไม่เริ่มตอบภายใน {self.START_TIMEOUT:.0f} วินาที"
         )
 
-    def wait_reply(self) -> str:
+    def wait_reply(self, after: int | None = None, previous: str = "") -> str:
         """รอจนตอบจบแล้วคืนข้อความล่าสุด
 
         ดูสองอย่างประกอบกัน: ปุ่มหยุดหายไป **และ** ข้อความไม่ยาวขึ้นอีกแล้ว
@@ -366,6 +497,16 @@ class ChatGPTSession:
         ขึ้นครบแล้วแต่ปุ่มหยุดยังไม่หาย (หรือข้อความในบล็อกยังกระพริบเพราะมีตัวจับเวลา
         เดินอยู่) ทำให้ยืนรอต่อจนหมดเวลาทั้งที่งานเสร็จไปแล้ว จึงเพิ่มทางออก:
         **ถ้ารูปขึ้นแล้วและจำนวนนิ่งนานพอ ให้ถือว่าเสร็จ ไม่ต้องสนใจปุ่มหยุด**
+
+        `after` = จำนวนคำตอบในแชท **ก่อน** ส่งคำถาม · `previous` = ข้อความของคำตอบ
+        ก้อนสุดท้ายตอนนั้น
+
+        **ต้องส่งสองค่านี้มาเสมอ ไม่งั้นจะคืนคำตอบเก่าโดยไม่มีอะไรฟ้อง**
+        เจอจริง 22 ส.ค. 2026 เวลา 21:48 — ขอ "บทพูด" แล้ว 14 วินาทีต่อมาระบบบอกว่า
+        "ตอบจบแล้ว 4,601 ตัวอักษร" ซึ่ง GPT พิมพ์ไม่ทันแน่ ของที่ได้คือ**คำตอบก้อน
+        ก่อนหน้า** (คำสั่ง Flow ภาษาอังกฤษ + คำอธิบายของ GPT) แล้วถูกเก็บเป็นบทพูด
+        722 คำ 54 ฉาก ไหลไปถึงหน้าอนุมัติของผู้ใช้
+        สาเหตุ: เงื่อนไขจบดูแค่ "ข้อความนิ่งครบ 3 วินาที" ซึ่งคำตอบเก่าก็นิ่งอยู่แล้ว
         """
         started = time.time()
         deadline = started + REPLY_TIMEOUT
@@ -374,6 +515,7 @@ class ChatGPTSession:
         quiet_since = started
         images_since = started
         beat = started
+        told_waiting = False
         while time.time() < deadline:
             state = self.state()
             text = state["lastReply"]
@@ -381,21 +523,48 @@ class ChatGPTSession:
             streaming = state["streaming"]
             waited = int(time.time() - started)
 
+            # คำตอบก้อนนี้เป็น **ของใหม่** จริงไหม
+            #
+            # ยึดสองอย่าง: จำนวนคำตอบต้องเพิ่มขึ้น และเนื้อความต้องไม่ใช่ก้อนเดิม
+            # (บางครั้งหน้าเว็บวาดใหม่แล้วจำนวนเพี้ยนชั่วคราว เลยเช็คเนื้อความคู่กัน)
+            fresh = True
+            if after is not None and state.get("replyCount", 0) <= after:
+                fresh = False
+            elif previous and text == previous:
+                fresh = False
+
             # เขียนชีพจรเป็นระยะ — ห้ามปล่อยให้ขั้นนี้เป็นกล่องดำอีก
             # (เจอจริง: ค้างเกิน 5 นาทีโดยไม่มี log สักบรรทัด ไล่สาเหตุไม่ได้เลย
             #  ต้องนั่งรอให้หมดเวลา 600 วินาทีเพื่อจะได้เห็นบรรทัดแรก)
             if time.time() - beat >= HEARTBEAT_SECONDS:
                 beat = time.time()
+                mark = "" if fresh else " · ยังเป็นคำตอบเก่า"
                 self.log(
                     f"  …รออยู่ {waited} วิ · สตรีม={streaming} "
-                    f"ข้อความ={len(text)} ตัว · รูป={images} ใบ"
+                    f"ข้อความ={len(text)} ตัว · รูป={images} ใบ{mark}"
                 )
 
-            if images != last_images:
+            if not fresh:
+                # ยังไม่มีคำตอบใหม่ — รีเซ็ตตัวจับเวลาทั้งหมด ห้ามนับว่านิ่ง
+                if not told_waiting and waited > 5:
+                    told_waiting = True
+                    self.log("  ยังเป็นคำตอบก้อนเดิม — รอคำตอบใหม่ต่อ")
+                quiet_since = time.time()
+                images_since = time.time()
+                last_text, last_images = text, images
+                time.sleep(POLL_SECONDS)
+                continue
+
+            if images != last_images or text != last_text:
                 images_since = time.time()
             # รูปขึ้นแล้วและนิ่งพอ = เสร็จแล้ว ต่อให้ปุ่มหยุดยังค้างอยู่ก็ตาม
+            #
+            # **ต้องให้ข้อความนิ่งด้วย ไม่ใช่ดูแค่จำนวนรูป** — ทางลัดนี้เคยทำให้
+            # ออกตอน GPT ยังพิมพ์อยู่ (2,738 ตัว ทั้งที่สุดท้ายยาว 5,084 ตัว)
+            # แล้วเราไปส่งคำถามถัดไปทับ กลายเป็นงานค้าง 10 นาทีแล้วล้ม
+            # (เจอจริง 23 ส.ค. 2026 เวลา 01:32)
             elif images and time.time() - images_since >= IMAGE_SETTLED_SECONDS:
-                self.log(f"  รูปนิ่งแล้ว {images} ใบ ({waited} วิ) — ไม่รอปุ่มหยุดต่อ")
+                self.log(f"  รูปกับข้อความนิ่งแล้ว {images} ใบ ({waited} วิ) — ไม่รอปุ่มหยุดต่อ")
                 return text
 
             # "ตอบแล้ว" นับรูปด้วย ไม่ใช่แค่ข้อความ — GPT สร้างภาพตอบเป็นรูปล้วน
@@ -408,6 +577,16 @@ class ChatGPTSession:
                 self.log(f"  ตอบจบแล้ว ({len(text)} ตัวอักษร · รูป {images} ใบ)")
                 return text
             time.sleep(POLL_SECONDS)
+
+        # หมดเวลาแล้วยังไม่มีคำตอบใหม่ = **ล้มเหลว ห้ามคืนของเก่า**
+        # คืนของเก่าไปคือส่งข้อมูลผิดให้ขั้นถัดไปโดยไม่มีใครรู้ ซึ่งแย่กว่าล้มเสียอีก
+        state = self.state()
+        stale = (after is not None and state.get("replyCount", 0) <= after) or (
+            previous and state["lastReply"] == previous)
+        if stale:
+            raise ChatGPTError(
+                f"ส่งคำถามแล้วแต่ ChatGPT ไม่ได้ตอบก้อนใหม่ภายใน {REPLY_TIMEOUT} วินาที"
+            )
         if last_text or last_images:
             self.log(f"  หมดเวลารอ — ใช้เท่าที่ได้ (รูป {last_images} ใบ)")
             return last_text
@@ -416,8 +595,12 @@ class ChatGPTSession:
     def ask(self, text: str, images: list[Path] | None = None) -> str:
         if images:
             self.attach(images)
+        # จำสภาพก่อนถามไว้ แล้วส่งให้ตัวรอใช้ยืนยันว่าได้ "คำตอบใหม่" จริง
+        before = self.state()
         self.send(text)
-        return self.wait_reply()
+        return self.wait_reply(
+            after=before.get("replyCount", 0), previous=before.get("lastReply", ""),
+        )
 
     # ------------------------------------------------- รูปที่ GPT ตอบกลับมา
 
@@ -554,6 +737,43 @@ FLOW_PROMPT_ASK = (
     "มีบทบรรยายแบบเพื่อนรีวิวให้เพื่อน มีตัวหนังสือในคลิปด้วย"
 )
 
+# ข้อกำหนดเพิ่มที่**ต่อท้าย**ข้อความข้างบน — ไม่แตะถ้อยคำเดิมของผู้ใช้
+#
+# **ทำไมต้องมี** (26 ส.ค. 2026) ตรวจคลิป 24 ใบพบว่า 2 ใบไม่มีเสียงพูดเลย
+# ไล่ไปที่คำสั่งแล้วพบสองสาเหตุคนละอัน
+#   1. คำสั่งยาวเกินเพดาน 4,000 ตัว แล้วบรรทัดสั่งเสียงที่อยู่ท้ายฉากโดนตัดทิ้ง
+#      (แก้ที่ `clip_app.build_one_clip_prompt` แล้ว — กันที่ให้บรรทัดเสียงก่อน)
+#   2. **GPT ไม่ได้เขียนบรรทัดสั่งเสียงมาให้เลยตั้งแต่แรก** ← ข้อนี้แก้ตรงนี้
+#      วัดจริง: ทีวี 55 V6C (25025138544) มีคำสั่ง 5 ฉาก แต่มีบรรทัดเสียงแค่ 1
+#
+# **ต้องระบุรูปแบบให้ตรงเป๊ะ** เพราะฝั่งที่รวมคำสั่งต้องหาบรรทัดนี้ให้เจอเพื่อกัน
+# ไม่ให้โดนตัด ถ้า GPT เขียนคนละรูปแบบทุกครั้ง ตัวกันจะหาไม่เจอแล้วกลับไปพังเหมือนเดิม
+FLOW_AUDIO_RULE = (
+    "\n\nข้อกำหนดเพิ่มเติมที่ห้ามข้าม:\n"
+    "**ทุกฉากต้องมีบรรทัดสั่งเสียงพูดภาษาไทย** เขียนเป็นบรรทัดแยกท้ายฉากนั้น "
+    "ในรูปแบบนี้เป๊ะๆ (ขึ้นต้นด้วยคำว่า Audio: เสมอ):\n"
+    "Audio: Generate Thai voice-over narration: \"<คำพูดของฉากนั้น>\"\n"
+    "ห้ามมีฉากไหนขาดบรรทัดนี้ — ฉากที่ขาดจะกลายเป็นคลิปเงียบซึ่งใช้งานไม่ได้"
+)
+
+# ฉากที่ต้องมีบรรทัดสั่งเสียง — ใช้ตรวจว่า GPT ตอบมาครบไหมก่อนเอาไปใช้จริง
+FLOW_AUDIO_LINE_RE = re.compile(r"^\s*Audio\s*[:：]", re.I | re.M)
+
+
+def flow_prompts_missing_audio(prompts: list[str]) -> list[int]:
+    """ฉากไหนไม่มีบรรทัดสั่งเสียง — คืนลำดับฉาก (เริ่มที่ 1)
+
+    **ไม่นับชุดแรกถ้าเป็นคำเกริ่น** GPT มักใส่ย่อหน้าอธิบายก่อนถึงฉากแรก
+    ซึ่งไม่ใช่ฉากจึงไม่ต้องมีเสียง — ดูจากว่ามีคำว่า SCENE/ซีน อยู่ต้นก้อนไหม
+    """
+    missing = []
+    for index, text in enumerate(prompts or [], start=1):
+        if not re.search(r"\b(SCENE|ซีน)\s*\d", (text or "")[:200], re.I):
+            continue                      # ก้อนเกริ่น ไม่ใช่ฉาก
+        if not FLOW_AUDIO_LINE_RE.search(text or ""):
+            missing.append(index)
+    return missing
+
 # ขอ "บทพูด" แยกออกมาต่างหาก
 #
 # คำสั่งสำหรับ Google Flow ยาวหลายพันตัวและเต็มไปด้วยศัพท์เทคนิค (มุมกล้อง แสง
@@ -572,6 +792,46 @@ SCRIPT_ASK = (
     "ไม่ต้องมีคำอธิบายมุมกล้อง ไม่ต้องมีคำสั่งเทคนิค ไม่ต้องมีหัวข้อนำ "
     "ไม่ต้องบอกจำนวนคำ"
 )
+
+# มุมเปิดเรื่อง — หมุนเวียนไปตามสินค้า ไม่ให้ทุกคลิปเปิดแบบเดียวกัน
+#
+# **ทำไมต้องมี** วัดจริง 23 ส.ค. 2026: บทพูด 27 ชิ้นในคลัง **22 ชิ้นขึ้นต้นด้วยคำว่า
+# "แก"** (81%) และปิดท้ายด้วยสูตรเดียวกันเกือบทั้งหมด ("...น่าโดนมาก!") ส่วนสินค้า
+# ตระกูลเดียวกันบทพูดซ้ำกัน 34–52% เพราะสเปกเหมือนกัน จุดเด่นจึงถูกคัดมาชุดเดียวกัน
+# แล้ว GPT ก็เขียนตามสูตรประจำของมัน
+#
+# คนดูเลื่อนเจอคลิปเราสามคลิปติดกันแล้วรู้สึกว่า "อันเดิม" = เลื่อนผ่าน
+#
+# เลือกมุมด้วยรหัสสินค้า ไม่ใช่สุ่ม — สินค้าเดิมสั่งซ้ำจะได้มุมเดิม ผลจึงคาดเดาได้
+# และเวลาไล่ปัญหาไม่ต้องเดาว่ารอบนั้นได้มุมไหน
+SCRIPT_ANGLES = (
+    "เปิดด้วย **ปัญหาที่คนเจอ** ก่อน แล้วค่อยเฉลยว่าของชิ้นนี้แก้ให้",
+    "เปิดด้วย **คำถามชวนคิด** ที่คนกลุ่มเป้าหมายตอบในใจว่าใช่",
+    "เปิดด้วย **ตัวเลขที่น่าตกใจ** ของสินค้าเลย ไม่ต้องเกริ่น",
+    "เปิดด้วย **สถานการณ์ในชีวิตจริง** ที่จะได้ใช้ของชิ้นนี้",
+    "เปิดด้วย **การเปรียบเทียบกับของเดิม** ที่คนใช้อยู่",
+    "เปิดด้วย **คำชวนดูตรงๆ แบบเพื่อนบอกเพื่อน** ไม่ต้องเกริ่นยาว",
+)
+
+
+def script_ask(avoid: list[str] | None = None, seed: str = "") -> str:
+    """คำสั่งขอบทพูด + ข้อห้ามไม่ให้เขียนซ้ำของเดิม
+
+    `avoid` = ประโยคเปิดของคลิปก่อนหน้า · `seed` = รหัสสินค้า ใช้เลือกมุมเปิด
+    """
+    parts = [SCRIPT_ASK]
+    if seed:
+        angle = SCRIPT_ANGLES[sum(ord(c) for c in str(seed)) % len(SCRIPT_ANGLES)]
+        parts.append(f"\n**มุมเปิดของคลิปนี้**: {angle}")
+    lines = [text.strip() for text in (avoid or []) if text and text.strip()][:8]
+    if lines:
+        parts.append(
+            "\n**ห้ามเปิดเรื่องซ้ำกับคลิปก่อนหน้าเหล่านี้** (คนดูเลื่อนเจอติดกัน "
+            "แล้วจะรู้สึกว่าเป็นคลิปเดิม):\n"
+            + "\n".join(f"  · {text[:60]}" for text in lines)
+            + "\nห้ามขึ้นต้นด้วยคำเดียวกับข้างบน และห้ามใช้ประโยคปิดแนวเดียวกัน"
+        )
+    return "".join(parts)
 
 
 # อักษรไทยเฉลี่ยกี่ตัวต่อหนึ่งคำ ใช้ประมาณจำนวนคำจากความยาวข้อความ
@@ -606,6 +866,42 @@ SCRIPT_LINE_RE = re.compile(
 
 # หัวข้อฉากที่โผล่กลางบรรทัดได้ ใช้ตอนคำตอบไม่มีการขึ้นบรรทัดใหม่เลย
 SCRIPT_INLINE_RE = re.compile(r"(?=(?:ฉาก|SCENE|Scene|ซีน)\s*\d+\s*[:：\-–])")
+
+
+# คลิป 10 วินาทีมีได้กี่ฉาก — เกินนี้แปลว่าแกะผิด ไม่ใช่บทพูดยาว
+SCRIPT_MAX_SCENES = 8
+
+# ร่องรอยว่า "นี่ไม่ใช่บทพูด แต่เป็นคำสั่งเจนภาพ/คำอธิบายของ GPT"
+_NOT_SCRIPT_RE = re.compile(
+    r"\bSCENE\s*\d|\bSHOT\s*:|\bCAMERA\s*:|MASTER STYLE|\bPrompt\b|"
+    r"\bCreate a\b|\bvertical 9:16\b|photorealistic|ข้อความบนภาพ",
+    re.I,
+)
+
+
+def script_looks_wrong(script: list[str]) -> str:
+    """บทพูดชุดนี้หน้าตาผิดปกติไหม — คืนคำอธิบายสั้นๆ ถ้าผิด คืนค่าว่างถ้าปกติ
+
+    **ต้องมีด่านนี้** เพราะ `extract_script` ชั้นสุดท้ายออกแบบให้ "คืนทั้งก้อน"
+    เมื่อแกะไม่ได้ ซึ่งดีเวลาคำตอบเป็นความเรียง แต่กลายเป็นช่องให้ของผิดไหลผ่าน
+    เวลาได้คำตอบผิดก้อนมา
+
+    เจอจริง 22 ส.ค. 2026: ระบบเก็บ "บทพูด" 54 ฉาก 722 คำ ซึ่งแท้จริงคือคำสั่ง
+    เจนวิดีโอภาษาอังกฤษ + คำอธิบายของ GPT — ไหลไปถึงหน้าอนุมัติโดยมีแค่คำเตือน
+    ตัวเล็กว่า "ยาวเกิน" ผู้ใช้ต้องมาเห็นเองว่ามันไม่ใช่บทพูด
+    """
+    if not script:
+        return "ไม่มีบทพูดเลย"
+    if len(script) > SCRIPT_MAX_SCENES:
+        return f"ได้มา {len(script)} ฉาก คลิป 10 วินาทีมีได้ไม่เกิน {SCRIPT_MAX_SCENES}"
+    words = count_words(script)
+    if words > SCRIPT_MAX_WORDS * 3:
+        return f"ยาว {words} คำ เกินเพดาน {SCRIPT_MAX_WORDS} คำหลายเท่า"
+    text = "\n".join(script)
+    found = _NOT_SCRIPT_RE.search(text)
+    if found:
+        return f"มีคำสั่งเจนภาพปนมา (“{found.group(0)}”)"
+    return ""
 
 
 def extract_script(reply: str) -> list[str]:
@@ -650,6 +946,8 @@ def make_storyboard(
     hidden: bool = True,
     # ข้อความสั่งเพิ่มที่แทรกก่อนบรรทัดสุดท้าย เช่นกรณีสินค้าปรับเปลี่ยนรูปทรงได้
     extra_ask: str = "",
+    # ประโยคเปิดของคลิปก่อนหน้า — ส่งไปบอก GPT ว่าห้ามเขียนซ้ำแนวนี้อีก
+    avoid_openers: list[str] | None = None,
 ) -> dict:
     """ส่ง ชื่อสินค้า + รูป + จุดเด่น เข้า GPT นักสร้างสตอรีบอร์ด แล้วเก็บรูปที่ได้
 
@@ -718,9 +1016,38 @@ def make_storyboard(
             log("ขอคำสั่งสำหรับ Google Flow ต่อในแชทเดิม")
             flow_reply, flow_prompts = "", []
             try:
-                flow_reply = session.ask(FLOW_PROMPT_ASK)
+                flow_reply = session.ask(FLOW_PROMPT_ASK + FLOW_AUDIO_RULE)
                 flow_prompts = extract_prompts(flow_reply)
                 log(f"  ได้คำสั่ง {len(flow_prompts)} ชุด")
+                # ---- ตรวจว่ามีบรรทัดสั่งเสียงครบทุกฉากไหม -------------------
+                #
+                # **ต้องรู้ตรงนี้ ไม่ใช่ไปรู้ตอนคลิปเจนเสร็จแล้วเงียบ** — ตอนนั้น
+                # เสียเครดิต Flow ไปแล้วและต้องเจนใหม่ทั้งรอบ ส่วนตรงนี้แค่ถามซ้ำ
+                # ในแชทเดิม ไม่มีต้นทุนอะไรเลยนอกจากเวลาไม่กี่วินาที
+                #
+                # ขอซ้ำครั้งเดียวพอ — ถ้ายังไม่ครบแปลว่า GPT ไม่ยอมทำตาม
+                # การวนขอไม่รู้จบมีแต่จะกินเวลาโดยไม่ได้อะไรเพิ่ม
+                missing = flow_prompts_missing_audio(flow_prompts)
+                if missing:
+                    log(f"  ⚠️ ฉาก {missing} ไม่มีบรรทัดสั่งเสียงพูด — ขอใหม่อีกครั้ง")
+                    retry = session.ask(
+                        "คำสั่งที่ให้มายังขาดบรรทัดสั่งเสียงพูดในบางฉาก\n"
+                        f"ฉากที่ขาดคือ: {', '.join(str(n) for n in missing)}\n"
+                        "ขอคำสั่งชุดเดิมใหม่ทั้งหมด โดย**ทุกฉากต้องมี**บรรทัดนี้"
+                        "ท้ายฉาก:\n"
+                        "Audio: Generate Thai voice-over narration: \"<คำพูดของฉากนั้น>\""
+                    )
+                    again = extract_prompts(retry)
+                    still = flow_prompts_missing_audio(again)
+                    if again and len(still) < len(missing):
+                        flow_reply, flow_prompts = retry, again
+                        log(f"  ได้คำสั่งใหม่ {len(again)} ชุด · ยังขาดเสียง {len(still)} ฉาก")
+                    else:
+                        # ของใหม่ไม่ได้ดีกว่าเดิม เก็บของเดิมไว้ แต่**ต้องไม่เงียบ**
+                        warnings.append(
+                            f"คำสั่ง Flow ยังขาดบรรทัดสั่งเสียงพูด {len(missing)} ฉาก "
+                            "— คลิปที่ได้อาจไม่มีเสียงพูด")
+                        log("  ⚠️ ขอใหม่แล้วยังไม่ครบ — เก็บของเดิมไว้และแจ้งเตือน")
             except Exception as error:                          # noqa: BLE001
                 warnings.append(f"ขอคำสั่ง Flow ไม่สำเร็จ ({error})")
                 log(f"  ⚠️ ขอคำสั่ง Flow ไม่สำเร็จ: {error} — เก็บสตอรีบอร์ดที่ได้ไว้ก่อน")
@@ -730,8 +1057,20 @@ def make_storyboard(
             log("ขอบทพูดในคลิปแยกอีกรอบ")
             script_reply, script = "", []
             try:
-                script_reply = session.ask(SCRIPT_ASK)
+                ask_script = script_ask(avoid_openers, seed=folder.name)
+                script_reply = session.ask(ask_script)
                 script = extract_script(script_reply)
+                bad = script_looks_wrong(script)
+                if bad:
+                    # ได้ของที่ไม่ใช่บทพูด — ขอใหม่หนึ่งครั้งพร้อมบอกว่าผิดตรงไหน
+                    log(f"  ⚠️ ที่ได้มาไม่ใช่บทพูด ({bad}) — ขอใหม่อีกครั้ง")
+                    script_reply = session.ask(
+                        f"อันนั้นไม่ใช่บทพูด ({bad})\n\n{ask_script}"
+                    )
+                    script = extract_script(script_reply)
+                    bad = script_looks_wrong(script)
+                if bad:
+                    raise ChatGPTError(f"ขอบทพูดแล้วยังไม่ได้บทพูดจริง ({bad})")
                 log(f"  ได้บทพูด {len(script)} ฉาก")
             except Exception as error:                          # noqa: BLE001
                 warnings.append(f"ขอบทพูดไม่สำเร็จ ({error})")

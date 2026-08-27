@@ -33,7 +33,9 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 import chatgpt_driver
+import clip_board
 import clip_check
+import clip_claims
 import clip_queue
 import clip_store
 import publish_order
@@ -43,6 +45,7 @@ import clip_rules
 NEWLINE = chr(10)
 import hashtag
 import policy_fix
+import shopee_scrape
 import studio_shared as shared
 import telegram_bot
 import thai_speech
@@ -236,11 +239,44 @@ def one_clip_mode() -> bool:
     return bool(shared.read_config().get(FLOW_ONE_CLIP_KEY, True))
 
 
+# บรรทัดสั่งเสียงพูดในคำสั่งของแต่ละฉาก — GPT เขียนมาแบบนี้เสมอ
+# ตัวอย่างจริง: `Audio: Generate Thai voice-over narration: "แก จอนี้ภาพสวยเกินเรื่องมาก!"`
+AUDIO_LINE_RE = re.compile(r"^\s*(audio|voice-?over|narration)\s*[:：]", re.I)
+
+
+def split_audio_line(text: str) -> tuple[str, str]:
+    """แยก **บรรทัดสั่งเสียงพูด** ออกจากคำบรรยายภาพ — คืน (ภาพ, เสียง)
+
+    ต้องแยกเพราะเวลาคำสั่งยาวเกินเพดานแล้วต้องย่อ **ห้ามย่อบรรทัดเสียง**
+    (ดูเหตุผลเต็มใน `build_one_clip_prompt`)
+    """
+    visual, audio = [], []
+    for line in (text or "").strip().splitlines():
+        (audio if AUDIO_LINE_RE.match(line) else visual).append(line)
+    return "\n".join(visual).strip(), "\n".join(audio).strip()
+
+
 def build_one_clip_prompt(prompts: list[str], seconds: int = 8) -> str:
     """รวม prompt ทุกฉากเป็นก้อนเดียวสำหรับเจนคลิปเดียวจบ
 
     ต้องบอกให้ชัดว่า **คลิปเดียวต่อเนื่อง** ไม่ใช่หลายคลิป ไม่งั้นโมเดลจะตีความว่า
     ให้ทำฉากแรกอย่างเดียว (แต่ละก้อนเดิมเขียนไว้แบบ "เจนทีละฉาก")
+
+    **บรรทัดสั่งเสียงพูดห้ามโดนตัดเด็ดขาด** (แก้ 26 ส.ค. 2026)
+    ------------------------------------------------------------------
+    ของเดิมย่อทุกฉากเท่าๆ กันด้วยการ **ตัดท้ายทิ้ง** ซึ่งเป็นที่ที่ GPT วางบรรทัด
+    `Audio: Generate Thai voice-over narration: "…"` ไว้พอดี ผลคือคำสั่งเสียง
+    เป็นสิ่งแรกที่หายทุกครั้งที่คำสั่งยาวเกิน
+
+    วัดกับของจริง — คลิปจอ 25 นิ้ว (43351917391):
+        คำสั่ง 6 ชุดรวม 6,599 ตัวอักษร → ย่อเหลือ 3,984 (เพดาน 4,000)
+        คำสั่งเรื่องเสียงในต้นฉบับ 22 จุด → **ส่งถึง Flow 0 จุด**
+    คลิปที่ได้จึงมีแต่ดนตรี ไม่มีเสียงพูดเลย และ**กดเจนใหม่พร้อมคอมเมนต์
+    "ใส่บทพูดตามสคริป" ก็ไม่ช่วย** เพราะคำสั่งที่แก้แล้วก็โดนตัดที่เดิมซ้ำ
+
+    ตอนนี้จึงกันที่ว่างให้บรรทัดเสียงไว้ก่อน แล้วค่อยเอาที่เหลือไปเฉลี่ยให้
+    คำบรรยายภาพ — ภาพย่อได้ (ได้ฉากที่บรรยายสั้นลง) แต่เสียงย่อไม่ได้
+    (ได้คลิปเงียบ ซึ่งใช้ไม่ได้เลยและต้องเจนใหม่ = เสียเครดิตฟรี)
     """
     header = (
         f"Create ONE continuous {seconds}-second vertical 9:16 video that plays "
@@ -248,20 +284,37 @@ def build_one_clip_prompt(prompts: list[str], seconds: int = 8) -> str:
         "Divide the time evenly between scenes with smooth cuts. "
         "Keep the same product, colours and lighting style across every scene.\n\n"
     )
-    body = "\n\n".join(
-        f"--- SCENE {index} ---\n{text.strip()}"
-        for index, text in enumerate(prompts, 1)
-    )
-    combined = header + body
+    parts = [split_audio_line(text) for text in prompts]
+
+    def join(rows: list[tuple[str, str]]) -> str:
+        blocks = []
+        for index, (visual, audio) in enumerate(rows, 1):
+            block = f"--- SCENE {index} ---\n{visual}"
+            if audio:
+                block += f"\n{audio}"
+            blocks.append(block)
+        return header + "\n\n".join(blocks)
+
+    combined = join(parts)
     if len(combined) <= FLOW_PROMPT_LIMIT:
         return combined
-    # ตัดแบบเฉลี่ยทุกฉาก ไม่ใช่ตัดท้ายทิ้ง — ไม่งั้นฉากหลังหายไปทั้งฉาก
-    room = max(200, (FLOW_PROMPT_LIMIT - len(header)) // max(1, len(prompts)) - 20)
-    body = "\n\n".join(
-        f"--- SCENE {index} ---\n{text.strip()[:room]}"
-        for index, text in enumerate(prompts, 1)
-    )
-    return (header + body)[:FLOW_PROMPT_LIMIT]
+
+    # กันที่ให้บรรทัดเสียงก่อน แล้วเอาที่เหลือหารเฉลี่ยให้คำบรรยายภาพ
+    reserved = sum(len(audio) + 1 for _, audio in parts if audio)
+    frame = len(header) + sum(len(f"--- SCENE {i} ---\n\n\n") for i in range(1, len(parts) + 1))
+    room = (FLOW_PROMPT_LIMIT - reserved - frame) // max(1, len(parts))
+    # ต่ำกว่านี้คำบรรยายภาพจะสั้นจนไม่เหลือความหมาย — ยอมเกินเพดานดีกว่าส่งของที่
+    # อ่านไม่รู้เรื่อง แล้วให้บรรทัดตัดท้ายชั้นสุดท้ายจัดการ (ซึ่งยังไม่โดนเสียง
+    # เพราะเสียงถูกกันที่ไว้แล้ว)
+    room = max(150, room)
+    combined = join([(visual[:room].rstrip(), audio) for visual, audio in parts])
+    if len(combined) <= FLOW_PROMPT_LIMIT:
+        return combined
+    # ยังยาวอยู่ = บรรทัดเสียงเองยาวมากผิดปกติ ตัดท้ายเป็นทางสุดท้าย
+    # **ขึ้น log ด้วย** ไม่ปล่อยให้เสียงหายเงียบๆ อีก
+    _clip_log(f"⚠️ คำสั่งยังยาว {len(combined)} เกินเพดาน {FLOW_PROMPT_LIMIT} "
+              "แม้ย่อคำบรรยายภาพจนสุดแล้ว — บรรทัดสั่งเสียงอาจถูกตัดบางส่วน")
+    return combined[:FLOW_PROMPT_LIMIT]
 
 
 def _remember_clip_chat_id(chat_id: str) -> None:
@@ -1082,6 +1135,9 @@ def _clip_make(job: dict) -> None:
     # ทำได้แค่ส่งข้อบังคับไปทับให้ชนะ (ไล่ตรวจ 26 ส.ค. 2026 แล้ว — คำสั่งฝั่งเรา
     # ไม่มีที่ไหนสั่งให้ซูมเลยสักจุด)
     rules = []
+    # ห้ามของมีลิขสิทธิ์บนหน้าจอสินค้า — **แนบทุกครั้ง ไม่มีเงื่อนไข**
+    # (คลิปทีวี 85 นิ้วโดนลบเพราะข้อนี้ 26 ส.ค. 2026 — ดู clip_rules.py)
+    rules.append((clip_rules.NO_THIRD_PARTY_LABEL, clip_rules.NO_THIRD_PARTY_ASK))
     if transform_hint(highlights, data.get("name", "")):
         rules.append(("สินค้าปรับเปลี่ยนได้", TRANSFORM_STORYBOARD_ASK))
     frame_label, frame_ask = clip_rules.ask_of(run)
@@ -1459,6 +1515,26 @@ def _clip_check_videos(item_id: str, force: bool = False) -> dict:
     result = clip_check.check(
         paths[0], load_gemini_api_key(), run.get("script"), log=_clip_log,
     )
+    # ---- คำอ้างที่ไม่มีในหน้าสินค้า (ผู้ใช้สั่ง 26 ส.ค. 2026) ----------------
+    #
+    # **ไม่ต้องยิง AI เลย** เป็นการเทียบข้อความกับข้อความล้วน จึงไม่กินโควตา
+    # ไม่มีทางล้มเพราะ 503 และให้คำตอบเดิมทุกครั้ง — ต่างจากด่านอื่นในไฟล์นี้
+    #
+    # เจอจริงตอนไล่ตรวจ 27 ใบ: คลิป TCL Monitor 27 นิ้ว พูดว่า "DC Dimming"
+    # ซึ่งสินค้าไม่มีฟีเจอร์นี้ (หน้าสินค้ามีแต่ "Precise Dimming Zones")
+    # เข้าข่ายอ้างสรรพคุณเกินจริง = 3 คะแนน หนักกว่าละเมิดลิขสิทธิ์ 3 เท่า
+    try:
+        claims = clip_claims.check(run, clip_store.target_dir(DATA_DIR, item_id))
+    except Exception as error:                               # noqa: BLE001
+        # ด่านเสริมล้มห้ามลากผลตรวจหลักตายตาม แต่ต้องไม่เงียบด้วย
+        _clip_log(f"ตรวจคำอ้างของ {item_id} ไม่สำเร็จ: {error}")
+        claims = []
+    result["claims"] = claims
+    if claims:
+        spots = ", ".join(f"ฉาก {c['scene']} “{c['value']}”" for c in claims[:3])
+        result.setdefault("problems", []).append(
+            f"⚠️ พูดถึงของที่ไม่มีในหน้าสินค้า ({spots}) — เข้าข่ายอ้างเกินจริง")
+        _clip_log(f"คำอ้างที่ไม่มีในหน้าสินค้าของ {item_id}: {spots}")
     clip_store.save_video_check(DATA_DIR, item_id, result)
     # แยกสามทางในบันทึก ไม่ใช่สองทาง — "ตรวจไม่ได้" ต้องไม่ถูกเขียนว่า "ไม่มีเสียงพูด"
     # ไม่งั้นวันหลังย้อนอ่าน log จะเข้าใจผิดว่าคลิปเสีย ทั้งที่แค่ยังไม่ได้ฟัง
@@ -2087,27 +2163,53 @@ def _clip_blocked_alert(info: dict) -> None:
     waiting = sum(1 for j in clip_jobs.all() if j.get("stage") == clip_queue.STAGE_QUEUED)
     link = job.get("link") or ""
     escape = telegram_bot._escape
-    lines = [
-        "⛔ <b>ติด CAPTCHA ของ Shopee — หยุดคิวไว้แล้ว</b>",
-        "",
-        f"ใบที่ติด: {escape((job.get('name') or link)[:70])}",
-        f"เหลือรอคิวอีก <b>{waiting}</b> ใบ — ยังอยู่ครบ ไม่ได้หายไปไหน",
-        "",
-        "Shopee ขึ้นหน้า “Please Try Again Later” เพราะตรวจว่าเป็นโปรแกรม",
-        "ไม่ใช่คนกด ระบบเลยหยุดรอ <b>ไม่ยิงต่อ</b> เพื่อไม่ให้โดนหนักกว่าเดิม",
-        "",
-        "<b>ทำยังไง</b> — เปิดลิงก์ข้างล่างในเบราว์เซอร์ แล้วเลื่อนจิ๊กซอว์ให้ผ่าน",
-        "เสร็จแล้วกดปุ่ม ✅ ข้างล่างนี้ ระบบจะทำต่อจากที่ค้างไว้ทันที",
-    ]
+    minutes = int((info.get("seconds") or 0) // 60)
+
+    if info.get("kind") == "wait":
+        # **หน้าที่ไม่มีอะไรให้คนทำ** — บอกให้รู้ว่าเกิดอะไรขึ้น แต่ห้ามขอให้เขา
+        # ไปแก้ เพราะไม่มีอะไรให้แก้ (27 ส.ค. 2026 เคยขอแล้วคิวนอน 6 ชม. 48 นาที)
+        lines = [
+            "😴 <b>Shopee ขอให้พักก่อน — พักคิวเองแล้ว</b>",
+            "",
+            f"ใบที่ติด: {escape((job.get('name') or link)[:70])}",
+            f"เหลือรอคิวอีก <b>{waiting}</b> ใบ — ยังอยู่ครบ ไม่ได้หายไปไหน",
+            "",
+            "หน้าที่ได้คือ “Please Try Again Later” ซึ่ง <b>ไม่มีจิ๊กซอว์ให้เลื่อน</b>",
+            "และ <b>ไม่มีอะไรที่คุณต้องไปทำ</b> — เขาแค่บอกให้รอสักครู่",
+            "",
+            f"⏳ ระบบจะ <b>พัก {minutes or 20} นาทีแล้วทำต่อเอง</b> ไม่ต้องกดอะไรทั้งนั้น",
+            "อยากให้เริ่มเดี๋ยวนี้เลยค่อยกดปุ่มข้างล่าง",
+        ]
+        keyboard = {"inline_keyboard": [[
+            {"text": "▶️ ไม่ต้องรอ เริ่มเลย", "callback_data": "clip:unhold:-"},
+        ], [
+            {"text": "🛑 ยกเลิกที่เหลือทั้งหมด", "callback_data": "clip:holdcancel:-"},
+        ]]}
+        _clip_log(f"แจ้งผู้ใช้แล้วว่าโดนพัก — จะทำต่อเองใน {minutes or 20} นาที "
+                  f"(ค้าง {waiting} ใบ ไม่ต้องรอใครกด)")
+    else:
+        lines = [
+            "⛔ <b>ติดด่านยืนยันตัวตนของ Shopee — หยุดคิวไว้แล้ว</b>",
+            "",
+            f"ใบที่ติด: {escape((job.get('name') or link)[:70])}",
+            f"เหลือรอคิวอีก <b>{waiting}</b> ใบ — ยังอยู่ครบ ไม่ได้หายไปไหน",
+            "",
+            "หน้านี้ <b>ต้องมีคนเลื่อนจิ๊กซอว์เอง</b> โปรแกรมทำแทนไม่ได้",
+            "ระบบจึงหยุดรอ <b>ไม่ยิงต่อ</b> เพื่อไม่ให้โดนหนักกว่าเดิม",
+            "",
+            "<b>ทำยังไง</b> — เปิดลิงก์ข้างล่างในเบราว์เซอร์ แล้วเลื่อนจิ๊กซอว์ให้ผ่าน",
+            "เสร็จแล้วกดปุ่ม ✅ ข้างล่างนี้ ระบบจะทำต่อจากที่ค้างไว้ทันที",
+        ]
+        keyboard = {"inline_keyboard": [[
+            {"text": "✅ เลื่อนจิ๊กซอว์ผ่านแล้ว ทำต่อเลย", "callback_data": "clip:unhold:-"},
+        ], [
+            {"text": "🛑 ยกเลิกที่เหลือทั้งหมด", "callback_data": "clip:holdcancel:-"},
+        ]]}
+        _clip_log(f"แจ้งผู้ใช้แล้วว่าติดด่านยืนยันตัวตน — รอยืนยันก่อนทำต่อ "
+                  f"(ค้าง {waiting} ใบ)")
     if link:
         lines += ["", f"<code>{escape(link)}</code>"]
-    keyboard = {"inline_keyboard": [[
-        {"text": "✅ แก้ CAPTCHA แล้ว ทำต่อเลย", "callback_data": "clip:unhold:-"},
-    ], [
-        {"text": "🛑 ยกเลิกที่เหลือทั้งหมด", "callback_data": "clip:holdcancel:-"},
-    ]]}
     _clip_say(chat_id, "\n".join(lines), keyboard, preview=False)
-    _clip_log(f"แจ้งผู้ใช้แล้วว่าติด CAPTCHA — รอยืนยันก่อนทำต่อ (ค้าง {waiting} ใบ)")
 
 
 clip_runner = clip_queue.ClipRunner(clip_jobs, _clip_worker, log=_clip_log,
@@ -3545,6 +3647,74 @@ def _failed_jobs() -> list[dict]:
     return [job for job in reversed(clip_jobs.all()) if job.get("stage") in stages]
 
 
+def _clip_wait_list(chat_id: str, argument: str = "") -> None:
+    """`/wait` — งานที่พักไว้รอแก้ทั้งหมด พร้อมปุ่มเอากลับเข้าขั้นเดิม
+
+    ผู้ใช้สั่ง 27 ส.ค. 2026: *"ฟังก์ชั่นรอแก้ ให้ลิ้งไปที่คำสั่ง /wait ใน telegram
+    เวลาเรียกดู"* — หน้าเว็บกับแชทจึงต้องเห็นรายการเดียวกัน ไม่ใช่คนละชุด
+
+    `/wait <เลข>` = เอาใบนั้นกลับเข้าขั้นเดิมเลย · `/wait all` = เอากลับทั้งหมด
+    """
+    escape = telegram_bot._escape
+    rows_all = clip_jobs.parked()
+    target = (argument or "").strip().lower()
+
+    if target:
+        picked: list[dict] = []
+        if target in ("all", "ทั้งหมด"):
+            picked = list(rows_all)
+        elif target.isdigit() and 1 <= int(target) <= len(rows_all):
+            picked = [rows_all[int(target) - 1]]
+        else:
+            _clip_say(chat_id, f"ไม่มีใบที่ {escape(target)} ในช่องรอแก้ — พิมพ์ /wait ดูรายการก่อน")
+            return
+        done = []
+        for job in picked:
+            try:
+                fresh = clip_jobs.unpark(job["id"])
+            except clip_queue.ClipQueueError:
+                continue
+            done.append(clip_queue.STAGE_LABEL.get(fresh.get("stage") or "",
+                                                   fresh.get("stage") or ""))
+        clip_runner.wake()
+        _clip_log(f"เอางานออกจากช่องรอแก้ {len(done)} ใบ")
+        _clip_say(chat_id, f"↩️ เอากลับเข้าขั้นเดิมแล้ว <b>{len(done)}</b> ใบ "
+                           f"— ระบบจะทำต่อให้เอง")
+        return
+
+    if not rows_all:
+        _clip_say(chat_id, "✅ ไม่มีงานพักรอแก้เลย — ช่อง 🅿️ รอแก้ว่างอยู่")
+        return
+
+    lines = [f"🅿️ <b>พักไว้รอแก้ {len(rows_all)} ใบ</b>",
+             "เครื่องไม่แตะใบพวกนี้ ของที่ทำไว้แล้วยังอยู่ครบ", ""]
+    buttons = []
+    for index, job in enumerate(rows_all[:20], 1):
+        name = str(job.get("name") or job.get("link") or job.get("id"))[:42]
+        park = job.get("parked") or {}
+        came = clip_queue.STAGE_LABEL.get(park.get("from") or "", park.get("from") or "—")
+        why = str(park.get("why") or "ไม่ได้บอกเหตุผล")[:70]
+        when = str(park.get("at") or "")[5:16].replace("T", " ")
+        lines.append(f"{index}. {escape(name)}")
+        lines.append(f"    <i>ค้างที่ “{escape(came)}” · {escape(why)}</i>")
+        if when:
+            lines.append(f"    <i>พักไว้เมื่อ {escape(when)}</i>")
+        if len(buttons) < 8:
+            buttons.append([{
+                "text": f"↩️ {index}. {name[:22]}",
+                "callback_data": f"clip:unpark:{job.get('id')}",
+            }])
+    if len(rows_all) > 20:
+        lines.append(f"…และอีก {len(rows_all) - 20} ใบ")
+    lines += ["", "เอากลับด้วย <code>/wait &lt;เลข&gt;</code> "
+                  "(<code>/wait all</code> = ทั้งหมด)",
+              "กลับเข้า<b>ขั้นเดิมที่ค้างไว้</b> ไม่ได้เริ่มใหม่"]
+    keyboard = {"inline_keyboard": buttons} if buttons else None
+    parts = _split_text("\n".join(lines), TELEGRAM_TEXT_LIMIT)
+    for index, part in enumerate(parts):
+        _clip_say(chat_id, part, keyboard if index == len(parts) - 1 else None)
+
+
 def _clip_failed_list(chat_id: str) -> None:
     """รายการงานที่ล้ม พร้อมเหตุผล และปุ่มสั่งทำต่อ"""
     jobs = _failed_jobs()
@@ -4437,6 +4607,9 @@ def _clip_telegram_command(chat_id: str, text: str) -> bool:
     if command == "/queue":
         _clip_queue_text(chat_id)
         return True
+    if command in ("/wait", "/รอแก้"):
+        _clip_wait_list(chat_id, argument)
+        return True
     if command in ("/pending", "/รออนุมัติ"):
         _clip_pending_list(chat_id, argument)
         return True
@@ -4770,6 +4943,32 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
         except ValueError as error:
             return str(error)
 
+    # ปุ่ม 🅿️ / ↩️ ของช่องรอแก้ (ผู้ใช้สั่ง 27 ส.ค. 2026)
+    if action == "park":
+        if clip_runner.current == job_id:
+            return "งานนี้กำลังทำอยู่ — พักกลางคันไม่ได้ รอให้จบขั้นนี้ก่อน"
+        if job.get("parked"):
+            return "งานนี้พักไว้อยู่แล้ว — ดูรายการทั้งหมดที่ /wait"
+        came = clip_queue.STAGE_LABEL.get(job.get("stage") or "", job.get("stage") or "")
+        try:
+            clip_jobs.park(job_id, "กดพักจากแชท")
+        except clip_queue.ClipQueueError as error:
+            return str(error)
+        _clip_log(f"พักงาน {job_id} ไว้รอแก้จากแชท (ค้างที่ขั้น {came})")
+        return f"🅿️ พักไว้รอแก้แล้ว (ค้างที่ขั้น {came}) — ดูทั้งหมดที่ /wait"
+
+    if action == "unpark":
+        if not job.get("parked"):
+            return "งานนี้ไม่ได้พักไว้"
+        try:
+            fresh = clip_jobs.unpark(job_id)
+        except clip_queue.ClipQueueError as error:
+            return str(error)
+        clip_runner.wake()
+        came = clip_queue.STAGE_LABEL.get(fresh.get("stage") or "", fresh.get("stage") or "")
+        _clip_log(f"เอางาน {job_id} ออกจากช่องรอแก้จากแชท → ขั้น {came}")
+        return f"↩️ เอากลับเข้าขั้น “{came}” แล้ว"
+
     if action == "img_all":
         return _clip_send_all_images(job_id, chat_id)
 
@@ -5026,6 +5225,10 @@ async def health() -> dict:
 async def clips_list() -> dict:
     """รายการงานเจนคลิปที่เก็บไว้ ใหม่สุดขึ้นก่อน"""
     runs = await asyncio.to_thread(clip_store.list_runs, DATA_DIR)
+    # ติดป้ายว่างานแต่ละชิ้นอยู่ขั้นไหน เพื่อให้หน้าเว็บกรองตามหัวข้อได้
+    # (ผู้ใช้สั่ง 26 ส.ค. 2026: "แยกงานที่เก็บไว้ตามแต่ละขั้นเลย")
+    for run in runs:
+        run["bucket"] = clip_board.bucket_of_run(run)
     return {"ok": True, "runs": runs}
 
 
@@ -5311,6 +5514,10 @@ async def jobs_detail(job_id: str) -> dict:
             "run": run,
             "max_images": CLIP_MAX_IMAGES,
             "max_highlights": CLIP_MAX_HIGHLIGHTS,
+            # เมนูโมเดลของปุ่ม "ให้ AI ดูรูปแล้วเขียนจุดเด่น" (ผู้ใช้สั่ง 27 ส.ค. 2026)
+            # ส่งทั้งเมนูไปให้หน้าเว็บวาดเอง — เพิ่ม/ตัดโมเดลที่ `shopee_scrape` ที่เดียว
+            # แล้วดรอปดาวน์เปลี่ยนตาม ไม่ต้องแก้หน้าเว็บ (เหมือน `framing_menu`)
+            "highlight_models": [dict(row) for row in shopee_scrape.IMAGE_HIGHLIGHT_MENU],
             # แนวการวางกล้องของสตอรีบอร์ด — ส่งทั้งเมนูและค่าที่ใช้อยู่ไปให้
             # หน้าเว็บวาดเอง เพิ่มตัวเลือกใหม่ที่ `clip_rules.MODES` ที่เดียว
             # แล้วปุ่มจะโผล่เองโดยไม่ต้องแก้หน้าเว็บ
@@ -5559,6 +5766,63 @@ async def jobs_script_save(job_id: str, request: Request) -> dict:
     }
 
 
+@app.get("/api/board")
+async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ `clip_board` — ทับชื่อโมดูล
+    """กระดาน 6 ขั้น — งานไหนค้างอยู่ตรงไหน (ผู้ใช้สั่ง 26 ส.ค. 2026)
+
+    *"ตอนนี้ผมงงกับงานมากไม่รู้ว่าอันไหนอยู่ stage ไหนเท่าไรบ้าง"*
+
+    **ฝั่งเซิร์ฟเวอร์เป็นคนตัดสินว่างานอยู่กองไหน ห้ามให้หน้าเว็บคิดเอง**
+    เพราะกอง 4–6 ใช้ `publish_order` ตัวเดียวกับด่านที่กั้นก่อนโพสต์จริง
+    ถ้าเขียนแยกกันสองชุด วันหลังจะกลายเป็น "กระดานบอกว่าลงได้ แต่กดแล้วโดนปฏิเสธ"
+    แล้วไม่มีใครรู้ว่าฝั่งไหนถูก (กติกาข้อ 2.8 ของโปรเจกต์)
+    """
+    def work() -> dict:
+        jobs = clip_jobs.all()
+        return clip_board.build(jobs, lambda item: clip_store.load_run(DATA_DIR, item))
+
+    return {"ok": True, **await asyncio.to_thread(work)}
+
+
+@app.post("/api/jobs/{job_id}/storyboard")
+async def jobs_storyboard_drop(job_id: str, request: Request) -> dict:
+    """ลบภาพสตอรีบอร์ดที่ไม่เอาออกจากงาน (ผู้ใช้สั่ง 26 ส.ค. 2026)
+
+    ที่ต้องมีปุ่มนี้: ChatGPT บางครั้งวาดมาสองใบพร้อมกล่องถามว่าชอบใบไหนมากกว่า
+    ("Which image do you like more?") ซึ่งเป็นการทดลองของ OpenAI ไม่ใช่สิ่งที่
+    เราขอ — ตัวโหลดของเราเห็นเป็นภาพสองใบในคำตอบเดียวจึงเก็บมาทั้งคู่
+
+    **ไม่ลบถาวร ย้ายลงถังขยะ** และเหลือใบสุดท้ายลบไม่ได้ — ด่านทั้งสองอยู่ที่
+    `clip_store.drop_storyboard()` ที่เดียว ตรงนี้แค่ส่งต่อ
+    """
+    payload = await request.json()
+    name = str(payload.get("drop") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="ต้องบอกด้วยว่าจะลบภาพใบไหน")
+
+    job = _find_job(job_id)
+    item_id = job.get("item_id") or ""
+    if not item_id:
+        raise HTTPException(status_code=409, detail="งานนี้ยังไม่มีข้อมูลสินค้า")
+
+    def work() -> dict:
+        with _web_lock:
+            return clip_store.drop_storyboard(DATA_DIR, item_id, name)
+
+    try:
+        run = await asyncio.to_thread(work)
+    except clip_store.ClipStoreError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    left = list(run.get("storyboard") or [])
+    _clip_log(f"ลบภาพสตอรีบอร์ด {name} ของ {item_id} — เหลือ {len(left)} ใบ "
+              "(ย้ายลงถังขยะที่ storyboard/_trash แล้ว)")
+    return {
+        "ok": True, "storyboard": left,
+        "message": f"ลบภาพนั้นแล้ว เหลือ {len(left)} ใบ (กู้ได้ที่ storyboard/_trash)",
+    }
+
+
 @app.post("/api/jobs/{job_id}/regen")
 async def jobs_regen(job_id: str, request: Request) -> dict:
     """ลบคลิปเดิมแล้วเจนใหม่ — พร้อมคอมเมนต์บอกว่าต้องแก้อะไร
@@ -5716,6 +5980,14 @@ async def jobs_features_regen(job_id: str, request: Request) -> dict:
     payload = await request.json()
     raw = payload.get("images")
 
+    # โมเดลที่ผู้ใช้เลือกจากดรอปดาวน์ (ผู้ใช้สั่ง 27 ส.ค. 2026) — ว่าง = อัตโนมัติ
+    #
+    # **ต้องตรวจที่นี่ ไม่ใช่เชื่อหน้าเว็บ** หน้าเว็บส่งชื่ออะไรมาก็ได้ ถ้าไม่กัน
+    # จะกลายเป็นยิงชื่อมั่วไปที่ Google แล้วได้ 404 ที่อ่านไม่รู้เรื่อง
+    want_model = str(payload.get("model") or "").strip()
+    if want_model and want_model not in shopee_scrape.IMAGE_HIGHLIGHT_CHOICES:
+        raise HTTPException(status_code=400, detail=f"ไม่รู้จักโมเดล {want_model}")
+
     job = _find_job(job_id)
     item_id = job.get("item_id") or ""
     if not item_id:
@@ -5789,6 +6061,7 @@ async def jobs_features_regen(job_id: str, request: Request) -> dict:
                   f"(ของเดิม {len(before)} ข้อ: {' / '.join(before) or '—'})")
         analysis = shopee_scrape.analyse_features_from_images(
             name, paths, load_gemini_api_key(), log=_clip_log, count=want,
+            model=want_model,
         )
         with _web_lock:
             fresh = clip_store.save_features(DATA_DIR, item_id, analysis)
@@ -5819,6 +6092,11 @@ async def jobs_features_regen(job_id: str, request: Request) -> dict:
                     f"— กดซ้ำอีกครั้งได้ถ้าอยากได้ครบ")
     if result.get("images_saved"):
         bits.insert(0, f"บันทึกชุดรูป {len(result['images_saved'])} ใบที่เลือกไว้แล้ว")
+    # **บอกว่าตัวไหนตอบจริง ไม่ใช่ตัวไหนถูกขอ** — เลือกอัตโนมัติแล้วตัวแรกล่ม
+    # ระบบจะข้ามไปตัวสำรอง ถ้าไม่บอกก็ไม่มีใครรู้ว่าผลมาจากโมเดลไหน
+    used = (result.get("analysis") or {}).get("model") or ""
+    if used:
+        bits.append(f"ใช้ {used}")
     bits.append(f"คลังจุดขาย {len(fresh.get('features') or [])} ข้อ")
     return {
         "ok": True,
@@ -5866,6 +6144,58 @@ async def jobs_highlight(job_id: str, request: Request) -> dict:
 
     message = await asyncio.to_thread(work)
     return {"ok": True, "message": message}
+
+
+@app.post("/api/jobs/{job_id}/park")
+async def jobs_park(job_id: str, request: Request) -> dict:
+    """พักงานไว้ "รอแก้" — เครื่องหยุดแตะ แต่ของที่ทำไว้แล้วยังอยู่ครบ
+
+    ผู้ใช้สั่ง 27 ส.ค. 2026: *"ให้สร้างอีกช่องนึงเป็นช่องรอแก้ สำหรับทุกขั้นตอน
+    โดยมีปุ่มให้กดไปรอแก้ในใบงานด้วย"*
+
+    **ต่างจาก "ยกเลิก" ตรงที่กลับมาทำต่อได้** ยกเลิกคือทิ้ง ส่วนพักคือ "ยังเอาอยู่
+    แต่ยังไม่พร้อม" — ก่อนหน้านี้มีแค่สองทางคือปล่อยให้ค้างอยู่ในกองเดิม
+    (แล้วไปปนกับงานที่เดินได้จริงจนนับไม่ถูก) หรือยกเลิกทิ้ง ซึ่งแรงเกินไป
+
+    **งานที่กำลังทำอยู่พักไม่ได้** เหมือนกับยกเลิก — เบราว์เซอร์เปิดค้างอยู่และ
+    อาจใช้เครดิตไปแล้ว การแกล้งเปลี่ยนสถานะให้ดูเหมือนหยุดคือการโกหกหน้าจอ
+    """
+    payload = await request.json() if await request.body() else {}
+    why = str((payload or {}).get("why") or "").strip()
+
+    job = _find_job(job_id)
+    if clip_runner.current == job_id:
+        raise HTTPException(
+            status_code=409,
+            detail="งานนี้กำลังทำอยู่ — พักกลางคันไม่ได้ รอให้จบขั้นนี้ก่อน",
+        )
+    if job.get("parked"):
+        raise HTTPException(status_code=400, detail="งานนี้พักไว้อยู่แล้ว")
+    try:
+        fresh = await asyncio.to_thread(clip_jobs.park, job_id, why)
+    except clip_queue.ClipQueueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    came = clip_queue.STAGE_LABEL.get(job.get("stage") or "", job.get("stage") or "")
+    _clip_log(f"พักงาน {job_id} ไว้รอแก้ (ค้างที่ขั้น {came}) — {why or 'ไม่ได้บอกเหตุผล'}")
+    return {"ok": True, "job": fresh,
+            "message": f"พักไว้ในช่อง 🅿️ รอแก้แล้ว (ค้างที่ขั้น {came}) "
+                       f"— เครื่องจะไม่แตะจนกว่าจะกดเอากลับ"}
+
+
+@app.post("/api/jobs/{job_id}/unpark")
+async def jobs_unpark(job_id: str) -> dict:
+    """เอางานที่พักไว้กลับเข้าขั้นเดิม — กลับไปตรงที่ค้างไว้เป๊ะ ไม่ต้องเริ่มใหม่"""
+    job = _find_job(job_id)
+    if not job.get("parked"):
+        raise HTTPException(status_code=400, detail="งานนี้ไม่ได้พักไว้")
+    try:
+        fresh = await asyncio.to_thread(clip_jobs.unpark, job_id)
+    except clip_queue.ClipQueueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    came = clip_queue.STAGE_LABEL.get(fresh.get("stage") or "", fresh.get("stage") or "")
+    clip_runner.wake()          # อาจเป็นงานที่เครื่องหยิบไปทำต่อได้ทันที
+    _clip_log(f"เอางาน {job_id} กลับเข้าขั้น {came} แล้ว")
+    return {"ok": True, "job": fresh, "message": f"เอากลับเข้าขั้น “{came}” แล้ว"}
 
 
 @app.post("/api/jobs/{job_id}/cancel")

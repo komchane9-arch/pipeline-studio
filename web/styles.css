@@ -1855,3 +1855,167 @@ button:disabled { opacity: 0.5; }
   resize: vertical;
   margin-bottom: 8px;
 }
+
+/* ── ปุ่มลบภาพสตอรีบอร์ด (ผู้ใช้สั่ง 26 ส.ค. 2026) ────────────────────────
+   ปุ่มลอยทับมุมขวาบนของภาพ ไม่ใช่วางใต้ภาพ เพราะภาพสูงถึง 70vh —
+   ถ้าวางใต้ภาพต้องเลื่อนจอลงไปหาปุ่มทุกครั้ง */
+/* `width: fit-content` ขาดไม่ได้ — ไม่ใส่แล้วกรอบจะกว้างเต็มแถว (วัดได้ 2,048 px)
+   ทั้งที่ภาพกว้างแค่ 331 px แล้วปุ่มที่เกาะขอบขวาจะไปลอยห่างจากภาพ 862 px
+   กลายเป็นปุ่มลอยกลางที่ว่าง ไม่มีใครรู้ว่าเป็นของภาพใบไหน */
+.story-shot {
+  position: relative;
+  margin: 0;
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+}
+.story-shot .story-cell-tools {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  gap: 6px;
+  padding: 4px;
+  border-radius: var(--r-pill);
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+/* ── กระดาน 6 ขั้น (ผู้ใช้สั่ง 26 ส.ค. 2026) ────────────────────────────────
+   "ตอนนี้ผมงงกับงานมากไม่รู้ว่าอันไหนอยู่ stage ไหนเท่าไรบ้าง"
+   เรียงเป็นตารางสองคอลัมน์ ไม่ใช่แถวเดียวยาว — คอลัมน์คิวกว้างราว 380 px
+   ยัด 6 ปุ่มเรียงเดี่ยวแล้วตัวหนังสือจะเล็กจนอ่านไม่ออก */
+/* 6 กล่องเรียงแถวเดียวพาดเต็มความกว้าง ตามที่ผู้ใช้วาดมา
+   แบ่งพื้นที่เท่ากันทุกกล่อง (`1fr`) เพื่อให้อ่านเป็นสายงานซ้าย→ขวา
+   จอแคบค่อยพับเป็นสองแถว (ดูท้ายบล็อกนี้) */
+.clip-board {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+/* ชื่อขั้นกับตัวเลขอยู่บรรทัดเดียวกัน ตัวเลขต่อท้ายในวงเล็บ (ผู้ใช้สั่ง 26 ส.ค.)
+   *"เอาตัวเลขวงเล็บต่อท้ายตัวอักษร ให้ตัวอักษรตัวใหญ่กว่าตัวเลข 1 ระดับ"* */
+.board-tab {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: center;
+  gap: 5px;
+  padding: 11px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--panel);
+  cursor: pointer;
+  text-align: center;
+  line-height: 1.3;
+}
+/* สีประจำขั้น — **แบบมินิมอล** ใช้เป็นแถบบางบนหัวกล่องกับสีตัวเลขเท่านั้น
+   ไม่ทาสีพื้นทั้งกล่อง เพราะ 6 กล่องเรียงกันแล้วจะเหมือนป้ายไฟ อ่านยากกว่าเดิม
+   ค่าสีเป็นเลขตรงๆ ตั้งใจ — ต้องเป็นสีเดียวกันทั้งธีมสว่างและธีมมืด
+   เพื่อให้จำได้ว่า "สีม่วง = สตอรีบอร์ด" ไม่ว่าเปิดธีมไหน */
+.board-tab { --stage: var(--ink-3); position: relative; overflow: hidden; }
+.board-tab[data-key="link"]           { --stage: #94a3b8; }  /* เทาฟ้า — เพิ่งเริ่ม */
+.board-tab[data-key="story"]          { --stage: #a78bfa; }  /* ม่วง — ช่วงคิดงาน */
+.board-tab[data-key="clip"]           { --stage: #fb923c; }  /* ส้ม — ได้ของแล้ว */
+.board-tab[data-key="shopee_video"]   { --stage: #f97362; }  /* ส้มแดง — Shopee */
+.board-tab[data-key="facebook_reels"] { --stage: #60a5fa; }  /* ฟ้า — Facebook */
+.board-tab[data-key="tiktok"]         { --stage: #2dd4bf; }  /* เขียวน้ำทะเล — TikTok */
+/* รอแก้ — เหลืองอำพัน สีของ "จอดไว้ก่อน" ไม่ใช่สีของขั้นตอนในสายพาน
+   จงใจให้ต่างจากอีก 6 กองอย่างชัดเจน เพราะมันไม่ใช่ขั้นตอน แต่เป็นที่พัก */
+.board-tab[data-key="fix"]            { --stage: #eab308; }
+
+/* แถบสีบางๆ บนหัวกล่อง — บอกขั้นได้โดยไม่ต้องอ่านตัวหนังสือ */
+.board-tab::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: var(--stage);
+}
+.board-tab:hover { border-color: var(--stage); }
+.board-tab.is-on {
+  border-color: var(--stage);
+  /* ระบายพื้นจางมาก (12%) พอให้รู้ว่าเลือกอยู่ แต่ไม่แย่งสายตาจากตัวเลข */
+  background: color-mix(in srgb, var(--stage) 12%, var(--panel));
+  box-shadow: inset 0 0 0 1px var(--stage);
+}
+/* กองที่ว่างยังกดได้ แต่จางลงเพื่อให้สายตาไปหากองที่มีงานก่อน */
+.board-tab.is-empty { opacity: 0.5; }
+/* ชื่อขั้นใหญ่กว่าตัวเลข 1 ระดับ (15 px ต่อ 13 px) ตามที่ผู้ใช้สั่ง
+   — ชื่อคือสิ่งที่ใช้หาว่ากดอันไหน ส่วนตัวเลขเป็นข้อมูลประกอบ */
+.board-name { font-size: 15px; font-weight: 600; }
+.board-count {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.board-count { color: var(--stage); }
+/* กองที่ว่างไม่ต้องเน้นสี — ตัวเลข 0 ไม่ใช่ข้อมูลที่ต้องรีบเห็น */
+.board-tab.is-empty .board-count { color: var(--ink-3); }
+.board-closed { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+
+/* จอแคบ (มือถือ · หน้าต่างเล็ก) — 6 ช่องในแถวเดียวจะแคบจนอ่านไม่ออก
+   พับเป็น 3 ช่องสองแถว ซึ่งยังอ่านเป็นสายงานซ้าย→ขวาได้อยู่ */
+@media (max-width: 900px) {
+  .clip-board { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 520px) {
+  .clip-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── กล่องแดงบอกว่า AI ล้มเพราะอะไร (ผู้ใช้สั่ง 26 ส.ค. 2026) ──────────────
+   "ถ้าล่มให้โชว์ error ออกมาด้วย" — ของเดิมข้อความล้มไปโผล่ที่บรรทัดใต้กรอบ
+   ทั้งหมด ซึ่งอยู่นอกฝั่งที่ผู้ใช้กำลังเลื่อนดูอยู่ จึงไม่มีใครเห็นเลย */
+.ai-error {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-left-width: 3px;
+  border-radius: var(--r-card);
+  background: var(--shade);
+}
+.ai-error-head { margin: 0 0 4px; color: var(--danger); font-weight: 600; }
+.ai-error-why {
+  margin: 0 0 6px;
+  line-height: 1.6;
+  word-break: break-word;      /* ข้อความจาก Google ยาวและไม่มีช่องว่างให้ตัด */
+}
+.ai-error .note { margin: 0 0 8px; }
+
+/* คำเตือนตอนได้ภาพมาเกินหนึ่งใบ — ต้องสะดุดตาพอให้รู้ว่ามีอะไรผิดปกติ
+   แต่ไม่ใช่สีแดง เพราะไม่มีอะไรพัง แค่ได้ของเกินมาให้เลือก */
+.warn-note {
+  border-left: 3px solid var(--warn);
+  padding: 8px 10px;
+  background: var(--shade);
+  border-radius: var(--r-card);
+  line-height: 1.6;
+}
+
+/* ---- เลือกโมเดลข้างปุ่ม "ให้ AI ดูรูป" (ผู้ใช้สั่ง 27 ส.ค. 2026) ----
+   วางในแถวเดียวกับปุ่ม แต่ไม่แย่งสายตาไปจากปุ่ม — คนส่วนใหญ่ไม่ต้องแตะมันเลย
+   คำอธิบายไปอยู่บรรทัดล่างของช่อง เพื่อไม่ให้แถวปุ่มยาวจนตกบรรทัดบนจอแคบ */
+.model-pick {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.model-pick-tag {
+  color: var(--muted);
+  font-size: 11px;
+}
+.model-pick-sel {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+  font-size: 13px;
+  max-width: 190px;
+}
+.model-pick-note {
+  color: var(--muted);
+  font-size: 11px;
+  max-width: 260px;
+}

@@ -28,13 +28,27 @@ def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
             shared.append_log("input", message)
 
     with shared.browser_lock(label="ดึงข้อมูล Shopee"):
-        data = shopee_scrape.scrape(link, open_browser, log=say)
+        # **ส่งที่เก็บรูปเข้าไปด้วย เพื่อให้ Chrome โหลดรูปเองตั้งแต่ตอนหน้ายังเปิด**
+        # (ผู้ใช้สั่ง 27 ส.ค. 2026 หลังไล่หาสาเหตุที่โดน Shopee บล็อก)
+        #
+        # ของเดิมโหลดรูปหลังปิดเบราว์เซอร์ จึงต้องใช้ตัวโหลดของ Python ซึ่งจาก
+        # ฝั่ง Shopee เห็นเป็นคนละโปรแกรมยิงมาจากที่อยู่เดียวกัน 129 ครั้งใน
+        # 10 นาที — ร่องรอยที่หนักที่สุดในบรรดาที่วิเคราะห์เจอ
+        image_root = shared.DATA_DIR / "shopee_products"
+        data = shopee_scrape.scrape(link, open_browser, log=say,
+                                    image_root=image_root, want_all=want_all)
         api_key = load_gemini_api_key()
         candidates = data["images"] if want_all else data["selected"]
-        folder = shared.DATA_DIR / "shopee_products" / data["item_id"]
-        saved = shopee_scrape.download_images(
-            [image["url"] for image in candidates], folder, log=say
-        )
+        folder = image_root / data["item_id"]
+        saved = list(data.get("saved_files") or [])
+        if len(saved) != len(candidates):
+            # โหลดผ่านหน้าเว็บไม่ครบ (คลังรูปปิด CORS · หน้าโดนเด้งกลางคัน)
+            # → ถอยไปใช้ตัวโหลดเดิมให้ครบ ดีกว่าปล่อยให้ได้รูปไม่ครบเงียบๆ
+            say(f"Chrome โหลดรูปได้ {len(saved)}/{len(candidates)} ใบ "
+                f"— ถอยไปใช้ตัวโหลดสำรองให้ครบ")
+            saved = shopee_scrape.download_images(
+                [image["url"] for image in candidates], folder, log=say
+            )
         paired = [{**image, "file": path} for image, path in zip(candidates, saved)]
         if want_all:
             picked = paired
@@ -51,7 +65,12 @@ def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
         data["candidates"] = paired
         data["saved_images"] = [item["file"] for item in picked]
         data["folder"] = str(folder)
-        data["highlights"] = shopee_scrape.extract_highlights(
+        # ไล่จุดขายให้ครบก่อน แล้วค่อยเลือก 3 ข้อที่ว้าวสุด (ผู้ใช้สั่ง 22 ส.ค. 2026)
+        # เก็บรายการเต็มไว้ด้วย เพื่อให้สลับข้อที่ไม่ถูกใจได้โดยไม่ต้องยิง AI ใหม่
+        analysis = shopee_scrape.analyse_features(
             data["name"], data["detail"], api_key, log=say
         )
+        data["highlights"] = analysis["highlights"]
+        data["features"] = analysis["features"]
+        data["highlight_why"] = analysis["why"]
     return data

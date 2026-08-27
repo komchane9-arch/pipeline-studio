@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 import urllib.request
@@ -62,10 +63,46 @@ PRODUCT_URL_RE = re.compile(r"https?://(?:[a-z-]+\.)?shopee\.[a-z.]+/\S+", re.I)
 IDS_PATH_RE = re.compile(r"/(?:[^/]+/)?(\d{6,})/(\d{6,})")
 IDS_DASH_RE = re.compile(r"-i\.(\d+)\.(\d+)")
 
+def _chrome_version() -> str:
+    """รุ่น Chrome **ที่ติดตั้งจริงในเครื่องนี้** ไม่ใช่เลขที่พิมพ์ค้างไว้ในโค้ด
+
+    **ทำไมถึงต้องอ่านของจริง** (แก้ 27 ส.ค. 2026 หลังโดน Shopee บล็อก)
+
+    ของเดิมพิมพ์ `Chrome/126.0.0.0` ตายตัวไว้ แต่ Chrome ในเครื่องคือ **151**
+    ห่างกัน 25 รุ่น ผลคือจากที่อยู่เดียวกันในนาทีเดียวกัน Shopee เห็นสองอย่าง:
+    หน้าเว็บถูกเปิดโดย Chrome 151 แล้ว **รูป 129 ใบถูกโหลดโดย "Chrome 126"**
+    ซึ่งเป็นไปไม่ได้ในเครื่องจริง — เท่ากับยื่นบัตรคนละใบให้ยามคนเดียวกัน
+
+    เลขที่พิมพ์ตายตัวยัง **เก่าลงทุกวัน** โดยไม่มีใครรู้ตัว Chrome อัปเดตเองทุก
+    2-3 สัปดาห์ ส่วนเลขในโค้ดอยู่กับที่ตลอดกาล ยิ่งนานยิ่งผิดชัดขึ้นเรื่อยๆ
+
+    อ่านไม่ได้ = ถอยไปใช้เลขเดิม ไม่ใช่ล้ม (ตัวช่วยแต่งหัวจดหมายห้ามทำงานพัง)
+    """
+    import subprocess
+    for exe in (r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"):
+        if not Path(exe).is_file():
+            continue
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-Item '{exe}').VersionInfo.ProductVersion"],
+                capture_output=True, text=True, timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout.strip()
+            if re.fullmatch(r"\d+(\.\d+)+", out):
+                return out
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return "126.0.0.0"
+
+
+CHROME_VERSION = _chrome_version()
+
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        f"(KHTML, like Gecko) Chrome/{CHROME_VERSION} Safari/537.36"
     )
 }
 
@@ -386,18 +423,95 @@ def _page_is_gated(page) -> str:
     return ""
 
 
-def scrape(link: str, open_browser, log=print, assisted: bool = True) -> dict:
+# สลับวิธีดึงข้อมูลทีละใบ (ผู้ใช้สั่ง 27 ส.ค. 2026 — "ให้ใช้ทางลัด สลับกับ
+# อ่านหน้าเวป 1:1")
+#
+# **ปัญหาที่แก้** เมื่อคืน 01:11–01:22 เราถามช่องทางลัดของ Shopee **12 ครั้งติดกัน
+# ไม่เว้นเลย** ซึ่งเป็นลายเซ็นที่ชัดมาก — หน้าเว็บของคนจริงไม่มีทางเรียกช่องนั้น
+# รวดขนาดนั้น แล้ว Shopee ก็ตีตรากลับมาว่า `scene=crawler_item`
+#
+# สลับ 1:1 แล้วได้สองอย่างพร้อมกัน
+#   • ลายเซ็นทางลัดหายไปครึ่งหนึ่ง และไม่เป็นแถวยาวติดกันอีก
+#   • ยังเร็วอยู่ครึ่งหนึ่ง ไม่ต้องแลกความเร็วทั้งหมดเหมือนการเลิกใช้ทางลัดไปเลย
+#
+# **สุ่มจุดเริ่มตอนเปิดโปรแกรม** ไม่ใช่เริ่มที่ใบคี่เสมอ — ไม่งั้นทุกครั้งที่
+# รีสตาร์ตแล้วดึงชุดเดิม ใบเดิมจะใช้วิธีเดิมทุกรอบ กลายเป็นรูปแบบซ้ำอีกแบบหนึ่ง
+_ROUTE_TURN = random.randint(0, 1)
+
+# ---- ปิดการสลับแล้ว (ผู้ใช้สั่ง 27 ส.ค. 2026: "ลองเลิกสลับ แล้วรันต่อ") ----
+#
+# **หลักฐานที่ทำให้เลิก** เปิดใช้การสลับตอน 09:02 แล้วโดนบล็อกภายใน 67 วินาที
+# และทั้งสองครั้งที่โดน **ตกอยู่บนตาที่อ่านจากหน้าเว็บพอดี**
+#
+#   09:02:36  ตาทางลัด    → ได้ข้อมูลครบ 15 รูป ผ่านฉลุย
+#   09:03:07  ตาอ่านหน้า  → 09:03:39 โดนบล็อก
+#   01:22:15  ตาอ่านหน้า  → 01:22:51 โดนบล็อก  (คืนก่อน เส้นทางเดียวกัน)
+#
+# ยิ่งดูยิ่งชี้ไปทางเดียวกัน: **การเปิดหน้าสินค้าเต็มๆ เสี่ยงกว่าการถามทางลัด**
+# ซึ่งสมเหตุสมผล — หน้าสินค้าเต็มโหลดสคริปต์ตรวจจับของ Shopee มาทั้งชุด
+# ส่วนทางลัดเป็นการถามข้อมูลจากหน้าแรกที่ผ่านด่านมาแล้ว
+#
+# การสลับ 1:1 จึงเท่ากับ **บังคับให้เดินเส้นทางเสี่ยงครึ่งหนึ่งของเวลา**
+# = เพิ่มความเสี่ยงแทนที่จะลด ตรงข้ามกับที่ตั้งใจไว้
+#
+# ⚠️ **ยังไม่ใช่ข้อสรุป มีแค่ 2 ตัวอย่าง** เปิดสวิตช์กลับได้ทันทีถ้าข้อมูลเปลี่ยน
+# ทางลัดยังคงถอยไปอ่านหน้าเว็บเองอยู่แล้วเวลามันใช้ไม่ได้ ไม่ได้ตัดทางถอยทิ้ง
+ALTERNATE_ROUTES = False
+
+
+def _use_shortcut() -> bool:
+    """ใบนี้ใช้ทางลัดหรืออ่านจากหน้าเว็บ"""
+    if not ALTERNATE_ROUTES:
+        return True
+    global _ROUTE_TURN
+    _ROUTE_TURN += 1
+    return _ROUTE_TURN % 2 == 0
+
+
+def scrape(link: str, open_browser, log=print, assisted: bool = True,
+           image_root: Path | None = None, want_all: bool = False) -> dict:
     """ดึงข้อมูลสินค้า 1 ชิ้น — `open_browser` ฉีดเข้ามาเพื่อใช้โปรไฟล์เดียวกับตัวอื่น
 
     assisted=True เปิดหน้าต่างให้เห็น เพราะ Shopee ขึ้นแคปช่าเลื่อนจิ๊กซอว์กับ
     การเข้าแบบอัตโนมัติ ระบบจะ **รอให้ผู้ใช้เลื่อนเอง** แล้วค่อยอ่านข้อมูลต่อ
     (โปรแกรมนี้ไม่แก้แคปช่าให้ — ตั้งใจไม่ทำ)
+
+    **`image_root` = ให้โหลดรูปตั้งแต่ตอนที่หน้าเว็บยังเปิดอยู่** (27 ส.ค. 2026)
+
+    ของเดิมโหลดรูปหลังปิดเบราว์เซอร์ไปแล้ว จึงต้องใช้ตัวโหลดของ Python ซึ่งเป็น
+    ร่องรอยที่หนักที่สุดที่ทำให้โดนบล็อก (เหตุผลเต็มที่ `grab_images_with_browser`)
+    ใส่ค่านี้มา = โหลดด้วย Chrome ตัวเดียวกันแล้วคืนไฟล์ที่บันทึกไว้ใน `saved_files`
+    ไม่ใส่ = ทำงานเหมือนเดิมทุกอย่าง (ของเก่าที่เรียกอยู่จึงไม่พัง)
     """
     from playwright.sync_api import sync_playwright
 
     full_url = resolve_link(link)
     shop_id, item_id = parse_ids(full_url)
     log(f"เปิดหน้าสินค้า ร้าน {shop_id} สินค้า {item_id}")
+
+    def grab(page, images: list[dict], picked: list[dict]) -> list[str]:
+        """โหลดรูปชุดที่ผู้เรียกต้องการ ขณะหน้าเว็บยังเปิดอยู่"""
+        if image_root is None:
+            return []
+        wanted = images if want_all else picked
+        urls = [image["url"] for image in wanted]
+        if not urls:
+            return []
+        folder = Path(image_root) / item_id
+        files = grab_images_with_browser(page, urls, folder, log=log)
+        log(f"ให้ Chrome โหลดรูปเอง {len(files)}/{len(urls)} ใบ "
+            f"(ไม่ผ่านตัวโหลดแยกอีกแล้ว)")
+        return files
+
+    def dom_images(raw: dict) -> list[dict]:
+        """ทางถอย (อ่าน DOM) แยกประเภทรูปไม่ได้ — ใบแรกเป็นภาพรวม ที่เหลือเป็นแกลเลอรี"""
+        return [
+            {"id": url.split("/")[-1], "url": url,
+             "kind": "overview" if index == 0 else "gallery", "label": ""}
+            for index, url in enumerate(raw.get("images", [])[:MAX_IMAGES])
+        ]
+
+    page_saved: list[str] = []
 
     with sync_playwright() as playwright:
         browser = open_browser(playwright, hidden=not assisted)
@@ -407,7 +521,28 @@ def scrape(link: str, open_browser, log=print, assisted: bool = True) -> dict:
             # แล้วค่อยยิง API จากตรงนั้น (same-origin คุกกี้ติดไปเอง)
             page.goto(SHOPEE_HOME, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
             time.sleep(2.0)
-            if not _page_is_gated(page):
+            home_gate = _page_is_gated(page)
+            if home_gate:
+                # **สัญญาณเตือนล่วงหน้าที่เคยเงียบสนิท** (แก้ 27 ส.ค. 2026)
+                #
+                # ของเดิมเป็นแค่ `if not _page_is_gated(page):` — พอหน้าแรกโดนกั้น
+                # โค้ดก็ข้ามทางลัดไปเฉยๆ **โดยไม่เขียน log สักบรรทัด** แล้วไปล้ม
+                # เอาที่หน้าสินค้า ผลคือใน log เห็นแค่ "ใบนี้ล้ม" ทั้งที่ความจริงคือ
+                # "โดนติดธงตั้งแต่ก่อนเปิดหน้าสินค้าแล้ว" — คนละเรื่องกันคนละวิธีแก้
+                #
+                # หน้าแรกโดนกั้น = ทั้งบัญชี/ที่อยู่โดนธง ไม่ใช่ใบนี้มีปัญหา
+                # ใบต่อๆ ไปจะล้มตามแน่นอน ตัวเรียกจึงควรพักคิวตั้งแต่เห็นบรรทัดนี้
+                log(f"⚠️ หน้าแรก Shopee โดนกั้นแล้ว (\"{home_gate}\") — "
+                    f"แปลว่าโดนติดธงทั้งเครื่อง ไม่ใช่แค่ลิงก์นี้ · ข้ามทางลัด "
+                    f"ไปลองอ่านจากหน้าสินค้าโดยตรง")
+                evidence.shot(page, "หน้าแรก Shopee โดนกั้น", tag="shopee",
+                              note=f"ด่านที่เจอ: {home_gate}\nลิงก์ที่กำลังจะดึง: {full_url}\n"
+                                   f"→ สัญญาณว่าโดนติดธงแล้ว ควรพักคิว")
+            elif not _use_shortcut():
+                # ตาของ "อ่านจากหน้าเว็บ" — ข้ามทางลัดไปเลย ทั้งที่ทางลัดใช้ได้
+                # (ผู้ใช้สั่งให้สลับ 1:1 เหตุผลเต็มอยู่ที่ `_use_shortcut` ข้างบน)
+                log("ตานี้อ่านจากหน้าเว็บ (สลับกับทางลัด 1:1 กันโดนจับรูปแบบ)")
+            else:
                 try:
                     result = page.evaluate(API_FETCH_JS, [item_id, shop_id])
                 except Exception as error:
@@ -442,6 +577,8 @@ def scrape(link: str, open_browser, log=print, assisted: bool = True) -> dict:
                         "name": result["name"], "detail": result.get("detail", ""),
                         "variation_name": result.get("variation_name", ""),
                         "images": images, "selected": picked,
+                        # โหลดตอนนี้ ขณะหน้ายังเปิด — หลัง `finally` เบราว์เซอร์ปิดแล้ว
+                        "saved_files": grab(page, images, picked),
                     }
                 log("API ไม่คืนข้อมูล — ถอยไปอ่านจากหน้าเว็บแทน")
 
@@ -497,6 +634,11 @@ def scrape(link: str, open_browser, log=print, assisted: bool = True) -> dict:
                               note=f"ลิงก์: {full_url}\n"
                                    f"ชื่อ: {data.get('name','')}\n"
                                    f"รูปที่เจอ: {len(data.get('images') or [])} ใบ")
+            # **ต้องโหลดรูปตรงนี้ ไม่ใช่หลังออกจากบล็อก** — `finally` ข้างล่างปิด
+            # เบราว์เซอร์ทิ้ง พ้นจากตรงนี้ไปก็ไม่มีหน้าเว็บให้ใช้โหลดอีกแล้ว
+            if not _looks_blocked(data.get("name", "")):
+                shots = dom_images(data)
+                page_saved = grab(page, shots, candidate_images(shots))
         finally:
             browser.close()
 
@@ -506,12 +648,7 @@ def scrape(link: str, open_browser, log=print, assisted: bool = True) -> dict:
             "— มักเป็นเพราะยิงถี่เกินไปจนโดนจำกัดการใช้งาน "
             "พักสัก 15-30 นาทีแล้วลองใหม่ · ดูภาพหน้าจอด้วย `python evidence.py`"
         )
-    # ทางถอย (อ่าน DOM) แยกประเภทรูปไม่ได้ — ให้ใบแรกเป็นภาพรวม ที่เหลือเป็นแกลเลอรี
-    images = [
-        {"id": url.split("/")[-1], "url": url,
-         "kind": "overview" if index == 0 else "gallery", "label": ""}
-        for index, url in enumerate(data.get("images", [])[:MAX_IMAGES])
-    ]
+    images = dom_images(data)
     log(f"ได้ชื่อ + รูป {len(images)} ใบ + รายละเอียด {len(data.get('detail',''))} ตัวอักษร")
     return {
         "url": full_url,
@@ -522,6 +659,7 @@ def scrape(link: str, open_browser, log=print, assisted: bool = True) -> dict:
         "variation_name": "",
         "images": images,
         "selected": candidate_images(images),
+        "saved_files": page_saved,
     }
 
 
@@ -560,22 +698,37 @@ def spread_pick(images: list[dict], count: int = IMAGE_PICK_COUNT) -> list[dict]
 
 # ให้ Gemini ดูรูปจริงแล้วเลือก — ไม่มีทางรู้ว่ารูปไหน "ซ้ำกัน" จากชื่อไฟล์
 IMAGE_JUDGE_PROMPT = (
-    "นี่คือรูปสินค้าจากหน้า Shopee เดียวกัน หมายเลขกำกับตามลำดับที่ส่งให้\n"
-    "เลือกมา {count} รูปที่ **แตกต่างกันชัดเจน** เพื่อเอาไปทำคลิปโฆษณา\n"
-    "เกณฑ์: ห้ามเลือกรูปที่หน้าตาเกือบเหมือนกัน · เอารูปที่เห็นตัวสินค้าชัด · "
-    "เลี่ยงรูปที่มีตัวหนังสือเต็มภาพ · ถ้ามีภาพรวมที่มีพื้นหลังสวยให้เอามา 1 รูป\n"
+    "นี่คือรูปสินค้าจากหน้า Shopee เดียวกัน หมายเลขกำกับตามลำดับที่ส่งให้\n\n"
+    "**งานนี้คือเลือกรูปไปทำคลิปโฆษณา affiliate ที่ตั้งเป้ายอดดู 1 ล้านวิว**\n"
+    "รูปที่เลือกจะกลายเป็นฉากในคลิป — รูปหนึ่งใบคือหนึ่งฉาก ฉากที่ไม่มีอะไร\n"
+    "ให้พูดถึงคือฉากที่เสียเปล่า และคนดูจะเลื่อนผ่านภายใน 2 วินาทีแรก\n\n"
+    "เลือกมา {count} รูป โดยยึด **คุณสมบัติเด่นของสินค้าที่ขายได้** เป็นหลัก\n\n"
+    "เลือกรูปแบบนี้\n"
+    "• รูปที่ **โชว์จุดขายที่จับต้องได้** — ของที่ทำให้คนอยากได้ เช่น กลไกที่ปรับได้ "
+    "ขนาดเทียบกับคน วัสดุใกล้ๆ ฟังก์ชันที่คู่แข่งไม่มี\n"
+    "• รูปที่ **เห็นแล้วเข้าใจทันทีโดยไม่ต้องอ่าน** — คนดูคลิปสั้นไม่อ่านตัวหนังสือ\n"
+    "• รูปที่ **หยุดนิ้วคนดูได้** — มุมแปลก ของใหญ่ ความต่างชัด สีสด\n"
+    "• รูปที่ **เล่าต่อกันเป็นเรื่องได้** เมื่อเรียงติดกัน ไม่ใช่ของซ้ำกัน 5 มุม\n\n"
+    "ห้ามเลือก\n"
+    "• รูปที่หน้าตาเกือบเหมือนกัน (ได้ฉากซ้ำ = เสียฉากฟรี)\n"
+    "• รูปที่มีตัวหนังสือเต็มภาพจนไม่เห็นตัวสินค้า\n"
+    "• รูปที่มืด เบลอ หรือเห็นสินค้าไม่ชัด\n\n"
+    "ถ้ามีภาพรวมที่มีพื้นหลังสวยให้เอามา 1 รูปไว้เปิดคลิป\n"
     "ตอบเป็น JSON array ของหมายเลขล้วนๆ เช่น [1, 4, 7] ไม่ต้องอธิบาย"
 )
 
 
+
 def judge_images(
     paths: list[str], api_key: str | None, count: int = IMAGE_PICK_COUNT, log=print,
-    extra_rule: str = "",
+    extra_rule: str = "", model: str = "",
 ) -> list[int]:
     """ให้ Gemini เลือกว่ารูปไหนไม่ซ้ำกัน คืน index (เริ่มที่ 0) ของรูปที่เลือก
 
     `extra_rule` = เกณฑ์เพิ่มเฉพาะกิจ เช่นสินค้าที่ "ปรับเปลี่ยนรูปทรงได้"
     ต้องได้รูปทั้งก่อนและหลังปรับ ไม่ใช่ได้แต่ท่าเดียวสวยๆ หลายใบ
+
+    `model` = เลือกโมเดลเอง ว่าง = ไล่สายพานตามลำดับที่วัดมา (27 ส.ค. 2026)
     """
     if len(paths) <= count:
         return list(range(len(paths)))
@@ -603,34 +756,49 @@ def judge_images(
                 "data": base64.b64encode(payload).decode("ascii"),
             }
         })
-    try:
-        response = httpx.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            "gemini-3.5-flash:generateContent",
-            params={"key": api_key},
-            json={"contents": [{"parts": parts}]},
-            timeout=120.0,
-        )
-        gemini_quota.record("gemini-3.5-flash", ok=response.status_code == 200,
-                            response=response)
-        if response.status_code != 200:
-            raise RuntimeError(f"Gemini ตอบ {response.status_code}")
-        text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        found = re.search(r"\[.*?\]", text, re.S)
-        numbers = json.loads(found.group(0)) if found else []
-        # แปลงเลขที่คนอ่าน (เริ่ม 1) เป็น index จริง และกันเลขเกินขอบ
-        chosen = [
-            int(n) - 1 for n in numbers
-            if isinstance(n, (int, float)) and 1 <= int(n) <= len(paths)
-        ]
-        unique = list(dict.fromkeys(chosen))[:count]
-        if unique:
-            log(f"Gemini เลือกรูปที่ {[i + 1 for i in unique]}")
-            return unique
-        raise RuntimeError("Gemini ไม่ได้ตอบเป็นเลขรูป")
-    except Exception as error:
-        log(f"ให้ Gemini เลือกรูปไม่สำเร็จ ({error}) — เลือกแบบกระจายแทน")
-        return []
+    # เลือกเอง = ตัวนั้นตัวเดียว · ไม่เลือก = ไล่สายพานจนกว่าจะมีตัวตอบ
+    #
+    # **ของเดิมยิงตัวเดียวแล้วยอมแพ้** พอถังนั้นหมด (20 ครั้ง/วัน/โมเดล)
+    # ตัวเลือกรูปก็ตายทั้งวัน ถอยไปเลือกแบบกระจายซึ่งไม่ได้ดูรูปเลยสักใบ
+    want = str(model or "").strip()
+    if want and want not in IMAGE_HIGHLIGHT_CHOICES:
+        log(f"ไม่รู้จักโมเดล {want} — ใช้สายพานอัตโนมัติแทน")
+        want = ""
+    chain = (want,) if want else tuple(IMAGE_JUDGE_MODELS)
+
+    tried: list[str] = []
+    for pick in chain:
+        try:
+            response = httpx.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{pick}:generateContent",
+                params={"key": api_key},
+                json={"contents": [{"parts": parts}]},
+                timeout=120.0,
+            )
+            gemini_quota.record(pick, ok=response.status_code == 200,
+                                response=response)
+            if response.status_code != 200:
+                raise RuntimeError(f"{pick} ตอบ {response.status_code}")
+            text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            found = re.search(r"\[.*?\]", text, re.S)
+            numbers = json.loads(found.group(0)) if found else []
+            # แปลงเลขที่คนอ่าน (เริ่ม 1) เป็น index จริง และกันเลขเกินขอบ
+            chosen = [
+                int(n) - 1 for n in numbers
+                if isinstance(n, (int, float)) and 1 <= int(n) <= len(paths)
+            ]
+            unique = list(dict.fromkeys(chosen))[:count]
+            if unique:
+                extra = "" if pick == chain[0] else f" [ตัวสำรอง {pick}]"
+                log(f"Gemini เลือกรูปที่ {[i + 1 for i in unique]}{extra}")
+                return unique
+            raise RuntimeError(f"{pick} ไม่ได้ตอบเป็นเลขรูป")
+        except Exception as error:                           # noqa: BLE001
+            tried.append(f"{pick}: {error}")
+            log(f"  เลือกรูปด้วย {pick} ไม่สำเร็จ ({error})")
+    log(f"ให้ Gemini เลือกรูปไม่สำเร็จทุกตัว ({' · '.join(tried)}) — เลือกแบบกระจายแทน")
+    return []
 
 
 # ---------------------------------------------------------- คัดรายละเอียดเด่น
@@ -813,9 +981,78 @@ def extract_highlights(name: str, detail: str, api_key: str | None, log=print) -
 # ยอมแชร์ถังโควตากับตัวเลือกรูป เพราะสองงานนี้ไม่ได้ทำพร้อมกัน (เลือกรูปตอนดึงสินค้า
 # ส่วนตัวนี้ตอนผู้ใช้กดปุ่มเอง) และโมเดลที่ตอบได้จริงย่อมดีกว่าโมเดลที่ไม่เคยตอบ
 #
-# **ห้ามใช้รุ่น lite** — รุ่นนั้นเอาไว้ฟังเสียงในตัวตรวจคลิป และไม่ได้ยืนยันว่า
-# อ่านภาพอินโฟกราฟิกภาษาไทยได้ดีเท่ากัน
-IMAGE_HIGHLIGHT_MODELS = ("gemini-3.5-flash", "gemini-3.7-flash")
+# **ห้ามใช้รุ่น lite ในสายพานอัตโนมัติ** — รุ่นนั้นเอาไว้ฟังเสียงในตัวตรวจคลิป
+# และไม่ได้ยืนยันว่าอ่านภาพอินโฟกราฟิกภาษาไทยได้ดีเท่ากัน
+# (เลือกเองจากดรอปดาวน์ได้ แต่ต้องเป็นการตัดสินใจของคนที่เห็นผลลัพธ์ ไม่ใช่ของระบบ)
+#
+# ─── วัดซ้ำ 27 ส.ค. 2026 (รูปโซฟา 2 ใบของ 53565455104 ยิงจริงทุกตัว) ───
+#
+#   gemini-3.6-flash        ✅  3.7 วินาที
+#   gemini-3.5-flash-lite   ✅  2.5 วินาที
+#   gemini-3.1-flash-lite   ✅  1.7 วินาที
+#   gemini-3-flash-preview  ✅  4.3 วินาที
+#   gemini-2.5-flash        ✅  7.8 วินาที
+#   gemini-3.5-flash        ❌  429 โควตาหมด (ชั้นฟรี 20 ครั้ง/วัน/โมเดล)
+#   gemini-3.7-flash        ❌  503 ฝั่ง Google แน่นเอง (เสียเวลาไป 14.4 วินาที)
+#   gemini-2.5-pro          ❌  404 เลิกให้บริการแล้ว
+#
+# **บทเรียนของวันนี้** สายพานเดิมมีแค่ 2 ตัวและวันนี้ตายพร้อมกันทั้งคู่ ปุ่มจึงล้ม
+# ทุกครั้งที่กดโดยที่ไม่มีทางไปต่อเลย ทั้งที่ยังมีโมเดลที่ตอบได้อยู่ 5 ตัว
+#
+# **โควตาชั้นฟรีแยกถังรายโมเดล** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`
+# = 20/วัน) ตัวหนึ่งหมดไม่ได้แปลว่าตัวอื่นหมด การมีหลายตัวในสายพานจึงไม่ใช่แค่
+# กันเหตุ Google ล่ม แต่คือการเพิ่มเพดานที่กดได้ต่อวันจาก 20 เป็น 20×จำนวนตัว
+#
+# **เอา 3.7-flash ออกจากสายพานอัตโนมัติ** — ไม่เคยตอบงานรูปสำเร็จสักครั้งตั้งแต่
+# 26 ส.ค. (หมดเวลา 180 วิ ×2 · วันนี้ 503) มีแต่ทำให้รอฟรี ยังเลือกเองได้จากเมนู
+IMAGE_HIGHLIGHT_MODELS = (
+    "gemini-3.6-flash",         # เร็วสุดในกลุ่มที่ไม่ใช่ lite
+    "gemini-3.5-flash",         # ตัวที่พิสูจน์คุณภาพไว้ตั้งแต่ 26 ส.ค.
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+)
+
+# เมนูให้ผู้ใช้เลือกเองจากหน้าเว็บ (ผู้ใช้สั่ง 27 ส.ค. 2026 — "ด้านข้างในทำ
+# drop down เลือกเปลี่ยน model ได้")
+#
+# **ทุกตัวในนี้ถูกยิงจริงด้วยรูปจริงมาแล้ว** ไม่ใช่รายชื่อที่คัดลอกมาจากเอกสาร
+# ตัวที่วัดแล้วใช้ไม่ได้ (2.5-pro เลิกให้บริการ) ไม่อยู่ในเมนู เพราะตัวเลือกที่
+# เลือกแล้วล้มแน่นอนคือกับดัก ไม่ใช่ทางเลือก
+#
+# `note` คือสิ่งที่วัดได้จริง ไม่ใช่คำโฆษณา — คนเลือกต้องเห็นว่าแลกอะไรกับอะไร
+IMAGE_HIGHLIGHT_MENU = (
+    {"id": "", "label": "อัตโนมัติ (แนะนำ)",
+     "note": "ไล่ตามลำดับที่วัดว่าดีที่สุด ตัวไหนล่มข้ามให้เอง"},
+    {"id": "gemini-3.6-flash", "label": "3.6 Flash",
+     "note": "เร็ว 3.7 วิ · ตัวแรกของสายพานอัตโนมัติ"},
+    {"id": "gemini-3.5-flash", "label": "3.5 Flash",
+     "note": "คุณภาพพิสูจน์แล้ว แต่แชร์โควตากับตัวเลือกรูปตอนดึงสินค้า"},
+    {"id": "gemini-3-flash-preview", "label": "3 Flash (preview)",
+     "note": "4.3 วิ · ถังโควตาแยกของตัวเอง"},
+    {"id": "gemini-2.5-flash", "label": "2.5 Flash",
+     "note": "7.8 วิ · รุ่นเก่าแต่นิ่ง ไว้ใช้ตอนรุ่นใหม่ล่มพร้อมกัน"},
+    {"id": "gemini-3.5-flash-lite", "label": "3.5 Flash Lite",
+     "note": "2.5 วิ · ประหยัดสุด แต่ยังไม่ยืนยันว่าอ่านอินโฟกราฟิกไทยได้แม่น"},
+    {"id": "gemini-3.1-flash-lite", "label": "3.1 Flash Lite",
+     "note": "1.7 วิ · เร็วที่สุด ใช้ตอนอยากได้ไวกว่าตอนอยากได้ละเอียด"},
+    {"id": "gemini-3.7-flash", "label": "3.7 Flash",
+     "note": "⚠️ ยังไม่เคยตอบงานรูปสำเร็จเลย (หมดเวลา/503) — เลือกได้แต่ไม่แนะนำ"},
+)
+
+# ชื่อโมเดลที่ยอมให้เลือกได้จริง — ฝั่งเซิร์ฟเวอร์ต้องตรวจก่อนยิง ไม่ใช่เชื่อ
+# ค่าที่หน้าเว็บส่งมา (หน้าเว็บส่งชื่ออะไรมาก็ได้ แล้วจะกลายเป็นยิงมั่วไปที่ Google)
+IMAGE_HIGHLIGHT_CHOICES = frozenset(
+    row["id"] for row in IMAGE_HIGHLIGHT_MENU if row["id"]
+)
+
+# โมเดลที่ใช้ **เลือกรูป** — สายพานเดียวกับตัวคิดจุดเด่น เพราะเป็นงานดูรูปเหมือนกัน
+# และวัดมาชุดเดียวกันแล้วว่าตัวไหนตอบได้จริง
+#
+# **ของเดิมฝังชื่อ `gemini-3.5-flash` ตายตัวไว้ในฟังก์ชัน** ผลคือวันที่ถังนั้นหมด
+# (ชั้นฟรี 20 ครั้ง/วัน/โมเดล) ตัวเลือกรูปตายทั้งวันโดยไม่มีทางไป — เกิดจริง
+# 27 ส.ค. 2026 เวลา 09:02:57 `Gemini ตอบ 429` แล้วถอยไปเลือกแบบกระจายทันที
+# ทั้งที่ยังมีโมเดลอื่นที่ถังว่างอยู่อีก 3 ตัวในสายพานเดียวกันนี้
+IMAGE_JUDGE_MODELS = IMAGE_HIGHLIGHT_MODELS
 
 # รอต่อโมเดลนานสุดกี่วินาที — ตั้งจากของที่วัดได้ (ตัวที่ใช้ได้จริงตอบใน ~12 วินาที)
 # เผื่อไว้เยอะแล้ว แต่ไม่เผื่อจนตัวที่ค้างลากผู้ใช้รอเป็นนาที
@@ -873,6 +1110,7 @@ IMAGE_ANALYSE_PROMPT = (
 
 def analyse_features_from_images(
     name: str, images, api_key: str | None, log=print, count: int = 0,
+    model: str = "",
 ) -> dict:
     """คัดจุดเด่นจาก **รูปที่ผู้ใช้เลือกไว้จริง** ใบละหนึ่งข้อ (ผู้ใช้สั่ง 26 ส.ค. 2026)
 
@@ -894,6 +1132,13 @@ def analyse_features_from_images(
     **ล้มแล้วโยน ไม่ถอยไปใช้กฎ** — ต่างจากตัวคัดจากข้อความโดยตั้งใจ เพราะตัวนี้
     ผู้ใช้กดสั่งเองและนั่งรอดูผลอยู่ การถอยไปคัดด้วยกฎเงียบๆ จะได้จุดเด่นที่ไม่ได้
     มาจากรูปเลย ทั้งที่ผู้ใช้กดปุ่มที่เขียนว่า "คิดจากรูป" — ผิดคำสัญญาแบบเงียบๆ
+
+    **`model` = เลือกเอง แล้วใช้ตัวนั้นตัวเดียว ไม่มีทางถอย** (ผู้ใช้สั่ง 27 ส.ค. 2026)
+
+    จงใจไม่ถอยไปตัวอื่น เพราะการเลือกเองแปลว่า "ฉันอยากได้ตัวนี้" ถ้าแอบเปลี่ยน
+    ให้เวลาล้ม ผลที่ได้จะมาจากโมเดลที่ผู้ใช้ไม่ได้เลือก โดยที่หน้าเว็บยังโชว์ชื่อ
+    ตัวที่เขาเลือกอยู่ — เป็นการโกหกแบบเงียบๆ ชนิดเดียวกับที่กติกาข้อ 2.3 ห้ามไว้
+    ไม่ใส่มา = ใช้สายพานอัตโนมัติตามเดิม
     """
     import base64
     import mimetypes
@@ -934,12 +1179,25 @@ def analyse_features_from_images(
         parts.append({"text": f"รูปที่ {index}"})
         parts.append(shot)
 
-    last = ""
-    for model in IMAGE_HIGHLIGHT_MODELS:
+    # เลือกเอง = ตัวนั้นตัวเดียว · ไม่ได้เลือก = สายพานอัตโนมัติ
+    want_model = str(model or "").strip()
+    if want_model:
+        if want_model not in IMAGE_HIGHLIGHT_CHOICES:
+            raise RuntimeError(f"ไม่รู้จักโมเดล {want_model}")
+        chain = (want_model,)
+        log(f"ผู้ใช้เลือกโมเดล {want_model} เอง — ใช้ตัวนี้ตัวเดียว ไม่มีตัวสำรอง")
+    else:
+        chain = tuple(IMAGE_HIGHLIGHT_MODELS)
+
+    # **จดทุกตัวที่ลอง ไม่ใช่จำแค่ตัวสุดท้าย** — ของเดิมรายงานแค่ error ตัวท้าย
+    # ผู้ใช้จึงเห็นแค่ "gemini-3.7-flash ตอบ 503" ทั้งที่ตัวแรกล้มเพราะโควตาหมด
+    # ซึ่งเป็นคนละเรื่องและแก้คนละแบบ (รอ vs เปลี่ยนโมเดล)
+    tried: list[str] = []
+    for pick in chain:
         try:
             response = httpx.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{model}:generateContent",
+                f"{pick}:generateContent",
                 params={"key": api_key},
                 json={
                     "contents": [{"parts": parts}],
@@ -947,10 +1205,10 @@ def analyse_features_from_images(
                 },
                 timeout=IMAGE_HIGHLIGHT_TIMEOUT,
             )
-            gemini_quota.record(model, ok=response.status_code == 200,
+            gemini_quota.record(pick, ok=response.status_code == 200,
                                 response=response)
             if response.status_code != 200:
-                raise RuntimeError(f"{model} ตอบ {response.status_code}")
+                raise RuntimeError(f"{pick} ตอบ {response.status_code}")
             text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
             found = re.search(r"\{.*\}", text, re.S)
             data = json.loads(found.group(0)) if found else {}
@@ -982,23 +1240,31 @@ def analyse_features_from_images(
                 highlights.append(text)
                 why.append(reason)
             if not highlights:
-                raise RuntimeError(f"{model} ไม่ได้เลือกจุดเด่นมาให้")
-            if model != IMAGE_HIGHLIGHT_MODELS[0]:
-                log(f"คัดจุดเด่นจากรูปด้วยโมเดลสำรอง {model}")
+                raise RuntimeError(f"{pick} ไม่ได้เลือกจุดเด่นมาให้")
+            if pick != chain[0]:
+                log(f"คัดจุดเด่นจากรูปด้วยโมเดลสำรอง {pick}")
             short = f" (ขอไว้ {want} ข้อ ได้ไม่ครบ)" if len(highlights) < want else ""
             log(f"ดูรูป {used} ใบ → ไล่จุดขายได้ {len(features)} ข้อ "
-                f"→ เขียนจุดเด่น {len(highlights[:want])} ข้อ{short}")
+                f"→ เขียนจุดเด่น {len(highlights[:want])} ข้อ{short} [{pick}]")
             return {
                 "features": features,
                 "highlights": highlights[:want],
                 "why": why[:want],
                 "images_seen": used,
                 "wanted": want,
+                # บอกกลับไปว่า **ตัวไหนตอบจริง** ไม่ใช่ตัวไหนถูกขอ — หน้าเว็บจะได้
+                # โชว์ของจริง เวลาสายพานอัตโนมัติข้ามไปใช้ตัวสำรอง
+                "model": pick,
             }
         except Exception as error:                           # noqa: BLE001
-            last = str(error)
-            log(f"คัดจุดเด่นจากรูปด้วย {model} ไม่สำเร็จ ({error})")
-    raise RuntimeError(f"ให้ AI ดูรูปแล้วคิดจุดเด่นไม่สำเร็จ — {last}")
+            tried.append(f"{pick}: {error}")
+            log(f"คัดจุดเด่นจากรูปด้วย {pick} ไม่สำเร็จ ({error})")
+    # **บอกทุกตัวที่ลอง** ผู้ใช้ต้องแยกออกว่า "ทั้งกลุ่มล่ม" (รอ) กับ "โควตาหมด"
+    # (เปลี่ยนโมเดล) ซึ่งแก้คนละแบบ — ของเดิมบอกแค่ตัวสุดท้าย ทำให้ตัดสินใจผิด
+    detail = " · ".join(tried) or "ไม่ได้ลองสักตัว"
+    hint = ("" if want_model else
+            " — ลองเลือกโมเดลอื่นจากช่องข้างปุ่มดู (โควตาชั้นฟรีแยกถังรายโมเดล)")
+    raise RuntimeError(f"ให้ AI ดูรูปแล้วคิดจุดเด่นไม่สำเร็จ — {detail}{hint}")
 
 
 def _extract_highlights_old(name: str, detail: str, api_key: str | None, log=print) -> list[str]:
@@ -1049,8 +1315,94 @@ def _extract_highlights_old(name: str, detail: str, api_key: str | None, log=pri
     return _fallback_highlights(detail)
 
 
+IMAGE_GRAB_JS = r"""
+async (urls) => {
+  const out = [];
+  for (const url of urls) {
+    try {
+      // credentials:'omit' — คลังรูปไม่ต้องใช้คุกกี้ และการไม่ส่งคุกกี้ข้ามโดเมน
+      // คือสิ่งที่หน้าเว็บจริงทำอยู่แล้ว (แท็ก <img> ก็ไม่ส่ง)
+      const r = await fetch(url, { credentials: 'omit' });
+      if (!r.ok) { out.push({ url, error: 'HTTP ' + r.status }); continue; }
+      const buf = new Uint8Array(await r.arrayBuffer());
+      let s = '';
+      const CH = 0x8000;      // แปลงทีละก้อน ไม่งั้น apply พังตอนไฟล์ใหญ่
+      for (let i = 0; i < buf.length; i += CH) {
+        s += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
+      }
+      out.push({ url, b64: btoa(s), size: buf.length });
+    } catch (e) {
+      out.push({ url, error: String(e).slice(0, 120) });
+    }
+  }
+  return out;
+}
+"""
+
+# โหลดทีละกี่ใบต่อการคุยกับหน้าเว็บหนึ่งครั้ง — รูปถูกแปลงเป็นข้อความก่อนส่งกลับ
+# ซึ่งทำให้ใหญ่ขึ้นราว 1.35 เท่า ก้อนละ 4 ใบ ≈ 2-3 MB กำลังดี ไม่บวมจนหน่วยความจำพุ่ง
+IMAGE_GRAB_CHUNK = 4
+
+
+def grab_images_with_browser(page, urls: list[str], target_dir: Path,
+                             log=print) -> list[str]:
+    """โหลดรูปด้วย **Chrome ตัวเดียวกับที่เพิ่งเปิดหน้าสินค้า** (ผู้ใช้สั่ง 27 ส.ค. 2026)
+
+    **ทำไมถึงต้องเป็น Chrome ไม่ใช่ตัวโหลดของ Python**
+
+    วิเคราะห์เหตุโดนบล็อกเมื่อคืน (01:22) พบว่าเราเปิดหน้าเว็บด้วย Chrome จริง
+    แต่ **โหลดรูป 129 ใบใน 10 นาทีด้วยตัวโหลดของ Python** ซึ่งจากฝั่ง Shopee
+    มองเห็นเป็นคนละโปรแกรมที่ยิงมาจากที่อยู่เดียวกัน ทั้งลายนิ้วมือการเชื่อมต่อ
+    ไม่ตรง ไม่มีคุกกี้ ไม่มีหน้าอ้างอิง และแปะป้ายรุ่น Chrome ที่ห่างของจริง 25 รุ่น
+    — เหมือนคนเดินเข้าร้านแล้วยื่นบัตรคนละใบตอนหยิบของ 129 ครั้งติด
+
+    ให้หน้าเว็บโหลดเองแล้วได้ทุกอย่างถูกต้องโดยไม่ต้องปลอมสักอย่าง: ลายนิ้วมือ
+    เดียวกับ Chrome จริง · หน้าอ้างอิงคือหน้าสินค้าที่เพิ่งเปิด · รุ่นตรงกันเสมอ
+
+    **ทำได้เพราะคลังรูปเปิดให้ข้ามโดเมน** (`Access-Control-Allow-Origin: *`
+    ยืนยันด้วยการยิงจริง 27 ส.ค. 2026) ถ้าวันหนึ่ง Shopee ปิดข้อนี้ ตัวนี้จะคืน
+    รายการว่างแล้วผู้เรียกถอยไปใช้ `download_images()` ตามเดิม — ไม่ล้ม
+
+    คืนรายชื่อไฟล์ที่บันทึกได้ **เรียงตามลำดับที่ขอ** เหมือน `download_images` เป๊ะ
+    """
+    import base64
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    for start in range(0, len(urls), IMAGE_GRAB_CHUNK):
+        chunk = urls[start:start + IMAGE_GRAB_CHUNK]
+        try:
+            rows = page.evaluate(IMAGE_GRAB_JS, chunk)
+        except Exception as error:                           # noqa: BLE001
+            # หน้าโดนเด้งกลางคัน = โหลดต่อไม่ได้ แต่ที่ได้มาแล้วยังใช้ได้
+            log(f"  ให้หน้าเว็บโหลดรูปไม่สำเร็จ ({str(error)[:80]}) — "
+                f"ได้มาแล้ว {len(saved)} ใบ")
+            break
+        for offset, row in enumerate(rows or []):
+            index = start + offset + 1
+            if row.get("error") or not row.get("b64"):
+                log(f"  โหลดรูปที่ {index} ไม่สำเร็จ: {row.get('error') or 'ไม่มีข้อมูล'}")
+                continue
+            try:
+                payload = base64.b64decode(row["b64"])
+            except Exception:                                # noqa: BLE001
+                log(f"  รูปที่ {index} แปลงกลับไม่ได้")
+                continue
+            if len(payload) < 2048:      # เล็กผิดปกติ = ไม่ใช่รูปสินค้าจริง
+                continue
+            path = target_dir / f"{index:02d}.jpg"
+            path.write_bytes(payload)
+            saved.append(str(path))
+    return saved
+
+
 def download_images(images: list[str], target_dir: Path, log=print) -> list[str]:
-    """โหลดรูปเก็บไว้ในเครื่อง เพื่อส่งต่อให้ขั้นเจนรูปใช้เป็นภาพต้นฉบับ"""
+    """โหลดรูปเก็บไว้ในเครื่อง — **ทางถอย** ใช้เมื่อให้ Chrome โหลดเองไม่ได้
+
+    ⚠️ ตัวนี้ยิงจากตัวโหลดของ Python ไม่ใช่จากเบราว์เซอร์ จึงเป็นร่องรอยที่ทำให้
+    Shopee ตีตราว่าเป็นโปรแกรมไต่เว็บ (ดูเหตุผลเต็มที่ `grab_images_with_browser`)
+    **ใช้เฉพาะตอนไม่มีหน้าเว็บให้ใช้แล้วเท่านั้น**
+    """
     target_dir.mkdir(parents=True, exist_ok=True)
     saved: list[str] = []
     for index, url in enumerate(images, start=1):

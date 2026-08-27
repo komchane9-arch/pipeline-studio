@@ -69,6 +69,137 @@ ACTIONABLE = {
     STAGE_QUEUED, STAGE_READY_STORYBOARD, STAGE_REVISING, STAGE_READY_FLOW,
     STAGE_POSTING,
 }
+
+# ทำได้ทีละกี่งาน — **ผู้ใช้สั่ง 25 ส.ค. 2026 "ทำทีละ 8 คิว"**
+#
+# ทำไมต้องมีเพดาน (เหตุการณ์จริงวันนั้น)
+#     ผู้ใช้ส่งลิงก์ 33 ใบพร้อมกันตอน 15:55 ระบบไล่ดึงรวดโดยไม่มีเพดาน
+#     ดึงสำเร็จ 8 ใบใน 10 นาที 44 วินาที (ใบละ ~80 วินาที · โหลดรูป 158 ใบ)
+#     แล้ว **ใบที่ 9 โดน Shopee บล็อก** หลังจากนั้นล้มรวดอีก 25 ใบติดกัน
+#     ผลสุดท้าย: สำเร็จ 8 · ล้ม 25
+#
+# ทำไมเลข 8 ตรงกับที่วัดได้พอดี — 8 คือจำนวนที่ทำได้จริงก่อนโดนบล็อก
+# ไม่ใช่เลขที่คิดขึ้นเอง
+#
+# **นับอะไร** — งานที่เริ่มไปแล้วและยังไม่จบ (ทุกสถานะใน OPEN_STAGES ยกเว้น
+# `queued` ซึ่งคือลิงก์ที่วางไว้เฉยๆ ยังไม่ได้แตะ) พองานใดจบ (done/failed/
+# cancelled) ที่ว่างจะคืนมาแล้วตัวรันหยิบใบถัดไปเข้ามาเองจนครบ 8
+#
+# **ไม่กั้นงานที่เริ่มไปแล้ว** — เพดานนี้กั้นเฉพาะการ "เริ่มใบใหม่" เท่านั้น
+# งานที่อยู่ในมือแล้ว (สั่งแก้ · ทำสตอรีบอร์ด · เจนคลิป) เดินต่อได้เสมอ
+# ไม่งั้นงานที่ผู้ใช้นั่งรออยู่หน้าจอจะค้างเพราะติดเพดานของงานอื่น
+BATCH_LIMIT = 8
+
+# สถานะที่แปลว่า **เครื่องกำลังลงมือทำอยู่จริง** (ไม่ใช่จอดรอคนกด)
+#
+# แยกออกมาเพราะเพดานข้างบนต้องนับแค่พวกนี้ — งานที่รอคนกดอนุมัติไม่ได้ใช้
+# เบราว์เซอร์ ไม่ได้ยิงหา Shopee ไม่ได้เผาเครดิต Flow มันแค่จอดรอเฉยๆ
+# การนับมันเข้าไปด้วยทำให้คิวล็อกตัวเองเมื่อเจ้าของไม่ว่างมากดอนุมัติ
+MACHINE_STAGES = {
+    STAGE_COLLECTING,      # กำลังดึงหน้า Shopee
+    STAGE_MAKING,          # กำลังคุยกับ GPT ทำสตอรีบอร์ด
+    STAGE_REVISING,        # กำลังสั่งแก้กับ GPT
+    STAGE_GENERATING,      # กำลังเผาเครดิตใน Google Flow
+    STAGE_POSTING,         # กำลังแตะจอมือถือโพสต์
+}
+
+# เจอปลายทางบล็อก (Shopee ขึ้นหน้า "Please Try Again Later") ให้ **พักทั้งคิว**
+# ไม่ใช่ไล่ยิงใบถัดไปจนหมด
+#
+# **เหตุการณ์จริง 2 รอบใน 2 ชั่วโมง (25 ส.ค. 2026)**
+#   16:07  โดนบล็อกใบที่ 9 แล้วไล่ยิงต่ออีก 25 ใบ ล้มหมด · สร้างสินค้าผี 14 ชิ้น
+#          และ **เขียนทับสินค้าจริงที่ทำไว้แล้ว 1 ชิ้น** (ชื่อ/จุดเด่น/คำบรรยายหาย)
+#   17:42  ผู้ใช้ส่งลิงก์ใหม่ 33 ใบ โดนบล็อกทันที ล้มรวด 4 ใบใน 40 วินาที
+#
+# ยิ่งยิงตอนโดนบล็อก ยิ่งโดนนาน — และทุกใบที่ยิงคือการสร้างขยะเพิ่ม
+# 20 นาทีมาจาก: รอบแรกบล็อกยาวเกิน 10 นาทีต่อเนื่อง แต่มีใบหนึ่งหลุดผ่านได้
+# ตอนนาทีที่ 7 แปลว่าเป็นการจำกัดแบบมีช่วงเวลา ไม่ใช่แบนถาวร
+BLOCK_HOLD_SECONDS = 20 * 60
+
+# อาการที่แปลว่า "ปลายทางบล็อก" ไม่ใช่ "โค้ดเราพัง"
+#
+# `Execution context was destroyed` = หน้าเว็บถูกเด้งไปที่อื่นกลางคัน ซึ่งเป็นสิ่งที่
+# Shopee ทำตอนกันเรา — วัดจริง 25 ส.ค. ล้มด้วยข้อความนี้ 4 ใบติดใน 40 วินาที
+BLOCK_ERROR_HINTS = (
+    "execution context was destroyed",
+    "please try again later",
+    "verify to continue",
+    "too many request",
+    "ไม่ให้ข้อมูลสินค้า",
+    "net::err_",
+)
+
+
+def _looks_blocked_error(message: str) -> bool:
+    low = str(message or "").lower()
+    return any(hint in low for hint in BLOCK_ERROR_HINTS)
+
+
+# หน้าที่ Shopee เด้งมาแล้ว **คนช่วยอะไรไม่ได้** — มีแต่ปุ่ม "ลองใหม่" กับข้อความ
+# ว่าให้รอสักครู่ ไม่มีจิ๊กซอว์ ไม่มีอะไรให้กด
+#
+# เหตุการณ์ที่ทำให้ต้องแยก (27 ส.ค. 2026): 01:22:52 ระบบเขียนว่า "ติด CAPTCHA —
+# รอยืนยันก่อนทำต่อ (ค้าง 34 ใบ)" ผู้ใช้จึงรอว่าต้องไปเลื่อนจิ๊กซอว์ที่ไหนสักแห่ง
+# **แต่ภาพหน้าจอที่เก็บไว้ตอน 01:22:49 พิสูจน์ว่าไม่มีจิ๊กซอว์เลย** หน้านั้นเขียนว่า
+# "Please Try Again Later · Verification can't be completed. Please try again
+# after a few minutes." มีแค่ปุ่ม Try Again — **ไม่มีอะไรให้คนทำ**
+#
+# ผลคือคิวนอนรอคนที่ช่วยอะไรไม่ได้อยู่ **6 ชั่วโมง 48 นาที** (01:22 → 08:11)
+# ทั้งที่การพัก 20 นาทีแล้วลองเองก็พอ
+#
+# เรียกทุกอย่างว่า "CAPTCHA" เหมือนกันหมดคือรากของปัญหา — สองหน้านี้แก้คนละทาง
+WAIT_ONLY_HINTS = (
+    "please try again later",
+    "try again later",
+    "too many request",
+    "execution context was destroyed",
+    "net::err_",
+)
+
+# หน้าที่ **ต้องมีคนเลื่อนจิ๊กซอว์จริงๆ** ถึงจะผ่าน — อันนี้รอคนถูกแล้ว
+NEEDS_HUMAN_HINTS = (
+    "verify to continue",
+    "captcha",
+    "ยืนยันตัวตน",
+    "จิ๊กซอว์",
+)
+
+
+def block_kind(message: str) -> str:
+    """หน้าบล็อกแบบนี้ต้องรอคน หรือรอเวลาเฉยๆ
+
+    คืน `"human"` = ต้องให้คนไปเลื่อนจิ๊กซอว์แล้วกดยืนยัน
+    คืน `"wait"`  = พักแล้วลองเองได้ **ห้ามไปรอคน** เพราะไม่มีอะไรให้เขาทำ
+
+    **ตรวจแบบ "ต้องมีคนทำ" ก่อนเสมอ** ข้อความหนึ่งอาจเข้าเงื่อนไขทั้งสองชุด
+    (เช่นหน้าจิ๊กซอว์ที่มีคำว่า try again อยู่ด้วย) กรณีนั้นต้องเลือกทางที่
+    ปลอดภัยกว่า = รอคน เพราะการเดาผิดทางนี้แค่ช้า ส่วนเดาผิดอีกทางคือยิงซ้ำ
+    ใส่ด่านที่ยังไม่ผ่านจนโดนบล็อกหนักกว่าเดิม
+    """
+    low = str(message or "").lower()
+    if any(hint in low for hint in NEEDS_HUMAN_HINTS):
+        return "human"
+    if any(hint in low for hint in WAIT_ONLY_HINTS):
+        return "wait"
+    return "human"          # ไม่รู้จัก = เลือกทางปลอดภัย
+
+# ลำดับความสำคัญตอนหยิบงาน — **เลขน้อยได้ทำก่อน** (ผู้ใช้สั่ง 22 ส.ค. 2026)
+#
+# หลักการเดียว: **งานที่มีคนนั่งรออยู่หน้าจอ ต้องมาก่อนงานที่ไม่มีใครรอ**
+#
+# ปัญหาที่แก้: เดิมหยิบงานแรกในลิสต์ที่ทำได้ = เรียงตามเวลาที่เข้าคิวล้วนๆ
+# พอผู้ใช้กด "แก้ไขบทพูด" แล้วพิมพ์คำสั่งแก้ งานนั้นกลายเป็น revising ซึ่งต้อง
+# ต่อแถวเท่ากับงานใหม่ที่เพิ่งวางลิงก์มา — คนที่นั่งรอดูผลการแก้จึงต้องรอให้
+# งานอื่นที่ไม่มีใครรอทำจนจบก่อน (งานละ ~1 ชั่วโมง) การแก้ทีละรอบเลยขาดตอน
+#
+# ตัวเลขเดียวกัน = ใครอยู่ก่อนในลิสต์ได้ก่อน (ลำดับเข้าคิวเดิม ไม่สลับมั่ว)
+STAGE_PRIORITY = {
+    STAGE_REVISING: 0,          # เพิ่งสั่งแก้ คนรอดูผลอยู่ตอนนี้
+    STAGE_READY_STORYBOARD: 1,  # เพิ่งกดผ่านชุดรูป — คนยังอยู่ในแชท
+    STAGE_READY_FLOW: 1,        # เพิ่งกดผ่านสตอรีบอร์ด — คนยังอยู่ในแชท
+    STAGE_POSTING: 2,           # สั่งโพสต์แล้ว รอเครื่องว่าง
+    STAGE_QUEUED: 3,            # ลิงก์ใหม่ที่เพิ่งวางไว้ ยังไม่มีใครรอผล
+}
 # สถานะที่ถือว่างานยังไม่จบ ใช้ตอนนับคิวและตอนหางานล่าสุดของแชท
 OPEN_STAGES = {
     STAGE_QUEUED, STAGE_COLLECTING, STAGE_IMAGE_REVIEW, STAGE_READY_STORYBOARD,
@@ -120,7 +251,63 @@ class ClipQueue:
         self.path = Path(path)
         self.lock = threading.RLock()
         self.jobs: list[dict] = []
+        self._held = False           # คิวถูกพักเพราะติด CAPTCHA/โดนบล็อกอยู่ไหม
+        self.hold_why: str = ""
+        self.hold_at: str = ""
+        # เวลาที่จะปลดพักเอง (0 = รอคนยืนยัน ไม่มีวันหมดอายุ)
+        self.hold_until: float = 0.0
         self._load()
+
+    def hold(self, why: str, seconds: float = 0.0) -> None:
+        """พักการเริ่มงานใหม่ — รอคน หรือรอเวลา แล้วแต่ชนิดของหน้าที่โดนบล็อก
+
+        ผู้ใช้สั่งไว้ 25 ส.ค. 2026: *"ถ้าติด capcha ให้หยุดและส่งกลับมาบอกผมทาง
+        telegram ว่าติด capcha ผมจะแก้ให้ก่อน แล้วคอนเฟิร์มกลับไปค่อยรันต่อ"*
+
+        **`seconds=0` = รอคนยืนยัน ไม่มีวันหมดอายุ** (พฤติกรรมเดิม) ใช้กับหน้า
+        จิ๊กซอว์จริงที่ต้องมีคนเลื่อน — ปลดเองตามเวลาแล้วยิงต่อทั้งที่ด่านยังอยู่
+        = กลับไปเป็นแบบเดิมที่ไล่ยิงจนล้มหมด
+
+        **`seconds>0` = พักแล้วเดินต่อเอง** (เพิ่ม 27 ส.ค. 2026) ใช้กับหน้า
+        "Please Try Again Later" ที่ **ไม่มีอะไรให้คนทำ** — รอคนในกรณีนั้นคือ
+        การจอดคิวไว้เฉยๆ ซึ่งเกิดจริงแล้ว 6 ชั่วโมง 48 นาที กับลิงก์ 34 ใบ
+
+        งานที่เริ่มไปแล้วเดินต่อได้ตามปกติทั้งสองแบบ พักเฉพาะการ **เริ่มใบใหม่**
+        """
+        with self.lock:
+            self._held = True
+            self.hold_why = why
+            self.hold_at = _now()
+            self.hold_until = (time.time() + seconds) if seconds > 0 else 0.0
+
+    def held(self) -> bool:
+        """คิวยังถูกพักอยู่ไหม — **พักแบบมีกำหนดจะปลดตัวเองตรงนี้**
+
+        ปลดตอนถูกถาม ไม่ใช่ตั้งเวลาแยก เพราะตัวรันถามค่านี้ทุกครั้งก่อนหยิบงาน
+        อยู่แล้ว การมีนาฬิกาปลุกอีกตัวมีแต่จะเพิ่มของที่ต้องดูแลโดยไม่ได้อะไรเพิ่ม
+        """
+        with self.lock:
+            if self._held and self.hold_until and time.time() >= self.hold_until:
+                self._held = False
+                self.hold_why = ""
+                self.hold_at = ""
+                self.hold_until = 0.0
+            return self._held
+
+    def hold_left(self) -> int:
+        """พักแบบมีกำหนดเหลืออีกกี่วินาที (0 = ไม่ได้พัก หรือพักแบบรอคน)"""
+        with self.lock:
+            if not self._held or not self.hold_until:
+                return 0
+            return max(0, int(self.hold_until - time.time()))
+
+    def release_hold(self) -> None:
+        """ผู้ใช้ยืนยันว่าแก้แล้ว — ทำงานต่อได้"""
+        with self.lock:
+            self._held = False
+            self.hold_why = ""
+            self.hold_at = ""
+            self.hold_until = 0.0
 
     # ------------------------------------------------------------ ไฟล์
 
@@ -206,6 +393,52 @@ class ClipQueue:
                     return dict(job)
         raise ClipQueueError(f"ไม่พบงาน {job_id}")
 
+    def park(self, job_id: str, why: str = "") -> dict:
+        """พักงานไว้ "รอแก้" — เครื่องจะไม่แตะจนกว่าจะเอากลับ (ผู้ใช้สั่ง 27 ส.ค. 2026)
+
+        *"ให้สร้างอีกช่องนึงเป็นช่องรอแก้ สำหรับทุกขั้นตอน โดยมีปุ่มให้กดไปรอแก้
+        ในใบงานด้วย"*
+
+        **เก็บสถานะเดิมไว้ครบ ไม่เปลี่ยน `stage`** เพราะการพักคือ "หยุดไว้ตรงนี้"
+        ไม่ใช่ "ถอยกลับ" — เอากลับเมื่อไรต้องกลับเข้าขั้นเดิมเป๊ะโดยไม่ต้องเดา
+        ถ้าเปลี่ยน stage เป็นค่าพิเศษ จะต้องมีตารางแปลงกลับอีกชุด ซึ่งวันหนึ่งจะ
+        ไม่ตรงกับสถานะที่เพิ่มใหม่ แล้วงานจะกลับผิดขั้นแบบเงียบๆ
+
+        พักซ้ำได้ (แค่ทับเหตุผลใหม่) — ไม่ต้องให้ผู้เรียกไปเช็คก่อน
+        """
+        with self.lock:
+            job = next((j for j in self.jobs if j["id"] == job_id), None)
+            if not job:
+                raise ClipQueueError(f"ไม่พบงาน {job_id}")
+            job["parked"] = {
+                "at": _now(),
+                "from": job.get("stage") or "",
+                "why": str(why or "").strip(),
+            }
+            job["updated_at"] = _now()
+            self._save()
+            return dict(job)
+
+    def unpark(self, job_id: str) -> dict:
+        """เอางานที่พักไว้กลับเข้าขั้นเดิม"""
+        with self.lock:
+            job = next((j for j in self.jobs if j["id"] == job_id), None)
+            if not job:
+                raise ClipQueueError(f"ไม่พบงาน {job_id}")
+            if not job.get("parked"):
+                raise ClipQueueError("งานนี้ไม่ได้พักไว้อยู่แล้ว")
+            job.pop("parked", None)
+            job["updated_at"] = _now()
+            self._save()
+            return dict(job)
+
+    def parked(self) -> list[dict]:
+        """งานที่พักไว้รอแก้ทั้งหมด — เรียงตามเวลาที่พัก ใบที่ค้างนานสุดขึ้นก่อน"""
+        with self.lock:
+            rows = [dict(j) for j in self.jobs if j.get("parked")]
+        rows.sort(key=lambda j: (j.get("parked") or {}).get("at") or "")
+        return rows
+
     def claim_next(self) -> dict | None:
         """หยิบงานที่ทำได้ทันทีมาหนึ่งงาน แล้วตั้งสถานะ "กำลังทำ" ทันทีในล็อกเดียว
 
@@ -221,14 +454,57 @@ class ClipQueue:
             STAGE_POSTING: STAGE_POSTING,
         }
         with self.lock:
-            for job in self.jobs:
-                if job.get("stage") in ACTIONABLE:
-                    was = job["stage"]
-                    job["stage"] = moving[was]
-                    job["claimed_from"] = was
-                    job["updated_at"] = _now()
-                    self._save()
-                    return dict(job)
+            # นับ **เฉพาะงานที่เครื่องกำลังลงมือทำอยู่จริง** ไม่นับงานที่จอดรอคน
+            # (ผู้ใช้สั่ง 26 ส.ค. 2026: "ตอนดึงข้อมูลจากลิ้งไม่ต้องมีลิมิต")
+            #
+            # **ของเดิมนับงานที่รอคนกดด้วย ซึ่งกลายเป็นการล็อกคิวตัวเอง**
+            # วัดของจริง 27 ส.ค. 00:0x — ช่องเต็มไป 6 จาก 8 โดยเป็น
+            #     video_review 4 ใบ · storyboard_review 2 ใบ  ← จอดรอคนกดทั้งหมด
+            #     collecting 0 ใบ                              ← ไม่มีใครดึง Shopee เลย
+            # แปลว่าเพดานไม่ได้กัน Shopee อะไรเลย มันแค่ห้ามดึงลิงก์ใหม่
+            # เพราะเจ้าของยังไม่ว่างมากดอนุมัติของเก่า — เสียเวลาเปล่าล้วนๆ
+            #
+            # **ทำไมปลอดภัย** `ClipRunner` เดินอยู่ตัวเดียวและทำทีละงานเท่านั้น
+            # การดึง Shopee จึงเรียงทีละใบอยู่แล้วโดยธรรมชาติ (ใบละ ~80 วินาที)
+            # เพดานนี้ไม่เคยลดความถี่ต่อคำขอเลยแม้แต่นิดเดียว
+            #
+            # **แล้วอะไรกันการโดนบล็อก** — `BLOCK_HOLD_SECONDS` (พักทั้งคิว 20 นาที
+            # ทันทีที่เจอหน้าบล็อก) ซึ่งเพิ่มเข้ามาทีหลังและตรงจุดกว่า เพราะมันตอบสนอง
+            # ต่อ**อาการจริง**ที่ปลายทางส่งกลับมา ไม่ใช่การเดาเพดานล่วงหน้า
+            busy = sum(1 for j in self.jobs if j.get("stage") in MACHINE_STAGES)
+            # โดนปลายทางบล็อกอยู่ = ห้ามเริ่มใบใหม่จนกว่าจะพ้นเวลาพัก
+            #
+            # **ต้องเรียก `self.held()` ไม่ใช่อ่าน `self._held` ตรงๆ** เพราะการพัก
+            # แบบมีกำหนดเวลา (หน้า "Please Try Again Later") ปลดตัวเองในเมท็อดนั้น
+            # อ่านตัวแปรตรงๆ = พักแล้วไม่มีวันปลด กลายเป็นค้างถาวรเงียบๆ
+            # (ล็อกเป็น RLock อยู่แล้ว เรียกซ้อนในล็อกเดิมได้)
+            full = busy >= BATCH_LIMIT or self.held()
+
+            # เลือกงานที่ "มีคนรออยู่" ก่อนงานที่ไม่มีใครรอ (ดู STAGE_PRIORITY)
+            # ตัวเลขเท่ากันให้ตัวที่อยู่ก่อนในลิสต์ชนะ — ลำดับเข้าคิวเดิมไม่สลับ
+            best = None
+            for index, job in enumerate(self.jobs):
+                stage = job.get("stage")
+                if stage not in ACTIONABLE:
+                    continue
+                # **พักไว้รอแก้ = เครื่องห้ามแตะ** (ผู้ใช้สั่ง 27 ส.ค. 2026)
+                # ไม่งั้นกดพักแล้วอีกเดี๋ยวตัวรันก็หยิบไปทำต่อ = ปุ่มพักไร้ความหมาย
+                if job.get("parked"):
+                    continue
+                # เต็มเพดานแล้ว = เริ่มใบใหม่ไม่ได้ แต่งานที่เริ่มไปแล้วเดินต่อได้
+                if full and stage == STAGE_QUEUED:
+                    continue
+                rank = (STAGE_PRIORITY.get(stage, 99), index)
+                if best is None or rank < best[0]:
+                    best = (rank, job)
+            if best is not None:
+                job = best[1]
+                was = job["stage"]
+                job["stage"] = moving[was]
+                job["claimed_from"] = was
+                job["updated_at"] = _now()
+                self._save()
+                return dict(job)
         return None
 
     def move(self, job_id: str, delta: int) -> dict:
@@ -373,6 +649,51 @@ class ClipQueue:
         with self.lock:
             return [dict(j) for j in self.jobs if j.get("stage") in OPEN_STAGES]
 
+    def load_now(self) -> dict:
+        """ตอนนี้มีงานในมือกี่ใบ เต็มเพดานหรือยัง รอคิวอีกกี่ใบ
+
+        ต้องมีตัวนี้เพราะถ้าเพดานทำงานเงียบๆ ผู้ใช้จะเห็นแค่ "ลิงก์ 25 ใบไม่ขยับ"
+        แล้วนึกว่าระบบค้าง — เพดานที่มองไม่เห็นแยกไม่ออกจากของพัง
+        """
+        with self.lock:
+            # **ต้องนับสูตรเดียวกับ `claim_next` เป๊ะ** ไม่งั้นหน้าเว็บจะบอกว่าเต็ม
+            # ทั้งที่ตัวรันยังหยิบงานได้ (หรือกลับกัน) แล้วไล่บั๊กกันไม่จบ
+            # ใบที่พักไว้รอแก้ไม่นับในทุกช่อง — เครื่องไม่แตะ คนก็ยังไม่แตะ
+            # นับรวมเมื่อไรตัวเลขจะบอกว่ามีงานค้างเยอะทั้งที่ไม่มีอะไรเดินอยู่จริง
+            live = [j for j in self.jobs if not j.get("parked")]
+            busy = sum(1 for j in live if j.get("stage") in MACHINE_STAGES)
+            waiting = sum(1 for j in live
+                          if j.get("stage") in OPEN_STAGES
+                          and j.get("stage") not in MACHINE_STAGES
+                          and j.get("stage") != STAGE_QUEUED)
+            queued = sum(1 for j in live if j.get("stage") == STAGE_QUEUED)
+            parked = sum(1 for j in self.jobs if j.get("parked"))
+        return {"busy": busy, "queued": queued, "limit": BATCH_LIMIT,
+                # งานที่จอดรอคนกด — ไม่กินเพดาน แต่ต้องเห็นว่ามีอยู่เท่าไร
+                "waiting": waiting,
+                # งานที่พักไว้รอแก้ — ดูรายการเต็มด้วย /wait
+                "parked": parked,
+                "full": busy >= BATCH_LIMIT, "free": max(0, BATCH_LIMIT - busy)}
+
+    def load_text(self) -> str:
+        """สรุปภาระคิวเป็นภาษาคน — ใช้ในแชทและหน้าเว็บ"""
+        info = self.load_now()
+        head = f"⚙️ กำลังทำ {info['busy']}/{info['limit']} งาน"
+        # งานที่จอดรอคนกดต้องแยกให้เห็น — ไม่งั้นเลข busy ที่ต่ำจะดูเหมือนระบบว่าง
+        # ทั้งที่มีของค้างรอเจ้าของอยู่หลายใบ
+        if info.get("waiting"):
+            head += f" · รอคุณกดอนุมัติอีก {info['waiting']} ใบ"
+        if info.get("parked"):
+            head += f" · พักรอแก้อีก {info['parked']} ใบ (/wait)"
+        if info["queued"]:
+            head += f" · รอคิวอีก {info['queued']} ใบ"
+        if info["full"] and info["queued"]:
+            head += ("\nเต็มเพดานแล้ว — ใบใหม่จะเริ่มเองเมื่องานที่เครื่องทำอยู่จบ "
+                     "(งานที่รอคุณกดอนุมัติไม่กินเพดาน ดึงลิงก์ใหม่ได้เรื่อยๆ)")
+        elif not info["queued"]:
+            head += " · ไม่มีใบรอคิว"
+        return head
+
     def latest_for_chat(self, chat_id: str, stages: set[str] | None = None) -> dict | None:
         """งานล่าสุดของแชทนี้ที่อยู่ในสถานะที่สนใจ
 
@@ -395,10 +716,16 @@ class ClipRunner:
     อนุมัติ ไม่ได้ใช้การวนถามถี่ๆ เพราะงานเจนคลิปนานเป็นนาที ไม่ต้องรีบ
     """
 
-    def __init__(self, queue: ClipQueue, handler: Callable[[dict], None], log=print) -> None:
+    def __init__(self, queue: ClipQueue, handler: Callable[[dict], None], log=print,
+                 on_hold: Callable[[dict], None] | None = None) -> None:
         self.queue = queue
         self.handler = handler
         self.log = log
+        # เรียกเมื่อคิวถูกพักเพราะปลายทางบล็อก — ตัวเรียกใช้ส่งข้อความเข้าแชท
+        #
+        # ต้องเป็น callback ไม่ใช่ให้ clip_queue ส่ง Telegram เอง เพราะไฟล์นี้เป็น
+        # คิวล้วนๆ ไม่รู้จักแชท ถ้าผูกกันจะเทสคิวโดยไม่มีโทเคน Telegram ไม่ได้
+        self.on_hold = on_hold
         self.signal = threading.Event()
         self.thread: threading.Thread | None = None
         self.current = ""
@@ -430,6 +757,36 @@ class ClipRunner:
             except Exception as error:
                 # งานหนึ่งพังต้องไม่ทำให้ตัวรันตายทั้งตัว งานที่เหลือในคิวต้องเดินต่อ
                 self.log(f"งาน {job['id']} ล้มเหลว: {type(error).__name__}: {error}")
+                # ปลายทางบล็อกอยู่ = พักทั้งคิว **ห้ามไล่ยิงใบถัดไปจนหมด**
+                # (25 ส.ค. 2026 ไล่ยิงต่อ 25 ใบหลังโดนบล็อก ล้มหมด + สร้างขยะ 14 ชิ้น)
+                if _looks_blocked_error(str(error)):
+                    already = self.queue.held()
+                    # **แยกสองหน้าออกจากกัน** (ผู้ใช้สั่ง 27 ส.ค. 2026)
+                    #   wait  = "Please Try Again Later" ไม่มีอะไรให้คนทำ → พักเองแล้วไปต่อ
+                    #   human = จิ๊กซอว์จริง ต้องมีคนเลื่อน → รอยืนยันเหมือนเดิม
+                    kind = block_kind(str(error))
+                    if kind == "wait":
+                        self.queue.hold(str(error)[:200], seconds=BLOCK_HOLD_SECONDS)
+                        self.log(
+                            f"⛔ ปลายทางบล็อกอยู่ (แบบรอเวลา ไม่มีจิ๊กซอว์ให้เลื่อน) — "
+                            f"พักคิว {BLOCK_HOLD_SECONDS // 60} นาทีแล้วทำต่อเอง "
+                            f"ลิงก์ที่เหลือยังอยู่ครบ ไม่ต้องรอใครกดอะไร"
+                        )
+                    else:
+                        self.queue.hold(str(error)[:200])
+                        self.log(
+                            f"⛔ ปลายทางขึ้นด่านยืนยันตัวตน — พักคิว ลิงก์ที่เหลือยังอยู่ครบ "
+                            f"รอผู้ใช้เลื่อนจิ๊กซอว์แล้วยืนยันถึงจะทำต่อ"
+                        )
+                    # แจ้งครั้งเดียวตอนเพิ่งติด ไม่ใช่ทุกใบที่ล้ม
+                    # (เตือนรัวๆ เท่ากับไม่มีเตือน เดี๋ยวก็เลิกอ่านกัน)
+                    if not already and self.on_hold:
+                        try:
+                            self.on_hold({"job": job, "error": str(error)[:300],
+                                          "kind": kind,
+                                          "seconds": BLOCK_HOLD_SECONDS if kind == "wait" else 0})
+                        except Exception as hold_error:      # noqa: BLE001
+                            self.log(f"แจ้งเรื่องคิวถูกพักไม่สำเร็จ: {hold_error}")
                 try:
                     self.queue.update(
                         job["id"], stage=STAGE_FAILED, error=str(error)[:400]

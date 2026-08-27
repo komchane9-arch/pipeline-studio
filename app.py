@@ -1390,6 +1390,94 @@ async def publish_hashtags_save(request: Request) -> dict:
 # --------------------------------------------------------------- เดินผังจริง
 
 
+def _wake_for_publish(serial: str):
+    """ปลุกจอ + ปัดหน้าล็อกก่อนเริ่มเดินผัง — คืนข้อความบอกว่าทำอะไรไป
+
+    **ทำไมต้องมี** ตรวจ 26 ส.ค. 2026: ทั้ง `publish_flow.py` ไม่มีคำสั่งปลุกจอ
+    เลยสักบรรทัด (grep "wake" ได้ 0 ผลลัพธ์) และตัวตรวจของขั้นแรก (`app_frontmost`)
+    ดูแค่ว่าแอปไหนอยู่หน้าสุด ซึ่ง **ผ่านได้ทั้งที่ `mWakefulness=Asleep`** —
+    เจอกับตัวจริง: ขั้น "เข้าแอป Shopee" รายงานว่าผ่าน ทั้งที่จอดับและมีหน้าล็อกบัง
+
+    `fb_screen.wake()` ยืนยันด้วยว่า**แตะจอได้จริง** ไม่ใช่แค่สั่งปลุกแล้วเชื่อ
+    """
+    def work() -> str:
+        shell = _screen_shell(serial)
+        if fb_screen.is_awake(shell):
+            return ""                    # จอติดอยู่แล้ว ไม่ต้องรายงานให้รก
+        if not fb_screen.wake(shell, log=lambda x: append_log("publish", x)):
+            raise RuntimeError("ปลุกจอไม่ขึ้น — จออาจติดหน้าล็อกที่ต้องใส่รหัส")
+        return f"ปลุกจอ {device_book.label(serial)} แล้ว"
+    return work
+
+
+def _clip_sender(serial: str, item_id: str, run: dict):
+    """ส่งคลิปของงานนี้เข้ามือถือ ให้เป็นวิดีโอใบล่าสุดในแกลเลอรี
+
+    ผู้ใช้สั่ง 26 ส.ค. 2026: *"ให้เตรียมคลิปเข้าเครื่องเลยตั้งแต่กดเริ่มงาน"*
+
+    **ทำไมต้องมี** ขั้น "เลือกคลิปที่จะโพสต์" แตะพิกัดที่เทรนไว้เฉยๆ มันไม่ได้
+    อ่านว่าช่องนั้นเป็นคลิปอะไร — ถ้าคลิปของงานไม่ได้อยู่ในเครื่อง มันจะหยิบคลิป
+    เก่าของสินค้าอื่นมาโพสต์แล้วเดินจนจบโดยไม่มีอะไรฟ้อง ซึ่งถอนไม่ได้
+    (เจอจริง 26 ส.ค.: ในจอ 3 มีแต่คลิปจากตอนเทรน 25 ส.ค. สองใบ)
+
+    **ต้องยืนยันว่าเป็นใบล่าสุดจริง ไม่ใช่แค่ส่งเข้าไปแล้วเชื่อ** — ระบบแกลเลอรี
+    ของ Android รู้จักไฟล์ก็ต่อเมื่อถูกสแกน ถ้าสแกนไม่ติดไฟล์จะอยู่ในเครื่อง
+    แต่ไม่โผล่ในตัวเลือกคลิป ซึ่งอาการเหมือน "ไม่ได้ส่ง" ทุกประการ
+
+    **ไม่ลบคลิปเก่าทิ้ง** ของในเครื่องเป็นของผู้ใช้ ที่นี่แค่ทำให้ของเราใหม่กว่า
+    """
+    videos = list(run.get("videos") or [])
+    if not videos:
+        return None                      # งานยังไม่มีคลิป — ไม่มีอะไรให้ส่ง
+    local = clip_store.file_path(DATA_DIR, item_id, videos[0])
+
+    def work() -> str:
+        if not local.is_file():
+            raise RuntimeError(f"ไม่พบไฟล์คลิปในเครื่องคอม: {local}")
+        size = local.stat().st_size
+        name = f"{item_id}-{local.name}"
+        remote = f"{PHONE_POST_REMOTE_DIR}/{name}"
+
+        def sh(*args: str) -> str:
+            return run_adb("-s", serial, "shell", *args, timeout=60).stdout.decode(
+                "utf-8", errors="replace")
+
+        run_adb("-s", serial, "shell", "mkdir", "-p", PHONE_POST_REMOTE_DIR, timeout=20)
+        # มีอยู่แล้วขนาดเท่ากัน = ไม่ต้องส่งซ้ำ (11 MB ต่อรอบ) แต่ยังต้อง "ดัน
+        # เวลาให้เป็นเดี๋ยวนี้" อยู่ดี ไม่งั้นคลิปอื่นที่ส่งทีหลังจะใหม่กว่า
+        here = sh("stat", "-c", "%s", remote).strip()
+        again = here.isdigit() and int(here) == size
+        if not again:
+            pushed = run_adb("-s", serial, "push", str(local), remote, timeout=600)
+            if pushed.returncode != 0:
+                raise RuntimeError(
+                    "ส่งคลิปเข้ามือถือไม่สำเร็จ: "
+                    + pushed.stderr.decode("utf-8", errors="replace")[:150])
+        sh("touch", remote)
+        sh("content", "call", "--uri", "content://media",
+           "--method", "scan_file", "--arg", remote)
+        time.sleep(1.5)
+
+        # ยืนยันกับระบบแกลเลอรีเอง ไม่ใช่เชื่อว่าสแกนติด
+        #
+        # **ห้ามใส่ LIMIT ในค่า --sort** Android ปฏิเสธด้วย "Invalid token LIMIT"
+        # (เจอจริง 26 ส.ค. 2026 บน REDMI 15C) ต้องดึงมาทั้งหมดแล้วอ่านแถวแรกเอง
+        rows = [line for line in sh(
+            "content", "query", "--uri", "content://media/external/video/media",
+            "--projection", "_display_name", "--sort", "'date_added DESC'",
+        ).splitlines() if line.startswith("Row:")]
+        first = rows[0] if rows else ""
+        if name not in first:
+            raise RuntimeError(
+                f"ส่งคลิปเข้าเครื่องแล้วแต่แกลเลอรียังไม่เห็นเป็นใบล่าสุด "
+                f"(ใบล่าสุดตอนนี้: {first.strip()[:120] or 'อ่านไม่ได้'}) — "
+                "ถ้าเดินต่อจะไปหยิบคลิปผิดใบมาโพสต์")
+        mb = size / 1048576
+        return (f"คลิปอยู่ในเครื่องแล้วและเป็นใบล่าสุด: {name} ({mb:.1f} MB)"
+                + (" — มีอยู่ก่อนแล้ว ไม่ได้ส่งซ้ำ" if again else ""))
+    return work
+
+
 def _build_context(
     serial: str, target: str, item_id: str, report
 ) -> "publish_flow.RunContext":
@@ -1420,6 +1508,11 @@ def _build_context(
         hashtags=list(plan.get("tags") or []),
         log=lambda message: append_log("publish", message),
         report=report,
+        # เตรียมของก่อนแตะจอขั้นแรก (ผู้ใช้สั่ง 26 ส.ค. 2026) — อยู่นอกผัง
+        # เพราะขั้นในผังถูกลบได้จากหน้าเว็บ ถ้าลบขั้นส่งคลิปทิ้ง ผังจะยังเดินจนจบ
+        # แล้วโพสต์คลิปของสินค้าอื่น ซึ่งถอนไม่ได้
+        wake_screen=_wake_for_publish(serial),
+        send_clip=_clip_sender(serial, item_id, run or {}) if item_id else None,
     )
 
 
@@ -1448,17 +1541,40 @@ async def publish_flow_run(request: Request) -> dict:
         raise HTTPException(status_code=409, detail="มีงานโพสต์รันอยู่แล้ว รอให้จบก่อน")
 
     def work() -> dict:
+        # ---- กดบัตรคิวจอก่อนแตะเครื่อง (กติกาข้อ 9 ของโปรเจกต์) ----------
+        #
+        # **ของเดิมไม่ได้กดบัตรเลย** จับแต่ `_publish_run_lock` ซึ่งเป็นล็อกใน
+        # โปรเซสตัวเอง คนอื่นมองไม่เห็น ผลคือระหว่างโพสต์จริง:
+        #   · ตัวหรี่จอเห็นว่า "จอว่าง" แล้ว **ดับจอกลางงาน**
+        #   · ตัวล้างเครื่องเห็นว่าจอว่างแล้ว **ลบทุกอย่างใน /sdcard/Movies/autopost**
+        #     ซึ่งคือที่ที่คลิปของงานถูกวางไว้พอดี
+        #
+        # ทั้งสองอย่างเกิดขึ้นจริงกับตาเมื่อ 26 ส.ค. 2026 ระหว่างไล่เทสทีละขั้น
+        # (log 21:00:26 "ล้างเครื่อง W4FYYPYTLFYLIFHM — ลบไฟล์ 1 ใบ" แล้วโฟลเดอร์
+        # คลิปว่างเปล่า) ถ้าเกิดตอนโพสต์จริงจะได้ "เลือกคลิป" บนแกลเลอรีที่ไม่มี
+        # คลิปของเราอยู่แล้ว = โพสต์คลิปผิดใบ ซึ่งถอนไม่ได้
+        #
+        # `phone_queue.slot` กันได้ทั้งสองตัว เพราะทั้งคู่ต้องขอล็อกเดียวกันนี้ก่อน
+        # ลงมือ (และเป็นล็อกข้ามโปรเซส บอทที่รันแยกอยู่ก็เห็น)
+        import phone_queue                                        # noqa: PLC0415
+        what = ("ไล่ทีละขั้น" if only else "โพสต์") + f" {target}"
+        # **ปล่อย `_publish_run_lock` ใน finally ชั้นนอกสุดเสมอ** — ถ้าไปปล่อย
+        # ข้างในบล็อกคิว แล้วขอคิวไม่ได้ (คนอื่นถือจออยู่) ล็อกจะค้างตลอดกาล
+        # แล้วทุกคำขอโพสต์หลังจากนั้นจะโดนตอบว่า "มีงานโพสต์รันอยู่แล้ว" ทั้งที่ว่าง
         try:
-            context = _build_context(serial, target, item_id, lambda *a: None)
-            if only:
-                number = int(only)
-                # ทดลองทีละขั้น = กำลังพิสูจน์ว่าพิกัดที่เทรนไว้ถูกจริง
-                # ต้องแตะตรงจุดเป๊ะ ไม่งั้นถ้าเยื้องแล้วบังเอิญไปโดนปุ่มพอดี
-                # จะเก็บพิกัดที่ผิดไว้โดยไม่รู้ตัว แล้วไปพังตอนเดินผังจริง
-                context.tap_jitter = 0
-                context.settle_jitter = 0.0
-                return publish_flow.run_flow(context, start_at=number, stop_after=number)
-            return publish_flow.run_flow(context)
+            with phone_queue.slot(serial, owner="งานโพสต์คลิป", task=what,
+                                  lane="post", timeout=600.0):
+                context = _build_context(serial, target, item_id, lambda *a: None)
+                if only:
+                    number = int(only)
+                    # ทดลองทีละขั้น = กำลังพิสูจน์ว่าพิกัดที่เทรนไว้ถูกจริง
+                    # ต้องแตะตรงจุดเป๊ะ ไม่งั้นถ้าเยื้องแล้วบังเอิญไปโดนปุ่มพอดี
+                    # จะเก็บพิกัดที่ผิดไว้โดยไม่รู้ตัว แล้วไปพังตอนเดินผังจริง
+                    context.tap_jitter = 0
+                    context.settle_jitter = 0.0
+                    return publish_flow.run_flow(
+                        context, start_at=number, stop_after=number)
+                return publish_flow.run_flow(context)
         finally:
             _publish_run_lock.release()
 

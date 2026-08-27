@@ -1,8 +1,25 @@
 """ผังการโพสต์วิดีโอบนมือถือ — เทรนพิกัดเอง แยกผังต่อปลายทาง ต่อเครื่อง
 
 ปลายทางที่รองรับตอนนี้: Shopee Video และ Facebook Reels
+ที่จะทำต่อ: TikTok Video · Instagram Reels
 แต่ละปลายทางมีผังของตัวเองเพราะหน้าจอคนละแอปคนละลำดับ และเก็บแยกต่อ serial
 เพราะจอคนละขนาด
+
+╔══════════════════════════════════════════════════════════════════════════╗
+║  กติกาที่ผู้ใช้สั่งไว้ 25 ส.ค. 2026 — ห้ามละเมิดในทุกปลายทาง               ║
+║                                                                          ║
+║  **ทุกจุดต้องเป็นการกดหน้าจอจริง ยกเว้นได้อย่างเดียวคือตอนเปิดแอป**        ║
+║                                                                          ║
+║  ได้    input tap / input swipe / input keyevent / ADBKeyboard           ║
+║  ได้    เปิดแอปด้วย monkey หรือ am start (ขั้น open_app) — ข้อยกเว้นเดียว  ║
+║  ห้าม   เรียก API ของแพลตฟอร์ม · ฉีดโค้ดเข้าแอป · accessibility service   ║
+║         · ยิง intent ข้ามขั้นตอนที่ควรกด                                  ║
+║                                                                          ║
+║  เพิ่มปลายทางใหม่เมื่อไร ต้องผ่านคำสั่งนี้โดยไม่เจออะไรเลย:                 ║
+║    grep -rn "graph.facebook.com\\|/me/videos\\|open_api\\|upload_video" *.py ║
+║                                                                          ║
+║  เหตุผลเต็มอยู่ที่ CLAUDE.md ข้อ 2.7                                       ║
+╚══════════════════════════════════════════════════════════════════════════╝
 
 ทำไมต้องเทรนพิกัดเอง ไม่ฝังพิกัดไว้ในโค้ด
     บทเรียนจาก notes.md ข้อ 2.2 — พิกัดตายตัว "พังทุกครั้งที่แอปเปลี่ยนหน้าตา"
@@ -23,6 +40,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import random
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -39,6 +58,50 @@ FACEBOOK_PACKAGE = "com.facebook.katana"
 
 DEFAULT_SETTLE = 1.2
 DEFAULT_VERIFY_TIMEOUT = 10.0
+
+# ---------------------------------------------------------- ทำให้เหมือนคนกด
+#
+# `adb shell input tap` เป็นการแตะจริงที่ระดับระบบปฏิบัติการ (ทางเดียวกับนิ้ว)
+# แต่มันแตะ **จุดเดิมเป๊ะทุกครั้ง** ซึ่งนิ้วคนทำไม่ได้ — คนกดปุ่มเดียวกันสิบครั้ง
+# ก็ลงไม่ตรงกันสักครั้ง และเว้นจังหวะไม่เท่ากันเป๊ะด้วย
+#
+# ค่าที่เลือก: รัศมี 6 พิกเซลบนจอ 1080 กว้าง = 0.56% ของความกว้างจอ ปุ่มจริงใน
+# Shopee/Facebook เล็กสุดที่วัดได้กว้างราว 90 พิกเซล การเยื้อง 6 พิกเซลจากจุด
+# กึ่งกลางจึงยังอยู่ในปุ่มเสมอ แม้เยื้องเต็มรัศมีในแนวทแยง
+TAP_JITTER_PX = 6
+# เวลาพักระหว่างขั้น สุ่มบวก/ลบ 18% — พักที่ตั้งไว้ 1.2 วิ จะกลายเป็น 0.98–1.42 วิ
+SETTLE_JITTER = 0.18
+
+
+def humanize_point(
+    point: tuple[int, int], width: int, height: int, radius: int = TAP_JITTER_PX
+) -> tuple[int, int]:
+    """เยื้องจุดกดแบบสุ่มเล็กน้อยรอบจุดเดิม แล้วกันไม่ให้หลุดขอบจอ
+
+    สุ่มเป็น **วงกลม** ไม่ใช่สี่เหลี่ยม เพราะการสุ่มในสี่เหลี่ยมทำให้มุมทั้งสี่
+    ถูกเลือกบ่อยกว่าที่ควร ซึ่งเป็นลายเซ็นที่สังเกตได้ถ้ามีใครมานั่งดูสถิติ
+
+    รัศมี 0 = ปิดการสุ่ม (ใช้ตอนเทรนพิกัด ที่ต้องแตะตรงจุดเป๊ะเพื่อยืนยันว่า
+    จุดที่เทรนถูกต้องจริง ไม่ใช่บังเอิญรอดเพราะเยื้องไปโดนพอดี)
+    """
+    x, y = int(point[0]), int(point[1])
+    if radius > 0:
+        angle = random.uniform(0, 2 * math.pi)
+        # รากที่สองของค่าสุ่ม — ทำให้จุดกระจายทั่ววงเท่ากัน ไม่กระจุกตรงกลาง
+        distance = radius * math.sqrt(random.random())
+        x += int(round(math.cos(angle) * distance))
+        y += int(round(math.sin(angle) * distance))
+    # ห้ามหลุดขอบจอ ไม่งั้น adb จะแตะไม่ติดหรือไปโดนแถบระบบ
+    x = max(1, min(x, max(1, width - 2)))
+    y = max(1, min(y, max(1, height - 2)))
+    return x, y
+
+
+def humanize_delay(seconds: float, spread: float = SETTLE_JITTER) -> float:
+    """สุ่มเวลาพักรอบค่าที่ตั้งไว้ — ไม่ให้จังหวะเป๊ะเท่ากันทุกครั้ง"""
+    if seconds <= 0 or spread <= 0:
+        return max(0.0, seconds)
+    return max(0.0, seconds * random.uniform(1.0 - spread, 1.0 + spread))
 SUGGESTION_TIMEOUT = 8.0
 
 
@@ -56,6 +119,9 @@ KINDS = {
     "type_text":    "พิมพ์ข้อความ",
     "paste_link":   "วางลิงก์สินค้า",
     "type_hashtag": "ใส่แฮชแท็ก (คัดตามยอดพูดถึง)",
+    # ใช้กับแอปที่ **ไม่ได้โชว์ยอดพูดถึง** ข้างตัวเลือกแท็ก อย่าง Facebook —
+    # แท็กถูกคัดมาแล้วตั้งแต่ตอนสร้างชุดแท็กของสินค้า ตรงนี้แค่พิมพ์ลงไป
+    "type_tags":    "พิมพ์แฮชแท็กที่คัดไว้แล้ว (ไม่อ่านยอด)",
     "popup":        "ปิดป็อปอัปถ้ามี",
     "key":          "กดปุ่มระบบ (BACK / ENTER)",
     # ปัดจอไม่ต้องเทรนพิกัด — ปัดกลางจอใช้ได้กับทุกหน้า และ "ปัดให้ถูกที่" ไม่มีอยู่จริง
@@ -86,6 +152,7 @@ DEFAULT_VERIFY = {
     # (ขั้นในผังตั้งต้นระบุโดเมน Shopee ไว้ ซึ่งคงที่ทุกสินค้า)
     "paste_link":   "text_appears",
     "type_hashtag": "tags_present",
+    "type_tags":    "tags_present",
     "popup":        "none",
     "key":          "screen_changed",
     "swipe":        "screen_changed",
@@ -135,7 +202,24 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
     "shopee_video": [
         _step("open_app", "เข้าแอป Shopee", kind="open_app",
               value=SHOPEE_PACKAGE, settle=3.0),
-        _step("live_and_video", "กด Live & Video", settle=2.0),
+        # **ขั้นนี้ตรวจไม่ได้จริงๆ — จึงประกาศตรงๆ ว่าไม่ตรวจ**
+        #
+        # ไล่มาแล้วสองแบบ ทั้งคู่ใช้ไม่ได้ด้วยเหตุผลคนละข้อ (วัดกับจอ 3 · 26 ส.ค. 2026)
+        #
+        #   "จอต้องเปลี่ยน"  ล้มทุกครั้งที่**เราอยู่หน้านั้นอยู่แล้ว** — Shopee จำแท็บ
+        #                    สุดท้ายไว้ แม้ force-stop ก็ยังกลับมาที่ Live & Video
+        #                    กดแท็บเดิมซ้ำจอไม่เปลี่ยน = ฟ้องว่าไม่ผ่านทั้งที่ถูกที่แล้ว
+        #
+        #   "ต้องเห็นคำว่า…" อ่านหน้าจอไม่ได้เลย **ล้ม 12 ครั้งรวด** เพราะ uiautomator
+        #                    รอให้จอนิ่งก่อนถึงจะดูดผังได้ แต่ฟีดวิดีโอเล่นตลอดเวลา
+        #                    จอไม่มีวันนิ่ง (แม้ใส่ตัวลองซ้ำ 3 รอบให้แล้วก็ยังล้มหมด)
+        #
+        # **ยอมประกาศว่าไม่ตรวจ ดีกว่าใส่ตัวตรวจที่ล้มทั้งที่กดถูก** — ตัวตรวจที่
+        # ให้คำตอบผิดอันตรายกว่าไม่มีตัวตรวจ (กติกาข้อ 2.3) ที่นี่จึงย้ายภาระการ
+        # พิสูจน์ไปไว้ที่ **ขั้นถัดไป** ซึ่งพาออกจากฟีดวิดีโอไปหน้าโปรไฟล์ที่นิ่ง
+        # และอ่านได้จริง ถ้าขั้นนี้กดพลาด ขั้นถัดไปจะจับได้เอง = เสียแค่การกดเปล่า
+        # หนึ่งครั้ง ไม่ใช่เดินหน้าไปกดมั่วจนถึงปุ่มโพสต์
+        _step("live_and_video", "กด Live & Video", settle=2.0, verify="none"),
         # id เดิมคือ tab_mine — **ห้ามเปลี่ยน** เพราะพิกัดที่ผู้ใช้เทรนไว้ผูกกับ id นี้
         # (เปลี่ยนแค่ชื่อที่แสดงให้ตรงกับที่ผู้ใช้เรียกจริง: รูปคน = โปรไฟล์ตัวเอง)
         _step("tab_mine", "กดตรงรูปคน (โปรไฟล์ตัวเอง)", settle=2.0),
@@ -158,6 +242,14 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         # พิมพ์แท็กแล้วแอปอาจกินไปบางตัว (ยาวเกิน / อักขระไม่รับ) ซึ่งจะเงียบสนิท
         _step("hashtag_type", "พิมพ์ # ตามลิสต์ (คัดตามยอดพูดถึง)", kind="type_hashtag",
               verify="tags_present"),
+        # ผู้ใช้สั่งเพิ่ม 25 ส.ค. 2026 — "ถัดจาก 18 มันจะมีแคปชั่นที่ให้ google
+        # gemini คิดมาใช่ไหม เอาอันนั้นมาพิมพ์ต่อ"
+        #
+        # **ห้ามใส่ `value`** — เว้นว่างไว้ตัวรันจะหยิบ `context.caption` ของงานนั้น
+        # มาพิมพ์เอง (ชื่อสินค้า + จุดเด่นที่ AI คัด + ลิงก์ affiliate)
+        # ถ้าใส่ข้อความตายตัว ทุกคลิปจะได้แคปชันเดียวกันหมด
+        _step("caption_type", "พิมพ์แคปชันของงานนี้ (ที่ AI คิดไว้)",
+              kind="type_text", settle=1.5),
         _step("hashtag_confirm", "กดตกลง"),
         _step("product_open", "แตะเพื่อเพิ่มสินค้า", settle=2.0),
         # ผูกสินค้าด้วย **การวางลิงก์** ไม่ใช่ค้นหาชื่อ — ผู้ใช้ยืนยัน 11 ส.ค.
@@ -169,6 +261,13 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         # เกาะทั้งลิงก์ไม่ได้เพราะเปลี่ยนทุกงาน และแอปมักตัดท้ายด้วย …
         _step("link_paste", "วางลิงก์ Shopee", kind="paste_link",
               verify="text_appears", verify_text=r"shopee\.co\.th|shopee\.com"),
+        # ผู้ใช้สั่งเพิ่ม 25 ส.ค. 2026 — "เอาลิ้ง shopee จากงานนั้นๆ ไปวาง"
+        # วางลิงก์เดิมของงานนั้นซ้ำอีกที่หนึ่ง ต่อจากขั้นวางลิงก์ข้างบน
+        #
+        # ตั้งเป็นขั้นข้ามได้ (`optional`) เพราะบางหน้าไม่มีช่องที่สอง
+        # ถ้าไม่ข้ามได้ จะค้างทั้งงานเพียงเพราะหาช่องไม่เจอ
+        _step("affiliate_paste", "วางลิงก์ Shopee ของงานนี้ (ซ้ำอีกที่)",
+              kind="paste_link", optional=True, settle=1.5),
         _step("product_import", "กดนำเข้า", settle=2.5),
         _step("product_pick", "กดรายการสินค้าที่ค้นเจอ"),
         _step("product_add", "กดเพิ่ม", settle=2.0),
@@ -196,7 +295,9 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         _step("latest_clip", "เลือกคลิปที่จะโพสต์", settle=1.5),
         _step("next_1", "กดถัดไป", settle=2.0),
         _step("caption_field", "แตะช่องคำอธิบาย"),
-        _step("hashtag_type", "พิมพ์ hashtag ตามลิสต์", kind="type_hashtag"),
+        # **ไม่ใช่ type_hashtag** เพราะ Facebook ไม่ได้โชว์ยอดพูดถึงข้างตัวเลือก
+        # ตัวคัดจึงอ่านยอดไม่ได้สักตัวแล้วตัดทิ้งหมด (เหตุผลเต็มที่ run_tags_step)
+        _step("hashtag_type", "พิมพ์ hashtag ตามลิสต์", kind="type_tags"),
         _step("scroll_to_product", "เลื่อนลงหาเมนูเพิ่มสินค้า",
               kind="swipe", value="down"),
         _step("product_open", "กดเพิ่มสินค้า", find="เพิ่มสินค้า", settle=2.5),
@@ -227,6 +328,33 @@ def _safe_name(serial: str) -> str:
 
 
 # --------------------------------------------------------------- ที่เก็บผัง
+
+
+def _upgrade_sequence(target: str, sequence: list[dict]) -> bool:
+    """อัปเกรดผังที่บันทึกไว้แล้วให้ตรงกับกติกาใหม่ — คืน True ถ้ามีอะไรเปลี่ยน
+
+    **ทำไมต้องมีตัวนี้** ผังของแต่ละเครื่องถูก *คัดลอก* จากค่าตั้งต้นในโค้ดตั้งแต่
+    ครั้งแรกที่เปิดใช้ แล้วเก็บแยกเป็นไฟล์ของเครื่องนั้น การแก้ค่าตั้งต้นทีหลัง
+    **จึงไม่มีผลกับเครื่องที่ตั้งไปแล้ว** ถ้าไม่ไล่แก้ตรงนี้ คำว่า "แก้แล้ว"
+    จะจริงเฉพาะเครื่องที่ยังไม่เคยใช้ ส่วนเครื่องจริงของผู้ใช้ยังพังเหมือนเดิม
+    (วัดจริง 25 ส.ค. 2026: มีผังที่บันทึกไว้แล้ว 2 เครื่อง ทั้งคู่มีขั้นนี้)
+
+    ตอนนี้มีข้อเดียว — **Facebook ไม่ได้โชว์ยอดพูดถึงข้างตัวเลือกแฮชแท็ก**
+    ขั้นที่ตั้งเป็น "คัดตามยอดพูดถึง" จึงอ่านยอดไม่ได้สักตัว แล้วตัดทิ้งทั้งหมด
+    จบด้วย "ไม่มีแฮชแท็กตัวไหนผ่านเกณฑ์เลย" = โพสต์ไม่ออก
+    """
+    if target != "facebook_reels":
+        return False
+    changed = False
+    for entry in sequence:
+        if entry.get("kind") == "type_hashtag":
+            entry["kind"] = "type_tags"
+            # ตัวตรวจเดิมของ type_hashtag คือ tags_present ซึ่งใช้กับตัวใหม่ได้เลย
+            # แต่ถ้าผู้ใช้เคยตั้งเป็นอย่างอื่นไว้ **ห้ามทับ** ของที่เขาตั้งเอง
+            if not entry.get("verify"):
+                entry["verify"] = "tags_present"
+            changed = True
+    return changed
 
 
 class FlowStore:
@@ -267,6 +395,8 @@ class FlowStore:
         block = self.data["targets"].setdefault(target, {})
         block.setdefault("sequence", [dict(s) for s in DEFAULT_SEQUENCES[target]])
         block.setdefault("positions", {})
+        if _upgrade_sequence(target, block["sequence"]):
+            self.save()
         return block
 
     def sequence(self, target: str) -> list[Step]:
@@ -407,7 +537,24 @@ NODE_RE = re.compile(
 VOLATILE_RE = re.compile(r"^(\d{1,2}:\d{2}(:\d{2})?|\d{1,3}\s*%|[\d.]+\s*(KB|MB|GB)/s)$")
 
 
-def dump_ui(run_adb: Callable[..., bytes]) -> str:
+# อ่านผังจอไม่ได้แล้วลองใหม่กี่รอบ — **จำเป็นมากบนฟีดวิดีโอ**
+#
+# วัดกับจอ 3 บนหน้า Live & Video ของ Shopee เมื่อ 26 ส.ค. 2026: อ่าน 5 ครั้ง
+# **ล้ม 3 สำเร็จ 2** (ล้ม 60%) เพราะ `uiautomator` รอให้หน้าจอ "นิ่ง" ก่อนถึงจะ
+# ดูดผังได้ แต่ฟีดวิดีโอเล่นตลอดเวลา หน้าจอจึงไม่เคยนิ่ง มันเลยยอมแพ้ด้วย
+# "could not get idle state" ซึ่งกินเวลา **13 วินาทีต่อครั้งที่ล้ม**
+#
+# ผลที่เกิดจริง: วงจรตรวจผลมีเวลา 10 วินาที แต่การอ่านที่ล้มกิน 13 วินาที
+# **จึงได้ลองแค่ครั้งเดียวเสมอ** = ทุกขั้นบนฟีดวิดีโอมีโอกาสล้มฟรี 60%
+# ทั้งที่กดถูกทุกอย่าง (ขั้น "กด Live & Video" ล้มด้วยเหตุนี้)
+#
+# ลองซ้ำในตัวอ่านเองแทนที่จะไปยืดเวลาตรวจ เพราะทุกคนที่เรียกตัวอ่านได้ประโยชน์
+# หมด ไม่ต้องไล่แก้ทีละจุด และของที่ล้มเพราะจอไม่นิ่งคือ **ล้มชั่วคราว** ล้วนๆ
+UI_DUMP_TRIES = 3
+UI_DUMP_RETRY_GAP = 0.6
+
+
+def dump_ui(run_adb: Callable[..., bytes], log: Callable[[str], None] | None = None) -> str:
     """คืน XML ลำดับชั้น UI ของหน้าจอปัจจุบัน — คืนค่าว่างถ้าอ่านไม่ได้
 
     **ต้องลบไฟล์เก่าทิ้งก่อนเสมอ** บางหน้าจอ uiautomator dump ล้มจริง
@@ -415,11 +562,21 @@ def dump_ui(run_adb: Callable[..., bytes]) -> str:
     คำสั่ง cat จะคืนผังของ "หน้าที่แล้ว" กลับมา แล้วตัวตรวจจะตัดสินจากหน้าจอผิดตัว
     โดยไม่มีอะไรฟ้อง — ซึ่งอันตรายกว่าไม่มีตัวตรวจเลย
     """
-    run_adb("shell", "rm", "-f", UI_DUMP_PATH)
-    run_adb("shell", "uiautomator", "dump", UI_DUMP_PATH)
-    raw = run_adb("shell", "cat", UI_DUMP_PATH)
-    xml = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
-    return xml if "<node" in xml else ""
+    for attempt in range(1, UI_DUMP_TRIES + 1):
+        run_adb("shell", "rm", "-f", UI_DUMP_PATH)
+        run_adb("shell", "uiautomator", "dump", UI_DUMP_PATH)
+        raw = run_adb("shell", "cat", UI_DUMP_PATH)
+        xml = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        if "<node" in xml:
+            if attempt > 1 and log:
+                log(f"   อ่านผังจอได้ในรอบที่ {attempt}")
+            return xml
+        if attempt < UI_DUMP_TRIES:
+            time.sleep(UI_DUMP_RETRY_GAP)
+    if log:
+        log(f"   ⚠️ อ่านผังจอไม่ได้เลยทั้ง {UI_DUMP_TRIES} รอบ "
+            "— หน้าจอนี้มีอะไรขยับตลอด (วิดีโอเล่นอยู่)")
+    return ""
 
 
 # รูปแบบจริงจากมือถือคือ  mCurrentFocus=Window{e36e918 u0 com.shopee.th/…Activity}
@@ -596,6 +753,110 @@ AD_CLOSE_LABELS = ["ปิดโฆษณา", "close_ad", "ad_close", "btn_clos
 AD_DISMISS_MAX = 3
 
 
+# ---------------------------------------------- ป็อปอัปโปรโมชันที่ไม่มีป้ายอะไรเลย
+#
+# **ที่ต้องเขียนใหม่ทั้งชุด** ตรวจกับป็อปอัปตัวจริงบนจอ 3 เมื่อ 26 ส.ค. 2026
+# (Shopee เด้ง "ซีรีส์สั้นดูฟรี แจก 200,000 COINS" ทับหน้า Live & Video) พบว่า
+# ตัวเดิมพังสองต่อ:
+#
+#   looks_like_ad()  → False   ในป็อปอัปไม่มีคำว่า "โฆษณา/Sponsored" สักคำ
+#   find_ad_close()  → (579, 1086) ซึ่งคือปุ่ม "close product panel" ของฟีดวิดีโอ
+#                       **คนละปุ่มกันคนละที่** กดแล้วป็อปอัปยังอยู่ แต่ระบบจะจด
+#                       ว่า "ปิดโฆษณาแล้ว" — ตัวตรวจที่บอกว่าผ่านทั้งที่ยังไม่ผ่าน
+#
+# ปุ่มกากบาทจริงของป็อปอัปคือ `[324,1201][396,1273]` ที่ **`clickable="false"`
+# และไม่มี text · content-desc · resource-id เลยแม้แต่ตัวเดียว** — หาโดยอ่านป้าย
+# เป็นไปไม่ได้ตั้งแต่ต้น จึงต้องเกาะ **รูปทรงและตำแหน่ง** แทน
+# (หลักการเดียวกับตัวจับแผ่นคลุมหน้าจอใน chatgpt_driver.py ที่ใช้ได้จริงมาแล้ว)
+
+# แผ่นคลุมต้องกินพื้นที่จอเท่าไรถึงนับว่าเป็นป็อปอัป — ตัวจริงวัดได้ 91.75%
+OVERLAY_MIN_COVER = 0.85
+# ขนาดด้านของปุ่มกากบาท (พิกเซล) — ตัวจริงที่วัดได้ 72×72 และ 48×48
+CLOSE_MIN_SIDE, CLOSE_MAX_SIDE = 32, 120
+# เบี้ยวจากกึ่งกลางจอได้กี่ส่วนของความกว้าง — ตัวจริงตรงกึ่งกลางเป๊ะ (360/720)
+CLOSE_CENTER_TOLERANCE = 0.08
+
+
+def _bounds(raw: str) -> tuple[int, int, int, int] | None:
+    hit = re.search(r'bounds="\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]"', raw)
+    return tuple(int(hit.group(i)) for i in range(1, 5)) if hit else None    # type: ignore[return-value]
+
+
+def _unlabeled(raw: str) -> bool:
+    """node นี้ไม่มีป้ายอะไรให้จับเลยใช่ไหม (ปุ่มรูปภาพล้วน)"""
+    return not (_attr(raw, "text") or _attr(raw, "content-desc")
+                or _attr(raw, "resource-id"))
+
+
+def find_overlay_close(xml: str, screen: tuple[int, int]) -> tuple[int, int] | None:
+    """หาปุ่มกากบาทของป็อปอัปที่ไม่มีป้าย — คืน None ถ้าไม่มั่นใจ
+
+    **ยอมไม่เจอ ดีกว่าเดาผิด** ถ้ากดพลาดในหน้าที่ไม่ใช่ป็อปอัป อาจไปโดนปุ่ม
+    "ซื้อโดยใช้โค้ด" หรือปุ่มโพสต์ ซึ่งร้ายกว่าโฆษณาที่ปิดไม่ได้มาก
+    จึงบังคับครบทั้ง 4 ข้อ ขาดข้อเดียวก็คืน None
+
+    เงื่อนไข
+      1. มีแผ่นคลุมกดได้กินพื้นที่จอตั้งแต่ 85% ขึ้นไป (= มีอะไรบังอยู่จริง)
+      2. มีกล่องเนื้อหากดได้อยู่ข้างใน (= การ์ดโปรโมชัน) และเล็กกว่าแผ่นคลุม
+      3. ปุ่มต้องเป็นสี่เหลี่ยมจัตุรัส ด้าน 32–120 px และไม่มีป้ายใดๆ
+      4. ปุ่มต้องอยู่ **ใต้การ์ด** และอยู่กลางจอในแนวนอน (±8% ของความกว้าง)
+    """
+    width, height = screen
+    if width <= 0 or height <= 0:
+        return None
+    area = width * height
+    scrim = card = None
+    for raw in ELEMENT_RE.findall(xml or ""):
+        if _attr(raw, "clickable") != "true":
+            continue
+        box = _bounds(raw)
+        if not box:
+            continue
+        x1, y1, x2, y2 = box
+        size = (x2 - x1) * (y2 - y1)
+        if size >= area * OVERLAY_MIN_COVER:
+            if scrim is None or size > (scrim[2] - scrim[0]) * (scrim[3] - scrim[1]):
+                scrim = box
+        elif size > area * 0.10 and _unlabeled(raw):
+            if card is None or size > (card[2] - card[0]) * (card[3] - card[1]):
+                card = box
+    if scrim is None or card is None:
+        return None
+
+    middle = width / 2
+    best = None
+    for raw in ELEMENT_RE.findall(xml or ""):
+        box = _bounds(raw)
+        if not box or not _unlabeled(raw):
+            continue
+        x1, y1, x2, y2 = box
+        side, tall = x2 - x1, y2 - y1
+        if not (CLOSE_MIN_SIDE <= side <= CLOSE_MAX_SIDE):
+            continue
+        if not (CLOSE_MIN_SIDE <= tall <= CLOSE_MAX_SIDE):
+            continue
+        if not (0.8 <= side / tall <= 1.25):        # ต้องเป็นจัตุรัส ไม่ใช่แถบยาว
+            continue
+        if y1 < card[3]:                            # ต้องอยู่ใต้การ์ด ไม่ใช่ในการ์ด
+            continue
+        away = abs((x1 + x2) / 2 - middle)
+        if away > width * CLOSE_CENTER_TOLERANCE:
+            continue
+        if best is None or away < best[0]:
+            best = (away, ((x1 + x2) // 2, (y1 + y2) // 2))
+    return best[1] if best else None
+
+
+def looks_like_overlay(xml: str, screen: tuple[int, int]) -> bool:
+    """มีป็อปอัปคลุมจออยู่ไหม — ใช้คู่กับ `looks_like_ad` ที่ดูจากคำ
+
+    ต้องมีทั้งสองตัวเพราะจับคนละอย่าง: ตัวเดิมจับ "โฆษณาที่บอกว่าตัวเองเป็นโฆษณา"
+    ส่วนตัวนี้จับ "อะไรก็ตามที่คลุมจนกดของข้างล่างไม่ได้" ซึ่งป็อปอัปโปรโมชัน
+    ของ Shopee เข้าข่ายอย่างหลังเท่านั้น
+    """
+    return find_overlay_close(xml, screen) is not None
+
+
 def looks_like_ad(xml: str) -> bool:
     """หน้าจอนี้มีโฆษณาบังอยู่ไหม — ดูจากคำที่บอกว่าเป็นโฆษณาเท่านั้น
 
@@ -608,8 +869,20 @@ def looks_like_ad(xml: str) -> bool:
     return False
 
 
-def find_ad_close(xml: str) -> tuple[tuple[int, int], str] | None:
-    """หาปุ่มปิดโฆษณา คืน (พิกัด, คำอธิบายว่าเจอจากอะไร)"""
+def find_ad_close(
+    xml: str, screen: tuple[int, int] | None = None
+) -> tuple[tuple[int, int], str] | None:
+    """หาปุ่มปิดโฆษณา คืน (พิกัด, คำอธิบายว่าเจอจากอะไร)
+
+    **ป็อปอัปคลุมจอต้องมาก่อนการหาจากป้ายเสมอ** เพราะเวลามีป็อปอัปคลุมอยู่
+    การไล่หาป้ายจะไปเจอปุ่มปิดของ**หน้าที่อยู่ข้างล่าง** ซึ่งกดไปก็ไม่ช่วยอะไร
+    แถมทำให้ระบบเชื่อว่าปิดโฆษณาแล้ว (วัดกับป็อปอัปตัวจริง 26 ส.ค. 2026:
+    ได้ปุ่ม "close product panel" ของฟีดวิดีโอ ทั้งที่ป็อปอัปอยู่คนละที่)
+    """
+    if screen:
+        point = find_overlay_close(xml, screen)
+        if point:
+            return point, "กากบาทของป็อปอัปที่คลุมจอ (หาจากรูปทรง)"
     for pattern in AD_CLOSE_TEXTS:
         point = find_node(xml, pattern)
         if point:
@@ -638,9 +911,12 @@ def dismiss_ads(
             current = context.dump()
         if not current:
             break
-        if not force and not looks_like_ad(current):
+        # ป็อปอัปคลุมจอนับเป็นโฆษณาด้วย แม้ในนั้นจะไม่มีคำว่า "โฆษณา" สักคำ
+        # (ป็อปอัปโปรโมชันของ Shopee ไม่เคยเขียนบอกว่าตัวเองเป็นโฆษณา)
+        if not force and not (looks_like_ad(current)
+                              or looks_like_overlay(current, context.screen)):
             break
-        found = find_ad_close(current)
+        found = find_ad_close(current, context.screen)
         if not found:
             if force:
                 # หาปุ่มปิดไม่เจอทั้งที่ขั้นล้ม — พิมพ์ปุ่มที่มีบนจอออกมาให้ดู
@@ -663,7 +939,7 @@ def dismiss_ads(
                                 + " · ".join(labels))
             break
         point, how = found
-        context.tap(*point)
+        context.tap_at(*point)
         time.sleep(0.8)
         closed.append(how)
         context.log(f"   ปิดโฆษณาที่บังอยู่ ({how})")
@@ -688,6 +964,9 @@ class RunContext:
     run_adb: Callable[..., bytes]
     caption: str = ""
     link: str = ""                                  # ลิงก์ Shopee ที่ส่งมาทาง Telegram
+    # วางข้อความผ่านคลิปบอร์ดของมือถือ (ตั้งค่า + สั่งวางในครั้งเดียว)
+    # เว้นว่าง = ไม่มีช่องทางนี้ ตัวรันจะถอยไปพิมพ์ทีละตัวอักษรเหมือนเดิม
+    set_clipboard: Callable[[str, bool], None] | None = None
     hashtags: list[str] = field(default_factory=list)
     mention_min: int = hashtag_lib.MENTION_MIN
     log: Callable[[str], None] = print
@@ -695,6 +974,13 @@ class RunContext:
     report: Callable[[Step, bool, str], None] = lambda step, ok, message: None
     # ผลการคัดแฮชแท็กจากหน้าจอจริง — เก็บไว้รายงานกลับเข้าแชท
     tag_results: list[dict] = field(default_factory=list)
+    # สุ่มเยื้องจุดกดกี่พิกเซล — 0 = ปิด แตะตรงจุดเป๊ะ
+    #
+    # ต้องปิดตอน **เทรนพิกัด** เพราะตอนนั้นเราต้องพิสูจน์ว่าจุดที่เทรนถูกจริง
+    # ถ้าเยื้องแล้วบังเอิญไปโดนปุ่มพอดี เราจะเก็บพิกัดที่ผิดไว้โดยไม่รู้ตัว
+    tap_jitter: int = TAP_JITTER_PX
+    # สุ่มเวลาพักบวก/ลบกี่ส่วน — 0 = ปิด พักตามที่ตั้งไว้เป๊ะ
+    settle_jitter: float = SETTLE_JITTER
     # ปิดโฆษณาที่เด้งแทรกให้อัตโนมัติ — ปิดได้เผื่อต้องไล่บั๊กว่าใครกดปุ่มนั้น
     ad_guard: bool = True
     # โฆษณาที่ปิดไปแล้วทั้งรอบ — รายงานกลับเข้าแชท ไม่ปิดเงียบๆ
@@ -704,8 +990,50 @@ class RunContext:
     # เว้นว่าง = ไม่ตรวจ (ผังที่ตั้งใจข้ามแอปยังทำงานได้เหมือนเดิม)
     app_package: str = ""
 
+    # ---------------------------------------------- เตรียมของก่อนเริ่มกดจอ
+    #
+    # **สองตัวนี้ทำก่อนขั้นที่ 1 เสมอ ไม่ใช่ขั้นในผัง** (ผู้ใช้สั่ง 26 ส.ค. 2026:
+    # "ให้เตรียมคลิปเข้าเครื่องเลยตั้งแต่กดเริ่มงาน")
+    #
+    # ที่ไม่ทำเป็นขั้นในผัง เพราะขั้นในผังถูกแก้/ลบได้จากหน้าเว็บ — ถ้าใครเผลอลบ
+    # ขั้นส่งคลิปทิ้ง ผังจะยังเดินได้จนจบแล้ว **โพสต์คลิปของสินค้าอื่น** ซึ่งถอนไม่ได้
+    # ส่วนสองตัวนี้อยู่นอกผัง ลบไม่ได้ และใช้ได้กับทุกปลายทางพร้อมกัน
+
+    # ส่งคลิปของงานนี้เข้าเครื่อง แล้วทำให้เป็นวิดีโอใบล่าสุดในแกลเลอรี
+    # คืนข้อความบอกว่าทำอะไรไป (ส่งใหม่ / มีอยู่แล้ว) — เว้นว่าง = ไม่มีคลิปให้ส่ง
+    #
+    # **จำเป็นเพราะขั้น "เลือกคลิปที่จะโพสต์" แตะพิกัดที่เทรนไว้เฉยๆ**
+    # มันไม่ได้อ่านว่าช่องนั้นเป็นคลิปอะไร ถ้าคลิปของงานไม่ได้เป็นใบล่าสุด
+    # มันจะหยิบคลิปเก่าของสินค้าอื่นมาโพสต์โดยไม่มีอะไรฟ้อง
+    # (เจอจริง 26 ส.ค. 2026: ในเครื่องมีแต่คลิปตอนเทรนวันที่ 25 ส.ค. สองใบ)
+    send_clip: Callable[[], str] | None = None
+
+    # ปลุกจอ + ปัดปลดล็อก คืนข้อความว่าทำอะไรไป
+    #
+    # **จำเป็นเพราะไม่มีขั้นไหนในผังปลุกจอเลยสักขั้น** (grep "wake" ได้ 0 ผลลัพธ์)
+    # ตัวตรวจของขั้นแรกดูแค่ว่าแอปไหนอยู่หน้าสุด ซึ่ง**ผ่านได้ทั้งที่จอดับสนิท** —
+    # แล้วขั้นที่เหลือจะไปแตะบนหน้าล็อกทีละขั้นโดยที่ทุกขั้นรายงานว่า "จอเปลี่ยนแล้ว"
+    # (เจอจริง 26 ส.ค. 2026: ขั้น 1 ผ่านทั้งที่ mWakefulness=Asleep)
+    wake_screen: Callable[[], str] | None = None
+
+    def tap_at(self, x: int, y: int) -> tuple[int, int]:
+        """แตะแบบเยื้องสุ่มเล็กน้อย — **ทางเดียวที่โค้ดในไฟล์นี้ใช้แตะจอ**
+
+        ห้ามเรียก `context.tap()` ตรงๆ ที่ไหนอีก ไม่งั้นจะมีบางขั้นที่แตะจุดเดิม
+        เป๊ะทุกครั้งปนอยู่ กลายเป็นลายเซ็นที่เด่นกว่าเดิมเสียอีก
+
+        คืนจุดที่แตะจริง เพื่อให้บันทึกลง log ได้ว่าลงตรงไหน
+        """
+        point = humanize_point((x, y), self.screen[0], self.screen[1], self.tap_jitter)
+        self.tap(*point)
+        return point
+
+    def pause(self, seconds: float) -> None:
+        """พักแบบสุ่มรอบค่าที่ตั้งไว้"""
+        time.sleep(humanize_delay(seconds, self.settle_jitter))
+
     def dump(self) -> str:
-        return dump_ui(self.run_adb)
+        return dump_ui(self.run_adb, log=self.log)
 
     def read(self) -> tuple[str, str]:
         """อ่านผังจอ **ครั้งเดียว** แล้วคืนทั้งผังและลายเซ็น
@@ -921,18 +1249,56 @@ def run_hashtag_step(context: RunContext, step: Step) -> str:
                 context.log(f"  #{clean} ผ่านเกณฑ์แต่กดเลือกไม่ได้ — ข้าม")
                 context.tag_results[-1]["used"] = False
             else:
-                context.tap(*point)
+                context.tap_at(*point)
                 used += 1
                 context.log(f"  #{clean} ยอด {count:,} — เลือกแล้ว")
         else:
             shown = f"{count:,}" if count is not None else "อ่านไม่ได้"
             context.log(f"  #{clean} ยอด {shown} — ไม่ถึงเกณฑ์ ข้าม")
             _clear_typed(context, clean)
-        time.sleep(step.settle)
+        context.pause(step.settle)
 
     if used == 0:
         raise StepError("ไม่มีแฮชแท็กตัวไหนผ่านเกณฑ์เลย")
     return f"ใส่แฮชแท็กที่ผ่านเกณฑ์แล้ว {used} จาก {len(context.hashtags)} ตัว"
+
+
+def run_tags_step(context: RunContext, step: Step) -> str:
+    """พิมพ์แฮชแท็กที่คัดไว้แล้วลงไปตรงๆ — ไม่อ่านยอดพูดถึง ไม่กดเลือกจากรายการ
+
+    **ผู้ใช้สั่งไว้ 25 ส.ค. 2026** — "ให้เอา hash tag ที่ได้มาพิมพ์ใส่ในนี้"
+
+    ทำไมขั้นตอนของ Facebook ใช้ `type_hashtag` แบบเดิมไม่ได้:
+      ตัวคัดตามยอดพูดถึงต้องอ่าน "ยอด" ที่แอปโชว์ไว้ท้ายแถวตัวเลือก ซึ่งเป็นของ
+      Shopee **Facebook ไม่ได้โชว์ตัวเลขนั้น** พออ่านไม่ได้ `hashtag_lib.passes()`
+      ตอบว่าไม่ผ่านทุกตัวโดยตั้งใจ (อ่านยอดไม่ได้ = ไม่ผ่าน) แล้วลบที่พิมพ์ทิ้ง
+      ครบทุกตัว จบด้วย StepError "ไม่มีแฮชแท็กตัวไหนผ่านเกณฑ์เลย"
+      → คือ **โพสต์ Facebook ไม่ออกเลยสักครั้ง** และเสียเวลารอตัวละ 8 วินาทีฟรีๆ
+
+    แท็กชุดนี้ถูกคัดมาแล้วตั้งแต่ตอนสร้าง `hashtag_plan` ของสินค้า จึงไม่ต้องคัดซ้ำ
+    """
+    if not context.hashtags:
+        if step.optional:
+            return "ไม่มีแฮชแท็กให้ใส่ ข้ามไป"
+        raise StepError("ไม่มีแฮชแท็กให้ใส่ — สร้างชุดแท็กของสินค้านี้ก่อน")
+
+    tags: list[str] = []
+    for tag in context.hashtags:
+        clean = hashtag_lib.normalize(tag)
+        if clean and clean not in tags:
+            tags.append(clean)
+    if not tags:
+        raise StepError("แฮชแท็กที่มีอยู่ใช้ไม่ได้สักตัว (เหลือแต่อักขระที่แท็กรับไม่ได้)")
+
+    # พิมพ์รวดเดียวทั้งชุด ไม่ทีละตัว — ทีละตัวต้องรอตัวเลือกโผล่ทุกครั้ง
+    # ซึ่งที่นี่ไม่ได้ใช้ประโยชน์อะไรเลย มีแต่ทำให้ช้าและมีจังหวะให้พลาดเพิ่ม
+    context.type_text(" ".join(f"#{tag}" for tag in tags))
+    # ตัวตรวจ `tags_present` อ่านจากตรงนี้ — ต้องเติมให้ ไม่งั้นมันจะตอบว่า
+    # "ไม่มีแท็กที่ผ่านเกณฑ์ให้ตรวจ" แล้วผ่านฉลุยโดยไม่ได้ตรวจอะไรเลย
+    context.tag_results = [
+        {"tag": tag, "count": None, "raw": "", "used": True} for tag in tags
+    ]
+    return f"พิมพ์แฮชแท็กที่คัดไว้ {len(tags)} ตัว"
 
 
 def _clear_typed(context: RunContext, text: str) -> None:
@@ -961,6 +1327,36 @@ def locate(
     if trained:
         return trained, "พิกัดที่เทรนไว้"
     return None, ""
+
+
+def _put_text(context: RunContext, step: Step, text: str) -> str:
+    """ใส่ข้อความลงช่องที่โฟกัสอยู่ — **ลิงก์ใช้คัดลอก-วาง** ที่เหลือพิมพ์ตามเดิม
+
+    **ผู้ใช้สั่งไว้ 25 ส.ค. 2026** — "ให้ปรับเป็นการ copy link จากรายละเอียดมาใส่
+    โดย copy paste ได้เลย"
+
+    ทำไมลิงก์ต้องต่างจากข้อความอื่น: ช่อง URL ของ Facebook เป็นช่องที่มีตัวเติมคำ
+    ให้ระหว่างพิมพ์ การส่งทีละตัวอักษรจึงมีโอกาสโดนแอปเติม/ตัด/แก้ระหว่างทาง และ
+    ลิงก์ที่ผิดแม้ตัวเดียวก็พาไปหน้าอื่นทั้งดุ้น ส่วนการวางคือของทั้งก้อนลงไปครั้งเดียว
+    ไม่มีจังหวะให้แอปแทรก — เป็นท่าเดียวกับที่คนทำ (กดค้าง → วาง)
+
+    ลิงก์ที่วางคือ `context.link` = `affiliate_url` ของงานนั้น ซึ่งคือลิงก์ที่ผู้ใช้
+    ส่งเข้ามาเอง **ไม่ใช่ลิงก์ที่ระบบแปลงขึ้น** (ลิงก์ที่แปลงเองไม่มีรหัสผู้แนะนำ
+    โพสต์ไปก็ไม่ได้ค่าคอม)
+
+    วางไม่ได้ก็ถอยไปพิมพ์ **แต่ต้องขึ้น log ว่าถอย** ไม่ใช่เงียบ เพราะถ้าวันหนึ่ง
+    คลิปบอร์ดใช้ไม่ได้ถาวร เราต้องรู้ตั้งแต่ครั้งแรก ไม่ใช่มารู้ตอนลิงก์เพี้ยน
+    (ขั้นนี้ยังมีด่านตรวจ `text_appears` เกาะโดเมน Shopee ปิดท้ายอยู่แล้ว
+    ไม่ว่าจะมาทางไหน ถ้าลิงก์ไม่ขึ้นบนจอจริงก็ไม่ผ่านอยู่ดี)
+    """
+    if step.kind == "paste_link" and context.set_clipboard:
+        try:
+            context.set_clipboard(text, True)
+            return f"คัดลอก-วางลิงก์ {len(text)} ตัวอักษร"
+        except Exception as error:      # noqa: BLE001 — ทางไหนล้มก็ต้องมีทางถอย
+            context.log(f"  วางผ่านคลิปบอร์ดไม่ได้ ({error}) — ถอยไปพิมพ์ทีละตัวแทน")
+    context.type_text(text)
+    return f"พิมพ์ {len(text)} ตัวอักษร"
 
 
 def run_step(context: RunContext, step: Step) -> str:
@@ -995,13 +1391,13 @@ def run_step(context: RunContext, step: Step) -> str:
         for pattern in POPUP_DISMISS_PATTERNS:
             point = find_node(xml, pattern)
             if point:
-                context.tap(*point)
+                context.tap_at(*point)
                 summary = f"ปิดป็อปอัปด้วยปุ่มที่ตรงกับ {pattern}"
                 break
         else:
             trained = context.store.point_for(context.target, step.id, width, height)
             if trained:
-                context.tap(*trained)
+                context.tap_at(*trained)
                 summary = "ไม่เจอปุ่มตามข้อความ ใช้พิกัดที่เทรนไว้แทน"
 
     elif step.kind == "key":
@@ -1026,6 +1422,9 @@ def run_step(context: RunContext, step: Step) -> str:
     elif step.kind == "type_hashtag":
         summary = run_hashtag_step(context, step)
 
+    elif step.kind == "type_tags":
+        summary = run_tags_step(context, step)
+
     elif step.kind in {"type_text", "paste_link"}:
         typed = context.link if step.kind == "paste_link" else (
             step.value or context.caption
@@ -1036,10 +1435,9 @@ def run_step(context: RunContext, step: Step) -> str:
             raise StepError("ไม่มีข้อความให้พิมพ์")
         point, _ = locate(context, step, width, height)
         if point:                       # รู้ตำแหน่งช่องก็แตะให้โฟกัสก่อน
-            context.tap(*point)
+            context.tap_at(*point)
             time.sleep(0.6)
-        context.type_text(typed)
-        summary = f"พิมพ์ {len(typed)} ตัวอักษร"
+        summary = _put_text(context, step, typed)
 
     else:                               # tap
         point, how = locate(context, step, width, height)
@@ -1052,10 +1450,13 @@ def run_step(context: RunContext, step: Step) -> str:
                     f" \"{step.name}\""
                 )
             raise StepError(f"ยังไม่ได้เทรนตำแหน่งของขั้น \"{step.name}\"")
-        context.tap(*point)
-        summary = f"แตะที่ {point[0]}, {point[1]} ({how})"
+        hit = context.tap_at(*point)
+        # บอกจุดที่ **แตะจริง** ไม่ใช่จุดที่ตั้งใจ ไม่งั้นตอนไล่บั๊กจะเทียบกับ
+        # หน้าจอไม่ตรง แล้วหลงคิดว่าพิกัดที่เทรนไว้เพี้ยน
+        drift = "" if hit == tuple(point) else f" · เยื้องจาก {point[0]}, {point[1]}"
+        summary = f"แตะที่ {hit[0]}, {hit[1]} ({how}){drift}"
 
-    time.sleep(step.settle)
+    context.pause(step.settle)
     proof = verify_step(context, step, before, typed=typed)
     head = f"ปิดโฆษณา {len(ad_notes)} ชั้นก่อน · " if ad_notes else ""
     return f"{head}{summary} · ตรวจแล้ว: {proof}"
@@ -1071,6 +1472,31 @@ def run_flow(
     """
     steps = context.store.sequence(context.target)
 
+    # ---- เตรียมของก่อนแตะจอขั้นแรก (ผู้ใช้สั่ง 26 ส.ค. 2026) ----------------
+    #
+    # ลำดับสำคัญ: **ปลุกจอก่อน แล้วค่อยส่งคลิป** เพราะการส่งคลิปสั่งให้ระบบ
+    # แกลเลอรีสแกนไฟล์ใหม่ ซึ่งทำตอนจอดับก็ได้ แต่ถ้าปลุกทีหลังจอจะสว่างขึ้นมา
+    # ตอนที่ขั้นแรกกำลังจะกดพอดี แล้วภาพยังไม่ทันนิ่ง
+    #
+    # **ล้มตรงนี้ต้องหยุดทันที ห้ามเดินผังต่อ** — เดินต่อคือการกดจนถึงปุ่มโพสต์
+    # โดยที่คลิปในเครื่องเป็นของสินค้าอื่น ซึ่งโพสต์ขึ้นแล้วถอนไม่ได้
+    ready: list[dict] = []
+    for job, label in ((context.wake_screen, "ปลุกจอ"),
+                       (context.send_clip, "ส่งคลิปเข้าเครื่อง")):
+        if job is None:
+            continue
+        try:
+            note = job()
+        except Exception as error:                       # noqa: BLE001
+            why = f"{label}ไม่สำเร็จ: {type(error).__name__}: {error}"
+            context.log(f"✕ {why}")
+            ready.append({"step": "prepare", "name": label, "ok": False, "message": why})
+            return {"target": context.target, "done": 0, "total": len(steps),
+                    "results": ready, "tags": [], "ads_closed": [], "ok": False}
+        if note:
+            context.log(f"✓ {note}")
+            ready.append({"step": "prepare", "name": label, "ok": True, "message": note})
+
     # แอปที่ผังนี้ต้องอยู่ตลอดทาง — เอาจากขั้น open_app ของผังเอง ไม่ฮาร์ดโค้ด
     # ผู้ใช้เปลี่ยนแอปปลายทางในผังได้ ตัวตรวจจะตามไปเอง
     if not context.app_package:
@@ -1079,7 +1505,7 @@ def run_flow(
                 context.app_package = step.value.strip()
                 break
 
-    results: list[dict] = []
+    results: list[dict] = list(ready)
     done = 0
     for number, step in enumerate(steps, start=1):
         if number < start_at:

@@ -3583,8 +3583,12 @@ def _clip_show_run(chat_id: str, argument: str) -> None:
     }])
     # ✅ ติ๊กว่าทำแล้ว — ต้องมีทุกงาน ไม่ใช่เฉพาะงานที่มีคลิป เพราะงานที่ตัดสินใจ
     # ว่าไม่เอาแล้วก็ต้องเก็บออกจากรายการได้เหมือนกัน
+    # ป้ายต้องบอกตรงกับสิ่งที่มันทำ — กดแล้วเลื่อนไปรอลงที่ถัดไป
+    # ไม่ใช่ "เก็บออกจากรายการ" อีกต่อไป (เว้นตอนลงครบสามที่แล้ว)
+    _nxt = publish_order.next_target(run)
     rows.append([{
-        "text": "✅ ทำแล้ว (เก็บออกจากรายการ)",
+        "text": (f"✅ ลง {POSTED_LABEL.get(_nxt, _nxt)} แล้ว" if _nxt
+                 else "✅ ลงครบแล้ว เก็บออกจากรายการ"),
         "callback_data": f"clip:done::{item_id}",
     }])
     note = []
@@ -5257,6 +5261,10 @@ POSTED_LABEL = {"shopee_video": "🛍 Shopee Video",
                 "facebook_reels": "📘 Facebook Reels",
                 "tiktok": "🎵 TikTok"}
 
+# ปลายทางนั้นไปโผล่ในรายการไหน — บอกคนว่ากดแล้วงานย้ายไปอยู่ที่ไหนต่อ
+_LIST_OF = {"shopee_video": "/clips", "facebook_reels": "/clipsfb",
+            "tiktok": "/clipstiktok"}
+
 
 def _clip_mark_posted(chat_id: str, item_id: str, target: str) -> str:
     """ติ๊กว่าลงปลายทางนั้นไปแล้ว — สำหรับคลิปที่โพสต์ด้วยมือ"""
@@ -5431,25 +5439,83 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
         _clip_show_run(chat_id, arg)
         return "เปิดงานให้แล้ว"
 
-    # ✅ ปุ่ม "ทำแล้ว" — ย้ายทั้งโฟลเดอร์ไป shopee_products_done/ งานจะหายจาก
-    # ทุกรายการทันทีเพราะ list_runs อ่านเฉพาะโฟลเดอร์หลัก ของไม่ได้ถูกลบ
+    # ✅ ปุ่ม "ทำแล้ว" = **ลงปลายทางปัจจุบันเสร็จแล้ว → เลื่อนไปรอลงที่ถัดไป**
+    #
+    # เจ้าของนิยามไว้เอง 27 ส.ค. 2569:
+    #
+    #     คลิปใน /clips                = รอลง Shopee
+    #     /clips   + กดทำแล้ว → /clipsfb      = รอลง Facebook
+    #     /clipsfb + กดทำแล้ว → /clipstiktok  = รอลง TikTok
+    #
+    # *"ไม่ต้องทำปุ่มเพิ่ม ให้ใช้เกณฑ์ตามนี้"* — ปุ่มเดิมปุ่มเดียวเดินได้ทั้งสาย
+    #
+    # **ของเดิมปุ่มนี้เก็บงานออกจากรายการเลย** (ย้ายโฟลเดอร์ไป
+    # `shopee_products_done/`) ซึ่งข้ามขั้น Facebook กับ TikTok ไปทั้งคู่
+    # เป็นสาเหตุที่ /clipsfb ว่างตลอด — ระบบไม่เคยรู้ว่าคลิปลงที่ไหนไปแล้วบ้าง
+    #
+    # **เก็บออกจากรายการเมื่อลงครบทั้งสามที่แล้วเท่านั้น** ถึงตอนนั้นไม่มีอะไร
+    # ให้ทำต่อจริงๆ การเก็บออกจึงเป็นสิ่งที่ถูก
     if action == "done":
+        run = clip_store.load_run(DATA_DIR, arg) or {}
+        if not run:
+            return "ไม่เจองานชิ้นนี้"
+        target = publish_order.next_target(run)
+        name = str(run.get("name") or arg)[:40]
+
+        if target:
+            try:
+                fresh = clip_store.mark_posted(DATA_DIR, arg, target, "")
+            except clip_store.ClipStoreError as error:
+                return str(error)
+            nxt = publish_order.next_target(fresh)
+            _clip_log(f"ติ๊กว่า {arg} ลง {target} แล้ว — {name}")
+            _clip_say(
+                chat_id,
+                f"✅ จดแล้วว่าลง <b>{POSTED_LABEL.get(target, target)}</b> แล้ว: "
+                f"<b>{telegram_bot._escape(name)}</b>" + '\n' + '\n' +
+                telegram_bot._escape(publish_order.summary(fresh)) + '\n' + '\n' +
+                (f"ต่อไปอยู่ในรายการ <code>{_LIST_OF.get(nxt, '/clips')}</code> "
+                 "— ลงได้ตั้งแต่พรุ่งนี้ (คลิปเดียวกันต้องเว้นอย่างน้อย 1 วัน)"
+                 if nxt else "🎉 ลงครบทั้งสามที่แล้ว — กดปุ่มนี้อีกครั้งเพื่อเก็บออกจากรายการ"),
+                {"inline_keyboard": [[{
+                    "text": "↩️ กดผิด เอากลับ",
+                    "callback_data": f"clip:unpost:{target}:{arg}",
+                }]]},
+            )
+            return f"ลง {POSTED_LABEL.get(target, target)} แล้ว ✅"
+
+        # ลงครบสามที่แล้ว — ถึงเวลาเก็บออกจากรายการจริงๆ
         try:
             moved = clip_store.mark_done(DATA_DIR, arg)
         except clip_store.ClipStoreError as error:
             return str(error)
-        name = str(moved.get("name") or arg)[:40]
-        _clip_log(f"ติ๊กว่าทำแล้ว {arg} — {name}")
+        _clip_log(f"เก็บงาน {arg} ออกจากรายการ (ลงครบสามที่แล้ว) — {name}")
         _clip_say(
             chat_id,
-            f"✅ เก็บออกจากรายการแล้ว: <b>{telegram_bot._escape(name)}</b>\n"
-            "ไฟล์ยังอยู่ครบ ย้ายไปโฟลเดอร์ <code>shopee_products_done</code>",
+            f"✅ ลงครบทั้งสามที่แล้ว เก็บออกจากรายการ: "
+            f"<b>{telegram_bot._escape(str(moved.get('name') or name)[:40])}</b>" + '\n' +
+            "ไฟล์ยังอยู่ครบ ย้ายไปโฟลเดอร์ <code>shopee_products_done</code> "
+            "— ดูได้ที่ /archive",
             {"inline_keyboard": [[{
                 "text": "↩️ เอากลับเข้ารายการ",
                 "callback_data": f"clip:undone::{arg}",
             }]]},
         )
-        return "ทำแล้ว ✅"
+        return "เก็บออกจากรายการแล้ว ✅"
+
+    # ↩️ กดปุ่ม "ทำแล้ว" ผิดใบ — ถอนการจดว่าลงแล้วของปลายทางนั้น
+    #
+    # **ต้องมี** เพราะปุ่มเดียวเดินหน้าทั้งสาย กดพลาดหนึ่งทีคลิปจะข้ามไปรอ
+    # ปลายทางถัดไปทันที แล้วรายการเดิมหายไปโดยไม่มีทางกลับ
+    if action == "unpost":
+        try:
+            fresh = clip_store.unmark_posted(DATA_DIR, arg, job_id)
+        except clip_store.ClipStoreError as error:
+            return str(error)
+        _clip_log(f"ถอนการจดว่า {arg} ลง {job_id} แล้ว")
+        _clip_say(chat_id, "↩️ ถอนแล้ว — กลับไปรออยู่ที่เดิม" + '\n' +
+                  telegram_bot._escape(publish_order.summary(fresh)))
+        return "ถอนแล้ว ↩️"
 
     # 🏷 สั่งทำแฮชแท็กย้อนหลัง — งานเก่าที่เจนคลิปไว้ก่อนมีขั้นนี้ยังไม่มีแท็ก
     if action == "tags":

@@ -763,6 +763,35 @@ def mark_posted(
     return run
 
 
+def unmark_posted(root: Path, item_id: str, target: str) -> dict:
+    """ถอนการจดว่าลงปลายทางนั้นแล้ว — สำหรับตอนกดปุ่มผิดใบ
+
+    **ต้องมีคู่กับ `mark_posted` เสมอ** ตั้งแต่ 27 ส.ค. 2569 ปุ่ม "✅ ทำแล้ว"
+    ปุ่มเดียวเดินหน้าทั้งสาย (Shopee → Facebook → TikTok) กดพลาดหนึ่งทีคลิป
+    จะข้ามไปรอปลายทางถัดไปทันที แล้วหายจากรายการเดิมโดยไม่มีทางกลับ
+
+    **ไม่ลบร่องรอย แต่เปลี่ยนกลับเป็น "ยังไม่ลง"** เก็บ `unposted_at` ไว้ด้วย
+    เผื่อวันหลังต้องไล่ดูว่ามีการถอนบ่อยผิดปกติตรงไหน
+    """
+    if target not in PUBLISH_TARGETS:
+        raise ClipStoreError(f"ไม่รู้จักปลายทาง {target}")
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+    publish = run.get("publish") or {}
+    if (publish.get(target) or {}).get("status") != "posted":
+        raise ClipStoreError("ใบนี้ไม่ได้จดว่าลงปลายทางนั้นไว้")
+    publish[target] = {
+        "status": "pending", "posted_at": "", "url": "", "error": "",
+        "unposted_at": _now(),
+    }
+    run["publish"] = publish
+    _write_json(folder / RUN_FILE, run)
+    _to_drive(root, str(item_id))
+    return run
+
+
 def park_run(root: Path, item_id: str, why: str = "", stage: str = "") -> dict:
     """พักงานที่ **จบจากคิวไปแล้ว** ไว้รอแก้ (ผู้ใช้สั่ง 27 ส.ค. 2569)
 

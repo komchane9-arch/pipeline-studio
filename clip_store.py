@@ -763,6 +763,41 @@ def mark_posted(
     return run
 
 
+def posted_history(root: Path) -> list[dict]:
+    """**สมุดบันทึกการลง** — ลงอะไรไปแล้วบ้าง ที่ไหน เมื่อไร (ผู้ใช้สั่ง 27 ส.ค. 2569)
+
+    *"ผมจำไม่ได้ว่าโพสต์อันไหนบ้าง ไม่มีลิ้สที่จดไว้ว่าลงแล้วหรอ บอกให้จด"*
+
+    **ไม่สร้างที่เก็บใหม่ อ่านจากไฟล์งานที่มีอยู่แล้ว** — ทุกครั้งที่จดว่าลงแล้ว
+    (`mark_posted`) เวลาถูกเขียนลง `publish.<ปลายทาง>.posted_at` อยู่แล้ว
+    ถ้าไปทำสมุดแยกอีกเล่ม วันหนึ่งสองเล่มจะไม่ตรงกันแล้วไม่มีใครรู้ว่าเล่มไหนถูก
+    (บทเรียนเดียวกับตอนกระดานกับ `/clips` นับไม่ตรงกัน)
+
+    **อ่านทั้งโฟลเดอร์หลักและโฟลเดอร์ที่เก็บไปแล้ว** — งานที่ลงครบสามที่จะถูก
+    ย้ายออกไป ถ้าอ่านแต่โฟลเดอร์หลัก สมุดจะลืมของที่ทำเสร็จสมบูรณ์ที่สุด
+
+    คืนรายการเรียง **ใหม่สุดขึ้นก่อน** แต่ละรายการคือการลงหนึ่งครั้ง
+    (คลิปหนึ่งใบลงสามที่ = สามรายการ)
+    """
+    out: list[dict] = []
+    for run in list_runs(root) + list_done(root):
+        publish = run.get("publish") or {}
+        for target, info in publish.items():
+            if not isinstance(info, dict) or info.get("status") != "posted":
+                continue
+            out.append({
+                "item_id": str(run.get("item_id") or ""),
+                "name": run.get("name") or "",
+                "target": target,
+                "at": info.get("posted_at") or "",
+                "url": info.get("url") or "",
+                # เคยถอนแล้วจดใหม่ไหม — ไว้ไล่ดูตอนสงสัยว่าจดผิด
+                "reposted": bool(info.get("unposted_at")),
+            })
+    out.sort(key=lambda r: r["at"], reverse=True)
+    return out
+
+
 def unmark_posted(root: Path, item_id: str, target: str) -> dict:
     """ถอนการจดว่าลงปลายทางนั้นแล้ว — สำหรับตอนกดปุ่มผิดใบ
 

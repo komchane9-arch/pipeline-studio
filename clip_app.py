@@ -368,6 +368,7 @@ CLIP_HELP = (
     "/archive — งานที่ติ๊กว่าทำแล้ว (เก็บออกจากรายการไปแล้ว)\n"
     "/posted &lt;เลข&gt; — <b>ติ๊กว่าคลิปนั้นลงไปแล้ว</b> (สำหรับคลิปที่โพสต์เองด้วยมือ)\n"
     "     ไม่ติ๊ก = ระบบไม่รู้ว่าลงแล้ว → /clipsfb กับ /clipstiktok จะว่างตลอด\n"
+    "/history — <b>สมุดบันทึกการลง</b> ลงอะไรไปแล้วบ้าง ที่ไหน เมื่อไร (แยกตามวัน)\n"
     "/wait — <b>งานที่พักไว้รอแก้ทั้งหมด</b> · <code>/wait &lt;เลข&gt;</code> เอากลับเข้าขั้นเดิม\n"
     "     แยกรายขั้น: <code>/waitstoryboard</code> · <code>/waitclip</code> · <code>/waitclips</code> · <code>/waitclipsfb</code> · <code>/waitclipstiktok</code>\n"
     "/clip &lt;เลข&gt; — เปิดดูงานนั้น (สตอรีบอร์ด + บทพูด)\n"
@@ -3566,15 +3567,9 @@ def _clip_show_run(chat_id: str, argument: str) -> None:
             "text": "🚀 ลง Facebook Reels",
             "callback_data": f"clip:fbcard::{item_id}",
         }])
-        # ✅ ติ๊กว่าลงไปแล้วด้วยมือ — **ทางเดียวที่ระบบจะรู้**
-        # ว่าคลิปขึ้นไปแล้ว ถ้าคนโพสต์เองบนมือถือ (ดูคอมเมนต์ที่
-        # `_clip_mark_posted` ว่าทำไมถึงต้องมี)
-        nxt = publish_order.next_target(run)
-        if nxt:
-            rows.append([{
-                "text": f"✅ ลง {POSTED_LABEL.get(nxt, nxt)} ไปแล้ว (ติ๊กเอง)",
-                "callback_data": f"clip:posted:{nxt}:{item_id}",
-            }])
+        # ❌ **ไม่ใส่ปุ่มติ๊กตรงนี้** — ปุ่ม "✅ ลง … แล้ว" ข้างล่างทำหน้าที่นี้แล้ว
+        # ผมเคยใส่ไว้ตอนแรกแล้วกลายเป็นปุ่มสองอันข้อความเกือบเหมือนกัน
+        # อยู่ติดกันในใบงานเดียว เจ้าของเห็นแล้วสั่งให้เอาออก (27 ส.ค. 2569)
     # 🅿 พักไว้รอแก้ — งานที่ออกจากคิวไปแล้วก็ต้องพักได้ ไม่ใช่เฉพาะใบในคิว
     rows.append([{
         "text": "↩️ เอากลับจากรอแก้" if run.get("parked") else "🅿 รอแก้",
@@ -4886,6 +4881,9 @@ def _clip_telegram_command(chat_id: str, text: str) -> bool:
     if command == "/queue":
         _clip_queue_text(chat_id)
         return True
+    if command in ("/history", "/สมุด", "/ลงไปแล้ว"):
+        _clip_posted_log(chat_id)
+        return True
     if command in ("/posted", "/ลงแล้ว"):
         _clip_posted_command(chat_id, argument)
         return True
@@ -5289,6 +5287,47 @@ def _clip_mark_posted(chat_id: str, item_id: str, target: str) -> str:
                "ลงได้ตั้งแต่พรุ่งนี้ (ต้องห่างกันอย่างน้อย 1 วัน)"
                if nxt else "ลงครบทั้งสามที่แล้ว 🎉"))
     return "จดแล้ว ✅"
+
+
+def _clip_posted_log(chat_id: str) -> None:
+    """`/history` — **สมุดบันทึกการลง** ลงอะไรไปแล้วบ้าง ที่ไหน เมื่อไร
+
+    ผู้ใช้สั่ง 27 ส.ค. 2569: *"ผมจำไม่ได้ว่าโพสต์อันไหนบ้าง ไม่มีลิ้สที่จดไว้
+    ว่าลงแล้วหรอ บอกให้จด"*
+
+    **จัดกลุ่มตามวัน** เพราะคำถามที่คนถามจริงคือ "เมื่อวานลงอะไรไปบ้าง"
+    ไม่ใช่ "ใบที่ 47 ลงเมื่อไร" — และกติกาเว้น 1 วันก็นับเป็นวันเหมือนกัน
+    """
+    escape = telegram_bot._escape
+    rows = clip_store.posted_history(DATA_DIR)
+    if not rows:
+        _clip_say(
+            chat_id,
+            "📕 <b>สมุดบันทึกการลงยังว่างเปล่า</b>" + '\n' + '\n' +
+            "ระบบยังไม่เคยจดว่าลงคลิปไหนไปเลยสักใบ" + '\n' +
+            "คลิปที่คุณโพสต์เองด้วยมือ ระบบไม่มีทางรู้ — ต้องกดบอกมันก่อน" + '\n' + '\n' +
+            "พิมพ์ <code>/posted</code> จะได้รายการพร้อมปุ่มติ๊กทีละใบ",
+        )
+        return
+
+    days: dict[str, list[dict]] = {}
+    for row in rows:
+        days.setdefault(str(row["at"])[:10], []).append(row)
+
+    lines = [f"📕 <b>สมุดบันทึกการลง</b> — จดไว้ {len(rows)} ครั้ง", ""]
+    for day, items in list(days.items())[:14]:      # 2 สัปดาห์ล่าสุดพอ
+        nice = day[8:10] + "/" + day[5:7] if len(day) >= 10 else day
+        lines.append(f"━━ <b>{nice}</b> · {len(items)} ครั้ง ━━")
+        for row in items:
+            when = str(row["at"])[11:16]
+            mark = POSTED_LABEL.get(row["target"], row["target"])
+            lines.append(f"  {when} {mark} — {escape(row['name'][:44])}")
+        lines.append("")
+    if len(days) > 14:
+        lines.append(f"…และอีก {len(days) - 14} วันก่อนหน้า")
+    lines.append("จดเพิ่มด้วย <code>/posted</code> · ถอนที่จดผิดด้วยปุ่ม ↩️ ในใบงาน")
+    for part in _split_text('\n'.join(lines), TELEGRAM_TEXT_LIMIT):
+        _clip_say(chat_id, part)
 
 
 def _clip_posted_command(chat_id: str, argument: str) -> None:
@@ -6448,6 +6487,87 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
             jobs, lambda item: clip_store.load_run(DATA_DIR, item), runs)
 
     return {"ok": True, **await asyncio.to_thread(work)}
+
+
+@app.get("/api/posted")
+async def posted_view() -> dict:
+    """สมุดบันทึกการลง — ลงอะไรไปแล้วบ้าง ที่ไหน เมื่อไร (ผู้ใช้สั่ง 27 ส.ค. 2569)
+
+    *"ผมจำไม่ได้ว่าโพสต์อันไหนบ้าง ไม่มีลิ้สที่จดไว้ว่าลงแล้วหรอ บอกให้จด"*
+
+    คืนรายการเรียงใหม่สุดขึ้นก่อน + สรุปรายวัน ให้หน้าเว็บวาดได้เลยไม่ต้องคิดเอง
+    """
+    def work() -> dict:
+        rows = clip_store.posted_history(DATA_DIR)
+        days: dict[str, int] = {}
+        for row in rows:
+            days[str(row["at"])[:10]] = days.get(str(row["at"])[:10], 0) + 1
+        return {
+            "rows": rows,
+            "total": len(rows),
+            "by_day": [{"day": d, "count": c} for d, c in days.items()],
+            # เคสว่างต้องบอกให้ชัดว่าทำไมว่าง ไม่ใช่ปล่อยหน้าเปล่า
+            "empty_note": ("ระบบยังไม่เคยจดว่าลงคลิปไหนไปเลย — "
+                           "คลิปที่โพสต์เองด้วยมือต้องกดปุ่ม ✅ บอกระบบก่อน"
+                           if not rows else ""),
+        }
+    return {"ok": True, **await asyncio.to_thread(work)}
+
+
+@app.post("/api/jobs/{item_id}/posted")
+async def jobs_mark_posted(item_id: str, request: Request) -> dict:
+    """จดว่าคลิปนี้ลงปลายทางนั้นไปแล้ว — สำหรับคลิปที่โพสต์เองด้วยมือ
+
+    body `{"target": "shopee_video"}` — ไม่ส่ง `target` มา = ใช้ปลายทางถัดไป
+    ที่ควรลงของใบนั้น ซึ่งถูกเกือบทุกครั้งเพราะคนกดหลังเพิ่งลงเสร็จ
+
+    ส่ง `{"undo": true}` มาเพื่อถอนการจด (กดผิดใบ)
+    """
+    payload = await request.json() if await request.body() else {}
+    run = clip_store.load_run(DATA_DIR, item_id) or {}
+    if not run:
+        raise HTTPException(status_code=404, detail=f"ไม่พบงาน {item_id}")
+    target = str((payload or {}).get("target") or "").strip()
+    undo = bool((payload or {}).get("undo"))
+    if not target:
+        # **ค่าตั้งต้นของสองคำสั่งนี้ตรงข้ามกัน อย่าใช้ตัวเดียวกัน**
+        #
+        #   จด   → ปลายทาง **ถัดไป** ที่ควรลง (คนกดหลังเพิ่งลงเสร็จ)
+        #   ถอน  → ปลายทางที่ **เพิ่งจดไปล่าสุด** (คนกดเพราะกดผิด)
+        #
+        # เคยใช้ตัวเดียวกันแล้วพัง — จด Shopee เสร็จ ถัดไปกลายเป็น Facebook
+        # พอสั่งถอนเลยไปถอน Facebook ที่ยังไม่ได้จด แล้วตอบ 400
+        # ส่วน Shopee ที่จดผิดยังค้างอยู่ (เจอตอนทดสอบ 27 ส.ค. 2569)
+        if undo:
+            done = [(str((info or {}).get("posted_at") or ""), name)
+                    for name, info in (run.get("publish") or {}).items()
+                    if isinstance(info, dict) and info.get("status") == "posted"]
+            target = max(done)[1] if done else ""
+            if not target:
+                raise HTTPException(status_code=400,
+                                    detail="ใบนี้ยังไม่ได้จดว่าลงที่ไหนเลย")
+        else:
+            target = publish_order.next_target(run)
+            if not target:
+                raise HTTPException(status_code=400,
+                                    detail="ใบนี้ลงครบทั้งสามที่แล้ว")
+
+    try:
+        if undo:
+            fresh = await asyncio.to_thread(
+                clip_store.unmark_posted, DATA_DIR, item_id, target)
+        else:
+            fresh = await asyncio.to_thread(
+                clip_store.mark_posted, DATA_DIR, item_id, target, "")
+    except clip_store.ClipStoreError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    _clip_log(("ถอนการจดว่า " if undo else "จดว่า ") + f"{item_id} ลง {target} แล้ว")
+    return {"ok": True, "run": fresh, "item_id": item_id, "target": target,
+            "next_target": publish_order.next_target(fresh),
+            "summary": publish_order.summary(fresh),
+            "message": (f"ถอนการจดว่าลง {target} แล้ว" if undo
+                        else f"จดแล้วว่าลง {target} ไปแล้ว")}
 
 
 @app.post("/api/jobs/{job_id}/storyboard")

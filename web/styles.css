@@ -2224,3 +2224,17 @@ button:disabled { opacity: 0.5; }
 .board-parked-head + .board-group { margin-top: 6px; border-top: 0; }
 /* เยื้องเข้าให้เห็นว่าอยู่ใต้หัวเรื่อง ไม่ใช่รายการระดับเดียวกับงานที่ยังเดิน */
 .board-parked-item { margin-left: 10px; }
+
+/* ── ชิปเตือน: ยังไม่พังแต่ใกล้แล้ว ─────────────────────────────────────
+
+   เดิมมีแค่ 🟢 ปกติ กับ 🔴 พัง ซึ่งไม่มีที่ให้ "งบเหลือ 12 บาทจาก 100"
+   ซึ่งยังทำงานได้อยู่แต่ต้องรู้ตัวก่อนของจะหยุดกลางคัน
+   ใช้สีเหลืองอำพัน อ่านออกทั้งธีมสว่างและมืด ไม่ปนกับสีแดงของที่พังจริง */
+.health-chip.warn {
+  color: #b45309;
+  border-color: rgba(180, 83, 9, 0.35);
+  background: rgba(245, 158, 11, 0.12);
+}
+.health-chip.warn::before { content: "● "; color: #f59e0b; }
+:root[data-theme="dark"] .health-chip.warn,
+:root:not([data-theme="light"]) .health-chip.warn { color: #fbbf24; }

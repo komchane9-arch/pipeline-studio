@@ -777,6 +777,13 @@ $("#claudeClear").addEventListener("click", async () => {
 //     dropdown ที่โหลดไว้แล้วแทน (ฟรี ไม่มี request เพิ่ม)
 //   · จำนวนงานรออนุมัติเอาจาก health ของสายคลิปที่ต้องถามอยู่แล้ว ไม่ถามเพิ่ม
 const HEALTH_EVERY_MS = 15000;
+/** เหลืองบ Gemini น้อยกว่ากี่บาทถึงจะเตือน
+ *
+ *  ตั้งที่ 20 บาท = หนึ่งในห้าของเพดาน 100 บาท/วัน — วัดจริง 27 ส.ค. 2569
+ *  งานดูรูปหนึ่งครั้งราว 0.29 บาท เหลือ 20 บาทจึงยังทำได้อีกราว 70 ครั้ง
+ *  พอให้รู้ตัวล่วงหน้าก่อนของจะหยุดกลางคัน ไม่ใช่เตือนตอนสายเกินแก้
+ */
+const LOW_BUDGET_THB = 20;
 
 function healthChip(ok, label, detail = "") {
   const chip = document.createElement("span");
@@ -873,39 +880,84 @@ export async function pollHealth() {
     chips.push(jump);
   }
 
-  // 5) โควตา Gemini ชั้นฟรีที่ใช้ไปวันนี้ (ผู้ใช้สั่ง 26 ส.ค. 2026)
+  // 5) ค่าใช้จ่าย Gemini วันนี้ **เป็นเงินบาท** (ผู้ใช้สั่ง 27 ส.ค. 2569)
   //
-  // **ตัวเลขนี้คือ "เรายิงไปกี่ครั้ง" ไม่ใช่ "เหลืออีกกี่ครั้ง"**
-  // Google ไม่มีที่ให้ถามว่าเหลือเท่าไร รู้เพดานได้ทางเดียวคือตอนโดนปฏิเสธ
-  // เพราะหมดโควตา (คำตอบ 429 มีเพดานจริงติดมา) จึงโชว์เท่าที่รู้จริง
-  // ห้ามเดาเลข "เหลือ" ให้เอง — คนจะวางแผนว่าเจนได้อีกกี่คลิปตามเลขนั้น
+  // *"gemini ใช้ไปเท่าไรแล้วให้เพิ่มให้มองเห็นที่หน้าเว็บด้วย"*
+  //
+  // **เดิมโชว์แค่ "ยิงไปกี่ครั้ง" ซึ่งตอบไม่ได้ว่าเสียเงินไปเท่าไร** จำนวนครั้ง
+  // ไม่ได้แปรผันตรงกับเงินเลยแม้แต่น้อย — วัดจริง 27 ส.ค. 2569 วันเดียวกัน
+  //     งานดูรูป    96 ครั้ง = 27.51 บาท
+  //     งานข้อความ  68 ครั้ง =  0.09 บาท
+  // จำนวนครั้งพอกัน แต่เงินต่างกัน **300 เท่า** เพราะรูปกินโทเคนมหาศาล
+  // ตัวเลขครั้งจึงพาให้วางแผนผิดได้ ("ยิงอีกร้อยครั้งคงไม่เท่าไร")
+  //
+  // **ตัวเลขเงินเป็นประมาณการ ไม่ใช่ใบเสร็จ** คิดจากจำนวนโทเคนที่คำตอบบอกมา
+  // คูณราคาต่อล้านโทเคน แล้วแปลงด้วยอัตราแลกที่ตรึงไว้ — ต้องเขียนกำกับเสมอ
+  // ไม่งั้นคนจะเอาไปกระทบยอดกับบิลจริงของ Google แล้วสับสนว่าใครผิด
+  //
+  // ห้ามเดาเลขที่ไม่รู้จริง — `priced: false` แปลว่าไม่รู้ราคาโมเดลนั้น
+  // ต้องขึ้นว่า "ยังไม่รู้ราคา" ห้ามขึ้น 0 บาท เพราะแยกไม่ออกจาก "ยิงแล้วไม่เสียเงิน"
   try {
     const quota = await api("/api/gemini-quota");
     if (quota.ok) {
       const dry = quota.dry || [];
+      const baht = (n) => Number(n || 0).toFixed(2);
+      // เพดานเป็นเลขกลมอยู่แล้ว โชว์ ".00" ต่อท้ายรกเปล่าๆ และกินที่บนหัวจอ
+      const cap = (n) => (Number.isInteger(Number(n)) ? String(Number(n)) : baht(n));
+      const hasMoney = typeof quota.thb === "number";
+      const left = quota.left_thb;
       const chip = document.createElement("button");
       chip.type = "button";
-      chip.className = "health-chip " + (dry.length ? "down" : "ok");
-      chip.textContent = dry.length
-        ? `🤖 Gemini หมด ${dry.length} รุ่น`
-        : `🤖 Gemini ${quota.total}`;
-      const lines = [`วันนี้ (${quota.date}) ยิงไปทั้งหมด ${quota.total} ครั้ง`, ""];
+
+      let tone = "ok";
+      let label = `🤖 Gemini ${quota.total}`;
+      if (quota.over) {
+        // **ไม่ใช่แค่ป้ายเตือน — ระบบหยุดยิงจริง** (check_budget โยน error 4 จุด)
+        tone = "down";
+        label = `⛔ Gemini ครบ ${cap(quota.limit_thb)} ฿`;
+      } else if (hasMoney && !quota.total) {
+        label = "🤖 ยังไม่ได้ใช้วันนี้";
+      } else if (hasMoney) {
+        const low = typeof left === "number" && left < LOW_BUDGET_THB;
+        if (low) tone = "warn";
+        label = `🤖 ${baht(quota.thb)}/${cap(quota.limit_thb)} ฿`
+          + (low ? " · เหลือน้อย" : "");
+      }
+      // โมเดลที่โควตาหมดยังต้องเห็น แม้เงินยังไม่ชนเพดาน — คนละเรื่องกัน
+      if (dry.length) {
+        if (tone === "ok") tone = "warn";
+        label += ` · หมด ${dry.length} รุ่น`;
+      }
+      chip.className = "health-chip " + tone;
+      chip.textContent = label;
+
+      const lines = [];
+      if (quota.over) {
+        lines.push(`⛔ ค่า Gemini ครบ ${cap(quota.limit_thb)} บาทแล้ววันนี้`
+          + " — ระบบหยุดยิงจนถึงพรุ่งนี้", "");
+      }
+      if (hasMoney) {
+        lines.push(`ค่า Gemini วันนี้ ${baht(quota.thb)} บาท`
+          + ` จากเพดาน ${cap(quota.limit_thb)} บาท`
+          + (typeof left === "number" ? ` · เหลือ ${baht(left)} บาท` : ""));
+      }
+      lines.push(`ยิงไป ${quota.total} ครั้ง (${quota.date})`, "");
       for (const row of quota.rows || []) {
-        const cap = row.limit ? ` / เพดาน ${row.limit}` : "";
-        const left = row.left !== null && row.left !== undefined ? ` · เหลือ ${row.left}` : "";
-        lines.push(`${row.dry ? "🔴" : "🟢"} ${row.model} — ${row.calls} ครั้ง${cap}${left}`);
+        const cost = row.priced ? `${baht(row.thb)} ฿` : "ยังไม่รู้ราคา";
+        lines.push(`${row.dry ? "🔴" : "🟢"} ${row.model} — ${row.calls} ครั้ง · ${cost}`);
         if (row.job) lines.push(`     ใช้ทำ: ${row.job}`);
         if (row.dry) lines.push(`     หมดตอน ${row.dry_at}`);
       }
       if (!(quota.rows || []).length) lines.push("(วันนี้ยังไม่ได้ยิงเลย)");
-      lines.push("", quota.note || "");
+      lines.push("", quota.money_note || quota.note || "");
       chip.title = lines.join("\n");
       // กดแล้วเปิดรายละเอียดเต็ม — ในแถบเล็กๆ ใส่ได้แค่ยอดรวม
       chip.addEventListener("click", () => window.alert(lines.join("\n")));
       chips.push(chip);
     }
   } catch (error) {
-    // อ่านโควตาไม่ได้ = ไม่ต้องโชว์ ไม่ใช่เรื่องที่ต้องหยุดงาน
+    // **อ่านไม่ได้ = ไม่ต้องโชว์ชิปเลย ห้ามโชว์ 0 บาท**
+    // 0 บาทแยกไม่ออกจาก "วันนี้ยังไม่ได้ใช้" ซึ่งคนละเรื่องกันคนละขั้ว
   }
 
   strip.replaceChildren(...chips);

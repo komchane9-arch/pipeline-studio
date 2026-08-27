@@ -300,6 +300,49 @@ def refile_folder(root: Path, here: Path) -> Path:
     return target
 
 
+def duplicates(root: Path) -> list[dict]:
+    """สินค้าที่มีโฟลเดอร์อยู่ **มากกว่าหนึ่งที่** — ต้องดังขึ้น ไม่ใช่เงียบ
+
+    **ทำไมต้องมี** (27 ส.ค. 2569) เจอของจริง 4 คู่ สินค้าที่ทำคลิปเสร็จแล้วถูก
+    ส่งลิงก์เข้ามาซ้ำ ตัวดึงสินค้าสร้างโฟลเดอร์ใหม่ที่ `shopee_products/` เสมอ
+    โดยไม่ถามว่าของเดิมอยู่ไหน จึงได้สองชุดต่อสินค้าหนึ่งชิ้น
+
+    **ที่แย่กว่าตัวบั๊กคือไม่มีอะไรฟ้อง** ชุดที่มีคลิป (จ่ายเครดิต Veo ไปแล้ว)
+    หายไปจากทุกรายการเงียบๆ เพราะตัวค้นเจอชุดใหม่ที่ว่างเปล่าก่อน — กว่าจะรู้ตัว
+    ก็ตอนมานั่งนับโฟลเดอร์เอง
+
+    ตัวนี้ไม่ได้แก้ต้นเหตุ (ต้นเหตุอยู่ที่ตัวดึงสินค้า ซึ่งเป็นไฟล์ของอีกสาย)
+    แต่ทำให้ **รู้ตัวทันทีแทนที่จะรู้ตอนของหายไปแล้ว**
+
+    คืนรายการเรียงตามรหัสสินค้า แต่ละอันบอกว่าอยู่ที่ไหนบ้าง และชุดไหนมีคลิป
+    """
+    seen: dict[str, list[Path]] = {}
+    for name in ALL_DIRS:
+        base = Path(root) / name
+        if not base.is_dir():
+            continue
+        for folder in base.iterdir():
+            if folder.is_dir() and (folder / RUN_FILE).is_file():
+                seen.setdefault(folder.name, []).append(folder)
+    out = []
+    for item_id, folders in sorted(seen.items()):
+        if len(folders) < 2:
+            continue
+        where = []
+        for folder in folders:
+            run = _read_json(folder / RUN_FILE) or {}
+            where.append({
+                "folder": folder.parent.name,
+                "videos": len(run.get("videos") or []),
+                "storyboard": len(run.get("storyboard") or []),
+                "at": run.get("product_at") or "",
+            })
+        out.append({"item_id": item_id,
+                    "name": (_read_json(folders[0] / RUN_FILE) or {}).get("name", ""),
+                    "copies": where})
+    return out
+
+
 def refile_all(root: Path, dry: bool = False) -> list[dict]:
     """ตรวจทั้งชุดว่าทุกโฟลเดอร์อยู่ถูกที่ไหม — คืนรายการที่ย้าย (หรือที่ควรย้าย)
 

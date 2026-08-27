@@ -4898,6 +4898,9 @@ def _clip_telegram_command(chat_id: str, text: str) -> bool:
     if command == "/queue":
         _clip_queue_text(chat_id)
         return True
+    if command in ("/dup", "/ซ้ำ"):
+        _clip_dup_list(chat_id)
+        return True
     if command in ("/history", "/สมุด", "/ลงไปแล้ว"):
         _clip_posted_log(chat_id)
         return True
@@ -5305,6 +5308,35 @@ def _clip_mark_posted(chat_id: str, item_id: str, target: str) -> str:
                "ลงได้ตั้งแต่พรุ่งนี้ (ต้องห่างกันอย่างน้อย 1 วัน)"
                if nxt else "ลงครบทั้งสามที่แล้ว 🎉"))
     return "จดแล้ว ✅"
+
+
+def _clip_dup_list(chat_id: str) -> None:
+    """`/dup` — สินค้าที่มีโฟลเดอร์งานซ้อนกันสองชุด
+
+    ไม่ลบให้เอง ไม่ย้ายให้เอง — บอกอย่างเดียวว่ามีอะไรซ้อนกันและชุดไหนมีของครบ
+    **การเลือกว่าจะเก็บชุดไหนเป็นการตัดสินใจของคน** เพราะทั้งสองชุดอาจมีของที่
+    จ่ายเครดิตไปแล้ว เดาผิดแล้วลบ = จ่ายซ้ำ (กติกาข้อ 7.4 ของโปรเจกต์)
+    """
+    escape = telegram_bot._escape
+    rows = clip_store.duplicates(DATA_DIR)
+    if not rows:
+        _clip_say(chat_id, "✅ ไม่มีสินค้าที่มีโฟลเดอร์ซ้อนกัน")
+        return
+    lines = [f"⚠️ <b>มีสินค้า {len(rows)} ชิ้นที่มีโฟลเดอร์ซ้อนกัน</b>", "",
+             "เกิดจากส่งลิงก์เดิมเข้ามาซ้ำ ตัวดึงสินค้าสร้างโฟลเดอร์ใหม่ทับ",
+             "<b>ชุดที่มีคลิปอาจถูกมองข้าม</b> เพราะระบบเจอชุดที่ว่างกว่าก่อน", ""]
+    for row in rows[:15]:
+        lines.append(f"<b>{escape(row['name'][:46])}</b>")
+        for copy in row["copies"]:
+            mark = f"🎥{copy['videos']}" if copy["videos"] else "ไม่มีคลิป"
+            lines.append(f"    <code>{copy['folder']}/</code> · {mark} · "
+                         f"🖼{copy['storyboard']} · ดึง {str(copy['at'])[:10]}")
+    if len(rows) > 15:
+        lines.append(f"…และอีก {len(rows) - 15} ชิ้น")
+    lines += ["", "เลือกเองว่าจะเก็บชุดไหน — ระบบไม่ลบให้ เพราะทั้งสองชุด",
+              "อาจมีของที่จ่ายเครดิตไปแล้ว"]
+    for part in _split_text('\n'.join(lines), TELEGRAM_TEXT_LIMIT):
+        _clip_say(chat_id, part)
 
 
 def _clip_posted_log(chat_id: str) -> None:
@@ -6501,8 +6533,17 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
         # **ส่งไฟล์งานเข้าไปด้วย** ไม่งั้นกองปลายทางจะนับได้แค่ใบที่ยังอยู่ในคิว
         # วัดจริง 27 ส.ค. 2569: `/clips` บอก 25 ใบ แต่กระดานบอก 8 ใบ — หายไป 17
         runs = clip_store.list_runs(DATA_DIR)
-        return clip_board.build(
+        board = clip_board.build(
             jobs, lambda item: clip_store.load_run(DATA_DIR, item), runs)
+        # **ของซ้ำต้องดังขึ้นบนหน้าจอ ไม่ใช่รอให้คนมานั่งนับโฟลเดอร์เอง**
+        # สินค้าที่มีโฟลเดอร์สองชุด ชุดที่มีคลิปจะหายจากทุกรายการเงียบๆ
+        # (เจอจริง 4 คู่ เมื่อ 27 ส.ค. 2569 — กว่าจะรู้ก็ตอนย้ายโฟลเดอร์)
+        dup = clip_store.duplicates(DATA_DIR)
+        board["duplicates"] = dup
+        board["warning"] = ("" if not dup else
+            f"⚠️ มีสินค้า {len(dup)} ชิ้นที่มีโฟลเดอร์งานซ้อนกันสองชุด — "
+            "ชุดที่มีคลิปอาจถูกมองข้าม สั่ง <code>/dup</code> ในแชทเพื่อดู")
+        return board
 
     return {"ok": True, **await asyncio.to_thread(work)}
 

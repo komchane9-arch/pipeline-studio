@@ -2238,3 +2238,16 @@ button:disabled { opacity: 0.5; }
 .health-chip.warn::before { content: "● "; color: #f59e0b; }
 :root[data-theme="dark"] .health-chip.warn,
 :root:not([data-theme="light"]) .health-chip.warn { color: #fbbf24; }
+
+/* ── ปุ่มปลายทางที่ยังลงไม่ได้ ─────────────────────────────────────────
+
+   **จาง แต่ไม่ปิดการกด** — ปุ่มที่หายไปเฉยๆ แยกไม่ออกจาก "ระบบพัง"
+   และปุ่มที่กดไม่ได้เลยก็ตอบไม่ได้ว่าทำไม คนที่กดคือคนที่อยากรู้เหตุผลพอดี
+   กดแล้วจึงขึ้นบรรทัดบอกว่าติดอะไร (ส่วนใหญ่คือกติกาเว้น 1 วันระหว่างปลายทาง) */
+.icon-btn.is-blocked {
+  opacity: 0.38;
+  filter: grayscale(1);
+  cursor: help;
+}
+.icon-btn.is-blocked:hover,
+.icon-btn.is-blocked:focus-visible { opacity: 0.7; filter: grayscale(0.4); }

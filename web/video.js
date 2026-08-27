@@ -654,8 +654,54 @@ function jobRow(job) {
     el("small", { textContent: bits.join("") }),
   );
 
+  /* **แถวที่ไม่มีรหัสใบงาน — ห้ามโชว์ปุ่มจัดการคิวสักปุ่ม**
+   *
+   * ตั้งแต่กระดานนับจากไฟล์งานด้วย (ไม่ใช่แค่ใบงานในคิว) จะมีแถวที่ `id` เป็น
+   * ค่าว่าง เพราะงานเจนคลิปจบแล้วและใบงานออกจากคิวไป แต่คลิปยังรอลงอยู่
+   *
+   * ปุ่มจัดการคิวทุกตัวยิงด้วย `id` ทั้งหมด แถวพวกนี้จึงกดแล้วยิงไปที่
+   * `/api/jobs//retry` ซึ่งไม่มีทางสำเร็จ — วัดจริง 27 ส.ค. 2569:
+   * **19 จาก 23 แถวในกอง Shopee Video โชว์ปุ่ม ↻ กับ 🗑 ที่กดไม่ขึ้นเลย**
+   * และ 🗑 อ่านว่า "ลบ" ซึ่งน่ากลัวกว่าที่มันทำได้จริงเสียอีก
+   *
+   * ปุ่มที่กดไม่ขึ้นแย่กว่าไม่มีปุ่ม — คนกดแล้วไม่เกิดอะไรจะคิดว่าระบบพัง */
+  /** รหัสที่ยิงคำสั่งได้เสมอ
+   *
+   *  **`item_id` มีทุกแถว ส่วน `id` ไม่มี** — ตั้งแต่กระดานนับจากไฟล์งานด้วย
+   *  แถวที่งานเจนจบไปแล้วจะไม่มีใบงานในคิวเหลืออยู่ วัดจริง 27 ส.ค. 2569:
+   *  **19 จาก 23 แถวในกอง Shopee Video ไม่มี `id`** ซึ่งเป็นกองที่มีของมากที่สุด
+   *
+   *  ที่อยู่ฝั่งเซิร์ฟเวอร์รับได้ทั้งสองรหัสแล้ว (หาในคิวก่อน ไม่เจอค่อยหาไฟล์งาน)
+   *  จึงยิงด้วย `item_id` ได้ตลอด ไม่ต้องแยกปุ่มสองแบบ
+   */
+  const key = job.item_id || job.id;
   const tools = el("span", { className: "story-queue-tools" });
-  if (job.stage === "queued") {
+
+  /* ---- ปุ่มลงแต่ละปลายทาง ----
+   *
+   * **รายการมาจาก `can_publish` ของเซิร์ฟเวอร์ ห้ามคิดกติกาลำดับเองฝั่งนี้**
+   * เป็นตัวเดียวกับด่านที่กั้นก่อนโพสต์จริง ถ้าเขียนแยกกันสองชุด วันหลังจะกลายเป็น
+   * หน้าเว็บบอกว่ากดได้ แต่พอกดจริงด่านปฏิเสธ แล้วไม่มีใครรู้ว่าฝั่งไหนถูก
+   *
+   * **ปลายทางที่ยังลงไม่ได้ต้องโชว์ด้วย แบบจาง ไม่ใช่ซ่อน** ปุ่มที่หายไปเฉยๆ
+   * แยกไม่ออกจาก "ระบบพัง" ส่วนปุ่มจางที่บอกเหตุผลได้ ตอบได้ว่าต้องรออะไร
+   * (เหตุผลที่เจอบ่อยคือกติกาเว้น 1 วันระหว่างปลายทาง)
+   */
+  for (const spot of job.can_publish || []) {
+    const mark = String(spot.label || "📤").split(" ")[0];
+    if (spot.ok) {
+      tools.append(iconBtn(mark, `ลง ${spot.label} — ต้องเลือกเครื่องก่อน`,
+        () => askPhoneThenPost({ name: spot.label, target: spot.target }, key)));
+    } else {
+      // กดแล้วบอกเหตุผล ดีกว่ากดแล้วเงียบ — คนที่กดคือคนที่อยากรู้ว่าทำไมยังไม่ได้
+      const blocked = iconBtn(mark, `ยังลง ${spot.label} ไม่ได้ — ${spot.why}`,
+        () => { $("#storyNote").textContent = `ยังลง ${spot.label} ไม่ได้ — ${spot.why}`; });
+      blocked.classList.add("is-blocked");
+      tools.append(blocked);
+    }
+  }
+
+  if (job.id && job.stage === "queued") {
     tools.append(
       iconBtn("↑", "แซงขึ้นก่อน", () => act(() => jobPost(`${job.id}/move`, { delta: -1 }))),
       iconBtn("↓", "เลื่อนลงทีหลัง", () => act(() => jobPost(`${job.id}/move`, { delta: 1 }))),
@@ -669,20 +715,24 @@ function jobRow(job) {
    *
    * งานที่เครื่องกำลังทำอยู่ (`running`) พักไม่ได้ — เบราว์เซอร์เปิดค้างอยู่
    * และอาจใช้เครดิตไปแล้ว ปุ่มจึงไม่โผล่เลย ดีกว่าโผล่แล้วกดไม่ได้ */
+  //
+  // **พัก/เอากลับใช้ได้ทุกแถว** ไม่ต้องมีใบงานในคิว เพราะที่อยู่รับรหัสสินค้าแล้ว
+  // ของเดิมผูกกับ `job.open` ซึ่งแถวที่มาจากไฟล์งานไม่มีฟิลด์นี้เลย ปุ่มจึงไม่เคยโผล่
   if (job.parked) {
     tools.append(iconBtn("↩", "เอากลับเข้าขั้นเดิม", () =>
-      act(() => jobPost(`${job.id}/unpark`))));
-  } else if (job.open && !job.running) {
+      act(() => jobPost(`${key}/unpark`))));
+  } else if (!job.running) {
     tools.append(iconBtn("🅿", "พักไว้รอแก้ — เครื่องจะไม่แตะจนกว่าจะเอากลับ", () => {
       const why = window.prompt("พักไว้เพราะอะไร (เว้นว่างได้)") ?? null;
       if (why === null) return;              // กดยกเลิกในกล่อง = ไม่ต้องพัก
-      act(() => jobPost(`${job.id}/park`, { why }));
+      act(() => jobPost(`${key}/park`, { why }));
     }));
   }
-  if (job.open && !job.running) {
+  // ยกเลิก/ทำใหม่/ลบ แตะ **ใบงานในคิว** โดยตรง แถวที่ไม่มีใบงานจึงทำไม่ได้
+  if (job.id && job.open && !job.running) {
     tools.append(iconBtn("✕", "ยกเลิกงานนี้", () => act(() => jobPost(`${job.id}/cancel`))));
   }
-  if (!job.open) {
+  if (job.id && !job.open) {
     tools.append(
       iconBtn("↻", "สั่งทำใหม่", () => act(() => jobPost(`${job.id}/retry`))),
       iconBtn("🗑", "ลบแถวออกจากคิว (ไฟล์งานไม่หาย)", () => act(() =>
@@ -693,6 +743,12 @@ function jobRow(job) {
 
   row.addEventListener("click", (event) => {
     if (event.target.closest("button")) return;   // กดปุ่มในแถวไม่ใช่กดเลือกแถว
+    // **ไม่มีใบงาน = ไม่มีอะไรให้เปิด** เปิดไปจะได้หน้าเปล่าแล้วคนจะคิดว่าพัง
+    if (!job.id) {
+      $("#storyNote").textContent =
+        "คลิปใบนี้เจนจบแล้ว ไม่มีใบงานในคิวให้เปิดดู — กดปุ่มลงหรือปุ่มพักได้เลย";
+      return;
+    }
     openJobId = job.id;
     showJob(job.id, true);
     loadJobQueue();
@@ -788,7 +844,7 @@ function fixGroupHead(items) {
   // และถ้าใบไหนพลาดจะรู้ทันทีว่าใบไหน แทนที่จะล้มทั้งชุดโดยไม่รู้ว่าตกตรงไหน
   if (items.length > 1) {
     head.append(textBtn("↩ เอากลับทั้งกลุ่ม", "ghost board-group-back", async () => {
-      const ids = items.map((job) => job.id);
+      const ids = items.map((job) => job.item_id || job.id);
       if (!window.confirm(`เอางาน ${ids.length} ใบในกลุ่ม "${first.fix_title}" `
         + "กลับไปทำต่อทั้งหมด?")) return;
       let done = 0;
@@ -824,8 +880,10 @@ function parkedRow(item) {
     el("small", { textContent: `ค้างที่ ${item.from_label}${why ? ` · ${why}` : ""}` }),
   );
   const tools = el("span", { className: "story-queue-tools" });
+  // **ต้องใช้ `item_id`** ใบที่งานเจนจบไปแล้วไม่มี `id` — ยิงด้วย `id` จะได้
+  // `/api/jobs//unpark` ซึ่งกดแล้วเงียบ (เจอจริงตอนทดสอบ 27 ส.ค. 2569)
   tools.append(iconBtn("↩", `เอากลับเข้าขั้น ${item.from_label}`,
-    () => act(() => jobPost(`${item.id}/unpark`))));
+    () => act(() => jobPost(`${item.item_id || item.id}/unpark`))));
   row.append(tools);
   row.addEventListener("click", (event) => {
     if (event.target.closest("button")) return;
@@ -908,9 +966,22 @@ function paintBoard() {
   }
   if (!short.isConnected) box.after(short);
 
-  // ใบงานบนกระดานเป็นข้อมูลย่อ ถ้ามีใบเต็มอยู่ในมือแล้วให้ใช้ใบเต็ม
-  const draw = (jobs) => (jobs || []).map((row) =>
-    jobRow(jobCards.find((j) => j.id === row.id) || row));
+  /** วาดแถว — **ต้องรวมสองแหล่ง ไม่ใช่เลือกอันใดอันหนึ่ง**
+   *
+   *  ใบงานในคิว (`/api/jobs`) มี `open` · `running` · `error` ที่กระดานไม่มี
+   *  ส่วนแถวบนกระดาน (`/api/board`) มี `can_publish` · `item_id` ที่คิวไม่มี
+   *
+   *  ของเดิมเขียนว่า "ถ้ามีใบเต็มให้ใช้ใบเต็ม" ซึ่ง **ทิ้ง `can_publish` ทั้งก้อน**
+   *  วัดจริง 27 ส.ค. 2569: กอง Shopee Video 23 แถว — 19 แถวที่ไม่มีใบงานในคิว
+   *  ได้ปุ่มลงครบ ส่วน **4 แถวที่มีใบงานกลับไม่ได้ปุ่มเลยสักปุ่ม**
+   *  ซึ่งกลับหัวกลับหางจากที่ควรเป็น (แถวที่ข้อมูลครบกว่าได้ปุ่มน้อยกว่า)
+   *
+   *  ให้ค่าจากกระดานทับ เพราะกระดานคือแหล่งของกติกาลำดับการลง
+   */
+  const draw = (jobs) => (jobs || []).map((row) => {
+    const full = row.id ? jobCards.find((j) => j.id === row.id) : null;
+    return jobRow(full ? { ...full, ...row } : row);
+  });
 
   const rows = draw(picked?.jobs);
   if (!rows.length) {

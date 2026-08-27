@@ -92,7 +92,24 @@ MODEL_PRICE = {
     "gemini-3.1-flash-lite":         (0.10, 0.40),
     "gemini-3.1-flash-lite-preview": (0.10, 0.40),
     "gemini-flash-lite-latest":      (0.10, 0.40),
+    # ชั้น pro — แพงกว่าชั้น flash ราว 4 เท่า มีโค้ดเรียกอยู่ใน
+    # `gemini_video.py` (ทางถอยเมื่อรุ่นหลักหนาแน่น) จึงต้องมีราคา
+    "gemini-3.1-pro-preview":        (1.25, 10.00),
+    "gemini-2.5-pro":                (1.25, 10.00),
 }
+
+# ราคาที่ใช้เมื่อ **ไม่รู้จักรุ่นนี้** — เอาราคาแพงสุดที่รู้จักมาคิดไว้ก่อน
+#
+# **ทำไมไม่คิดเป็น 0** (สายกลางเตือนไว้ 27 ส.ค. 2569 · ตรวจแล้วจริง)
+# ของเดิมรุ่นที่ไม่อยู่ในตารางจะคิดเงินเป็น 0 บาท ผลคือ **เงินไหลออกจริง
+# แต่ตัวนับขึ้น 0 แล้วเพดาน 100 บาทไม่ทำงานเลย** — วัดจริงตอนนั้น
+# `gemini-2.5-pro` กับ `gemini-3.1-pro-preview` มีโค้ดเรียกแต่ไม่มีราคา
+#
+# คิดแพงไว้ก่อนแล้วเตือนดัง ปลอดภัยกว่าคิดถูกแล้วเงียบเสมอ —
+# คิดแพงเกินทำให้หยุดยิงเร็วไปหน่อย (เสียเวลา) ส่วนคิดเป็นศูนย์
+# ทำให้ไม่หยุดเลย (เสียเงินจริงไม่มีเพดาน)
+UNKNOWN_PRICE = max(MODEL_PRICE.values(), key=lambda pair: pair[1])
+_warned_models: set[str] = set()
 
 # เพดานที่ผู้ใช้กำหนด — บาทต่อวัน
 DAILY_LIMIT_THB = 100.0
@@ -104,8 +121,23 @@ class BudgetExceeded(RuntimeError):
 
 def _cost_thb(model: str, usage: dict) -> float:
     """คิดเงินของการยิงหนึ่งครั้งจากจำนวนโทเคนที่คำตอบบอกมา"""
-    price = MODEL_PRICE.get(str(model or "").strip())
-    if not price or not isinstance(usage, dict):
+    name = str(model or "").strip()
+    price = MODEL_PRICE.get(name)
+    if price is None:
+        # **ห้ามเงียบ** รุ่นใหม่ที่ยังไม่ได้ใส่ราคาคือช่องที่เงินรั่วได้
+        # เตือนรุ่นละครั้ง (ไม่งั้นท่วม log) แล้วคิดราคาแพงสุดไว้ก่อน
+        if name and name not in _warned_models:
+            _warned_models.add(name)
+            try:
+                from studio_shared import append_log      # noqa: PLC0415
+                append_log("clip", f"⚠️ ไม่รู้ราคาของรุ่น {name} — "
+                                   f"คิดเป็นราคาแพงสุดที่รู้จักไว้ก่อน "
+                                   f"({UNKNOWN_PRICE[0]}/{UNKNOWN_PRICE[1]} USD ต่อล้านหน่วย) "
+                                   f"ไปเพิ่มใน gemini_quota.MODEL_PRICE ด้วย")
+            except Exception:                             # noqa: BLE001
+                pass
+        price = UNKNOWN_PRICE
+    if not isinstance(usage, dict):
         return 0.0
     inp = int(usage.get("promptTokenCount") or 0)
     out = int(usage.get("candidatesTokenCount") or 0)

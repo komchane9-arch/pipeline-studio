@@ -310,6 +310,37 @@ def bucket_of_run(run: dict) -> str:
     return ""
 
 
+def publish_options(run: dict | None) -> list[dict]:
+    """แถวนี้ **ลงอะไรได้เดี๋ยวนี้บ้าง** — ให้หน้าเว็บใช้ตัดสินว่าจะโชว์ปุ่ม 📤 ไหม
+
+    สายกลางขอไว้ 27 ส.ค. 2569: *"อย่าให้ผมคิดกติกาลำดับเองฝั่งหน้าเว็บ"*
+    — ถูกต้องแล้ว กติกาลำดับต้องมาจาก `publish_order` ที่เดียว (กติกาข้อ 2.8)
+    ถ้าหน้าเว็บคิดเอง วันหลังจะกลายเป็น "กระดานบอกว่าลงได้ แต่กดแล้วโดนปฏิเสธ"
+
+    คืนรายการเรียงตามลำดับที่ควรลง แต่ละอันบอกครบว่า
+
+        target   ชื่อปลายทางที่ส่งให้ `/api/publish/flow/run`
+        label    ชื่อที่เอาไปโชว์
+        ok       กดได้เดี๋ยวนี้ไหม
+        why      ถ้ากดไม่ได้ เพราะอะไร (ภาษาคน เอาไปโชว์ได้ตรงๆ)
+
+    **ส่งมาทั้งที่กดไม่ได้ด้วย พร้อมเหตุผล** ไม่ใช่ตัดทิ้ง — ปุ่มที่หายไปเฉยๆ
+    แยกไม่ออกจาก "ระบบพัง" ส่วนปุ่มที่จางพร้อมเหตุผลบอกได้ว่าต้องรออะไร
+    """
+    if not run:
+        return []
+    out = []
+    for key, target in POST_TARGET.items():
+        state = ((run.get("publish") or {}).get(target) or {}).get("status")
+        if state == "posted":
+            continue                        # ลงไปแล้ว ไม่ต้องมีปุ่ม
+        ok, why = publish_order.check(run, target)
+        label = next((t for k, t, _h in BOARD if k == key), target)
+        out.append({"target": target, "label": label, "ok": bool(ok),
+                    "why": "" if ok else why})
+    return out
+
+
 def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
     """จัดงานทั้งหมดลง 6 กอง — `load_run(item_id)` คืน run.json ของงานนั้น
 
@@ -361,6 +392,8 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 "parked": park,
                 "created_at": job.get("created_at") or "",
                 "updated_at": job.get("updated_at") or "",
+                # ใบที่พักไว้ไม่มีปุ่มลง — ต้องเอากลับก่อนถึงจะลงได้
+                "can_publish": [],
             })
             continue
         if stage not in LINK_STAGES | STORY_STAGES | CLIP_STAGES:
@@ -392,6 +425,8 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
             "stage_label": clip_queue.STAGE_LABEL.get(stage, stage),
             "why": why,
             "created_at": job.get("created_at") or "",
+            # ลงอะไรได้บ้างเดี๋ยวนี้ — หน้าเว็บห้ามคิดกติกาลำดับเอง
+            "can_publish": publish_options(run),
             "updated_at": job.get("updated_at") or "",
         })
 
@@ -421,6 +456,7 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 "stage_label": "",
                 "why": "",
                 "created_at": run.get("product_at") or "",
+                "can_publish": publish_options(run),
                 "updated_at": run.get("video_at") or run.get("storyboard_at") or "",
             }
             park = run.get("parked") or {}
@@ -432,6 +468,9 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                     "from_stage": came, "from_label": clip_queue.STAGE_LABEL.get(came, came),
                     "fix_group": group, "fix_title": title, "fix_hint": hint,
                     "why": str(park.get("why") or "").strip(), "parked": park,
+                    # ใบที่พักไว้ไม่มีปุ่มลง — ต้องเอากลับก่อนถึงจะลงได้
+                    # (ตรงกับใบที่พักจากในคิว ต้องเหมือนกันทั้งสองทาง)
+                    "can_publish": [],
                 })
                 parked_piles[key].append(row)
             else:

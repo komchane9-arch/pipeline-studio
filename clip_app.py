@@ -6746,6 +6746,32 @@ async def jobs_highlight(job_id: str, request: Request) -> dict:
     return {"ok": True, "message": message}
 
 
+def _park_target(key: str) -> tuple[dict | None, str]:
+    """แปลงรหัสที่หน้าเว็บส่งมาเป็นงานจริง — คืน (ใบงานในคิว, รหัสสินค้า)
+
+    **รับได้ทั้งรหัสใบงานในคิวและรหัสสินค้า** (สายกลางขอไว้ 27 ส.ค. 2569)
+    หาในคิวก่อน ไม่เจอค่อยไปหาไฟล์งาน
+
+    **ทำไมต้องรับสองแบบ** ไม่ใช่แค่ความสะดวก — วัดจริงบนกระดาน
+    **19 จาก 23 แถวในกอง Shopee Video ไม่มีรหัสใบงานให้ใช้เลย**
+    เพราะงานเจนคลิปเสร็จแล้วออกจากคิวไป ถ้าที่อยู่นี้รับแค่รหัสใบงาน
+    แถวส่วนใหญ่ของกองที่มีของมากที่สุดจะกดพักไม่ได้ตลอดกาล
+    """
+    key = str(key or "").strip()
+    job = next((j for j in clip_jobs.all() if str(j.get("id")) == key), None)
+    if job:
+        return job, str(job.get("item_id") or "")
+    # ไม่ใช่รหัสใบงาน — ลองเป็นรหัสสินค้า แล้วดูว่ามีใบงานที่ยังเปิดอยู่ไหม
+    job = next((j for j in clip_jobs.all()
+                if str(j.get("item_id")) == key
+                and j.get("stage") in clip_queue.OPEN_STAGES), None)
+    if job:
+        return job, key
+    if clip_store.load_run(DATA_DIR, key):
+        return None, key
+    return None, ""
+
+
 @app.post("/api/jobs/{job_id}/park")
 async def jobs_park(job_id: str, request: Request) -> dict:
     """พักงานไว้ "รอแก้" — เครื่องหยุดแตะ แต่ของที่ทำไว้แล้วยังอยู่ครบ
@@ -6759,43 +6785,83 @@ async def jobs_park(job_id: str, request: Request) -> dict:
 
     **งานที่กำลังทำอยู่พักไม่ได้** เหมือนกับยกเลิก — เบราว์เซอร์เปิดค้างอยู่และ
     อาจใช้เครดิตไปแล้ว การแกล้งเปลี่ยนสถานะให้ดูเหมือนหยุดคือการโกหกหน้าจอ
+
+    รับได้ทั้ง **รหัสใบงานในคิว** และ **รหัสสินค้า** — ดู `_park_target`
     """
     payload = await request.json() if await request.body() else {}
     why = str((payload or {}).get("why") or "").strip()
+    stage_hint = str((payload or {}).get("stage") or "").strip()
 
-    job = _find_job(job_id)
-    if clip_runner.current == job_id:
-        raise HTTPException(
-            status_code=409,
-            detail="งานนี้กำลังทำอยู่ — พักกลางคันไม่ได้ รอให้จบขั้นนี้ก่อน",
-        )
-    if job.get("parked"):
+    job, item_id = _park_target(job_id)
+    if not job and not item_id:
+        raise HTTPException(status_code=404, detail=f"ไม่พบงาน {job_id}")
+
+    # ---- ยังอยู่ในคิว: พักที่ใบงาน ----------------------------------------
+    if job:
+        if clip_runner.current == job["id"]:
+            raise HTTPException(
+                status_code=409,
+                detail="งานนี้กำลังทำอยู่ — พักกลางคันไม่ได้ รอให้จบขั้นนี้ก่อน",
+            )
+        if job.get("parked"):
+            raise HTTPException(status_code=400, detail="งานนี้พักไว้อยู่แล้ว")
+        try:
+            fresh = await asyncio.to_thread(clip_jobs.park, job["id"], why)
+        except clip_queue.ClipQueueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        came = clip_queue.STAGE_LABEL.get(job.get("stage") or "", job.get("stage") or "")
+        _clip_log(f"พักงาน {job['id']} ไว้รอแก้ (ค้างที่ขั้น {came}) — {why or 'ไม่ได้บอกเหตุผล'}")
+        return {"ok": True, "job": fresh, "item_id": item_id,
+                "message": f"พักไว้ในช่อง 🅿️ รอแก้แล้ว (ค้างที่ขั้น {came}) "
+                           f"— เครื่องจะไม่แตะจนกว่าจะกดเอากลับ"}
+
+    # ---- จบจากคิวไปแล้ว: พักที่ไฟล์งาน ------------------------------------
+    run = clip_store.load_run(DATA_DIR, item_id) or {}
+    if run.get("parked"):
         raise HTTPException(status_code=400, detail="งานนี้พักไว้อยู่แล้ว")
+    came = stage_hint or clip_board.bucket_of_run(run)
     try:
-        fresh = await asyncio.to_thread(clip_jobs.park, job_id, why)
-    except clip_queue.ClipQueueError as error:
+        fresh = await asyncio.to_thread(
+            clip_store.park_run, DATA_DIR, item_id, why, came)
+    except clip_store.ClipStoreError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    came = clip_queue.STAGE_LABEL.get(job.get("stage") or "", job.get("stage") or "")
-    _clip_log(f"พักงาน {job_id} ไว้รอแก้ (ค้างที่ขั้น {came}) — {why or 'ไม่ได้บอกเหตุผล'}")
-    return {"ok": True, "job": fresh,
-            "message": f"พักไว้ในช่อง 🅿️ รอแก้แล้ว (ค้างที่ขั้น {came}) "
+    label = next((t for k, t, _h in clip_board.BOARD if k == came), came)
+    _clip_log(f"พักงานเก็บไว้ {item_id} รอแก้ (กอง {came}) — {why or 'ไม่ได้บอกเหตุผล'}")
+    return {"ok": True, "run": fresh, "item_id": item_id,
+            "message": f"พักไว้ในช่อง 🅿️ รอแก้แล้ว (ค้างที่ {label}) "
                        f"— เครื่องจะไม่แตะจนกว่าจะกดเอากลับ"}
 
 
 @app.post("/api/jobs/{job_id}/unpark")
 async def jobs_unpark(job_id: str) -> dict:
-    """เอางานที่พักไว้กลับเข้าขั้นเดิม — กลับไปตรงที่ค้างไว้เป๊ะ ไม่ต้องเริ่มใหม่"""
-    job = _find_job(job_id)
-    if not job.get("parked"):
-        raise HTTPException(status_code=400, detail="งานนี้ไม่ได้พักไว้")
+    """เอางานที่พักไว้กลับเข้าขั้นเดิม — กลับไปตรงที่ค้างไว้เป๊ะ ไม่ต้องเริ่มใหม่
+
+    รับได้ทั้งรหัสใบงานในคิวและรหัสสินค้า เหมือน `/park`
+    """
+    job, item_id = _park_target(job_id)
+    if not job and not item_id:
+        raise HTTPException(status_code=404, detail=f"ไม่พบงาน {job_id}")
+
+    if job:
+        if not job.get("parked"):
+            raise HTTPException(status_code=400, detail="งานนี้ไม่ได้พักไว้")
+        try:
+            fresh = await asyncio.to_thread(clip_jobs.unpark, job["id"])
+        except clip_queue.ClipQueueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        came = clip_queue.STAGE_LABEL.get(fresh.get("stage") or "", fresh.get("stage") or "")
+        clip_runner.wake()      # อาจเป็นงานที่เครื่องหยิบไปทำต่อได้ทันที
+        _clip_log(f"เอางาน {job['id']} กลับเข้าขั้น {came} แล้ว")
+        return {"ok": True, "job": fresh, "item_id": item_id,
+                "message": f"เอากลับเข้าขั้น “{came}” แล้ว"}
+
     try:
-        fresh = await asyncio.to_thread(clip_jobs.unpark, job_id)
-    except clip_queue.ClipQueueError as error:
+        fresh = await asyncio.to_thread(clip_store.unpark_run, DATA_DIR, item_id)
+    except clip_store.ClipStoreError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    came = clip_queue.STAGE_LABEL.get(fresh.get("stage") or "", fresh.get("stage") or "")
-    clip_runner.wake()          # อาจเป็นงานที่เครื่องหยิบไปทำต่อได้ทันที
-    _clip_log(f"เอางาน {job_id} กลับเข้าขั้น {came} แล้ว")
-    return {"ok": True, "job": fresh, "message": f"เอากลับเข้าขั้น “{came}” แล้ว"}
+    _clip_log(f"เอางานเก็บไว้ {item_id} ออกจากช่องรอแก้แล้ว")
+    return {"ok": True, "run": fresh, "item_id": item_id,
+            "message": "เอากลับเข้ารายการแล้ว"}
 
 
 @app.post("/api/jobs/{job_id}/cancel")

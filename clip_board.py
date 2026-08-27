@@ -72,6 +72,99 @@ CLIP_STAGES = {
     clip_queue.STAGE_VIDEO_REVIEW,
 }
 
+# ============================================================================
+# กองรอแก้ — **แยกย่อยตามชนิดของการแก้** (ผู้ใช้สั่ง 27 ส.ค. 2026)
+# ============================================================================
+#
+# *"รอแก้แต่ละขั้นให้เก็บแยกกันนะ ทั้งในเว็บและใน telegram เพราะการแก้แต่ละอย่าง
+#   ไม่เหมือนกัน"*
+#
+# **แยกละเอียดกว่ากอง 6 ขั้นบนกระดานโดยตั้งใจ** — บนกระดาน `image_review`,
+# `storyboard_review` และ `script_review` อยู่กอง Storyboard เหมือนกันหมด
+# เพราะมองจาก "ไปถึงไหนแล้ว" แต่พอเป็นการแก้ มัน **คนละงานกันสิ้นเชิง**
+#
+#     ค้างที่ชุดรูป      → ไปหารูปเพิ่ม/สลับรูป แล้วกดผ่าน
+#     ค้างที่สตอรีบอร์ด  → พิมพ์คอมเมนต์สั่งแก้ แล้วให้ GPT ทำใหม่
+#     ค้างที่บทพูด       → แก้ข้อความบทพูดเอง
+#     ค้างที่คลิป        → สั่งเจนใหม่ (เสียเครดิต Veo)
+#
+# รวมกองเดียวแล้วเปิดมาเจอปนกัน จะแก้ทีละใบสลับไปมาซึ่งช้ากว่าแก้ทีเดียวทั้งกอง
+#
+# `hint` = **บอกว่าต้องทำอะไรถึงจะแก้ได้** ไม่ใช่บอกแค่ว่าค้างตรงไหน
+FIX_GROUPS = (
+    ("images", "🖼 ชุดรูป",
+     "เปิดใบงานแล้วสลับ/เพิ่มรูป หรือกดให้ AI คัดใหม่ แล้วกดผ่าน",
+     {clip_queue.STAGE_IMAGE_REVIEW}),
+    ("storyboard", "🎨 สตอรีบอร์ด",
+     "พิมพ์คอมเมนต์บอกว่าจะแก้อะไร แล้วให้ GPT ทำใหม่",
+     {clip_queue.STAGE_STORYBOARD_REVIEW, clip_queue.STAGE_READY_STORYBOARD,
+      clip_queue.STAGE_MAKING, clip_queue.STAGE_REVISING}),
+    ("script", "💬 บทพูด",
+     "แก้ข้อความบทพูดเองในใบงาน หรือสั่งให้เขียนใหม่",
+     {clip_queue.STAGE_SCRIPT_REVIEW}),
+    ("clip", "🎬 คลิป",
+     "ดูคลิปแล้วสั่งเจนใหม่ — ⚠️ เสียเครดิต Veo ทุกครั้งที่เจน",
+     {clip_queue.STAGE_VIDEO_REVIEW, clip_queue.STAGE_READY_FLOW,
+      clip_queue.STAGE_GENERATING}),
+    ("link", "🐣 ดึงข้อมูล",
+     "ลิงก์อาจเสียหรือ Shopee บล็อกอยู่ — ลองเปิดลิงก์ดูเองก่อน",
+     {clip_queue.STAGE_QUEUED, clip_queue.STAGE_COLLECTING}),
+    ("post", "🛍 ตอนโพสต์",
+     "ติดตอนลงแพลตฟอร์ม — ดูว่าค้างขั้นไหนบนมือถือ",
+     {clip_queue.STAGE_POST_REVIEW, clip_queue.STAGE_POSTING}),
+    ("failed", "💥 ล้มแล้วพักไว้",
+     "ล้มก่อนถูกพัก — อ่านเหตุผลในใบงานก่อนสั่งทำต่อ",
+     {clip_queue.STAGE_FAILED, clip_queue.STAGE_CANCELLED}),
+)
+
+# ค้างที่ขั้นที่ไม่รู้จัก — ต้องมีที่ลง ไม่งั้นใบนั้นหายจากทุกกองเงียบๆ
+FIX_OTHER = ("other", "❓ อื่นๆ", "ขั้นที่ระบบยังไม่รู้จัก — เปิดใบงานดูเอง")
+
+
+def fix_group_of(stage: str) -> str:
+    """ใบที่พักไว้จากขั้นนี้ ควรอยู่กลุ่มการแก้ไหน"""
+    for key, _label, _hint, stages in FIX_GROUPS:
+        if stage in stages:
+            return key
+    return FIX_OTHER[0]
+
+
+def fix_group_meta(key: str) -> tuple[str, str]:
+    """(ชื่อกลุ่ม, วิธีแก้) ของกลุ่มนั้น"""
+    for gkey, label, hint, _stages in FIX_GROUPS:
+        if gkey == key:
+            return label, hint
+    return FIX_OTHER[1], FIX_OTHER[2]
+
+
+def group_parked(rows: list[dict]) -> list[dict]:
+    """จัดใบที่พักไว้เป็นกลุ่มตามชนิดของการแก้ — ใช้ร่วมกันทั้งหน้าเว็บและแชท
+
+    **ต้องมีที่เดียวแล้วเรียกร่วมกัน** ไม่งั้นวันหนึ่งหน้าเว็บกับแชทจะจัดกลุ่ม
+    ไม่ตรงกัน แล้วไม่มีใครรู้ว่าอันไหนถูก (บทเรียนเดียวกับ `/clips` ที่เลขในรายการ
+    เคยไม่ตรงกับเลขที่พิมพ์)
+
+    เรียงกลุ่มตามลำดับใน `FIX_GROUPS` = ตามลำดับสายพาน ต้นน้ำก่อนปลายน้ำ
+    กลุ่มที่ว่างไม่ถูกส่งไป — คนอ่านไม่ต้องกวาดตาผ่านกองเปล่า
+    """
+    piles: dict[str, list[dict]] = {}
+    for row in rows or []:
+        came = ((row.get("parked") or {}).get("from")
+                or row.get("stage") or "")
+        piles.setdefault(fix_group_of(came), []).append(row)
+
+    order = [key for key, _l, _h, _s in FIX_GROUPS] + [FIX_OTHER[0]]
+    out = []
+    for key in order:
+        items = piles.get(key)
+        if not items:
+            continue
+        label, hint = fix_group_meta(key)
+        out.append({"key": key, "title": label, "hint": hint,
+                    "count": len(items), "jobs": items})
+    return out
+
+
 # อีโมจิ + ชื่อของแต่ละกอง
 #
 # **สีอยู่ฝั่งหน้าเว็บ ไม่ได้ส่งมาจากที่นี่** — สีเป็นเรื่องของการแสดงผล ถ้าส่งค่าสี
@@ -228,6 +321,9 @@ def build(jobs: list[dict], load_run) -> dict:
              "short": 0 if key in NO_TARGET else max(0, STOCK_TARGET - counts[key]),
              # **บอกวิธีเติมด้วย ไม่ใช่บอกแค่ว่าขาด**
              "refill": "" if key in NO_TARGET else refill_hint(key, counts),
+             # กองรอแก้แยกย่อยตามชนิดของการแก้ (ผู้ใช้สั่ง 27 ส.ค. 2026)
+             # กองอื่นไม่มี `groups` — หน้าเว็บเช็คว่ามีไหมแล้วค่อยวาด
+             **({"groups": group_parked(piles[key])} if key == FIX else {}),
              "jobs": piles[key]}
             for key, title, hint in BOARD
         ],

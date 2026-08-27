@@ -3731,8 +3731,18 @@ def _clip_wait_list(chat_id: str, argument: str = "") -> None:
             picked = list(rows_all)
         elif target.isdigit() and 1 <= int(target) <= len(rows_all):
             picked = [rows_all[int(target) - 1]]
+        elif any(g["key"] == target for g in clip_board.group_parked(rows_all)):
+            # `/wait images` = เอากลับทั้งกลุ่มเดียว (ผู้ใช้สั่งแยกกลุ่ม 27 ส.ค.)
+            # มีประโยชน์ตอนแก้เสร็จทั้งกอง เช่นหารูปมาเพิ่มครบแล้วทุกใบ
+            picked = next(g["jobs"] for g in clip_board.group_parked(rows_all)
+                          if g["key"] == target)
         else:
-            _clip_say(chat_id, f"ไม่มีใบที่ {escape(target)} ในช่องรอแก้ — พิมพ์ /wait ดูรายการก่อน")
+            keys = " · ".join(g["key"] for g in clip_board.group_parked(rows_all))
+            _clip_say(chat_id,
+                      f"ไม่มีใบที่ {escape(target)} ในช่องรอแก้\n"
+                      f"ใส่ได้: เลขใบ · <code>all</code>"
+                      + (f" · ชื่อกลุ่ม ({escape(keys)})" if keys else "")
+                      + "\nพิมพ์ /wait เฉยๆ ดูรายการก่อน")
             return
         done = []
         for job in picked:
@@ -3752,29 +3762,45 @@ def _clip_wait_list(chat_id: str, argument: str = "") -> None:
         _clip_say(chat_id, "✅ ไม่มีงานพักรอแก้เลย — ช่อง 🅿️ รอแก้ว่างอยู่")
         return
 
-    lines = [f"🅿️ <b>พักไว้รอแก้ {len(rows_all)} ใบ</b>",
-             "เครื่องไม่แตะใบพวกนี้ ของที่ทำไว้แล้วยังอยู่ครบ", ""]
+    # **แยกกลุ่มตามชนิดของการแก้** (ผู้ใช้สั่ง 27 ส.ค. 2026)
+    # ใช้ตัวจัดกลุ่มตัวเดียวกับหน้าเว็บ (`clip_board.group_parked`) ห้ามจัดเองซ้ำ
+    # ไม่งั้นวันหนึ่งแชทกับหน้าเว็บจะบอกไม่ตรงกันแล้วไม่มีใครรู้ว่าอันไหนถูก
+    groups = clip_board.group_parked(rows_all)
+    lines = [f"🅿️ <b>พักไว้รอแก้ {len(rows_all)} ใบ</b> · {len(groups)} กลุ่ม",
+             "เครื่องไม่แตะใบพวกนี้ ของที่ทำไว้แล้วยังอยู่ครบ"]
     buttons = []
-    for index, job in enumerate(rows_all[:20], 1):
-        name = str(job.get("name") or job.get("link") or job.get("id"))[:42]
-        park = job.get("parked") or {}
-        came = clip_queue.STAGE_LABEL.get(park.get("from") or "", park.get("from") or "—")
-        why = str(park.get("why") or "ไม่ได้บอกเหตุผล")[:70]
-        when = str(park.get("at") or "")[5:16].replace("T", " ")
-        lines.append(f"{index}. {escape(name)}")
-        lines.append(f"    <i>ค้างที่ “{escape(came)}” · {escape(why)}</i>")
-        if when:
-            lines.append(f"    <i>พักไว้เมื่อ {escape(when)}</i>")
-        if len(buttons) < 8:
+    index = 0
+    for group in groups:
+        lines += ["", f"━━ {group['title']} · {group['count']} ใบ ━━",
+                  f"<i>{escape(group['hint'])}</i>"]
+        for job in group["jobs"]:
+            index += 1
+            if index > 20:
+                continue
+            name = str(job.get("name") or job.get("link") or job.get("id"))[:42]
+            park = job.get("parked") or {}
+            why = str(park.get("why") or "ไม่ได้บอกเหตุผล")[:70]
+            when = str(park.get("at") or "")[5:16].replace("T", " ")
+            lines.append(f"{index}. {escape(name)}")
+            lines.append(f"    <i>{escape(why)}"
+                         + (f" · พักไว้ {escape(when)}" if when else "") + "</i>")
+            if len(buttons) < 8:
+                buttons.append([{
+                    "text": f"↩️ {index}. {name[:22]}",
+                    "callback_data": f"clip:unpark:{job.get('id')}",
+                }])
+        # ปุ่มเอากลับทั้งกลุ่ม — แก้เสร็จทั้งกองแล้วกดทีเดียวจบ
+        if len(buttons) < 10 and group["count"] > 1:
             buttons.append([{
-                "text": f"↩️ {index}. {name[:22]}",
-                "callback_data": f"clip:unpark:{job.get('id')}",
+                "text": f"↩️ เอากลับทั้ง {group['title']} ({group['count']})",
+                "callback_data": f"clip:unpkg:{group['key']}:",
             }])
-    if len(rows_all) > 20:
-        lines.append(f"…และอีก {len(rows_all) - 20} ใบ")
-    lines += ["", "เอากลับด้วย <code>/wait &lt;เลข&gt;</code> "
-                  "(<code>/wait all</code> = ทั้งหมด)",
-              "กลับเข้า<b>ขั้นเดิมที่ค้างไว้</b> ไม่ได้เริ่มใหม่"]
+    if index > 20:
+        lines.append(f"\n…และอีก {index - 20} ใบ")
+    keys = " · ".join(g["key"] for g in groups)
+    lines += ["", "เอากลับด้วย <code>/wait &lt;เลข&gt;</code> · "
+                  f"ทั้งกลุ่ม <code>/wait &lt;ชื่อกลุ่ม&gt;</code> ({escape(keys)})",
+              "ทั้งหมด <code>/wait all</code> — กลับเข้า<b>ขั้นเดิมที่ค้างไว้</b> ไม่ได้เริ่มใหม่"]
     keyboard = {"inline_keyboard": buttons} if buttons else None
     parts = _split_text("\n".join(lines), TELEGRAM_TEXT_LIMIT)
     for index, part in enumerate(parts):
@@ -4879,6 +4905,26 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
 
     # ปุ่มของ /approveall — ไม่ผูกกับงานใดงานหนึ่ง ต้องดักก่อนไปหาในคิว
     #
+    # ปุ่ม "เอากลับทั้งกลุ่ม" ใน /wait — ผูกกับ **ชื่อกลุ่ม** ไม่ใช่รหัสงาน
+    # จึงต้องดักก่อนไปหางานในคิวเหมือนกับ apvall
+    if action == "unpkg":
+        key = job_id                       # ตำแหน่งนี้เป็นชื่อกลุ่ม ไม่ใช่รหัสงาน
+        group = next((g for g in clip_board.group_parked(clip_jobs.parked())
+                      if g["key"] == key), None)
+        if not group:
+            return "ไม่มีกลุ่มนี้ในช่องรอแก้แล้ว — พิมพ์ /wait ดูใหม่"
+        done = []
+        for item in group["jobs"]:
+            try:
+                fresh = clip_jobs.unpark(item["id"])
+            except clip_queue.ClipQueueError:
+                continue
+            done.append(clip_queue.STAGE_LABEL.get(fresh.get("stage") or "",
+                                                   fresh.get("stage") or ""))
+        clip_runner.wake()
+        _clip_log(f"เอางานกลุ่ม {key} ออกจากช่องรอแก้ {len(done)} ใบ")
+        return f"↩️ เอากลับเข้าขั้นเดิมแล้ว {len(done)} ใบ ({group['title']})"
+
     # แยกสองจังหวะชัดๆ: `ask` = ขอดูก่อน (จากปุ่มใน /pending) · `go` = ยืนยันแล้ว
     # ค่าอื่น/ไม่ระบุถือเป็น `ask` เสมอ — **ผิดพลาดแล้วต้องไม่กลายเป็นการจ่ายเงิน**
     if action == "apvall":
@@ -5026,6 +5072,7 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
     if action == "unpark":
         if not job.get("parked"):
             return "งานนี้ไม่ได้พักไว้"
+
         try:
             fresh = clip_jobs.unpark(job_id)
         except clip_queue.ClipQueueError as error:

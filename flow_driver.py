@@ -424,11 +424,19 @@ class FlowDriver:
         มาตั้งแต่แรกและยืนยันจากหน้าจริงแล้วว่ามี
         """
         marks: list[str] = []
+        # รูปโปรไฟล์มุมขวาบน — **ยืนยันจากผังหน้าจริงที่เก็บไว้ 28 ส.ค. 15:39**
+        # ป้ายจริงคือ alt="รูปโปรไฟล์ผู้ใช้" (ตามภาษาบัญชี) รับภาษาอังกฤษไว้ด้วย
         try:
-            if self.page.get_by_role(
-                    "button", name=re.compile(r"ULTRA|User profile|Account",
-                                              re.I)).count():
-                marks.append("ปุ่มบัญชีมุมขวาบน")
+            if self.page.locator(
+                    'img[alt="รูปโปรไฟล์ผู้ใช้"], img[alt="User profile image"]'
+            ).count():
+                marks.append("รูปโปรไฟล์มุมขวาบน")
+        except Exception:                                        # noqa: BLE001
+            pass
+        # ปุ่มสร้างโปรเจกต์ — มีเฉพาะบนแดชบอร์ดที่เข้าระบบแล้ว
+        try:
+            if self.page.get_by_role("button", name=NEW_PROJECT_RE).count():
+                marks.append("ปุ่มสร้างโปรเจกต์")
         except Exception:                                        # noqa: BLE001
             pass
         try:
@@ -931,8 +939,12 @@ class FlowDriver:
         ถ้าเดาผิดจะรายงานว่ารอบนี้ใช้เครดิตไปเป็นหมื่นทั้งที่ไม่ได้ใช้
         """
         try:
-            button = self.page.get_by_role(
-                "button", name=re.compile(r"ULTRA|User profile", re.I)
+            # **ป้ายปุ่มนี้เคยเป็น "ULTRA"/"User profile" แต่ Google เปลี่ยนแล้ว**
+            # ผังหน้าจริงที่เก็บไว้ 28 ส.ค. 15:39 ไม่มีปุ่มชื่อนั้นเลย มีแต่รูป
+            # โปรไฟล์ที่ alt="รูปโปรไฟล์ผู้ใช้" — เป็นเหตุให้ log ขึ้นว่า
+            # "อ่านเครดิตก่อนเริ่มไม่ได้" ทุกครั้งมานานโดยไม่มีใครสังเกต
+            button = self.page.locator(
+                'img[alt="รูปโปรไฟล์ผู้ใช้"], img[alt="User profile image"]'
             ).first
             if not button.count():
                 return None

@@ -1879,7 +1879,10 @@ def _clip_generate(job: dict) -> None:
     ที่ยังไม่ผ่านมาทำ เพราะสถานะยังไม่ใช่ ready_flow
     """
     import flow_driver
-    from flow_worker import FLOW_URL, open_browser, _app_page, _enter_app
+    from flow_worker import (
+        FLOW_URL, open_browser, _app_page, _enter_app,
+        FLOW_LOCK, flow_gen_profile_dir,
+    )
     from playwright.sync_api import sync_playwright
 
     chat_id = job["chat_id"]
@@ -1933,7 +1936,8 @@ def _clip_generate(job: dict) -> None:
         เปิดหน้าต่างให้เห็น (hidden=False) ตามที่ผู้ใช้ขอ จะได้ดูว่ากำลังทำอะไรอยู่
         """
         with sync_playwright() as playwright:
-            browser = open_browser(playwright, hidden=False)
+            browser = open_browser(playwright, hidden=False,
+                                   profile_dir=flow_gen_profile_dir())
             page = browser.pages[0] if browser.pages else browser.new_page()
             driver = None                 # อาจล้มก่อนสร้าง — finally ต้องเช็คได้
             credits_before = None
@@ -2066,7 +2070,10 @@ def _clip_generate(job: dict) -> None:
                 browser.close()
         return False
 
-    with shared.browser_lock(label="เจนคลิปใน Google Flow"):
+    # โปรไฟล์ของ Flow แยกจาก ChatGPT แล้ว (28 ส.ค. 2569) จึงใช้ล็อกคนละดอก
+    # ผลคือ **ทำสตอรีบอร์ดกับเจนคลิปเดินพร้อมกันได้** ไม่ต้องผลัดกันเหมือนเดิม
+    with shared.browser_lock(label="เจนคลิปใน Google Flow",
+                             profile=FLOW_LOCK):
         if attempt():
             # ผู้ใช้สั่งไว้: ถ้าต้องล็อกอิน ให้เด้งหน้าต่างขึ้นมาให้ล็อกอินเอง
             # ต้องเรียก **นอกบล็อก Playwright** — เปิดซ้อนกันไม่ได้
@@ -4315,14 +4322,17 @@ def _clip_flow_probe(want_credits: bool = True) -> dict:
     import flow_driver
     from flow_worker import (
         FLOW_URL, open_browser, _app_page, _enter_app, _is_signed_in,
+        FLOW_LOCK, flow_gen_profile_dir,
     )
     from playwright.sync_api import sync_playwright
 
     try:
         # timeout สั้น — ถ้าคิวกำลังเจนอยู่ อย่าให้ /credits ค้างรอเป็นนาที
-        with shared.browser_lock(timeout=8, label="ตรวจสถานะ Flow"):
+        with shared.browser_lock(timeout=8, label="ตรวจสถานะ Flow",
+                                 profile=FLOW_LOCK):
             with sync_playwright() as playwright:
-                browser = open_browser(playwright, hidden=True)
+                browser = open_browser(playwright, hidden=True,
+                                       profile_dir=flow_gen_profile_dir())
                 try:
                     page = browser.pages[0] if browser.pages else browser.new_page()
                     page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=90_000)

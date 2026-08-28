@@ -51,6 +51,39 @@ GEMINI_KEY_FILE = DATA_DIR / "gemini_api_key.bin"
 # โปรไฟล์ Chrome ถาวร ล็อกอิน Google ครั้งเดียวแล้วคุกกี้อยู่ยาว
 PROFILE_DIR = DATA_DIR / "flow_browser_profile"
 
+# ---- โปรไฟล์ของ Google Flow แยกออกมาแล้ว (เจ้าของสั่ง 28 ส.ค. 2569) ---------
+#
+# *"ให้ทำ storyboard ใน profile เดิม แล้วแยก google flow มาเจนต่อได้ใน profile ใหม่"*
+#
+# **ทำไมถึงคุ้ม** เดิมสตอรีบอร์ด (ChatGPT) กับเจนคลิป (Flow) ใช้โปรไฟล์เดียวกัน
+# Chrome เปิดโปรไฟล์เดียวกันซ้อนกันไม่ได้ สองงานนี้จึงต้องผลัดกันทำทั้งที่เป็น
+# คนละเว็บคนละบัญชี — 28 ส.ค. Flow ติดปัญหาแล้วงานสตอรีบอร์ดต้องรอไปด้วย
+# ทั้งที่ไม่เกี่ยวกันเลย แยกแล้วเดินคู่กันได้
+#
+# ตั้งต้นด้วยการก๊อปโปรไฟล์เดิมมาทั้งก้อน ล็อกอิน Google จึงติดมาด้วย
+# ไม่ต้องล็อกอินใหม่ (ก๊อปตอน Chrome ปิดสนิทเท่านั้น ไม่งั้นได้ไฟล์ครึ่งๆ กลางๆ)
+#
+# ⚠️ ใครแตะ Flow ต้องใช้ **สองตัวนี้คู่กันเสมอ** — โฟลเดอร์กับชื่อล็อก
+# ใช้ผิดคู่ = Chrome สองตัวเปิดโปรไฟล์เดียวกัน งานตายกลางคัน
+FLOW_GEN_PROFILE = DATA_DIR / "flow_gen_profile"
+FLOW_LOCK = "flow-gen"
+
+
+def flow_gen_profile_dir():
+    """โฟลเดอร์โปรไฟล์ที่ใช้เปิด Google Flow
+
+    ตั้งโปรไฟล์บอทไว้ = ตัวนั้นชนะเหมือนเดิม (ยังใช้ร่วมกับ ChatGPT เหมือน
+    ก่อนแยก — ตั้งใจ เพราะโปรไฟล์บอทเป็นเรื่องของ "ใช้บัญชีไหน" ไม่ใช่เรื่อง
+    "เปิดเว็บไหน" ถ้าจะแยกด้วยต้องแก้ทั้ง bot_profiles ซึ่งเป็นคนละงาน)
+    """
+    try:
+        import studio_shared as shared
+        if str((shared.read_config() or {}).get("flow_bot_profile") or "").strip():
+            return flow_profile_dir()
+    except Exception:                                            # noqa: BLE001
+        pass
+    return FLOW_GEN_PROFILE
+
 FLOW_URL = "https://labs.google/fx/tools/flow"
 
 # ป้ายปุ่ม/พาธเป็นภาษาตามบัญชี Google ไม่ใช่ตาม URL — บัญชีนี้ตั้งไทยไว้
@@ -512,7 +545,7 @@ def flow_profile_dir() -> Path:
         ) from error
 
 
-def open_browser(playwright, hidden: bool = False):
+def open_browser(playwright, hidden: bool = False, profile_dir=None):
     """เปิด Chrome ตัวจริงพร้อมโปรไฟล์ถาวร
 
     - headless=False จำเป็น Google ตรวจจับ headless แล้วบล็อก
@@ -521,7 +554,8 @@ def open_browser(playwright, hidden: bool = False):
       "This browser or app may not be secure"
     - ปิด flag ที่ประกาศตัวว่าเป็นระบบอัตโนมัติ ลดโอกาสโดนสกัด
     """
-    profile_dir = flow_profile_dir()
+    # ไม่ระบุมา = โปรไฟล์เดิม (ChatGPT · TikTok · Shopee) ของเดิมจึงไม่เปลี่ยน
+    profile_dir = Path(profile_dir) if profile_dir else flow_profile_dir()
     profile_dir.mkdir(parents=True, exist_ok=True)
     args = [
         "--disable-blink-features=AutomationControlled",
@@ -538,6 +572,17 @@ def open_browser(playwright, hidden: bool = False):
     if hidden:
         # ซ่อนไปนอกจอ ใช้ตอนรันคิวยาวๆ ที่ไม่ต้องดู (ห้ามใช้ตอนล็อกอิน)
         args.append("--window-position=-32000,-32000")
+    else:
+        # **ต้องบังคับตำแหน่งกลับมาในจอ ไม่ใช่แค่ไม่ใส่ค่าซ่อน**
+        #
+        # เจอจริง 28 ส.ค. 2569: หน้าต่างที่เปิดให้เจ้าของล็อกอินไปโผล่ที่
+        # x=-1570 ซึ่งอยู่นอกจอทุกจอ เจ้าของมองไม่เห็นเลยทั้งที่ระบบขึ้นว่า
+        # "เปิดหน้าต่างให้แล้ว" — เพราะ Chrome **จำตำแหน่งหน้าต่างล่าสุด**
+        # ของโปรไฟล์นั้นไว้ ซึ่งคือตำแหน่งซ่อนจากรอบก่อน
+        #
+        # ตั้งแต่ตำแหน่งอย่างเดียว **ไม่ตั้งขนาด** — ขนาดหน้าต่างเปลี่ยน
+        # การจัดหน้าของเว็บ ซึ่งอาจทำให้ตัวหาปุ่มที่ใช้ได้อยู่แล้วหาไม่เจอ
+        args.append("--window-position=80,60")
     return playwright.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         channel="chrome",
@@ -715,7 +760,8 @@ def login_flow(wait_minutes: int) -> int:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as playwright:
-        browser = open_browser(playwright, hidden=False)
+        browser = open_browser(playwright, hidden=False,
+                                 profile_dir=flow_gen_profile_dir())
         page = browser.pages[0] if browser.pages else browser.new_page()
         page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=90_000)
         _enter_app(page)
@@ -775,7 +821,8 @@ def inspect_flow(click: str = "", name: str = "project") -> int:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as playwright:
-        browser = open_browser(playwright, hidden=False)
+        browser = open_browser(playwright, hidden=False,
+                                 profile_dir=flow_gen_profile_dir())
         page = browser.pages[0] if browser.pages else browser.new_page()
         page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=90_000)
         page = _app_page(browser, page)
@@ -988,7 +1035,8 @@ def worker_loop(demo: bool, once: bool, hidden: bool = False) -> int:
         from playwright.sync_api import sync_playwright
 
         playwright = sync_playwright().start()
-        browser = open_browser(playwright, hidden=hidden)
+        browser = open_browser(playwright, hidden=hidden,
+                                 profile_dir=flow_gen_profile_dir())
         page = browser.pages[0] if browser.pages else browser.new_page()
         page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=90_000)
         page = _app_page(browser, page)
@@ -1196,7 +1244,12 @@ def main() -> int:
     if args.command in logins:
         import studio_shared
 
-        with studio_shared.browser_lock(label=f"ล็อกอิน ({args.command})"):
+        # **ล็อกต้องตรงกับโปรไฟล์ที่จะเปิด** — ล็อกอิน Flow เปิดโปรไฟล์ Flow
+        # ที่เหลือ (TikTok · ChatGPT · Shopee) ยังอยู่โปรไฟล์เดิม
+        # จับผิดดอก = Chrome สองตัวเปิดโปรไฟล์เดียวกัน งานตายกลางคัน
+        with studio_shared.browser_lock(
+                label=f"ล็อกอิน ({args.command})",
+                profile=FLOW_LOCK if args.command == "flow" else ""):
             return logins[args.command](args.wait_minutes)
     if args.command == "post-tiktok":
         return post_tiktok_folder(

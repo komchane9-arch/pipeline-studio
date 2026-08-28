@@ -413,9 +413,23 @@ class ClipQueue:
             return dict(job)
 
     def update(self, job_id: str, **fields) -> dict:
+        """แก้ค่าในใบงาน — **ย้ายออกจากสถานะล้มเหลวแล้วต้องล้างข้อความล้มด้วย**
+
+        เจ้าของเจอเอง 28 ส.ค. 2569: *"ทำไมหน้าเว็บยังขึ้นโชว์"* — หน้าเว็บขึ้น
+        แถบแดง "ยังไม่ได้ล็อกอิน ChatGPT" บนใบงาน **55 ใบที่ทำสำเร็จไปแล้ว**
+        เพราะตอนกู้งานกลับเข้าคิว เปลี่ยนแค่ `stage` แต่ `error` ยังค้างของเดิม
+        แล้วไม่มีใครล้างให้ตลอดสายพาน
+
+        นี่คือกับดักเดียวกับที่เจอทั้งวัน — **ป้ายบอกสถานะที่ไม่ตรงกับความจริง**
+        คนอ่านแล้วนึกว่าพัง ทั้งที่งานเดินปกติ แล้วไปไล่หาสาเหตุที่ไม่มีอยู่จริง
+        """
         with self.lock:
             for job in self.jobs:
                 if job["id"] == job_id:
+                    stage = fields.get("stage")
+                    if (stage and stage != STAGE_FAILED
+                            and "error" not in fields and job.get("error")):
+                        fields = {**fields, "error": ""}
                     job.update(fields)
                     job["updated_at"] = _now()
                     self._save()

@@ -2062,15 +2062,46 @@ async function askPhoneThenPost(row, itemId) {
   let phones = [];
   try {
     const payload = await api("/api/devices");
-    phones = (payload.devices || []).filter(
-      (device) => device.enabled && (device.lanes || []).includes("post"));
+    window.__lastDevices = payload.devices || [];   // ไว้แยกข้อความเคสว่างข้างล่าง
+    // **คัดด้วยสายคลิป + ต้องเทรนปลายทางนี้แล้ว** (แก้ 28 ส.ค. 2569 ตามสเปค
+    // SPEC-เลือกมือถือก่อนลงคลิป.md ที่สายคลิปส่งมา เจ้าของคอนเฟิร์มแล้ว)
+    //
+    // ของเดิมคัดด้วย lanes.includes("post") ซึ่งอ่านผิดความหมาย — ในทะเบียน
+    // "post" แปลว่า *งานสายโพสต์กลุ่ม Facebook เป็นเจ้าของเครื่องนี้* ไม่ได้แปลว่า
+    // *เครื่องนี้โพสต์คลิปได้* เครื่องที่ใช้ลงคลิปจริงตั้งสายงานเป็น "clip"
+    // จึงถูกคัดทิ้ง แล้วกล่องขึ้นเครื่องที่ลงไม่ได้มาให้เลือกแทน
+    //
+    // ที่ไล่ไม่เจอเพราะ **กล่องยังขึ้นเครื่องมาให้เลือก 2 เครื่อง ดูปกติทุกอย่าง**
+    // ไม่ล้ม ไม่มี error — ตรงกับ CLAUDE.md ข้อ 2.3 ที่ว่าตัวตรวจที่บอกว่าผ่าน
+    // ทั้งที่ยังไม่ผ่าน อันตรายกว่าไม่มีตัวตรวจ
+    //
+    // วัดจากทะเบียนจริงวันนั้น
+    //   Xiaomi 11T pro    สาย post          Shopee 16 จุด  → ขึ้น (ไม่ควร)
+    //   REDMI 15C สำรอง   สาย post,engage   Shopee 0 จุด   → ขึ้น (ไม่ควร)
+    //   REDMI 15C วิดีโอ  สาย clip          Shopee 20 จุด  → หายไป (ต้องขึ้น)
+    //
+    // ⚠️ ใช้ `trained` เท่านั้น **ห้ามใช้ `steps`** — steps มีให้ทุกเครื่องตั้งแต่แรก
+    // เพราะเป็นแบบร่างกลาง ดู steps จะเห็นทุกเครื่องพร้อมหมด ทั้งที่กดจริงแล้ว
+    // ล้มตั้งแต่ขั้นแรก ส่วน points คือจุดที่เจ้าของเทรนเองบนเครื่องนั้น
+    //
+    // `flows` ไม่มีคีย์ tiktok (ลงผ่านเบราว์เซอร์บนคอม) จึงต้องทนกับ undefined
+    phones = (payload.devices || []).filter((device) =>
+      device.enabled
+      && (device.lanes || []).includes("clip")
+      && ((device.flows || {})[row.target] || {}).trained);
   } catch (error) {
     $("#storyNote").textContent = `อ่านทะเบียนมือถือไม่ได้: ${error.message}`;
     return;
   }
   if (!phones.length) {
-    $("#storyNote").textContent =
-      "ยังไม่มีมือถือที่เปิดใช้ในสายโพสต์ — เปิดเครื่องในแท็บมือถือก่อน";
+    // แยกสองเคส — ข้อความเดิมชี้ไปที่ "สายโพสต์" ซึ่งพาไปแก้ผิดที่
+    const clipPhones = (window.__lastDevices || []).filter(
+      (device) => device.enabled && (device.lanes || []).includes("clip"));
+    $("#storyNote").textContent = clipPhones.length
+      ? `เครื่องสายคลิปยังไม่ได้เทรนวิธีลง ${row.name || "ปลายทางนี้"} `
+        + "— ไปเทรนในแท็บมือถือก่อน"
+      : "ยังไม่ได้ตั้งเครื่องไหนเป็นสายคลิป — ไปที่แท็บมือถือ เลือกเครื่อง "
+        + 'แล้วติ๊ก "คลิป"';
     return;
   }
 

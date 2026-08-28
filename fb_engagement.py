@@ -139,6 +139,20 @@ def open_db() -> sqlite3.Connection:
 
 # --------------------------------------------------------- โพสต์ที่ต้องตามเก็บ
 
+def _caption_of(account: str) -> str:
+    """แคปชันของงานล่าสุดของบัญชีนั้น — ใช้ยืนยันว่าเปิดถูกโพสต์"""
+    try:
+        rows = json.loads((shared.account_dir(account) / "fb_jobs.json")
+                          .read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+    for job in reversed(rows):
+        text = (job.get("caption") or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def our_posts() -> list[dict]:
     """โพสต์ของเราทุกบัญชีที่มีลิงก์เก็บไว้แล้ว
 
@@ -160,6 +174,7 @@ def our_posts() -> list[dict]:
             if link:
                 out.append({
                     "post_url": link,
+                    "caption": _caption_of(account),
                     "group_id": group.get("group_id", ""),
                     "group_name": group.get("name", ""),
                     "account": account,
@@ -197,40 +212,128 @@ def parse_count(text: str) -> int | None:
     return int(value)
 
 
-def read_post(page, url: str) -> dict:
+_CANON_CACHE: dict[str, str] = {}
+
+
+def canonical_url(share_url: str) -> str:
+    """แปลงลิงก์แชร์เป็นที่อยู่โพสต์เต็ม — คืน "" เมื่อแปลงไม่ได้
+
+    `facebook.com/share/p/XXXX/` เด้งกลับหน้าฟีดเมื่อเปิดบนเบราว์เซอร์คอม
+    ส่วน `groups/<gid>/posts/<pid>/` เปิดตรงได้ ไม่เด้ง
+    """
+    if share_url in _CANON_CACHE:
+        return _CANON_CACHE[share_url]
+    full = ""
+    try:
+        import fb_auto_post
+        gid, pid = fb_auto_post.resolve_post_link(share_url, timeout=25)
+        if gid and pid:
+            full = f"https://www.facebook.com/groups/{gid}/posts/{pid}/"
+    except Exception:
+        full = ""
+    _CANON_CACHE[share_url] = full
+    return full
+
+
+def read_post(page, url: str, expect: str = "") -> dict:
     """เปิดโพสต์แล้วอ่านยอด + คอมเมนต์ — ไม่กดอะไรที่เปลี่ยนสถานะเลย
 
     คืน {"reachable": bool, "reactions"|"comments"|"shares": int|None,
          "comments_list": [...], "note": str}
     """
     page.goto(url, timeout=PAGE_TIMEOUT_MS, wait_until="domcontentloaded")
-    page.wait_for_timeout(4000)
-    body = page.inner_text("body")[:6000]
+    page.wait_for_timeout(7000)
 
-    # เข้าไม่ถึง ≠ ยอด 0 — ต้องแยกให้ออก ไม่งั้นจะนึกว่าโพสต์ไม่มีคนสนใจ
+    # **ต้องอ่านเฉพาะกล่องของโพสต์ ห้ามอ่านทั้งหน้า**
+    #
+    # เจอจริง 28 ส.ค. 2569 หลังไล่ผิดทางไปสองรอบ: เว็บ Facebook เวอร์ชันคอม
+    # มีเมนูซ้ายมือ ("เมนู Facebook" · "ทางลัดของคุณ" · "สร้างสตอรี่") อยู่ใน
+    # ทุกหน้า รวมถึงหน้าโพสต์ด้วย อ่านทั้งหน้าจึงได้เมนูมาก่อนเนื้อโพสต์เสมอ
+    # แล้วตัวอ่านยอดไปเจอตัวเลขของเมนูแทน (หรือไม่เจอเลย)
+    #
+    # ผมเคยสรุปผิดว่า "เด้งไปหน้าฟีด" ทั้งที่ URL เข้าถูกหน้าแล้ว — ตัวชี้ขาด
+    # คือ **URL หลังเปิด** ไม่ใช่ข้อความบนหน้า
+    #
+    # โพสต์เปิดเป็น **หน้าต่างซ้อน** (`div[role="dialog"]`) ไม่ใช่หน้าเต็ม
+    # จึงต้องเลือกกล่องที่มีข้อความโพสต์ของเราอยู่จริง
+    landed = page.url
+    body = ""
+    holder_node = None
+    for node in page.query_selector_all('div[role="dialog"], div[role="article"]'):
+        try:
+            text = (node.inner_text() or "").strip()
+        except Exception:
+            continue
+        if expect and expect.strip()[:14] in text:
+            body = text
+            holder_node = node
+            break
+    if not body:
+        on_post = "/posts/" in landed or "/permalink/" in landed
+        return {"reachable": False,
+                "note": ("เข้าถึงหน้าโพสต์แล้วแต่หากล่องโพสต์ไม่เจอ" if on_post
+                         else f"ไม่ได้อยู่หน้าโพสต์ — {landed[:70]}"),
+                "reactions": None, "comments": None, "shares": None,
+                "comments_list": []}
+
     blocked = ("เนื้อหานี้ไม่พร้อมใช้งาน", "content isn't available",
-               "คุณต้องเข้าสู่ระบบ", "log in to continue",
-               "เข้าร่วมกลุ่มนี้", "join this group")
+               "คุณต้องเข้าสู่ระบบ", "log in to continue")
     if any(mark.lower() in body.lower() for mark in blocked):
         return {"reachable": False, "note": body.strip().splitlines()[0][:120],
                 "reactions": None, "comments": None, "shares": None,
                 "comments_list": []}
 
+    # **อ่านยอดจากป้ายบอกของปุ่ม (aria-label) ไม่ใช่จากข้อความบนหน้า**
+    #
+    # ไล่ผิดทางมาสามรอบก่อนจะเจอ (28 ส.ค. 2569) — บนหน้าเว็บเวอร์ชันคอม
+    # ยอดถูกวาดเป็น **ตัวเลขเปล่าๆ ไม่มีคำกำกับ** อยู่ใต้คำว่า "โพสต์ที่แชร์"
+    #
+    #     'โพสต์ที่แชร์'
+    #     '1'          ← ตัวไหนคืออะไร บอกไม่ได้จากข้อความ
+    #     '2'
+    #
+    # ส่วนป้ายบอกของปุ่มเขียนครบ **"ถูกใจ: 1 คน"** — อ่านจากตรงนี้จึงแม่นกว่า
+    # และไม่พังเวลา Facebook ขยับตำแหน่งตัวเลข
     counts = {"reactions": None, "comments": None, "shares": None}
-    for line in body.splitlines():
-        low = line.strip()
-        if not low:
-            continue
-        if counts["comments"] is None and ("ความคิดเห็น" in low or "comment" in low.lower()):
+    labels = []
+    try:
+        for element in holder_node.query_selector_all("[aria-label]"):
+            text = element.get_attribute("aria-label") or ""
+            if text:
+                labels.append(text)
+    except Exception:
+        labels = []
+    for text in labels:
+        low = text.strip()
+        if counts["reactions"] is None and ("ถูกใจ:" in low or "แสดงความรู้สึก" in low
+                                            or "reaction" in low.lower()):
+            value = parse_count(low)
+            if value is not None:
+                counts["reactions"] = value
+        if counts["comments"] is None and ("ความคิดเห็น" in low and "รายการ" in low):
             counts["comments"] = parse_count(low)
-        if counts["shares"] is None and ("แชร์" in low or "share" in low.lower()):
+        if counts["shares"] is None and ("แชร์" in low and ("ครั้ง" in low or "คน" in low)):
             counts["shares"] = parse_count(low)
-        if counts["reactions"] is None and ("ความรู้สึก" in low or "reaction" in low.lower()):
-            counts["reactions"] = parse_count(low)
+
+    # นับคอมเมนต์จากป้าย "ความคิดเห็นจาก <ชื่อ> เมื่อ ..." ที่มีหนึ่งอันต่อคอมเมนต์
+    # เชื่อถือได้กว่าตัวเลขสรุปที่บางทีไม่โผล่เลยเมื่อมีคอมเมนต์น้อย
+    if counts["comments"] is None:
+        seen_comments = sum(1 for x in labels if x.startswith("ความคิดเห็นจาก"))
+        counts["comments"] = seen_comments
 
     comments = []
     try:
-        nodes = page.query_selector_all('div[role="article"]')
+        # อ่านคอมเมนต์จากในกล่องโพสต์เท่านั้น — `div[role="article"]` ทั้งหน้า
+        # มี 8 กล่อง ซึ่งส่วนใหญ่เป็นโพสต์คนอื่นในฟีดที่อยู่ข้างหลังหน้าต่างซ้อน
+        holder = None
+        for node in page.query_selector_all('div[role="dialog"]'):
+            try:
+                if expect and expect.strip()[:14] in (node.inner_text() or ""):
+                    holder = node
+                    break
+            except Exception:
+                continue
+        nodes = (holder or page).query_selector_all('div[role="article"]')
         for order, node in enumerate(nodes, 1):
             text = (node.inner_text() or "").strip()
             if not text or len(text) < 2:
@@ -310,8 +413,10 @@ def check_once() -> dict:
         try:
             for post in posts:
                 label = f"{post['group_name'][:26]} ({post['account']})"
+                # ใช้ที่อยู่เต็มถ้าแปลงได้ — ลิงก์แชร์เด้งกลับหน้าฟีด
+                target = canonical_url(post["post_url"]) or post["post_url"]
                 try:
-                    result = read_post(page, post["post_url"])
+                    result = read_post(page, target, expect=post.get("caption", ""))
                 except Exception as error:
                     log(f"  ❌ {label}: {type(error).__name__}: {str(error)[:90]}")
                     continue

@@ -6892,10 +6892,34 @@ async def posted_view() -> dict:
         days: dict[str, int] = {}
         for row in rows:
             days[str(row["at"])[:10]] = days.get(str(row["at"])[:10], 0) + 1
+        # **ยอดโควตาวันนี้ — คิดที่นี่ ไม่ให้หน้าเว็บนับเอง**
+        #
+        # ถ้าปล่อยให้หน้าเว็บนับจาก rows เอง มันจะนับผิดสองทาง
+        #   · วันของโควตาเริ่มตี 4 ไม่ใช่เที่ยงคืน (`publish_order.posting_day`)
+        #   · โควตาแยกรายบัญชี ต้องรู้ว่าบัญชีไหนผูกกับปลายทางไหน
+        # แล้วเลขบนหน้าเว็บจะไม่ตรงกับด่านที่กั้นจริงตอนโพสต์ ซึ่งอันตรายกว่า
+        # ไม่มีเลขเลย เพราะคนจะเชื่อเลขที่เห็นแล้วไล่บั๊กผิดทาง (กติกาข้อ 2.3)
+        runs = clip_store.list_runs(DATA_DIR) + clip_store.list_done(DATA_DIR)
+        quota = []
+        for target in ("shopee_video", "facebook_reels", "tiktok"):
+            used = publish_order.day_used(runs, target)
+            quota.append({
+                "target": target,
+                "name": publish_order.NAMES.get(target, target),
+                "used": used,
+                "limit": publish_order.DAY_LIMIT,
+                "left": max(0, publish_order.DAY_LIMIT - used),
+                "full": used >= publish_order.DAY_LIMIT,
+                "text": publish_order.quota_check(runs, target)[1],
+            })
+
         return {
             "rows": rows,
             "total": len(rows),
             "by_day": [{"day": d, "count": c} for d, c in days.items()],
+            "quota": quota,
+            "quota_note": ("โควตานับเป็นวันที่เริ่มตี 4 — ลงตอนตี 3 "
+                           "ถือว่ายังเป็นยอดของเมื่อวาน"),
             # เคสว่างต้องบอกให้ชัดว่าทำไมว่าง ไม่ใช่ปล่อยหน้าเปล่า
             "empty_note": ("ระบบยังไม่เคยจดว่าลงคลิปไหนไปเลย — "
                            "คลิปที่โพสต์เองด้วยมือต้องกดปุ่ม ✅ บอกระบบก่อน"

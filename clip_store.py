@@ -988,6 +988,9 @@ def posted_history(root: Path) -> list[dict]:
                 "target": target,
                 "at": info.get("posted_at") or "",
                 "url": info.get("url") or "",
+                # **ลงด้วยบัญชีไหน** — โควตา 70/วัน นับแยกรายบัญชี
+                # ถ้าสมุดไม่บอกบัญชี คนอ่านจะแยกไม่ออกว่าทำไมยอดถึงนับแบบนั้น
+                "account": info.get("account") or "",
                 # เคยถอนแล้วจดใหม่ไหม — ไว้ไล่ดูตอนสงสัยว่าจดผิด
                 "reposted": bool(info.get("unposted_at")),
             })

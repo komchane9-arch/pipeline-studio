@@ -1796,8 +1796,40 @@ def _device_rows() -> list[dict]:
             "is_default": serial == device_book.default_serial(),
             "holder": phone_gate.held_by(serial),
             "job": fb_runner.running().get(serial, ""),
+            # **เครื่องนี้เทรนผังลงปลายทางไหนไว้แล้วบ้าง**
+            #
+            # หน้าเว็บต้องใช้ตัวนี้คัดว่าจะให้เลือกเครื่องไหนตอนจะลงคลิป
+            # **ห้ามคัดด้วยสายงาน (`lanes`) เด็ดขาด** — สายงานบอกว่า "งานสายไหน
+            # เป็นเจ้าของเครื่องนี้" ไม่ได้บอกว่า "เครื่องนี้ลงคลิปเป็นไหม"
+            # สองอย่างนี้ไม่เท่ากัน และเคยพลาดมาแล้วจริง (28 ส.ค. 2569):
+            # กล่องเลือกเครื่องคัดด้วย lane="post" จึง **ซ่อนเครื่องคลิปที่เทรน
+            # ไว้ครบ 20 จุด** แล้วเสนอเครื่องสำรองที่ยังไม่เคยเทรนสักจุดแทน
+            "flows": _flow_summary(serial),
         })
     return rows
+
+
+def _flow_summary(serial: str) -> dict:
+    """ปลายทางไหนพร้อมลงจริงบ้างสำหรับเครื่องนี้
+
+    **พร้อม = เทรนพิกัดไว้แล้ว** ไม่ใช่ "มีผัง" — ผังมีให้ทุกเครื่องตั้งแต่แรก
+    เพราะเป็นแบบร่างกลาง ส่วนพิกัดต้องผู้ใช้เทรนเองทีละจุดบนเครื่องนั้น
+    ดูแต่จำนวนขั้นจึงเห็นทุกเครื่องพร้อมหมด ทั้งที่กดจริงแล้วล้มตั้งแต่ขั้นแรก
+    """
+    out: dict = {}
+    for target in ("shopee_video", "facebook_reels"):
+        try:
+            store = _flow_store(serial)
+            points = len(store.positions(target))
+            steps = len(store.sequence(target))
+        except Exception:               # ปลายทางที่เครื่องนี้ไม่มีผัง
+            continue
+        out[target] = {
+            "points": points,
+            "steps": steps,
+            "trained": points > 0,
+        }
+    return out
 
 
 @app.get("/api/devices")

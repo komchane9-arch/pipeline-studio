@@ -109,13 +109,42 @@ LISTEN_ASK = (
     '{"has_speech": true/false, "language": "th"/"en"/"other"/"none", '
     '"transcript": "ข้อความที่ได้ยินทั้งหมด", "other_sound": "เสียงอื่นที่ได้ยิน", '
     '"clear": true/false, "has_text": true/false, '
+    '"speech_ok": true/false, "speech_problem": "ถ้าพูดไม่รู้เรื่องบอกว่าเพราะอะไร", '
+    '"split_screen": true/false, "split_seen": "แบ่งกี่ช่อง ฉากไหน", '
     '"text_seen": "ตัวอักษรที่อ่านได้จากภาพ", "text_readable": true/false, '
     '"text_problem": "ถ้าอ่านไม่ออกบอกว่าเพราะอะไร", '
     '"third_party": true/false, "third_party_seen": "เห็นอะไรบ้าง ฉากไหน"}\n\n'
     "has_speech = มีคน**พูดเป็นคำ**จริงๆ ไหม — ดนตรี เสียงบรรยากาศ เสียงฮัม "
     "หรือเสียงคล้ายพูดที่ฟังไม่ออกว่าเป็นคำ ให้ตอบ false\n"
-    "clear = เสียงพูดชัดพอที่คนฟังรู้เรื่องไหม\n"
+    "clear = เสียงพูดชัดพอที่คนฟังรู้เรื่องไหม (เรื่องคุณภาพเสียง)\n"
+    # ผู้ใช้สั่งเพิ่ม 28 ส.ค. 2569: "เอาคลิปที่พูดไทยไม่รู้เรื่อง"
+    #
+    # **คนละเรื่องกับ `clear`** — `clear` ถามว่าเสียงชัดไหม (ดัง เบา แตก อู้อี้)
+    # ส่วนข้อนี้ถามว่า **สิ่งที่พูดออกมาเป็นภาษาไทยที่มีความหมายไหม**
+    # Veo ออกเสียงไทยเพี้ยนบ่อยจนได้เสียงที่ "ชัดมาก" แต่ไม่เป็นคำ ซึ่งด่านเดิม
+    # ปล่อยผ่านทั้งคู่ เพราะ clear = true และ has_speech = true
+    "speech_ok = สิ่งที่พูดออกมา **เป็นภาษาไทยที่มีความหมายจริง** ไหม\n"
+    "  · ออกเสียงเพี้ยนจนไม่เป็นคำไทย · ผสมเสียงมั่วคล้ายไทยแต่แปลไม่ได้ = false\n"
+    "  · อ่านคำอังกฤษ/ตัวเลขผิดจนฟังไม่รู้ว่าคืออะไร = false\n"
+    "  · วรรณยุกต์ผิดจนกลายเป็นคนละคำ เช่น “เก้าอี้” เป็น “เกาอี” = false\n"
+    "  · ประโยคขาดกลางคัน จับใจความไม่ได้ = false\n"
+    "  · ฟังแล้วเข้าใจว่าพูดอะไร แม้สำเนียงไม่เป๊ะ = true\n"
+    "  · พูดภาษาอื่นที่ไม่ใช่ไทยและฟังรู้เรื่อง = true (ไปดูที่ language แทน)\n"
+    "speech_problem = ถ้า false ให้ยกคำที่ผิดมาให้ดูด้วย ไม่ใช่บอกลอยๆ\n"
     "transcript = ถอดเท่าที่ได้ยินจริง ห้ามเดาเติมเอง ไม่มีเสียงพูดให้ใส่ค่าว่าง\n\n"
+    # ผู้ใช้สั่งเพิ่ม 28 ส.ค. 2569: "เอาคลิปที่ในคลิปแบ่งหน้าเป็นแบบ storyboard"
+    #
+    # Veo เข้าใจคำสั่งที่เขียนเป็นฉากๆ ผิดเป็นบางครั้ง แล้ววาด **กระดานสตอรีบอร์ด**
+    # ออกมาจริงๆ คือแบ่งจอเป็นช่องๆ ใส่ทุกฉากลงไปพร้อมกัน แทนที่จะเล่นทีละฉาก
+    # คลิปแบบนี้ใช้ไม่ได้เลย แต่ด่านเดิมมองไม่เห็นเพราะภาพชัด เสียงครบ ตัวอักษรอ่านออก
+    "split_screen = เฟรมถูก**แบ่งเป็นหลายช่องพร้อมกัน**ไหม เหมือนกระดาน"
+    "สตอรีบอร์ดหรือตารางภาพ แทนที่จะเป็นภาพเดียวเต็มจอ\n"
+    "  · แบ่ง 2 ช่องขึ้นไป มีเส้นคั่นหรือขอบขาวคั่นชัดเจน = true\n"
+    "  · มีเลขฉากหรือคำว่า Scene / ฉากที่ กำกับแต่ละช่อง = true\n"
+    "  · ภาพซ้อนภาพแบบกรอบเล็กในกรอบใหญ่ทั้งคลิป = true\n"
+    "  · ภาพเดียวเต็มจอ ตัดสลับฉากไปตามเวลา = false (แบบนี้ถูกต้อง)\n"
+    "  · มีแถบดำบนล่างหรือซ้ายขวาเฉยๆ = false (แค่สัดส่วนภาพ ไม่ใช่การแบ่งช่อง)\n"
+    "split_seen = ถ้า true บอกว่าแบ่งกี่ช่องและเห็นในเฟรมไหน\n\n"
     "has_text = ในภาพมีตัวอักษรที่**ตั้งใจใส่มาเป็นข้อความโฆษณา**ไหม "
     "(ไม่นับตัวอักษรบนกล่องสินค้า ป้ายในฉาก หรือหน้าจอในภาพ)\n"
     "text_readable = ตัวอักษรนั้น **อ่านออกเป็นคำจริง สะกดครบ** ไหม\n"
@@ -556,6 +585,12 @@ def check(path, api_key: str = "", script=None, log=print) -> dict:
     # ไม่งั้นวันที่ตรวจไม่ได้ คลิปที่มีโลโก้จะขึ้นเครื่องหมายถูกเหมือนคลิปที่สะอาด
     result["third_party"] = None
     result["third_party_seen"] = ""
+    # สองข้อที่ผู้ใช้สั่งเพิ่ม 28 ส.ค. 2569 — ตั้งต้นเป็น None ("ยังไม่ได้ดู")
+    # ด้วยเหตุผลเดียวกับข้างบน: ยังไม่ได้ดู กับ ดูแล้วไม่เจอ ต้องแยกจากกัน
+    result["speech_ok"] = None
+    result["speech_problem"] = ""
+    result["split_screen"] = None
+    result["split_seen"] = ""
 
     if not result["has_audio_track"]:
         result["speech_note"] = "ไม่มีแทร็กเสียงจึงไม่ต้องฟัง"
@@ -619,11 +654,31 @@ def check(path, api_key: str = "", script=None, log=print) -> dict:
                         + (f": {result['third_party_seen']}"
                            if result["third_party_seen"] else "")
                     )
+            # ---- จอแบ่งช่องแบบสตอรีบอร์ด (28 ส.ค. 2569) ----------------
+            # ดูจากภาพนิ่ง จึงตอบได้แม้ไม่มีเสียงพูด — วางไว้นอกบล็อกเสียงพูด
+            if "split_screen" in heard:
+                result["split_screen"] = bool(heard.get("split_screen"))
+                result["split_seen"] = str(heard.get("split_seen") or "").strip()[:150]
+                if result["split_screen"]:
+                    problems.append(
+                        "จอถูกแบ่งเป็นช่องแบบกระดานสตอรีบอร์ด ไม่ใช่คลิปจริง"
+                        + (f" — {result['split_seen']}" if result["split_seen"] else "")
+                    )
             if not result["has_speech"]:
                 other = result["other_sound"] or "ไม่มีเสียงพูด"
                 problems.append(f"ไม่มีเสียงพูด (ได้ยินแต่{other})")
             elif not result["speech_clear"]:
                 problems.append("เสียงพูดฟังไม่ค่อยชัด")
+            # ---- พูดไทยรู้เรื่องไหม (28 ส.ค. 2569) ---------------------
+            # ถามเฉพาะตอนมีเสียงพูดจริง ไม่งั้นจะได้คำตอบมั่วจากความเงียบ
+            if result["has_speech"] and "speech_ok" in heard:
+                result["speech_ok"] = bool(heard.get("speech_ok"))
+                result["speech_problem"] = str(heard.get("speech_problem") or "")[:150]
+                if not result["speech_ok"]:
+                    problems.append(
+                        "พูดไทยไม่รู้เรื่อง"
+                        + (f" — {result['speech_problem']}" if result["speech_problem"] else "")
+                    )
             # เทียบกับบทเป็น **คำขอที่สอง** และเฉพาะตอนได้ยินเสียงพูดจริงเท่านั้น
             # เทียบไม่ได้ไม่ทำให้ผลตรวจหลักเสีย — ของหลักคือ 1080p กับมีเสียงพูดไหม
             if script and result["has_speech"]:
@@ -648,8 +703,24 @@ def check(path, api_key: str = "", script=None, log=print) -> dict:
     #
     # ตัวอักษรอ่านไม่ออกก็โพสต์ไม่ได้เหมือนกัน — คนดูเห็นคำที่สะกดผิดเต็มจอ
     # คลิปที่ไม่มีตัวอักษรเลยไม่ถือว่าตก (text_readable = None) เพราะไม่มีอะไรให้อ่าน
+    # ผู้ใช้สั่ง 28 ส.ค. 2569 ให้ตกทั้ง 4 ข้อนี้ — ก่อนหน้านั้นตกแค่ 3 ข้อแรก
+    #
+    #   1. ไม่มีเสียง                  has_speech
+    #   2. พูดไทยไม่รู้เรื่อง            speech_ok      ← เพิ่มใหม่
+    #   3. ตัวอักษรอ่านไม่ออก           text_readable
+    #   4. จอแบ่งช่องแบบสตอรีบอร์ด      split_screen   ← เพิ่มใหม่
+    #
+    # เขียนเป็น `is not False` / `is not True` ทุกตัวโดยตั้งใจ **ห้ามเปลี่ยนเป็น
+    # ค่าความจริงธรรมดา** เพราะค่า None แปลว่า "ยังไม่ได้ตรวจข้อนี้" ซึ่งต้องไม่ทำให้
+    # คลิปตก ไม่งั้นวันที่ Gemini ตอบไม่ครบทุกช่อง คลิปดีจะตกยกคิว
+    # (ส่วน "ตรวจเสียงพูดไม่ได้เลย" ยังตกอยู่ เพราะ has_speech เป็น None = ไม่ผ่าน
+    #  ข้อนั้นตั้งใจให้เข้มกว่า ดูเหตุผลที่หัวไฟล์)
     result["ok"] = bool(
-        result["hd"] and result["has_speech"] and result["text_readable"] is not False
+        result["hd"]
+        and result["has_speech"]
+        and result["speech_ok"] is not False
+        and result["text_readable"] is not False
+        and result["split_screen"] is not True
     )
     return result
 
@@ -703,6 +774,22 @@ def chips(result: dict) -> list[dict]:
             # อ่านผ่านๆ แล้วนึกว่าผ่าน ซึ่งคือสิ่งที่ป้ายสีมีไว้กันตั้งแต่แรก
             state = "warn"
         out.append({"key": "speech", "state": state, "text": voice_text, "detail": ""})
+        # ป้ายแยกสำหรับ "พูดไทยรู้เรื่องไหม" (28 ส.ค. 2569)
+        #
+        # **ต้องเป็นคนละป้ายกับ "มีเสียงพูด"** เพราะสองข้อนี้ตกคนละสาเหตุและ
+        # แก้คนละทาง — ไม่มีเสียง = Veo เจนเสียงล้ม ต้องเจนใหม่ · พูดไม่รู้เรื่อง =
+        # บทพูดสะกดแบบที่ Veo อ่านไม่ถูก ต้องไปแก้บทก่อน (ดู thai_speech.py)
+        sense = result.get("speech_ok")
+        if sense is True:
+            out.append({"key": "sense", "state": "ok",
+                        "text": "✅ พูดไทยรู้เรื่อง", "detail": ""})
+        elif sense is False:
+            out.append({"key": "sense", "state": "fail",
+                        "text": "❌ พูดไทยไม่รู้เรื่อง",
+                        "detail": str(result.get("speech_problem") or "")[:90]})
+        else:
+            out.append({"key": "sense", "state": "unknown",
+                        "text": "❓ ยังไม่ได้ตรวจว่าพูดรู้เรื่องไหม", "detail": ""})
     elif speech is False:
         heard = result.get("other_sound") or ""
         out.append({
@@ -750,6 +837,19 @@ def chips(result: dict) -> list[dict]:
     else:
         out.append({"key": "ip", "state": "unknown",
                     "text": "❓ ยังไม่ได้ตรวจของมีลิขสิทธิ์บนจอ", "detail": ""})
+
+    # ---- จอแบ่งช่องแบบกระดานสตอรีบอร์ด (28 ส.ค. 2569) ------------------
+    split = result.get("split_screen")
+    if split is True:
+        out.append({"key": "split", "state": "fail",
+                    "text": "❌ จอถูกแบ่งเป็นช่องแบบสตอรีบอร์ด",
+                    "detail": str(result.get("split_seen") or "")[:90]})
+    elif split is False:
+        out.append({"key": "split", "state": "ok",
+                    "text": "✅ ภาพเดียวเต็มจอ ไม่ได้แบ่งช่อง", "detail": ""})
+    else:
+        out.append({"key": "split", "state": "unknown",
+                    "text": "❓ ยังไม่ได้ตรวจว่าจอแบ่งช่องไหม", "detail": ""})
     return out
 
 

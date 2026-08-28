@@ -5365,6 +5365,32 @@ def _fb_serial(serial: str = "", *, allow_default: bool = True) -> str:
     ยังตรวจว่าเครื่องนั้นเสียบอยู่จริงไหมเหมือนเดิม — ทะเบียนรู้ว่า "ควรใช้เครื่องไหน"
     แต่ไม่รู้ว่า "ตอนนี้สายหลุดหรือเปล่า"
     """
+    # **บัญชีมาก่อนเสมอ** (แก้ 28 ส.ค. 2569)
+    #
+    # เจอจริงวันนั้น: งานที่สั่งผ่าน @Richmantai1Bot ใช้กลุ่มของบัญชี Kp Oo ถูกต้อง
+    # แต่ไปลงเครื่อง Xiaomi ซึ่งเป็น "เครื่องตัวหลัก" ที่ตั้งไว้ ไม่ใช่เครื่องที่
+    # ผูกบัญชี Kp Oo ไว้ — ผลคือเปิดกลุ่มไม่เข้าเลยสักกลุ่ม เพราะบัญชีบนเครื่องนั้น
+    # ไม่ได้เป็นสมาชิก (log: "ยังไม่เข้ากลุ่ม — ปิดแอปแล้วเปิดใหม่")
+    #
+    # รากเหง้า: ตัวเลือกเครื่องถามแค่ "สายโพสต์มีเครื่องไหนบ้าง" แล้วถอยไปใช้
+    # เครื่องตัวหลัก **ไม่เคยถามว่างานนี้เป็นของบัญชีไหน** ทั้งที่ทะเบียนผูก
+    # บัญชีกับเครื่องไว้แล้ว (หนึ่งเครื่อง = หนึ่งไอดี ตาม CLAUDE.md ข้อ 9)
+    #
+    # โชคดีที่ครั้งนั้นบัญชีไม่ได้เป็นสมาชิกกลุ่ม จึงล้มตั้งแต่กลุ่มแรก
+    # **ถ้าบังเอิญเป็นสมาชิก จะโพสต์ขึ้นจริงในนามบัญชีผิด ซึ่งถอนคืนไม่ได้**
+    if not serial:
+        try:
+            account = fb_auto_post.posting_account()
+        except studio_shared.AccountMissing:
+            account = ""
+        if account:
+            try:
+                serial = device_book.device_for_account(account)
+            except device_book.DeviceError:
+                # บัญชีนี้ยังไม่ได้ผูกกับเครื่องไหน — ตกไปใช้ทางเดิมข้างล่าง
+                # แต่ต้องบอกให้รู้ ไม่ใช่เงียบแล้วไปลงเครื่องที่เดาเอา
+                append_log("publish", f"⚠️ บัญชี {account} ยังไม่ได้ผูกกับมือถือ "
+                                      "เครื่องไหน — จะใช้เครื่องตัวหลักแทน")
     try:
         picked = device_book.resolve(serial, lane="post", allow_default=allow_default)
     except device_book.DeviceError as error:
@@ -5394,13 +5420,34 @@ def _bot_channel(bot_id: str = "") -> tuple[str, str, str]:
             str(config.get("telegram_main_account") or ""))
 
 
+def _bot_name(bot_id: str = "") -> str:
+    if not bot_id:
+        return "บอทหลัก"
+    bot = next((b for b in extra_bots() if b.get("id") == bot_id), {})
+    return str(bot.get("name") or bot_id)
+
+
 def _as_bot(handler, bot_id: str = ""):
     """ห่อตัวจัดการข้อความให้ทำงาน **ในนามบอทตัวที่รับสารมา**
 
     ทั้งการตอบกลับและการเขียนแฟ้มจะไปช่อง/บัญชีของบอทตัวนั้น ไม่ใช่ของบอทหลัก
+
+    **จดทุกครั้งว่าตอบออกทางไหน** — ของเดิมไม่เคยจด พอเจ้าของบอกว่า "ทักตัวหนึ่ง
+    แล้วอีกตัวเด้งตอบ" จึงพิสูจน์ไม่ได้เลยว่าใครเป็นคนตอบ ต้องไปรบกวนให้ทดสอบซ้ำ
+    (CLAUDE.md ข้อ 2.4 — ห้ามปล่อยให้ขั้นตอนใดเป็นกล่องดำ)
     """
     def wrapped(*args, **kwargs):
         token, chat_id, account = _bot_channel(bot_id)
+        name = _bot_name(bot_id)
+        if not token or not chat_id:
+            # **ต้องดัง** ไม่งั้นจะเงียบๆ ถอยไปใช้บอทหลัก แล้วปลายทางเห็นบอทผิดตัว
+            # ซึ่งเป็นอาการเป๊ะที่เจ้าของเจอเมื่อ 28 ส.ค. 2569
+            append_log("input", f"[{name}] ⚠️ ช่องไม่ครบ (โทเคน="
+                                f"{'มี' if token else 'ไม่มี'} chat={chat_id or 'ว่าง'}) "
+                                "— จะตอบออกทางบอทหลักแทน")
+        else:
+            append_log("input", f"[{name}] รับข้อความ → ตอบกลับทางตัวเอง "
+                                f"· บัญชี {account or '(ยังไม่ได้ผูก)'}")
         with reply_as(token, chat_id, account):
             return handler(*args, **kwargs)
     return wrapped

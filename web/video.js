@@ -927,6 +927,8 @@ function autoToggle(bucket) {
     event.stopPropagation();
     const next = !button.classList.contains("is-on");
     // เปิดของที่โพสต์จริงต้องถามก่อน ถอนคืนไม่ได้ · ปิดไม่ต้องถาม
+    // กองที่มี `risk` = กดแล้ว **โพสต์ขึ้นจริงเอง** ไม่ใช่แค่กดผ่านขั้นตอน
+    // (TikTok · Shopee Video · Facebook Reels) ถอนคืนไม่ได้ จึงต้องถามก่อนเปิด
     if (next && auto.risk
         && !window.confirm(`${auto.risk}
 
@@ -1009,9 +1011,15 @@ function paintBoard() {
     );
     if (bucket.short) button.classList.add("is-short");
     // ห่อเป็นช่องเดียวกัน: สวิตช์อยู่บน · กล่องอยู่กลาง · โควตาอยู่ล่าง
-    // `auto: null` = กองนี้ไม่มีขั้นอนุมัติ (Shopee/Facebook เป็น "สั่งโพสต์ด้วย
-    // เครื่องไหน" ต้องเลือกมือถือเสมอและถอนไม่ได้) — ห้ามวาดสวิตช์
-    // `quota: null` = ไม่มีโควตา ห้ามวาด x/70
+    //
+    // **วาดตามที่ API ส่งมา ไม่ตัดสินจากชื่อกอง** — `auto: null` = กองนั้นยังไม่มี
+    // ขั้นอนุมัติอัตโนมัติ · `quota: null` = ไม่มีโควตา ห้ามวาด x/70
+    //
+    // ⚠️ **อย่าฝังรายชื่อกองไว้ในโค้ดนี้** ตอนแรกสเปคบอกว่า Shopee Video กับ
+    // Facebook Reels "ไม่มีขั้นอนุมัติ" แล้วเจ้าของสั่งกลับในวันเดียวกันว่า
+    // *"shopee กับ facebook reels ทำโพสต์อัตโนมัติด้วยนะ"* — ถ้าตอนนั้นเขียน
+    // ชื่อกองไว้ตายตัว จะต้องมาไล่แก้หน้าเว็บอีกรอบ
+    // เขียนแบบอ่านจาก API ตั้งแต่แรก พอเซิร์ฟเวอร์ใส่ `auto` ให้ ปุ่มก็ขึ้นเอง
     const cell = el("div", { className: "board-cell" });
     if (bucket.auto) cell.append(autoToggle(bucket));
     cell.append(button);

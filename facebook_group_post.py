@@ -1111,7 +1111,9 @@ COMMENT_TIME_HINTS = ["เมื่อสักครู่", "นาที", "�
 COMMENT_HEADER_GAP = 200
 # ระยะจากท้ายข้อความคอมเมนต์ลงไปถึงป้ายเวลา (พิกัดอ้างอิงบนจอ 1080x2400)
 # กว้างกว่าฝั่งบนมาก เพราะการ์ดลิงก์/รูปแนบมาคั่นระหว่างข้อความกับเวลาได้
-COMMENT_FOOTER_GAP = 700
+# ป้ายที่บอกว่า "ตรงนี้คือหัวของคอมเมนต์อันหนึ่ง" — ใช้แบ่งว่าเวลาที่เจอ
+# เป็นของคอมเมนต์เราหรือของอันถัดไป แทนการเดาระยะพิกเซล
+COMMENT_HEAD_MARKS = ("รูปโปรไฟล์ของ", "profile picture of")
 
 
 NO_COMMENT = {"commented": False, "comment_liked": False, "comment_count": 0}
@@ -1742,33 +1744,33 @@ def _comment_is_live(xml: str, probe: str) -> bool:
             break
     if top is None:
         return False
-    # **ป้ายเวลาอยู่ได้ทั้งเหนือและใต้ข้อความ แล้วแต่รุ่นแอป/ขนาดจอ**
-    # (แก้ 28 ส.ค. 2569)
+    # **หาป้ายเวลาแบบไม่ผูกกับระยะพิกเซลเลย** (แก้รอบสอง 28 ส.ค. 2569)
     #
-    # เดิมมองหาเฉพาะ "เหนือข้อความ" ตามโครง [ชื่อ · เวลา] / [ข้อความ]
-    # แต่วัดกับเครื่องจริง (REDMI 15C 720x1600) พบว่าแอปรุ่นนี้วางเวลา **ใต้**
-    # ข้อความ และมีการ์ดลิงก์ Shopee คั่นกลางอีก
+    # รอบแรกใช้ระยะตายตัวขึ้น-ลง แล้วยังพลาด เพราะ **คอมเมนต์ที่แนบรูปสูงมาก**
+    # วัดจากเครื่องจริง (REDMI 15C):
+    #     ไม่มีรูป  ข้อความจบ y=1194 · เวลา y=1383  ห่าง 189
+    #     มีรูป     ข้อความจบ y=636  · เวลา y=1383  ห่าง 747
+    # เผื่อระยะเท่าไรก็ยังมีเคสที่เกิน — และเผื่อมากไปก็ไปคว้าเวลาของคอมเมนต์ถัดไป
     #
-    #     y= 874  Kp Oo              ← หัวแถว ไม่มีเวลา
-    #     y= 913  ข้อความคอมเมนต์
-    #     y=1211  ลิงก์ที่แชร์: ...   ← การ์ดลิงก์คั่น
-    #     y=1383  "2 นาที"           ← เวลาอยู่ตรงนี้ ห่างลงไป 470 จุด
+    # เปลี่ยนมาใช้กติกาที่ตรงความจริงกว่า: **ไล่ลงจากข้อความของเรา เจอป้ายเวลา
+    # ก่อนเจอหัวคอมเมนต์ถัดไป = เป็นเวลาของคอมเมนต์เรา** ไม่ต้องเดาระยะ
+    # และใช้ได้กับจอทุกขนาดโดยไม่ต้องแก้อะไรอีก
     #
-    # ผลคือคอมเมนต์ **ขึ้นจริงแล้วแต่ระบบรายงานว่ายังไม่ขึ้น** ซึ่งอันตรายกว่า
-    # ส่งไม่สำเร็จ เพราะรอบตามเก็บจะส่งซ้ำจนกลายเป็นคอมเมนต์คู่
-    #
-    # ระยะทั้งสองฝั่งเป็น "พิกัดอ้างอิงบนจอ 1080x2400" ต้องย่อขยายตามจอจริง
-    # ไม่งั้นบนจอเตี้ยหน้าต่างจะกว้างเกินไปจนไปคว้าเวลาของคอมเมนต์อื่น
-    height = 0
-    for match in re.finditer(r'bounds="\[\d+,\d+\]\[(\d+),(\d+)\]"', xml):
-        height = max(height, int(match.group(2)))
-    scale = (height / 2400) if height else 1.0
-    above = COMMENT_HEADER_GAP * scale
-    below = COMMENT_FOOTER_GAP * scale
-    for labels, (_, y1, _, _) in iter_nodes(xml):
-        joined = " ".join(labels)
-        if top - above <= y1 <= (bottom or top) + below:
-            if any(hint in joined for hint in COMMENT_TIME_HINTS):
+    # ยังดูฝั่งบนด้วย เพราะแอปบางรุ่นวางเวลาไว้ในหัวแถว [ชื่อ · เวลา]
+    rows = sorted((y1, " ".join(labels)) for labels, (_, y1, _, _) in iter_nodes(xml))
+    head_at = None
+    for y1, joined in rows:
+        if any(mark in joined for mark in COMMENT_HEAD_MARKS):
+            head_at = y1
+        if y1 >= top:
+            break
+    for y1, joined in rows:
+        if y1 < (head_at if head_at is not None else top):
+            continue                      # ยังไม่ถึงหัวคอมเมนต์ของเรา
+        if y1 > (bottom or top) and any(mark in joined for mark in COMMENT_HEAD_MARKS):
+            break                         # ถึงหัวของคอมเมนต์ถัดไปแล้ว หยุด
+        if any(hint in joined for hint in COMMENT_TIME_HINTS):
+
                 return True
         # แถวปุ่มใต้ข้อความ (คอมเมนต์เก่าที่โหลดมาเต็มแล้ว)
         if top <= y1 <= top + COMMENT_REGION_HEIGHT:
@@ -2953,8 +2955,24 @@ def post_to_group(
     link = ""
     if clipboard is not None:
         link = copy_post_link(phone, group_id, caption, clipboard)
+    # **ลำดับที่เจ้าของกำหนด 28 ส.ค. 2569**
+    #
+    #   โพสต์ → ไลก์โพสต์ → คอมเมนต์ 1 → ไลก์คอมเมนต์ 1
+    #                     → คอมเมนต์ 2 → ไลก์คอมเมนต์ 2 → ... (วนเท่าจำนวนคอมเมนต์)
+    #
+    # มีลิงก์แล้วเปิดหน้าโพสต์เดี่ยวก่อน **แล้วทำทั้งไลก์และคอมเมนต์บนหน้านั้น**
+    # ทั้งสองอย่างในฟีดต้องเลื่อนหาโพสต์ตัวเองเหมือนกัน ซึ่งเป็นด่านที่พังบนจอเล็ก
+    # (วัด 28 ส.ค.: ฟีดล้ม 6/6 กลุ่ม · หน้าโพสต์เดี่ยวเจอทุกปุ่มโดยไม่ต้องเลื่อน)
+    on_post_page = False
+    if link:
+        try:
+            on_post_page = open_post_link(phone, link, caption, group_id=group_id)
+        except Exception as error:      # เปิดไม่ได้ต้องไม่ทำให้ทั้งกลุ่มล้ม
+            phone.log(f"  เปิดโพสต์จากลิงก์ไม่ได้ ({error}) — ถอยไปทำในฟีด")
+    if on_post_page:
+        phone.log("  ทำงานบนหน้าโพสต์เดี่ยว (ไม่ต้องเลื่อนหา)")
     # กดถูกใจโดยอ้างอิงแคปชันของเรา ไม่ใช่ "โพสต์บนสุด"
-    liked = like_post_of(phone, caption)
+    liked = like_post_of(phone, caption, single_post=on_post_page)
     outcome = dict(NO_COMMENT)
     if _as_texts(comment):
         # **มีลิงก์แล้วให้เปิดหน้าโพสต์เดี่ยวไปคอมเมนต์ ดีกว่าไล่หาในฟีดมาก**
@@ -2970,19 +2988,10 @@ def post_to_group(
         # ส่วนทางฟีดวันเดียวกันล้ม 6 จาก 6 กลุ่ม ("หาปุ่มคอมเมนต์ไม่เจอ")
         #
         # ยังเก็บทางฟีดไว้เป็นทางถอย — เปิดจากลิงก์ไม่ได้ทุกครั้ง (ดู open_post_link)
-        opened = False
-        if link:
-            try:
-                opened = open_post_link(phone, link, caption, group_id=group_id)
-            except Exception as error:      # เปิดไม่ได้ต้องไม่ทำให้ทั้งกลุ่มล้ม
-                phone.log(f"  เปิดโพสต์จากลิงก์ไม่ได้ ({error}) — ถอยไปคอมเมนต์ในฟีด")
-        if opened:
-            phone.log("  คอมเมนต์บนหน้าโพสต์เดี่ยว (ไม่ต้องเลื่อนหา)")
-            outcome = comment_post_of(phone, caption, comment,
-                                      single_post=True, photos=comment_images)
-        else:
-            # ทำหลังไลก์ เพราะแผงคอมเมนต์เปิดทับหน้าฟีด แล้วหาปุ่มถูกใจไม่เจอ
-            outcome = comment_post_of(phone, caption, comment, photos=comment_images)
+        # ทำหลังไลก์เสมอ — ในฟีดแผงคอมเมนต์เปิดทับหน้าจอแล้วหาปุ่มถูกใจไม่เจอ
+        # ส่วนบนหน้าโพสต์เดี่ยวไม่มีปัญหานั้น แต่คงลำดับเดิมไว้ให้ตรงกับที่สั่ง
+        outcome = comment_post_of(phone, caption, comment,
+                                  single_post=on_post_page, photos=comment_images)
         phone.back()
         time.sleep(1.5)
     return {

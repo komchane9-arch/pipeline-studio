@@ -711,6 +711,29 @@ NUMBERED_RE = re.compile(r"^\s*(?:\d+[.)]|[-•])\s+(.{15,})$", re.M)
 # เผื่อสัญลักษณ์นำหน้าที่ GPT ชอบใส่ (`## Scene 1`, `- Scene 1`, `> Scene 1`)
 SCENE_HEAD_RE = re.compile(r"(?=^[ \t>*#\-]*(?:SCENE|Scene|ซีน)\s*\d+\b)", re.M)
 
+# ทางถอยสำหรับคำตอบรูปแบบเก่าที่ **ทั้งไฟล์เป็นบรรทัดเดียว ไม่มีการขึ้นบรรทัดเลย**
+# (เช่นใบ 27239816564 · 5,320 ตัวอักษร 0 บรรทัด) หัวข้อฉากจึงอยู่กลางบรรทัดเสมอ
+# ตัวบนหาไม่เจอสักจุด — ใช้ตัวนี้แทนเฉพาะตอนนั้น ไม่ใช้เป็นตัวหลักเพราะมันตัด
+# ประโยคที่อ้างถึงฉากก่อนหน้าด้วย ซึ่งเป็นบั๊กที่เพิ่งแก้ไป
+SCENE_HEAD_LOOSE_RE = re.compile(r"(?=(?:\bSCENE\b|\bScene\b|ซีน)\s*\d+\b)")
+
+
+def _split_scenes(reply: str) -> list[str]:
+    """แยกฉากจากคำตอบ — ลองแบบเข้มก่อน ไม่ได้ค่อยถอยไปแบบหลวม
+
+    วัดกับคำตอบจริง 49 ไฟล์ (GPT ถูกสั่งให้ทำ 5 ฉากเสมอ)
+        ตัดทุกที่ที่เจอ Scene   ได้ 5 ฉากถูก 26 ไฟล์   ผิด 23
+        เฉพาะต้นบรรทัด          ได้ 5 ฉากถูก 47 ไฟล์   แยกไม่ได้เลย 2
+        เข้มก่อนแล้วถอย         ได้ 5 ฉากถูก **49 ไฟล์**
+    """
+    for pattern in (SCENE_HEAD_RE, SCENE_HEAD_LOOSE_RE):
+        parts = [part.strip() for part in pattern.split(reply or "")]
+        # ชิ้นแรกมักเป็นคำนำก่อนถึงฉากแรก ตัดทิ้งด้วยเกณฑ์ "ต้องขึ้นต้นด้วยหัวข้อฉาก"
+        scenes = [s for s in parts if len(s) > 60 and pattern.match(s)]
+        if len(scenes) > 1:
+            return scenes
+    return []
+
 
 def extract_prompts(reply: str) -> list[str]:
     """แยก prompt ออกจากคำตอบ
@@ -730,9 +753,7 @@ def extract_prompts(reply: str) -> list[str]:
                 return lines
         return blocks
 
-    scenes = [part.strip() for part in SCENE_HEAD_RE.split(reply or "")]
-    # ชิ้นแรกมักเป็นคำนำก่อนถึงฉากแรก ตัดทิ้งด้วยเกณฑ์ "ต้องขึ้นต้นด้วยหัวข้อฉาก"
-    scenes = [s for s in scenes if len(s) > 60 and SCENE_HEAD_RE.match(s)]
+    scenes = _split_scenes(reply)
     if len(scenes) > 1:
         return scenes
 

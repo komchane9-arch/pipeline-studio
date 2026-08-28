@@ -1021,6 +1021,8 @@ class PostRunner:
                     log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
                     clipboard=clipboard, comment=comment,
                     comment_images=comment_images,
+                    # กลุ่มที่เปิดโหมด "ถูกปฏิเสธแล้วส่งใหม่เหลือแต่ลิงก์"
+                    links_only_groups=job.get("links_only_groups") or (),
                 )
         except studio_shared.PhoneBusy as error:
             error_text = str(error)

@@ -9135,7 +9135,14 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
 
     try:
         fb_runner.for_device(serial).start(
-            job={**job, "groups": groups}, adb=ADB, serial=serial, image=image,
+            job={**job, "groups": groups,
+                 # กลุ่มที่ติดธง "ถูกปฏิเสธแล้วส่งใหม่เหลือแต่ลิงก์"
+                 # เจ้าของสั่ง 28 ส.ค. 2569 ให้ใช้เฉพาะกลุ่มที่เปิดไว้เท่านั้น
+                 "links_only_groups": [
+                     g.get("group_id") for g in fb_groups.listing()
+                     if g.get("links_only_on_reject")
+                 ]},
+            adb=ADB, serial=serial, image=image,
             gap_range=_fb_gap_range(serial),
             on_log=_in_channel(on_log), on_result=_in_channel(on_result),
             on_done=_in_channel(on_done), clipboard=Clipboard,

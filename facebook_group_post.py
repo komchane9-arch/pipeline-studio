@@ -1316,6 +1316,30 @@ def _comment_already_there(phone: Phone, probe: str) -> bool:
 COMMENT_REJECTED_MARKS = ("ถูกปฏิเสธ", "was rejected", "ไม่ผ่านการตรวจสอบ")
 
 
+def comment_probe(text: str) -> str:
+    """ชิ้นข้อความที่ใช้ตามหาคอมเมนต์ของเราบนจอ — ต้อง **ไม่ซ้ำกับใบอื่น**
+
+    ปกติ 10 ตัวแรกก็พอ แต่คอมเมนต์ที่เหลือแต่ลิงก์ขึ้นต้นด้วย "https://s."
+    เหมือนกันหมดทุกใบ — ตามหาแล้วไปเจอคอมเมนต์เก่าแทน แล้วไปกดไลก์ผิดใบ
+    หรือรายงานว่า "มีอยู่แล้ว" ทั้งที่ยังไม่ได้ส่ง (เจอจริง 28 ส.ค. 2569)
+
+    ลิงก์จึงใช้ **ท้ายลิงก์แรก** ซึ่งเป็นรหัสเฉพาะของสินค้าแต่ละชิ้น
+    """
+    body = (text or "").strip()
+    if not body:
+        return ""
+    if body.lower().startswith(("http://", "https://")):
+        # **Facebook แทนตัวลิงก์ด้วยการ์ดสินค้า — ตัว URL ไม่ถูกวาดออกมาเลย**
+        # (วัดจากผังจอจริง 28 ส.ค. 2569) บนจอมีแค่
+        #     "ลิงก์ที่แชร์: s.shopee.co.th, D-Link DWR-U2000 Mobile Ro..."
+        # ตามหาด้วยตัว URL หรือรหัสท้ายลิงก์จึงไม่มีทางเจอ
+        # ใช้ **ชื่อเว็บ** ซึ่งอยู่บนการ์ดแน่นอน และตัวที่เจอก่อนคือใบใหม่สุดเสมอ
+        # เพราะคอมเมนต์ใหม่อยู่บนสุด
+        host = body.split()[0].split("//", 1)[-1].split("/", 1)[0]
+        return host or body[:10]
+    return body[:10]
+
+
 def links_only(text: str) -> str:
     """เหลือแต่ลิงก์ ตัดคำพูดทิ้ง — ใช้ตอนคอมเมนต์เต็มถูกปฏิเสธ
 
@@ -1357,7 +1381,7 @@ def delete_own_comment(phone: Phone, text: str) -> bool:
     ท่าเดียวกับที่คนกดเอง (กติกาข้อ 2.7 ทุกอย่างต้องเป็นการกดจริง)
     ต้องเจอเมนูแบบ **ตรงเป๊ะ** เพราะบนเมนูนั้นมี "รายงาน" อยู่ใกล้ๆ ด้วย
     """
-    probe = (text or "").strip()[:10]
+    probe = comment_probe(text)
     if not probe:
         return False
     spot = None
@@ -1387,7 +1411,8 @@ def delete_own_comment(phone: Phone, text: str) -> bool:
     return gone
 
 
-def comment_single_post(phone: Phone, comment, photos=None) -> dict:
+def comment_single_post(phone: Phone, comment, photos=None,
+                        links_only_on_reject: bool = False) -> dict:
     """คอมเมนต์บน "หน้าโพสต์เดี่ยว" — ช่องพิมพ์ตรึงอยู่ล่างจอตลอด
 
     ไม่ต้องหาแคปชันหรือกดปุ่มเปิดแผงก่อน ต่างจากตอนอยู่ในฟีด
@@ -1400,7 +1425,7 @@ def comment_single_post(phone: Phone, comment, photos=None) -> dict:
     shots = _as_photos(photos, len(texts))
     done, liked = 0, 0
     for order, text in enumerate(texts, 1):
-        if _comment_already_there(phone, text.strip()[:10]):
+        if _comment_already_there(phone, comment_probe(text)):
             phone.log(f"  คอมเมนต์ที่ {order} มีอยู่แล้ว — ไม่ซ้ำ")
             done += 1
             liked += 1 if like_own_comment(phone, text) else 0
@@ -1419,7 +1444,10 @@ def comment_single_post(phone: Phone, comment, photos=None) -> dict:
             #
             # เจ้าของสั่งให้ **ตัดคำพูดออก เหลือแต่ลิงก์ แล้วส่งใหม่**
             # เพราะตัวที่โดนคัดออกคือข้อความโฆษณา ไม่ใช่ตัวลิงก์
-            bare = links_only(text)
+            # **ใช้เฉพาะกลุ่มที่เจ้าของเปิดไว้** (สั่ง 28 ส.ค. 2569: "loop นี้ใช้
+            # เฉพาะกลุ่มรีวิวครอบจักรวาลเท่านั้น") — กลุ่มอื่นคอมเมนต์เต็มผ่านอยู่แล้ว
+            # ตัดคำพูดทิ้งทุกกลุ่มคือทำให้กลุ่มที่ไม่มีปัญหาแย่ลงฟรีๆ
+            bare = links_only(text) if links_only_on_reject else ""
             if bare and bare != text.strip():
                 phone.log("  ไลก์คอมเมนต์ไม่ขึ้น = น่าจะถูกปฏิเสธ "
                           "— ลบแล้วส่งใหม่เหลือแต่ลิงก์")
@@ -1476,7 +1504,8 @@ def _scroll_back_to_caption(phone: Phone, caption: str) -> bool:
 
 
 def comment_post_of(phone: Phone, caption: str, comment,
-                    single_post: bool = False, photos=None) -> dict:
+                    single_post: bool = False, photos=None,
+                    links_only_on_reject: bool = False) -> dict:
     """คอมเมนต์ใต้ "โพสต์ที่มีแคปชันนี้"
 
     ทำทันทีหลังโพสต์ตอนโพสต์ยังอยู่ในฟีด ไม่ใช่ย้อนกลับมาหาทีหลัง —
@@ -1489,7 +1518,7 @@ def comment_post_of(phone: Phone, caption: str, comment,
     if not texts:
         return dict(NO_COMMENT)
     if single_post:
-        return comment_single_post(phone, texts, photos)
+        return comment_single_post(phone, texts, photos, links_only_on_reject)
     shots = _as_photos(photos, len(texts))
     text = texts[0]
     # ขั้นกดถูกใจก่อนหน้านี้เลื่อนลงไปหาแถบปุ่มได้ไกลถึง 5 รอบ (3,500px)
@@ -1555,7 +1584,7 @@ def like_own_comment(phone: Phone, text: str) -> bool:
     คอมเมนต์อยู่แถวเล็กๆ ใต้ตัวข้อความ ต่างจากแถบปุ่มใหญ่ของตัวโพสต์
     ไม่เห็นคอมเมนต์ของเรา = ไม่แตะอะไร เหมือนกติกาของการกดถูกใจโพสต์
     """
-    probe = text.strip()[:10]
+    probe = comment_probe(text)
     if not probe:
         return False
     xml = phone.dump()
@@ -1764,7 +1793,7 @@ def _write_comment(phone: Phone, text: str, photo: Path | None = None,
     phone.type_text(text)
     time.sleep(1.5)
     # ต้องเห็นข้อความบนจอก่อนกดส่ง — broadcast ผ่านไม่ได้แปลว่าข้อความเข้าช่องจริง
-    probe = text.strip()[:10]
+    probe = comment_probe(text)
     typed = phone.dump()
     if not screen_has(typed, probe):
         phone.log("  พิมพ์คอมเมนต์แล้วแต่ข้อความไม่ขึ้นบนจอ")
@@ -2957,7 +2986,7 @@ def keep_failure_screen(phone: Phone, step: str) -> None:
 def post_to_group(
     phone: Phone, group_id: str, caption: str, dry_run: bool = False,
     clipboard=None, comment: str = "", photo_count: int = 1,
-    comment_images=None, stop=lambda: False,
+    comment_images=None, stop=lambda: False, links_only_on_reject: bool = False,
 ) -> dict:
     """โพสต์ลงกลุ่มเดียว — คืนผลว่าไปถึงขั้นไหน
 
@@ -3087,7 +3116,8 @@ def post_to_group(
         # ทำหลังไลก์เสมอ — ในฟีดแผงคอมเมนต์เปิดทับหน้าจอแล้วหาปุ่มถูกใจไม่เจอ
         # ส่วนบนหน้าโพสต์เดี่ยวไม่มีปัญหานั้น แต่คงลำดับเดิมไว้ให้ตรงกับที่สั่ง
         outcome = comment_post_of(phone, caption, comment,
-                                  single_post=on_post_page, photos=comment_images)
+                                  single_post=on_post_page, photos=comment_images,
+                                  links_only_on_reject=links_only_on_reject)
         phone.back()
         time.sleep(1.5)
     return {
@@ -3129,7 +3159,7 @@ def post_to_groups(
     adb: str, serial: str, image, caption: str, group_ids: list[str],
     gap_range: tuple[float, float] = DEFAULT_GAP_RANGE,
     dry_run: bool = False, log=print, stop=lambda: False, on_result=None,
-    clipboard=None, comment="", comment_images=None,
+    clipboard=None, comment="", comment_images=None, links_only_groups=(),
 ) -> list[dict]:
     """ไล่โพสต์ทีละกลุ่ม เว้นระยะแบบสุ่มระหว่างกลุ่ม
 
@@ -3182,6 +3212,10 @@ def post_to_groups(
                 entry = post_to_group(
                     phone, group_id, caption, dry_run, clipboard, text, photo_count,
                     comment_images=shots, stop=stop,
+                    # **เปิดเฉพาะกลุ่มที่เจ้าของสั่ง** (28 ส.ค. 2569)
+                    # กลุ่มอื่นคอมเมนต์เต็มผ่านอยู่แล้ว ตัดคำพูดทิ้งทุกกลุ่ม
+                    # คือทำให้กลุ่มที่ไม่มีปัญหาแย่ลงฟรีๆ
+                    links_only_on_reject=str(group_id) in set(links_only_groups),
                 )
                 results.append(entry)
                 log("  สำเร็จ")

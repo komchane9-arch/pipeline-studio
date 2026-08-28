@@ -2279,3 +2279,61 @@ body.typing-through {
   :root:not([data-theme="light"]) { --typing-ring: #4ade80; }
 }
 :root[data-theme="dark"] { --typing-ring: #4ade80; }
+
+/* ---- ช่องกล่องขั้นตอน: สวิตช์บน · กล่องกลาง · โควตาล่าง (28 ส.ค. 2569) ----
+
+   เดิม `.clip-board` วาง `.board-tab` ตรงๆ พอต้องมีสวิตช์เหนือกล่องและโควตา
+   ใต้กล่อง จึงห่อเป็น `.board-cell` — สวิตช์เป็น **พี่น้อง** ของกล่อง ไม่ใช่ลูก
+   เพราะปุ่มซ้อนในปุ่มคลิกจะทะลุไปโดนกล่อง แล้วกองที่เลือกอยู่เปลี่ยนตาม */
+.clip-board > .board-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 0;              /* ยืดเท่ากันเมื่อที่พอ — ท่าเดียวกับ .board-tab เดิม */
+  min-width: 132px;
+}
+.board-cell > .board-tab { width: 100%; }
+
+/* สวิตช์อนุมัติอัตโนมัติ
+   **แยกออกด้วยตาโดยไม่ต้องอ่าน** — ใช้ ☑/☐ คู่กับสีและกรอบ ไม่ใช่สีอย่างเดียว
+   คนที่แยกสีไม่ออกยังดูสัญลักษณ์ได้ และคนที่มองผ่านๆ ก็เห็นกรอบเขียวทันที */
+.board-auto {
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-auto:hover:not(:disabled) { border-color: var(--ink-3); }
+.board-auto:disabled { opacity: 0.55; cursor: progress; }
+.board-auto.is-on {
+  color: var(--auto-on);
+  border-color: var(--auto-on);
+  background: var(--auto-on-bg);
+  font-weight: 600;
+}
+
+/* โควตาโพสต์วันนี้ — ต้องมีคำกำกับเสมอ ไม่ใช่เลขลอยๆ
+   เพราะตัวเลขในวงเล็บบนกล่องคือ "งานค้าง/สต๊อกที่อยากมี" ซึ่งคนละเรื่องกัน */
+.board-quota {
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.board-quota.is-full { color: var(--warn); font-weight: 600; }
+
+:root { --auto-on: #16a34a; --auto-on-bg: rgba(22, 163, 74, 0.10); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --auto-on: #4ade80; --auto-on-bg: rgba(74, 222, 128, 0.14);
+  }
+}
+:root[data-theme="dark"] { --auto-on: #4ade80; --auto-on-bg: rgba(74, 222, 128, 0.14); }

@@ -892,6 +892,87 @@ function parkedRow(item) {
   return row;
 }
 
+/** ปุ่มติ๊ก "อนุมัติอัตโนมัติ" เหนือกล่องขั้นตอน
+ *
+ *  **เจ้าของสั่ง 28 ส.ค. 2569** — *"สร้างปุ่ม bypass ข้างบนแต่ละขั้น … เป็นปุ่ม
+ *  ให้ติ้กกด และให้มีสัญลักษณ์บอกว่ากดเปิดหรือปิดอยู่ … approve ไฟล์งานที่รออยู่
+ *  ทั้งหมด รวมที่มารอก่อนหน้าด้วย ยกเว้นงานที่กดไว้ว่าพักไว้รอแก้"*
+ *
+ *  **ทำไมเป็นปุ่มพี่น้องของกล่อง ไม่ใช่ลูกในกล่อง** ปุ่มซ้อนในปุ่มไม่ถูกต้อง
+ *  และคลิกจะทะลุไปโดนกล่อง ทำให้กองที่เลือกอยู่เปลี่ยนตามทุกครั้งที่กดสวิตช์
+ *
+ *  **แยกออกด้วยตาโดยไม่ต้องอ่าน** ใช้สัญลักษณ์ ☑/☐ คู่กับสี ไม่ใช่สีอย่างเดียว
+ */
+function autoToggle(bucket) {
+  const auto = bucket.auto;
+  const button = el("button", {
+    type: "button",
+    className: "board-auto" + (auto.on ? " is-on" : ""),
+  });
+  button.setAttribute("role", "switch");
+  button.setAttribute("aria-checked", auto.on ? "true" : "false");
+  const paint = (on, waiting) => {
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-checked", on ? "true" : "false");
+    button.textContent = `${on ? "☑" : "☐"} อัตโนมัติ`
+      + (!on && waiting ? ` · รอ ${waiting}` : "");
+  };
+  paint(auto.on, auto.waiting);
+  button.title = auto.on
+    ? `เปิดอยู่ — งานที่ถึงขั้น "${auto.label}" จะผ่านเองโดยไม่ต้องกด`
+    : `ปิดอยู่ — ต้องกดผ่านเอง${auto.waiting ? ` (รออยู่ ${auto.waiting} ใบ)` : ""}`;
+
+  button.addEventListener("click", async (event) => {
+    // ห้ามทะลุไปโดนกล่อง — ไม่งั้นกดสวิตช์แล้วกองที่เลือกอยู่เปลี่ยนตาม
+    event.stopPropagation();
+    const next = !button.classList.contains("is-on");
+    // เปิดของที่โพสต์จริงต้องถามก่อน ถอนคืนไม่ได้ · ปิดไม่ต้องถาม
+    if (next && auto.risk
+        && !window.confirm(`${auto.risk}
+
+เปิดอนุมัติอัตโนมัติของ "${auto.label}" ใช่ไหม?`)) {
+      return;
+    }
+    button.disabled = true;
+    paint(next, auto.waiting);          // ขยับให้เห็นทันที แล้วค่อยยืนยันกับเซิร์ฟเวอร์
+    try {
+      const out = await api(`${CLIP_API}/api/auto-approve`, {
+        method: "POST",
+        body: JSON.stringify({ step: auto.key, on: next }),
+      });
+      $("#storyNote").textContent = out.message
+        || (next ? `เปิดอนุมัติอัตโนมัติของ "${auto.label}" แล้ว`
+                 : `ปิดอนุมัติอัตโนมัติของ "${auto.label}" แล้ว`);
+      loadJobQueue();
+    } catch (error) {
+      // **ดีดกลับ** ห้ามให้ดูเหมือนเปิดแล้วทั้งที่ไม่ได้เปิด (CLAUDE.md ข้อ 2.3)
+      paint(!next, auto.waiting);
+      $("#storyNote").textContent = `สั่งไม่สำเร็จ — ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+/** โควตาโพสต์ใต้กล่อง — "โพสต์วันนี้ 1/70"
+ *
+ *  ⚠️ **ต้องมีคำว่า "โพสต์วันนี้" กำกับเสมอ** เพราะตัวเลขในวงเล็บบนกล่อง
+ *  `(1/10)` แปลว่า "งานค้าง 1 จากสต๊อกที่อยากมี 10" ซึ่ง**คนละเรื่องกันสิ้นเชิง**
+ *  วางเลขลอยๆ สองชุดติดกันคือเชิญให้อ่านสลับกัน
+ */
+function quotaLine(bucket) {
+  const quota = bucket.quota;
+  const node = el("span", {
+    className: "board-quota" + (quota.full ? " is-full" : ""),
+    textContent: `โพสต์วันนี้ ${quota.text || `${quota.used}/${quota.limit}`}`,
+  });
+  node.title = quota.full
+    ? `ครบโควตาวันนี้แล้ว (${quota.limit}) — ลงเพิ่มไม่ได้จนกว่าจะขึ้นวันใหม่`
+    : `ลงได้อีก ${quota.left} คลิปวันนี้`;
+  return node;
+}
+
 function paintBoard() {
   const box = boardBox();
   const list = $("#storyQueueList");
@@ -927,6 +1008,14 @@ function paintBoard() {
                      : `(${bucket.count})` }),
     );
     if (bucket.short) button.classList.add("is-short");
+    // ห่อเป็นช่องเดียวกัน: สวิตช์อยู่บน · กล่องอยู่กลาง · โควตาอยู่ล่าง
+    // `auto: null` = กองนี้ไม่มีขั้นอนุมัติ (Shopee/Facebook เป็น "สั่งโพสต์ด้วย
+    // เครื่องไหน" ต้องเลือกมือถือเสมอและถอนไม่ได้) — ห้ามวาดสวิตช์
+    // `quota: null` = ไม่มีโควตา ห้ามวาด x/70
+    const cell = el("div", { className: "board-cell" });
+    if (bucket.auto) cell.append(autoToggle(bucket));
+    cell.append(button);
+    if (bucket.quota) cell.append(quotaLine(bucket));
     button.addEventListener("click", () => {
       boardPick = bucket.key;
       try { localStorage.setItem(BOARD_KEY, boardPick); } catch { /* โหมดส่วนตัว */ }
@@ -939,7 +1028,7 @@ function paintBoard() {
       // ควรเห็นผลทันที ไม่ใช่รอรอบดึงถัดไปแล้วนึกว่าปุ่มไม่ทำงาน
       loadJobQueue();
     });
-    return button;
+    return cell;
   }));
 
   const picked = buckets.find((b) => b.key === boardPick);

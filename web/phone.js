@@ -1244,6 +1244,173 @@ $("#phoneText").addEventListener("keydown", (event) => {
   if (event.key === "Enter") sendPhoneText();
 });
 
+// ------------------------------------------- ⌨ พิมพ์ตรง (คีย์บอร์ดคอม → มือถือ)
+//
+// **ต่างจากช่อง "พิมพ์ข้อความลงมือถือ" ข้างบน** ตัวนั้นพิมพ์ให้จบแล้วกดส่ง
+// ตัวนี้ทุกปุ่มไปถึงมือถือทันที เหมือนเสียบคีย์บอร์ดเข้ากับเครื่องโดยตรง
+//
+// **ทำไมไม่ยิงผ่าน /api/phone/text** ตัวนั้นต้องสลับคีย์บอร์ดบนมือถือไป-กลับ
+// ทุกครั้งที่เจอภาษาไทย ซึ่งกินเป็นวินาที ใช้กับการพิมพ์ทีละตัวไม่ได้เลย
+// ตัวนี้ไปทาง /api/phone/type ที่ยิงผ่านช่องควบคุมที่เปิดค้างไว้แล้ว
+// (วัดกับมือถือจริง 28 ส.ค. 2569: ส่งครั้งละ 0-1 มิลลิวินาที)
+//
+// **ข้อจำกัดที่หลบไม่ได้** ช่องเร็วของ scrcpy รับได้แค่ ASCII — ตัวอักษรไทย
+// ส่งทางนั้นแล้ว **เงียบสนิท ไม่มี error ให้จับด้วย** (วัดไว้ตั้งแต่ 19 ส.ค. 2569)
+// ไทยจึงต้องไปทางคลิปบอร์ด ซึ่งส่งเป็นก้อนคุ้มกว่าส่งทีละตัวมาก
+//
+//   อังกฤษ/ตัวเลข/สัญลักษณ์ → ไปทันทีทีละตัว
+//   ไทย/อีโมจิ              → รอหยุดพิมพ์ 350 มิลลิวินาที แล้วส่งทั้งก้อน
+//
+// ⚠️ **ห้ามให้ตัวหลังแซงก้อนที่ยังค้างอยู่** พิมพ์ "aกb" แล้วปล่อยให้ b วิ่งไปก่อน
+// จะไปโผล่เป็น "abก" — พอมีก้อนค้าง ตัวถัดไปต้องต่อท้ายก้อนเสมอ และปุ่มพิเศษ
+// (ลบ · enter · ลูกศร) ต้องไล่ก้อนออกไปก่อนทุกครั้ง ไม่งั้นปุ่มลบไปลบผิดตัว
+const typeBtn = $("#typeThrough");
+const typeNote = $("#typeThroughNote");
+
+/** ชื่อปุ่มของเบราว์เซอร์ → ชื่อปุ่มใน scrcpy_control.KEYCODES */
+const TYPE_KEYS = {
+  Backspace: "ลบ", Delete: "ลบหน้า", Enter: "enter", Tab: "แท็บ",
+  ArrowLeft: "ซ้าย", ArrowRight: "ขวา", ArrowUp: "ขึ้น", ArrowDown: "ลง",
+  Home: "ต้นบรรทัด", End: "ท้ายบรรทัด",
+};
+const TYPE_FLUSH_MS = 350;
+
+let typeOn = false;
+let typeBuffer = "";
+let typeTimer = null;
+let typeChain = Promise.resolve();
+
+function typeSay(message) {
+  if (typeNote) typeNote.textContent = message;
+}
+
+/** เคอร์เซอร์อยู่ในช่องพิมพ์ของหน้าเว็บเองหรือเปล่า */
+function inPageField(node) {
+  return Boolean(node?.closest?.(
+    "input, textarea, select, [contenteditable=''], [contenteditable='true']"));
+}
+
+function typePaint() {
+  if (!typeBtn) return;
+  typeBtn.textContent = typeOn ? "⌨ พิมพ์ตรง: เปิด" : "⌨ พิมพ์ตรง: ปิด";
+  typeBtn.classList.toggle("primary", typeOn);
+  typeBtn.classList.toggle("ghost", !typeOn);
+  typeBtn.setAttribute("aria-pressed", typeOn ? "true" : "false");
+  // กรอบรอบหน้าเว็บ — ต้องเห็นจากหางตาว่าเปิดอยู่ ไม่งั้นเผลอพิมพ์ใส่มือถือ
+  document.body.classList.toggle("typing-through", typeOn);
+}
+
+/** ต่อคิวส่ง — เรียงตามลำดับที่กดเสมอ ไม่ปล่อยให้คำขอแซงกัน */
+function typeQueue(body) {
+  typeChain = typeChain
+    .then(() => api("/api/phone/type", {
+      method: "POST",
+      body: JSON.stringify({ serial: deviceSelect.value, ...body }),
+    }))
+    .catch((error) => {
+      typeOff(`ปิดให้แล้วเพราะส่งไม่ผ่าน — ${error.message}`);
+    });
+}
+
+function typeFlush() {
+  if (typeTimer) {
+    window.clearTimeout(typeTimer);
+    typeTimer = null;
+  }
+  if (!typeBuffer) return;
+  const text = typeBuffer;
+  typeBuffer = "";
+  typeQueue({ text });
+}
+
+function typeChar(ch) {
+  const later = () => {
+    if (typeTimer) window.clearTimeout(typeTimer);
+    typeTimer = window.setTimeout(typeFlush, TYPE_FLUSH_MS);
+  };
+  if (typeBuffer) {          // มีก้อนค้าง = ต่อท้ายเสมอ ห้ามแซง
+    typeBuffer += ch;
+    later();
+    return;
+  }
+  if (ch >= " " && ch <= "~") {   // ASCII ที่พิมพ์ได้ — ไปทางเร็วได้ทันที
+    typeQueue({ text: ch });
+    return;
+  }
+  typeBuffer = ch;
+  later();
+}
+
+function typeOff(why) {
+  if (!typeOn) return;
+  typeFlush();
+  typeOn = false;
+  typePaint();
+  typeSay(why || "ปิดแล้ว — พิมพ์บนคอมไม่ไปมือถือแล้ว");
+}
+
+typeBtn?.addEventListener("click", () => {
+  if (typeOn) {
+    typeOff();
+    return;
+  }
+  if (!deviceSelect.value) {
+    typeSay("เลือกมือถือก่อน");
+    return;
+  }
+  typeOn = true;
+  typePaint();
+  typeSay("เปิดแล้ว — พิมพ์ได้เลย ตัวอักษรจะไปโผล่บนมือถือ · กด Esc เพื่อปิด");
+});
+
+document.addEventListener("keydown", (event) => {
+  if (!typeOn) return;
+  if (event.key === "Escape") {
+    typeOff("กด Esc — ปิดแล้ว");
+    return;
+  }
+  // อยู่ในช่องพิมพ์ของหน้าเว็บ = ปล่อยให้พิมพ์ลงหน้าเว็บตามปกติ
+  // ถ้าดักไว้ด้วย ผู้ใช้จะพิมพ์ในหน้าเว็บไม่ได้เลยตอนเปิดโหมดนี้
+  if (inPageField(event.target)) {
+    typeFlush();
+    typeSay("หยุดชั่วคราว — เคอร์เซอร์อยู่ในช่องพิมพ์ของหน้าเว็บ");
+    return;
+  }
+  // ปล่อย Alt/Win และ Ctrl ตัวอื่นให้เบราว์เซอร์ ไม่งั้น F5 · Ctrl+R · F12
+  // ใช้ไม่ได้ทันทีที่เปิดโหมดนี้ ซึ่งน่าหงุดหงิดกว่าประโยชน์ที่ได้
+  if (event.altKey || event.metaKey) return;
+  if (event.ctrlKey) {
+    if (event.key.toLowerCase() !== "a") return;
+    event.preventDefault();
+    typeFlush();
+    typeQueue({ key: "a", meta: "ctrl" });
+    typeSay("เลือกทั้งหมดบนมือถือแล้ว — พิมพ์ทับได้เลย");
+    return;
+  }
+  const named = TYPE_KEYS[event.key];
+  if (named) {
+    event.preventDefault();
+    typeFlush();          // ก้อนที่ค้างต้องไปก่อน ไม่งั้นปุ่มลบไปลบผิดตัว
+    typeQueue({ key: named });
+    return;
+  }
+  if (event.key.length === 1) {
+    event.preventDefault();
+    typeChar(event.key);
+  }
+});
+
+// เปลี่ยนเครื่อง / สลับแท็บ / ออกจากหน้าต่าง = ปิดให้เอง
+// ไม่งั้นพิมพ์ต่อแล้วตัวอักษรไปโผล่ผิดเครื่องโดยไม่มีอะไรเตือนเลย
+deviceSelect.addEventListener("change", () => {
+  typeOff("เปลี่ยนเครื่องแล้ว — ปิดพิมพ์ตรงให้ก่อน กดเปิดใหม่ได้");
+});
+window.addEventListener("blur", () => typeOff("ออกจากหน้าต่าง — ปิดพิมพ์ตรงให้แล้ว"));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) typeOff("สลับแท็บ — ปิดพิมพ์ตรงให้แล้ว");
+});
+typePaint();
+
 // ------------------------------------------- ลิงก์ คอม ↔ มือถือ
 const linkNote = $("#linkNote");
 

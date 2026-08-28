@@ -2265,3 +2265,17 @@ button:disabled { opacity: 0.5; }
    ใช้ pre-line ไม่ใช่ pre เพราะยังอยากให้ตัดบรรทัดตามความกว้างจอตามปกติ
    เอาเฉพาะการขึ้นบรรทัดใหม่ที่ตั้งใจส่งมา */
 #storyNote { white-space: pre-line; }
+
+/* ⌨ โหมดพิมพ์ตรง — เปิดอยู่ต้องเห็นจากหางตา
+   ปุ่มเปลี่ยนสีอย่างเดียวไม่พอ เพราะตอนพิมพ์คนมองภาพจอมือถือ ไม่ได้มองปุ่ม
+   เผลอพิมพ์ตอนเปิดค้าง = ตัวอักษรไปโผล่บนมือถือจริงโดยไม่ได้ตั้งใจ */
+:root { --typing-ring: #16a34a; }
+body.typing-through {
+  box-shadow: inset 0 0 0 3px var(--typing-ring);
+}
+#typeThrough[aria-pressed="true"]::before { content: "cf  "; color: var(--typing-ring); }
+#typeThroughNote { flex: 1 1 14ch; min-width: 0; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --typing-ring: #4ade80; }
+}
+:root[data-theme="dark"] { --typing-ring: #4ade80; }

@@ -711,6 +711,52 @@ def send_touch(
     raise ScrcpyUnavailable("ส่งคำสั่งผ่าน scrcpy ไม่สำเร็จ")
 
 
+def send_text(adb_executable: str, serial: str, text: str) -> str:
+    """พิมพ์ข้อความลงช่องที่โฟกัสอยู่บนมือถือ — คืนชื่อทางที่ใช้จริง
+
+    เลือกทางให้เองเหมือน `_Session.type_text` — ASCII ไปทาง INJECT_TEXT ซึ่งเร็ว
+    และไม่ไปแตะคลิปบอร์ดของผู้ใช้ ส่วนไทย/อีโมจิไปทางคลิปบอร์ด เพราะ INJECT_TEXT
+    **เงียบสนิทกับตัวอักษรไทย ไม่มี error ให้จับด้วย** (วัดกับมือถือจริง 19 ส.ค. 2569)
+
+    ต่อใหม่หนึ่งครั้งถ้า socket ตายไปแล้ว — ท่าเดียวกับ `send_touch()`
+    """
+    if not is_available():
+        raise ScrcpyUnavailable("ไม่พบไฟล์ scrcpy-server ในโฟลเดอร์ tools")
+    for attempt in range(2):
+        session = _get_or_open(adb_executable, serial)
+        try:
+            with session.lock:
+                return session.type_text(text)
+        except OSError as error:
+            close_session(serial)
+            if attempt == 1:
+                raise ScrcpyUnavailable(f"พิมพ์ผ่าน scrcpy ไม่สำเร็จ: {error}")
+    raise ScrcpyUnavailable("พิมพ์ผ่าน scrcpy ไม่สำเร็จ")
+
+
+def send_key(
+    adb_executable: str, serial: str, keycode: int, meta: int = META_NONE
+) -> None:
+    """กดปุ่มหนึ่งครั้ง (ลง+ขึ้น) — ใช้กับ ลบ · enter · ลูกศร · แท็บ
+
+    **ไม่ใช่ปุ่มระบบ** BACK/HOME/RECENTS/POWER ส่งทางนี้ไม่ได้ผลเสมอไป
+    ให้ไปทาง `adb shell input keyevent` เหมือนที่ /api/phone/key ทำอยู่
+    """
+    if not is_available():
+        raise ScrcpyUnavailable("ไม่พบไฟล์ scrcpy-server ในโฟลเดอร์ tools")
+    for attempt in range(2):
+        session = _get_or_open(adb_executable, serial)
+        try:
+            with session.lock:
+                session.send_key(keycode, meta)
+            return
+        except OSError as error:
+            close_session(serial)
+            if attempt == 1:
+                raise ScrcpyUnavailable(f"กดปุ่มผ่าน scrcpy ไม่สำเร็จ: {error}")
+    raise ScrcpyUnavailable("กดปุ่มผ่าน scrcpy ไม่สำเร็จ")
+
+
 def set_clipboard(
     adb_executable: str, serial: str, text: str, paste: bool = False
 ) -> None:

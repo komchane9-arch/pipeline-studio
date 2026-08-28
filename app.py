@@ -3490,6 +3490,64 @@ async def phone_text(request: Request) -> dict:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
+@app.post("/api/phone/type")
+async def phone_type(request: Request) -> dict:
+    """พิมพ์สดจากคีย์บอร์ดคอมลงมือถือ — ทางเร็วของโหมด "พิมพ์ตรง"
+
+    **ต่างจาก /api/phone/text ตรงที่ไม่สลับคีย์บอร์ดบนมือถือเลย** ตัวนั้นต้อง
+    `ime set` ไป-กลับทุกครั้งที่เจอภาษาไทย ซึ่งกินเป็นวินาที — ใช้กับการพิมพ์
+    ทีละตัวไม่ได้เลย ตัวนี้ยิงผ่านช่องควบคุมของ scrcpy ที่เปิดค้างไว้แล้ว
+
+    วัดกับมือถือจริง 28 ส.ค. 2569 (REDMI 15C) หลังเปิดช่องแล้ว **ส่งครั้งละ
+    0-1 มิลลิวินาที** ครั้งแรกที่ยังไม่มีช่องใช้ 1.4 วินาทีเพราะต้องเปิดช่องก่อน
+
+    ช่องควบคุมเปิดแบบ video=false จึง**ไม่แย่งตัวเข้ารหัสวิดีโอ**กับช่องภาพ
+    พิมพ์ได้แม้ไม่ได้เปิดดูจออยู่
+
+    รับอย่างใดอย่างหนึ่ง
+      {"serial": ..., "text": "abc"}            พิมพ์ข้อความ (ไทยได้ ผ่านคลิปบอร์ด)
+      {"serial": ..., "key": "ลบ", "meta": ""}  กดปุ่มเดียว (ชื่อปุ่มตาม KEYCODES)
+    """
+    payload = await request.json()
+    text = str(payload.get("text", ""))
+    key = str(payload.get("key", "")).strip()
+    if bool(text) == bool(key):
+        raise HTTPException(status_code=400, detail="ส่งได้อย่างเดียว: text หรือ key")
+    if text and len(text) > 500:
+        raise HTTPException(status_code=400, detail="ข้อความยาวเกิน 500 ตัวอักษร")
+    serial = await asyncio.to_thread(
+        clean_serial, str(payload.get("serial", "")), True
+    )
+    if not scrcpy_control.is_available():
+        # ล้มให้ดัง ไม่ถอยไปทาง `ime set` เงียบๆ — ทางนั้นช้าจนพิมพ์สดไม่ได้จริง
+        # แล้วผู้ใช้จะนึกว่าโหมดนี้ใช้ได้ทั้งที่ตัวอักษรตกหล่นเป็นแถบ
+        raise HTTPException(
+            status_code=400,
+            detail="พิมพ์ตรงยังใช้ไม่ได้ — ไม่พบ scrcpy-server ในโฟลเดอร์ tools",
+        )
+
+    meta_name = str(payload.get("meta", "")).strip().lower()
+    meta = {
+        "ctrl": scrcpy_control.META_CTRL,
+        "shift": scrcpy_control.META_SHIFT,
+    }.get(meta_name, scrcpy_control.META_NONE)
+
+    def work() -> dict:
+        if key:
+            keycode = scrcpy_control.KEYCODES.get(key)
+            if keycode is None:
+                raise scrcpy_control.ScrcpyUnavailable(f"ไม่รู้จักปุ่ม {key}")
+            scrcpy_control.send_key(ADB, serial, keycode, meta)
+            return {"ok": True, "route": "ปุ่ม", "key": key}
+        route = scrcpy_control.send_text(ADB, serial, text)
+        return {"ok": True, "route": route, "typed": len(text)}
+
+    try:
+        return await asyncio.to_thread(work)
+    except scrcpy_control.ScrcpyUnavailable as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @app.post("/api/phone/swipe")
 async def phone_swipe(request: Request) -> dict:
     """ปัดหน้าจอ — ใช้ตอน scrcpy ใช้ไม่ได้ หรือสั่งปัดตรงๆ จากปุ่ม"""

@@ -126,6 +126,18 @@
           <button type="button" data-key="VOLUME_DOWN">− เสียง</button>
           <button type="button" data-key="VOLUME_UP">＋ เสียง</button>
         </div>
+        <!-- ⌨ พิมพ์ตรง — เปิดแล้วทุกปุ่มที่กดบนคีย์บอร์ดคอมไปโผล่บนมือถือทันที
+             ต่างจากช่องข้างล่างที่ต้องพิมพ์ให้จบแล้วกดส่ง
+             ปิดไว้เป็นค่าตั้งต้นเสมอ เพราะเปิดค้างไว้แล้วเผลอพิมพ์ = ตัวอักษร
+             ไปโผล่บนมือถือโดยไม่ได้ตั้งใจ ซึ่งย้อนคืนยากกว่าการกดเปิดใหม่มาก -->
+        <div class="inline-row">
+          <button id="typeThrough" class="ghost" type="button" aria-pressed="false"
+                  title="เปิดแล้วพิมพ์บนคีย์บอร์ดคอมได้เลย ตัวอักษรไปโผล่บนมือถือทันที · กด Esc เพื่อปิด">
+            ⌨ พิมพ์ตรง: ปิด
+          </button>
+          <span id="typeThroughNote" class="note" aria-live="polite"></span>
+        </div>
+
         <div class="inline-row">
           <input id="phoneText" type="text" maxlength="500" placeholder="พิมพ์ข้อความลงมือถือ (ไทยได้)" />
           <button id="sendPhoneText" class="ghost" type="button">ส่ง</button>

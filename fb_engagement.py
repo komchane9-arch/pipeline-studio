@@ -61,7 +61,7 @@ import re
 import sqlite3
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import studio_shared as shared
@@ -315,6 +315,17 @@ def read_post(page, url: str, expect: str = "") -> dict:
         if counts["shares"] is None and ("แชร์" in low and ("ครั้ง" in low or "คน" in low)):
             counts["shares"] = parse_count(low)
 
+    # **ไม่มีป้ายแชร์ = ยังไม่มีใครแชร์ ไม่ใช่ "อ่านไม่ออก"** (28 ส.ค. 2569)
+    #
+    # แคปหน้าจริงมาดูแล้ว ในกล่องโพสต์มีแค่ตัวเลขไลก์กับคอมเมนต์
+    # **ไม่มีตัวเลขแชร์เลย** เพราะ Facebook วาดยอดแชร์เฉพาะตอนมีคนแชร์จริง
+    # (เทียบกับโพสต์อื่นที่มีคนแชร์ จะขึ้นว่า "แชร์ 2 ครั้ง" ชัดเจน)
+    #
+    # อ่านโพสต์สำเร็จแล้วแต่ไม่เจอป้ายแชร์ จึงแปลว่า 0 ไม่ใช่ None
+    # ถ้าคืน None ต่อไป รายงานจะขึ้น "?" ตลอดกาลทั้งที่ความจริงคือยังไม่มีใครแชร์
+    if counts["shares"] is None and counts["reactions"] is not None:
+        counts["shares"] = 0
+
     # นับคอมเมนต์จากป้าย "ความคิดเห็นจาก <ชื่อ> เมื่อ ..." ที่มีหนึ่งอันต่อคอมเมนต์
     # เชื่อถือได้กว่าตัวเลขสรุปที่บางทีไม่โผล่เลยเมื่อมีคอมเมนต์น้อย
     if counts["comments"] is None:
@@ -388,6 +399,50 @@ def save(conn: sqlite3.Connection, post: dict, result: dict) -> tuple[int, int]:
 
 # ----------------------------------------------------------------------- รอบเช็ค
 
+# ยอดไม่ขยับนานเท่านี้ = เลิกตามเก็บโพสต์ใบนั้น (เจ้าของสั่ง 28 ส.ค. 2569)
+#
+#   "ถ้าภายใน 1 วัน ยังมียอดไลค์ หรือ คอมเมนต์เพิ่ม ให้ดูต่อ
+#    แต่ถ้าโพสต์ไหนภายใน 1 วัน ยอดไม่มีขึ้นแล้ว ให้ยกเลิกเก็บได้เลย"
+QUIET_HOURS = 24.0
+
+
+def still_worth_watching(conn: sqlite3.Connection, post_url: str) -> tuple[bool, str]:
+    """ยังควรตามเก็บโพสต์ใบนี้อยู่ไหม — คืน (เก็บต่อ, เหตุผลถ้าเลิก)
+
+    **ตัดสินจากยอดที่วัดได้จริง ไม่ใช่จากอายุโพสต์** โพสต์ที่ลงมา 3 วันแล้วยัง
+    มีคนไลก์เพิ่มก็ยังน่าตาม ส่วนโพสต์ที่ลงมาวันเดียวแล้วเงียบสนิทก็ไม่ต้องตาม
+    ถ้าตัดสินจากอายุจะทิ้งโพสต์ที่กำลังมาแรงและตามโพสต์ที่ตายแล้วไปเรื่อยๆ
+
+    **ต้องมีประวัติครอบคลุมเกิน 1 วันก่อนถึงจะตัดสินได้** เพิ่งเก็บวันนี้แล้ว
+    เห็นว่ายอดเท่าเดิม 2 รอบ ไม่ได้แปลว่าเงียบ — แปลว่ายังดูไม่นานพอ
+    """
+    rows = conn.execute(
+        """SELECT reactions, comments, checked_at FROM my_post
+           WHERE post_url = ? AND reachable = 1
+           ORDER BY id DESC LIMIT 400""", (post_url,)).fetchall()
+    if len(rows) < 2:
+        return True, ""
+    newest = rows[0]
+    cutoff = datetime.now() - timedelta(hours=QUIET_HOURS)
+    older = None
+    for row in rows:
+        try:
+            when = datetime.fromisoformat(row["checked_at"])
+        except ValueError:
+            continue
+        if when <= cutoff:
+            older = row
+            break
+    if older is None:
+        return True, ""                 # ยังเก็บไม่ครบ 1 วัน ตัดสินไม่ได้
+    same = (newest["reactions"] == older["reactions"]
+            and newest["comments"] == older["comments"])
+    if same:
+        return False, (f"ยอดไม่ขยับมา {QUIET_HOURS:.0f} ชั่วโมง "
+                       f"(ไลก์ {newest['reactions']} · คอมเมนต์ {newest['comments']})")
+    return True, ""
+
+
 def check_once() -> dict:
     """เช็คทุกโพสต์หนึ่งรอบ — คืนสรุปเป็น dict"""
     import random
@@ -405,7 +460,7 @@ def check_once() -> dict:
     farm = ProfileFarm(shared.DATA_DIR)
     entry = mf.find_bot(farm, COLLECTOR_PROFILE)
     conn = open_db()
-    done = blocked = new_comments = 0
+    done = blocked = new_comments = quiet = 0
     log(f"เริ่มรอบเช็ค — โพสต์ {len(posts)} ใบ ผ่านโปรไฟล์ {COLLECTOR_PROFILE}")
     with sync_playwright() as playwright:
         browser = mf.launch_bot_browser(playwright, farm, entry)
@@ -413,6 +468,11 @@ def check_once() -> dict:
         try:
             for post in posts:
                 label = f"{post['group_name'][:26]} ({post['account']})"
+                keep, why = still_worth_watching(conn, post["post_url"])
+                if not keep:
+                    quiet += 1
+                    log(f"  💤 {label}: เลิกตามแล้ว — {why}")
+                    continue
                 # ใช้ที่อยู่เต็มถ้าแปลงได้ — ลิงก์แชร์เด้งกลับหน้าฟีด
                 target = canonical_url(post["post_url"]) or post["post_url"]
                 try:
@@ -438,9 +498,9 @@ def check_once() -> dict:
                 pass
     conn.close()
     log(f"จบรอบ — อ่านได้ {done} ใบ · เข้าไม่ถึง {blocked} ใบ "
-        f"· คอมเมนต์ใหม่ {new_comments} อัน")
+        f"· เลิกตามแล้ว {quiet} ใบ · คอมเมนต์ใหม่ {new_comments} อัน")
     return {"posts": len(posts), "ok": done, "blocked": blocked,
-            "new_comments": new_comments}
+            "quiet": quiet, "new_comments": new_comments}
 
 
 def watch() -> None:

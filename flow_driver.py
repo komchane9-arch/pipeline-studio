@@ -368,6 +368,63 @@ class FlowDriver:
             },
         )
 
+    def _signed_in_marks(self) -> list[str]:
+        """ของที่ **มีเฉพาะตอนล็อกอินแล้วจริง** บนหน้า Flow — คืนรายชื่อที่เจอ
+
+        **หาของที่มีตอนสำเร็จ ไม่ใช่หาของที่แปลว่าล้ม** (กติกาข้อ 2.3.1)
+        ตัวตรวจเดิมถามว่า "โดนเด้งไปหน้า accounts.google.com หรือยัง" ซึ่ง
+        ตอบว่า "ไม่" ได้ทั้งตอนล็อกอินแล้ว **และ**ตอนหน้าเพี้ยน/ค้าง/ขึ้นหน้าคั่น
+        เพราะหน้าพวกนั้นก็อยู่บนโดเมน labs.google เหมือนกัน
+
+        ปุ่มบัญชีมุมขวาบนใช้ยืนยันได้จริง — `read_credits()` ใช้ปุ่มเดียวกันนี้
+        มาตั้งแต่แรกและยืนยันจากหน้าจริงแล้วว่ามี
+        """
+        marks: list[str] = []
+        try:
+            if self.page.get_by_role(
+                    "button", name=re.compile(r"ULTRA|User profile|Account",
+                                              re.I)).count():
+                marks.append("ปุ่มบัญชีมุมขวาบน")
+        except Exception:                                        # noqa: BLE001
+            pass
+        try:
+            if PROJECT_URL_RE.search(self.page.url or ""):
+                marks.append("อยู่ในโปรเจกต์อยู่แล้ว")
+        except Exception:                                        # noqa: BLE001
+            pass
+        return marks
+
+    def _require_signed_in(self, where: str) -> None:
+        """ยังไม่ล็อกอิน = โยน NeedsLogin ตั้งแต่ตรงนี้ อย่าปล่อยไปตายที่ปุ่ม
+
+        ปล่อยไปตายที่ปุ่มแล้วข้อความจะกลายเป็น "หาปุ่ม 'New project' ไม่เจอ"
+        ซึ่งด่านพักคิวอ่านไม่ออกว่าเป็นเรื่องล็อกอิน แล้วคิวจะไล่เผางานต่อ
+        **เกิดจริง 28 ส.ค. 2569 10:59–14:48 เผาไป 15 ใบ ใบละราวหนึ่งนาที**
+        """
+        if self.snapshot().get("signedOut"):
+            raise NeedsLogin("หลุดไปหน้าล็อกอิน Google")
+        marks = self._signed_in_marks()
+        if not marks:
+            self.shot(f"Flow ไม่มีร่องรอยว่าล็อกอินแล้ว ({where})")
+            raise NeedsLogin(
+                "ยังไม่ได้ล็อกอิน Google Flow — เปิดหน้า Flow แล้วไม่เจอปุ่มบัญชี "
+                "มุมขวาบน แปลว่ายังไม่ได้เข้าระบบหรือหน้ายังโหลดไม่ขึ้น "
+                f"(ที่อยู่ตอนนี้: {self.page.url})"
+            )
+
+    def shot(self, why: str) -> None:
+        """เก็บภาพ+ผังหน้าไว้ดูย้อนหลัง — **ห้ามทำให้งานล้มหนักขึ้น** (ข้อ 2.6.1)
+
+        เดิมสายคลิปไม่เก็บอะไรเลยตอน Flow พัง พอเจ้าของถามว่าหน้านั้นเขียนว่าอะไร
+        ก็ตอบไม่ได้ เพราะเบราว์เซอร์ปิดไปแล้ว
+        """
+        try:
+            import evidence
+            evidence.shot(self.page, why, tag="flow",
+                          note=f"ที่อยู่: {getattr(self.page, 'url', '')}")
+        except Exception as error:                               # noqa: BLE001
+            self.log(f"  เก็บภาพหลักฐานไม่ได้: {error}")
+
     def new_project(self) -> str:
         """สร้างโปรเจกต์ Flow ใหม่ แล้วคืน URL
 
@@ -378,14 +435,14 @@ class FlowDriver:
         self.page.goto(FLOW_URL, wait_until="domcontentloaded",
                        timeout=TIMEOUTS["page_load"] * 1000)
         time.sleep(2)
-        if self.snapshot().get("signedOut"):
-            raise NeedsLogin("หลุดไปหน้าล็อกอิน Google")
+        self._require_signed_in("ตอนสร้างโปรเจกต์ใหม่")
         button = self.page.get_by_role(
             "button", name=NEW_PROJECT_RE
         ).first
         try:
             button.wait_for(state="visible", timeout=TIMEOUTS["page_load"] * 1000)
         except Exception as error:
+            self.shot("Flow หาปุ่ม New project ไม่เจอ")
             raise FlowError(
                 "หาปุ่ม 'New project' ไม่เจอ — เปิด Flow สร้างโปรเจกต์เองแล้ววางลิงก์แทน"
             ) from error
@@ -413,12 +470,14 @@ class FlowDriver:
             self.page.goto(project_url, wait_until="domcontentloaded",
                            timeout=TIMEOUTS["page_load"] * 1000)
         elif not PROJECT_URL_RE.search(self.page.url):
+            self._require_signed_in("ตอนเปิดโปรเจกต์")
             button = self.page.get_by_role("button", name=NEW_PROJECT_RE).first
             try:
                 # แดชบอร์ดวาดรายการโปรเจกต์หลัง DOM พร้อม ต้องรอปุ่มจริงๆ
                 # ไม่ใช่เช็ค count() ทันทีแล้วสรุปว่าไม่มี
                 button.wait_for(state="visible", timeout=TIMEOUTS["page_load"] * 1000)
             except Exception as error:
+                self.shot("Flow หาปุ่ม New project ไม่เจอ")
                 raise FlowError(
                     "หาปุ่ม 'New project' ไม่เจอ — เปิด Flow สร้างโปรเจกต์เองแล้ววางลิงก์แทน"
                 ) from error

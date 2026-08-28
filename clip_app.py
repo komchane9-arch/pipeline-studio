@@ -2533,6 +2533,163 @@ REVIEW_STAGES = {
 }
 
 
+# ============================================================ อนุมัติอัตโนมัติ
+#
+# **เจ้าของสั่ง 28 ส.ค. 2569** — *"สร้างปุ่ม bypass ข้างบนแต่ละขั้นให้หน่อย
+# เพื่อที่จะ auto-approve ให้ทำทุกอันที่มีขั้นตอน approve เป็นปุ่มให้ติ๊กกด
+# และให้มีสัญลักษณ์บอกด้วยว่ากดเปิดหรือปิดอยู่ โดยเมื่อกดปุ่มแล้วจะเป็นการ
+# approve ไฟล์งานที่รออยู่ทั้งหมด รวมที่มารอก่อนหน้าด้วย ยกเว้นงานที่กดไว้ว่า
+# พักไว้รอแก้ จะไม่ auto"*
+#
+# **ไม่เขียนทางอนุมัติเส้นที่สอง** — ยิงเข้าปุ่มตัวเดียวกับที่คนกด
+# (`_clip_telegram_button`) ทุกครั้ง ถ้าเขียนแยก วันหนึ่งการกดเองกับการกด
+# อัตโนมัติจะทำงานไม่เหมือนกันแล้วไล่หาสาเหตุไม่เจอ (บทเรียนเดิมของโปรเจกต์นี้)
+#
+# **สองขั้นแรกต้องกดสองปุ่ม** เพราะการ์ดหนึ่งใบมีของให้ตรวจสองอย่าง
+#   ชุดรูป      img_ok + hl_ok   (รูป · จุดเด่น)
+#   สตอรีบอร์ด  sb_ok  + sc_ok   (ภาพ · บทพูด)
+# กดปุ่มเดียวแล้วงานจะค้างรออีกอย่างเงียบๆ — เคยเป็นแบบนั้นจริงตอนกดเอง
+
+AUTO_APPROVE_KEY = "clip_auto_approve"
+
+# ขั้นไหน กดปุ่มอะไรบ้าง — เรียงตามลำดับที่งานเดินจริง
+AUTO_STEPS: dict[str, dict] = {
+    "images": {
+        "label": "ชุดรูป + จุดเด่น",
+        "stages": [clip_queue.STAGE_IMAGE_REVIEW],
+        "actions": ["img_ok", "hl_ok"],
+        "risk": "",
+    },
+    "storyboard": {
+        "label": "สตอรีบอร์ด + บทพูด",
+        "stages": [clip_queue.STAGE_STORYBOARD_REVIEW,
+                   clip_queue.STAGE_SCRIPT_REVIEW],
+        "actions": ["sb_ok", "sc_ok"],
+        "risk": "",
+    },
+    "clip": {
+        "label": "คลิปที่เจนได้",
+        "stages": [clip_queue.STAGE_VIDEO_REVIEW],
+        "actions": ["vid_ok"],
+        "risk": "",
+    },
+    "tiktok_post": {
+        "label": "ยืนยันก่อนโพสต์ TikTok",
+        "stages": [clip_queue.STAGE_POST_REVIEW],
+        "actions": ["tt_post"],
+        # **ขั้นนี้โพสต์ขึ้นจริง ถอนคืนไม่ได้** ต้องบอกให้ชัดบนปุ่ม
+        "risk": "กดเปิดแล้วคลิปจะขึ้น TikTok เองโดยไม่ถามอีก — ถอนคืนไม่ได้",
+    },
+}
+
+
+def _auto_on() -> dict:
+    """ตอนนี้เปิดอัตโนมัติขั้นไหนบ้าง — คืนเฉพาะชื่อขั้นที่รู้จัก
+
+    ค่าที่ไม่รู้จัก (ชื่อขั้นเก่าที่ถูกลบไปแล้ว) ถูกทิ้ง ไม่ให้ค้างมาหลอกตา
+    """
+    saved = (shared.read_config() or {}).get(AUTO_APPROVE_KEY) or {}
+    if not isinstance(saved, dict):
+        return {}
+    return {k: bool(v) for k, v in saved.items() if k in AUTO_STEPS}
+
+
+def _auto_eligible(step: str) -> list[dict]:
+    """งานที่ขั้นนี้อนุมัติแทนได้เดี๋ยวนี้
+
+    **ข้ามงานที่พักไว้รอแก้เสมอ** (เจ้าของสั่งไว้ตรงๆ) — การพักคือการบอกว่า
+    "ใบนี้ฉันจะมาดูเอง" ถ้าอัตโนมัติไปกดผ่านให้ ก็เท่ากับลบเจตนานั้นทิ้ง
+    """
+    stages = set(AUTO_STEPS[step]["stages"])
+    return [job for job in clip_jobs.all()
+            if job.get("stage") in stages and not job.get("parked")]
+
+
+def _auto_run_one(step: str, job: dict) -> bool:
+    """กดปุ่มอนุมัติให้ใบเดียว — คืน True ถ้ากดได้อย่างน้อยหนึ่งปุ่ม"""
+    done = False
+    for action in AUTO_STEPS[step]["actions"]:
+        fresh = clip_jobs.get(job["id"])
+        if not fresh or fresh.get("parked"):
+            break
+        try:
+            with _as_web_call():
+                _clip_telegram_button(
+                    fresh.get("chat_id", ""), f"{action}:{job['id']}:", {},
+                )
+            done = True
+        except Exception as error:                               # noqa: BLE001
+            # ปุ่มที่กดไม่ได้ตอนนี้ (เช่นอนุมัติไปแล้ว) ไม่ใช่เรื่องผิดปกติ
+            # แต่ต้องเขียน log ไว้ ไม่ใช่กลืนเงียบ (กติกาข้อ 2.4)
+            _clip_log(f"อนุมัติอัตโนมัติ {action} ของ {job['id']} ไม่สำเร็จ: {error}")
+    return done
+
+
+def _auto_sweep(only: str = "") -> dict:
+    """กวาดอนุมัติงานที่รออยู่ทั้งหมดของขั้นที่เปิดไว้
+
+    เรียกได้บ่อยเท่าไรก็ได้ — งานที่อนุมัติไปแล้วจะไม่อยู่ในขั้นรออนุมัติอีก
+    จึงไม่ถูกหยิบซ้ำ
+
+    เจ้าของสั่งว่า **"รวมที่มารอก่อนหน้าด้วย"** ตัวนี้จึงกวาดจากคิวทั้งกอง
+    ไม่ใช่ดักเฉพาะงานที่เพิ่งเดินเข้ามาใหม่
+    """
+    on = _auto_on()
+    steps = [only] if only else [s for s in AUTO_STEPS if on.get(s)]
+    result: dict[str, int] = {}
+    for step in steps:
+        if step not in AUTO_STEPS or not on.get(step):
+            continue
+        count = 0
+        for job in _auto_eligible(step):
+            if _auto_run_one(step, job):
+                count += 1
+        if count:
+            _clip_log(f"อนุมัติอัตโนมัติ “{AUTO_STEPS[step]['label']}” ให้ {count} ใบ")
+        result[step] = count
+    return result
+
+
+def _auto_keeper() -> None:
+    """กวาดอนุมัติเองทุก 20 วินาที
+
+    **ทำไมต้องมีตัวเดินเอง ไม่ใช่ดักตอนงานเปลี่ยนขั้น** — งานเข้าขั้นรออนุมัติ
+    ได้จากหลายทาง (คิวเดินเอง · คนกดในแชท · หน้าเว็บ · กู้งานหลังรีสตาร์ต)
+    ถ้าไปดักทีละทาง วันหนึ่งจะมีทางใหม่ที่ลืมดัก แล้วงานค้างรอทั้งที่เปิด
+    อัตโนมัติไว้ — ตัวกวาดตัวเดียวครอบได้ทุกทางโดยไม่ต้องจำ
+
+    20 วินาทีเพราะการอนุมัติไม่ใช่เรื่องด่วนถึงระดับวินาที และคิวเองก็ตื่นทุก
+    30 วินาทีอยู่แล้ว
+    """
+    while True:
+        try:
+            if _auto_on():
+                _auto_sweep()
+        except Exception as error:                               # noqa: BLE001
+            _clip_log(f"ตัวอนุมัติอัตโนมัติสะดุด: {type(error).__name__}: {error}")
+        time.sleep(20)
+
+
+def _auto_view() -> dict:
+    """สถานะที่หน้าเว็บเอาไปวาดปุ่มได้เลย ไม่ต้องคิดเอง"""
+    on = _auto_on()
+    steps = []
+    for key, meta in AUTO_STEPS.items():
+        waiting = _auto_eligible(key)
+        parked = [j for j in clip_jobs.all()
+                  if j.get("stage") in set(meta["stages"]) and j.get("parked")]
+        steps.append({
+            "key": key,
+            "label": meta["label"],
+            "on": bool(on.get(key)),
+            "waiting": len(waiting),
+            "parked_skipped": len(parked),
+            "risk": meta["risk"],
+        })
+    return {"steps": steps,
+            "note": "งานที่กด 🅿 พักไว้รอแก้ จะไม่ถูกอนุมัติอัตโนมัติ"}
+
+
 def _apply_edit_text(job: dict, text: str, target: str = "") -> str:
     """เอาข้อความที่คนพิมพ์มาเป็น "คำสั่งแก้" ของงานนี้ — ใช้ร่วมกันทั้งแชทและหน้าเว็บ
 
@@ -6879,6 +7036,38 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
         # **ของซ้ำต้องดังขึ้นบนหน้าจอ ไม่ใช่รอให้คนมานั่งนับโฟลเดอร์เอง**
         # สินค้าที่มีโฟลเดอร์สองชุด ชุดที่มีคลิปจะหายจากทุกรายการเงียบๆ
         # (เจอจริง 4 คู่ เมื่อ 27 ส.ค. 2569 — กว่าจะรู้ก็ตอนย้ายโฟลเดอร์)
+        # ---- ผูกปุ่มอนุมัติอัตโนมัติ + โควตา เข้ากับกองบนกระดาน --------
+        #
+        # **ให้หน้าเว็บดึงครั้งเดียวได้ครบ** ไม่ต้องยิงสามที่แล้วมานั่งจับคู่เอง
+        # เหตุผลเดียวกับที่เขียนไว้ข้างบน: ฝั่งเซิร์ฟเวอร์เป็นคนตัดสิน
+        # ถ้าให้หน้าเว็บจับคู่เอง วันหลังเพิ่มขั้นใหม่แล้วหน้าเว็บจะไม่รู้จัก
+        #
+        # กองไหนคู่กับปุ่มอนุมัติอัตโนมัติตัวไหน — กองที่ไม่มีขั้นอนุมัติ
+        # (Shopee Video · Facebook Reels) ได้ค่า None ไม่ใช่ค่าปลอม
+        # เพราะสองกองนั้นไม่ใช่การ "กดผ่าน" แต่เป็นการ "สั่งโพสต์ด้วยเครื่องไหน"
+        # ซึ่งโพสต์แล้วถอนไม่ได้ และต้องเลือกมือถือเสมอ (กติกาข้อ 8)
+        auto_of = {"link": "images", "story": "storyboard",
+                   "clip": "clip", "tiktok": "tiktok_post"}
+        auto = {s["key"]: s for s in _auto_view()["steps"]}
+        # โควตา 70/วัน มีเฉพาะสามปลายทางที่โพสต์จริง
+        all_runs = runs + clip_store.list_done(DATA_DIR)
+        quota_of = {}
+        for target in ("shopee_video", "facebook_reels", "tiktok"):
+            used = publish_order.day_used(all_runs, target)
+            quota_of[target] = {
+                "used": used,
+                "limit": publish_order.DAY_LIMIT,
+                "left": max(0, publish_order.DAY_LIMIT - used),
+                "full": used >= publish_order.DAY_LIMIT,
+                "text": f"{used}/{publish_order.DAY_LIMIT}",
+            }
+        for bucket in board.get("buckets") or []:
+            bucket["auto"] = auto.get(auto_of.get(bucket["key"], ""))
+            bucket["quota"] = quota_of.get(bucket["key"])
+        board["quota_note"] = ("โควตานับเป็นวันที่เริ่มตี 4 — "
+                               "ลงตอนตี 3 ถือว่ายังเป็นยอดของเมื่อวาน")
+        board["auto_note"] = "งานที่กด 🅿 พักไว้รอแก้ จะไม่ถูกอนุมัติอัตโนมัติ"
+
         dup = clip_store.duplicates(DATA_DIR)
         board["duplicates"] = dup
         board["warning"] = ("" if not dup else
@@ -6887,6 +7076,51 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
         return board
 
     return {"ok": True, **await asyncio.to_thread(work)}
+
+
+@app.get("/api/auto-approve")
+async def auto_approve_view() -> dict:
+    """ตอนนี้ติ๊กเปิดอนุมัติอัตโนมัติขั้นไหนไว้บ้าง + มีงานรออยู่กี่ใบ"""
+    return {"ok": True, **await asyncio.to_thread(_auto_view)}
+
+
+@app.post("/api/auto-approve")
+async def auto_approve_set(request: Request) -> dict:
+    """ติ๊กเปิด/ปิดอนุมัติอัตโนมัติของขั้นหนึ่ง
+
+    body `{"step": "storyboard", "on": true}`
+
+    **เปิดแล้วกวาดอนุมัติงานที่รออยู่ทั้งหมดทันที** รวมใบที่มารอก่อนหน้าด้วย
+    (เจ้าของสั่งไว้ตรงๆ) ไม่ใช่มีผลเฉพาะงานที่เดินเข้ามาใหม่ — ถ้าทำแบบหลัง
+    คนกดจะเห็นว่า "กดแล้วไม่มีอะไรเกิดขึ้น" ทั้งที่มีงานค้างรออยู่เป็นสิบใบ
+
+    งานที่กด 🅿 พักไว้รอแก้ ไม่ถูกแตะ
+    """
+    payload = await request.json() if await request.body() else {}
+    step = str((payload or {}).get("step") or "").strip()
+    if step not in AUTO_STEPS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ไม่รู้จักขั้น “{step}” — มีให้เลือก: " + " · ".join(AUTO_STEPS))
+    want = bool((payload or {}).get("on"))
+
+    def work() -> dict:
+        current = _auto_on()
+        current[step] = want
+        shared.update_json(
+            shared.CONFIG_FILE,
+            lambda data: data.update({AUTO_APPROVE_KEY: current}),
+            default={},
+        )
+        _clip_log(("เปิด" if want else "ปิด")
+                  + f"อนุมัติอัตโนมัติขั้น “{AUTO_STEPS[step]['label']}”")
+        swept = _auto_sweep(step)[step] if want else 0
+        return {"swept": swept, **_auto_view()}
+
+    result = await asyncio.to_thread(work)
+    message = (f"เปิดแล้ว — อนุมัติงานที่รออยู่ให้ {result['swept']} ใบ"
+               if want else "ปิดแล้ว — งานถัดไปจะรอให้คุณกดเอง")
+    return {"ok": True, "step": step, "on": want, "message": message, **result}
 
 
 @app.get("/api/posted")
@@ -7683,6 +7917,8 @@ async def _startup() -> None:
     threading.Thread(target=_digest_keeper, daemon=True).start()
     # บทสนทนาแชท + log ระบบ ขึ้น Drive เอง — ไม่ต้องรอให้มีคลิปใหม่
     threading.Thread(target=_drive_log_keeper, daemon=True).start()
+    # อนุมัติอัตโนมัติตามขั้นที่เจ้าของติ๊กเปิดไว้ (28 ส.ค. 2569)
+    threading.Thread(target=_auto_keeper, daemon=True).start()
     append_log("clip", f"เซิร์ฟเวอร์สายคลิปพร้อม — พอร์ต {PORT}")
 
 

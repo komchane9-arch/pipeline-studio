@@ -1168,6 +1168,63 @@ import hashtag as hashtag_lib                                    # noqa: E402
 # มือถือมีจอเดียว สองงานยิง adb พร้อมกันจะกดทับกันทั้งคู่ — ล็อกให้รันทีละงาน
 _publish_run_lock = threading.Lock()
 
+# ---- สมุดจดว่าตอนนี้กำลังกดจอมือถืออยู่หรือเปล่า (28 ส.ค. 2569) -------------
+#
+# **เหตุการณ์ที่ทำให้ต้องมี** — 15:38 ผมสั่งรีสตาร์ตเซิร์ฟเวอร์ระหว่างที่งาน
+# โพสต์ Shopee Video เดินไปถึงขั้นที่ 20 จาก 22 แล้ว งานตายทันทีเพราะตัวกดจอ
+# ทำงาน **อยู่ในโปรเซสนี้** ไม่ใช่โปรแกรมแยก ปิดเซิร์ฟเวอร์ = ตัวกดจอตายด้วย
+#
+# ด่านกันรีสตาร์ต (`restart_studio.check_safe`) ถามแค่ `/api/fb/jobs` ซึ่งเป็น
+# งานโพสต์กลุ่ม Facebook — **มันไม่รู้จักงานกดจอลงคลิปเลย** จึงตอบว่าปลอดภัย
+# ผลคือคลิปค้างอยู่หน้าใส่แคปชัน 35 นาทีโดยไม่มีอะไรฟ้อง สถานะยังเป็น pending
+# ทั้งที่ทำไปแล้ว 20 ขั้น
+#
+# **ทำไมเขียนเป็น "ตอบว่ากำลังทำอะไรอยู่" แทนที่จะไปแก้ด่านให้รู้จัก Shopee**
+# เพราะถ้าแก้แบบหลัง พองานชนิดใหม่โผล่มาอีก ด่านก็จะมองไม่เห็นอีกเหมือนเดิม
+# ตัวนี้ให้เซิร์ฟเวอร์เป็นคนตอบว่า "ฉันกำลังทำอะไรที่จะตายถ้าปิดฉัน" งานใหม่
+# แค่มาจดเพิ่มในสมุดนี้ ด่านไม่ต้องแก้อีกเลย
+_busy_lock = threading.Lock()
+_busy_now: dict[str, dict] = {}
+
+
+def _busy_mark(key: str, **fields) -> None:
+    """จดว่ากำลังทำอะไรอยู่ — ใส่ค่าเดิมซ้ำได้ (ใช้อัปเดตความคืบหน้า)"""
+    with _busy_lock:
+        row = _busy_now.setdefault(key, {"key": key, "since": _now_text()})
+        row.update(fields)
+
+
+def _busy_clear(key: str) -> None:
+    with _busy_lock:
+        _busy_now.pop(key, None)
+
+
+def _busy_rows() -> list[dict]:
+    with _busy_lock:
+        return [dict(row) for row in _busy_now.values()]
+
+
+def _now_text() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+@app.get("/api/busy")
+async def busy_view() -> dict:
+    """ตอนนี้เซิร์ฟเวอร์กำลังทำอะไรอยู่ที่ **จะตายถ้าปิดโปรเซสนี้**
+
+    `restart_studio.py` เรียกตัวนี้ก่อนรีสตาร์ตทุกครั้ง เจออะไรค้างอยู่ = ไม่ยอมรี
+    (สั่ง --force ทับได้ ถ้าเจ้าของยอมให้งานนั้นตาย)
+
+    **ห้ามใช้ตอบว่า "ว่าง" ถ้าตอบไม่ได้** — คืนรายการจริงเท่านั้น
+    """
+    rows = _busy_rows()
+    return {
+        "ok": True,
+        "busy": bool(rows),
+        "jobs": rows,
+        "text": " · ".join(r.get("what") or r["key"] for r in rows),
+    }
+
 
 def _flow_store(serial: str) -> "publish_flow.FlowStore":
     return publish_flow.FlowStore(serial, root=DATA_DIR)
@@ -1773,9 +1830,15 @@ async def publish_flow_run(request: Request) -> dict:
         # **ปล่อย `_publish_run_lock` ใน finally ชั้นนอกสุดเสมอ** — ถ้าไปปล่อย
         # ข้างในบล็อกคิว แล้วขอคิวไม่ได้ (คนอื่นถือจออยู่) ล็อกจะค้างตลอดกาล
         # แล้วทุกคำขอโพสต์หลังจากนั้นจะโดนตอบว่า "มีงานโพสต์รันอยู่แล้ว" ทั้งที่ว่าง
+        busy_key = f"publish:{serial}:{target}"
         try:
             with phone_queue.slot(serial, owner="งานโพสต์คลิป", task=what,
                                   lane="post", timeout=600.0):
+                # จดตั้งแต่ก่อนแตะจอขั้นแรก — ถ้าไปจดทีหลังจะมีช่องว่างที่
+                # รีสตาร์ตแทรกเข้ามาได้พอดี ซึ่งคือเคสที่เกิดจริงเมื่อ 15:38
+                _busy_mark(busy_key, what=f"{what} ({item_id or 'ไม่ระบุใบงาน'})",
+                           serial=serial, target=target, item_id=item_id,
+                           step=0, steps=0)
                 context = _build_context(serial, target, item_id,
                                          _shot_after_step(serial, target, item_id))
                 if only:
@@ -1792,6 +1855,7 @@ async def publish_flow_run(request: Request) -> dict:
             # คืนคีย์บอร์ดเดิมเสมอ แม้ผังจะล้มกลางคัน — ทิ้งไว้ที่
             # ADBKeyboard เจ้าของหยิบมือถือขึ้นมาจะพิมพ์อะไรไม่ได้เลย
             adb_restore_keyboard(serial)
+            _busy_clear(busy_key)
             _publish_run_lock.release()
 
     try:

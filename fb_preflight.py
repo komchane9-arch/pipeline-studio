@@ -221,6 +221,53 @@ def check_keyboard(shell) -> Check:
     return Check("คีย์บอร์ด", True, current.split("/")[0][-28:] or "ปกติ")
 
 
+def check_photo_permission(shell) -> Check:
+    """แอป Facebook เข้าถึงรูปในเครื่องได้ไหม — **ไม่ได้ = ห้ามเริ่ม**
+
+    **เหตุการณ์ที่ทำให้มีด่านนี้ 28 ส.ค. 2569** เพิ่งย้ายงานโพสต์มาเครื่องใหม่
+    (REDMI 15C สำรอง) แล้วล้มทุกกลุ่มด้วยข้อความ "ไม่พบรูปในหน้าเลือกรูป"
+    ผังจอตอนพังบอกความจริง: หน้านั้นไม่ใช่แกลเลอรี แต่เป็นหน้าขออนุญาต
+    "อนุญาตให้เข้าถึงม้วนฟิล์มของคุณ" — แอปยังไม่เคยได้รับสิทธิ์บนเครื่องนี้
+
+        เครื่องเก่า  READ_MEDIA_IMAGES granted=true   → ไม่เคยเจอปัญหา
+        เครื่องใหม่  READ_MEDIA_IMAGES granted=false  → ล้มทุกกลุ่ม
+
+    **ทำไมต้องห้ามเริ่ม ไม่ใช่แค่เตือน** ไม่มีสิทธิ์ = แนบรูปไม่ได้ = ล้มทุกกลุ่ม
+    แน่นอน 100% ปล่อยให้เริ่มคือไล่เปิดกลุ่มทีละกลุ่มแล้วล้มทีละกลุ่ม นอกจาก
+    เสียเวลายังเสี่ยงโดน Facebook ตีธงว่าพฤติกรรมผิดปกติ
+
+    **ระบบไม่กดอนุญาตให้เอง** เพราะการให้สิทธิ์แอปเป็นการตั้งค่าความปลอดภัย
+    ของเครื่อง ที่เจ้าของควรเป็นคนตัดสิน
+    """
+    try:
+        raw = shell("dumpsys package com.facebook.katana")
+    except Exception as error:
+        return Check("สิทธิ์เข้าถึงรูป", False, f"ถามไม่ได้ ({error})", blocking=False)
+    wanted = ("android.permission.READ_MEDIA_IMAGES",
+              "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+              "android.permission.READ_EXTERNAL_STORAGE")
+    seen = False
+    for line in raw.splitlines():
+        line = line.strip()
+        for name in wanted:
+            if line.startswith(name + ":"):
+                seen = True
+                if "granted=true" in line:
+                    return Check("สิทธิ์เข้าถึงรูป", True, name.rsplit(".", 1)[-1])
+    if not seen:
+        # อ่านบรรทัดสิทธิ์ไม่เจอเลย — Android คนละรุ่นหรือรูปแบบต่างไป
+        # เตือนอย่างเดียว ไม่ห้าม เพราะอาจโพสต์ได้จริง
+        return Check("สิทธิ์เข้าถึงรูป", False,
+                     "อ่านสิทธิ์ไม่ได้ — ลองโพสต์ดู ถ้าแนบรูปไม่ได้ให้ไปเปิดสิทธิ์เอง",
+                     blocking=False)
+    return Check(
+        "สิทธิ์เข้าถึงรูป", False,
+        "แอป Facebook ยังเข้าถึงรูปในเครื่องนี้ไม่ได้ — แนบรูปไม่ได้ทุกกลุ่ม" + "\n"
+        + "แก้ครั้งเดียวจบ: เปิดแอป Facebook บนเครื่องนั้น ลองแนบรูป "
+        + 'แล้วแตะ "อนุญาตให้เข้าถึง" เลือก "อนุญาตทั้งหมด"',
+    )
+
+
 # --------------------------------------------------- กันโพสต์ซ้ำกลุ่มเดิมเร็วเกิน
 
 def _job_time(job: dict) -> datetime | None:
@@ -302,6 +349,7 @@ def run_checks(serial: str, *, adb: str = "adb", shell=None, devices=None,
     if device.ok:
         report.checks.append(check_phone_space(shell))
         report.checks.append(check_keyboard(shell))
+        report.checks.append(check_photo_permission(shell))
     if group_ids:
         report.checks.append(check_duplicate(
             jobs or [], group_ids, label=label, minutes=minutes, now=now,

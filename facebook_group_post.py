@@ -230,6 +230,52 @@ class Phone:
             creationflags=studio_shared.NO_WINDOW,
         )
 
+    # ---- ขนาดจอจริง + การเลื่อนจอที่ย่อขยายตามจอ ----
+    #
+    # **เหตุการณ์ที่ทำให้ต้องมี 28 ส.ค. 2569** ย้ายงานโพสต์มาเครื่องใหม่
+    # (REDMI 15C 720x1600) แล้วโพสต์ขึ้นครบ 6 กลุ่มแต่ **คอมเมนต์ไม่ลงสักกลุ่ม**
+    # เพราะคำสั่งเลื่อนจอเขียนพิกัดตายตัวไว้ว่าเริ่มลากที่ y=1800 ซึ่งเป็นพิกัด
+    # ของ Xiaomi (1080x2400) — บนจอสูง 1600 ตำแหน่งนั้น **อยู่นอกจอ** เลื่อนไม่ติด
+    # หาปุ่มคอมเมนต์จึงไม่เจอทุกครั้ง แล้วข้ามไปเงียบๆ ว่า "โพสต์สำเร็จ"
+    #
+    # ผิดกติกา CLAUDE.md ข้อ 2.7 ที่เขียนไว้เองว่า "พิกัดห้ามฝังตายในโค้ด"
+    # มีแบบนี้ 14 จุดในไฟล์เดียว — แก้ทีละจุดก็ลืมจุดใดจุดหนึ่งอยู่ดี
+    # จึงรวมมาไว้ที่ทางผ่านเดียว แล้วให้ตัวเลขเดิมเป็น "พิกัดอ้างอิง" ที่ย่อขยายเอง
+    REF_W, REF_H = 1080, 2400      # จอที่ใช้ตอนจูนตัวเลขพวกนี้ (Xiaomi 11T pro)
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """(กว้าง, สูง) ของจอเครื่องนี้ — ถามครั้งเดียวแล้วจำไว้"""
+        cached = getattr(self, "_size", None)
+        if cached:
+            return cached
+        size = (self.REF_W, self.REF_H)
+        try:
+            found = re.search(r"(\d+)x(\d+)", self.shell("wm size"))
+            if found:
+                size = (int(found.group(1)), int(found.group(2)))
+        except Exception:
+            pass          # ถามไม่ได้ก็ใช้จออ้างอิง ดีกว่าล้มทั้งงาน
+        self._size = size
+        return size
+
+    def vswipe(self, y_from, y_to, ms=None, x_ref: int = 540) -> None:
+        """เลื่อนจอแนวตั้ง — **รับพิกัดบนจออ้างอิง 1080x2400 แล้วย่อขยายให้ตรงจอจริง**
+
+        ตัวเลขที่ส่งเข้ามาเป็นค่าที่จูนไว้กับจอ Xiaomi ไม่ใช่พิกัดจริงของเครื่องนี้
+        """
+        width, height = self.size
+        fx = width / self.REF_W
+        fy = height / self.REF_H
+        # กันหลุดขอบจอ — เลื่อนต้องอยู่ในจอทั้งจุดเริ่มและจุดจบ ไม่งั้นไม่มีอะไรเกิดขึ้น
+        clamp = lambda v: max(1, min(height - 1, int(round(float(v) * fy))))
+        self.run(
+            "shell", "input", "swipe",
+            str(max(1, min(width - 1, int(round(x_ref * fx))))), str(clamp(y_from)),
+            str(max(1, min(width - 1, int(round(x_ref * fx))))), str(clamp(y_to)),
+            str(int(ms if ms is not None else SCROLL_DURATION_MS)),
+        )
+
     def shell(self, command: str, timeout: float = 30) -> str:
         result = self.run("shell", command, timeout=timeout)
         return result.stdout.decode("utf-8", errors="replace")
@@ -900,9 +946,7 @@ def like_single_post(phone: Phone) -> bool:
             phone.log(f"  ปุ่มอยู่นอกเขตที่แตะเข้า (y={buttons[0][1]}) — เลื่อนก่อน")
         else:
             phone.log("  ยังไม่เห็นแถบปุ่ม — เลื่อนหา")
-        phone.run(
-            "shell", "input", "swipe", "540", "1800",
-            "540", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
+        phone.vswipe("1800", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
         )
         time.sleep(2.0)
     phone.log("  หาปุ่มถูกใจในหน้าโพสต์ไม่เจอ")
@@ -960,9 +1004,7 @@ def like_post_of(phone: Phone, caption: str, single_post: bool = False) -> bool:
         if attempt >= LIKE_SCROLL_TRIES:
             break
         phone.log(f"  แถบปุ่มยังไม่โผล่ — เลื่อนช้าๆ {SCROLL_STEP}px")
-        phone.run(
-            "shell", "input", "swipe", "540", "1800",
-            "540", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
+        phone.vswipe("1800", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
         )
         scrolled = True
         time.sleep(2.0)
@@ -1187,9 +1229,7 @@ def _comment_already_there(phone: Phone, probe: str) -> bool:
     for _ in range(COMMENT_SEARCH_SCROLLS):
         if _comment_is_live(phone.dump(), probe):
             return True
-        phone.run(
-            "shell", "input", "swipe", "540", "1800",
-            "540", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
+        phone.vswipe("1800", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
         )
         time.sleep(1.8)
     return False
@@ -1253,9 +1293,7 @@ def _scroll_back_to_caption(phone: Phone, caption: str) -> bool:
     if _caption_box(phone.dump(), caption) is not None:
         return True
     for _ in range(CAPTION_BACK_TRIES):
-        phone.run(
-            "shell", "input", "swipe", "540", "700",
-            "540", str(700 + SCROLL_STEP), str(SCROLL_DURATION_MS),
+        phone.vswipe("700", str(700 + SCROLL_STEP), str(SCROLL_DURATION_MS),
         )
         time.sleep(1.8)
         if _caption_box(phone.dump(), caption) is not None:
@@ -1329,9 +1367,7 @@ def comment_post_of(phone: Phone, caption: str, comment,
             break
         distance = min(1100, max(300, top - 350))
         phone.log(f"  ยังไม่เห็นปุ่มคอมเมนต์ — เลื่อนขึ้น {distance}px")
-        phone.run(
-            "shell", "input", "swipe", "540", "1800", "540", str(1800 - distance), "500"
-        )
+        phone.vswipe("1800", str(1800 - distance), 500)
         time.sleep(2.0)
     phone.log("  หาปุ่มคอมเมนต์ของโพสต์นี้ไม่เจอ")
     return dict(NO_COMMENT)
@@ -1367,9 +1403,7 @@ def like_own_comment(phone: Phone, text: str) -> bool:
     for _ in range(3):
         if below:
             break
-        phone.run(
-            "shell", "input", "swipe", "540", "1600", "540", "1150",
-            str(SCROLL_DURATION_MS),
+        phone.vswipe("1600", "1150", str(SCROLL_DURATION_MS),
         )
         time.sleep(2.0)
         xml = phone.dump()
@@ -1702,9 +1736,7 @@ def open_post_from_notification(phone: Phone, group_name: str, caption: str) -> 
             # เปิดมาแล้วแต่ไม่เห็นแคปชัน — โพสต์ที่มีคอมเมนต์แล้ว แจ้งเตือนจะพา
             # ลงไปโผล่ที่โซนคอมเมนต์เลย ตัวโพสต์อยู่เหนือขอบจอ ต้องเลื่อนขึ้นไปดู
             for _ in range(4):
-                phone.run(
-                    "shell", "input", "swipe", "540", "700", "540", "1900",
-                    str(SCROLL_DURATION_MS),
+                phone.vswipe("700", "1900", str(SCROLL_DURATION_MS),
                 )
                 time.sleep(1.8)
                 if _caption_box(phone.dump(), caption) is not None:
@@ -1717,9 +1749,7 @@ def open_post_from_notification(phone: Phone, group_name: str, caption: str) -> 
             break
         if attempt >= NOTIFICATION_SCROLL_TRIES:
             break
-        phone.run(
-            "shell", "input", "swipe", "540", "1800",
-            "540", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
+        phone.vswipe("1800", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
         )
         time.sleep(2.0)
     phone.log("  ไม่เจอแจ้งเตือนของกลุ่มนี้ (อาจยังไม่ได้รับอนุมัติ)")
@@ -1879,9 +1909,7 @@ def open_own_post(phone: Phone, group_id: str, group_name: str, caption: str,
             if fresh and open_post_link(phone, fresh, caption, group_id):
                 return {"route": "link", "link": fresh}
             return {"route": "feed", "link": fresh}
-        phone.run(
-            "shell", "input", "swipe", "540", "1800",
-            "540", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
+        phone.vswipe("1800", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
         )
         time.sleep(1.8)
     phone.log("  หาโพสต์ในฟีดไม่เจอ")
@@ -2034,9 +2062,7 @@ def copy_link_single_post(phone: Phone, clipboard) -> str:
             return _copy_link_from_menu(phone, best, clipboard)
         if attempt >= LINK_TOP_SCROLL_TRIES:
             break
-        phone.run(
-            "shell", "input", "swipe", "540", "700",
-            "540", str(700 + SCROLL_STEP), str(SCROLL_DURATION_MS),
+        phone.vswipe("700", str(700 + SCROLL_STEP), str(SCROLL_DURATION_MS),
         )
         time.sleep(1.5)
     phone.log("  หาปุ่ม … ของโพสต์ไม่เจอ — ข้ามการเก็บลิงก์")
@@ -2059,9 +2085,7 @@ def _find_in_sheet(phone: Phone, hints: list[str], tries: int = MENU_SCROLL_TRIE
         if found is not None:
             return found
         # ปัดขึ้นภายในแผ่นเมนู (แผ่นอยู่ครึ่งล่างของจอ)
-        phone.run(
-            "shell", "input", "swipe", "540", "1600",
-            "540", "1100", str(SCROLL_DURATION_MS),
+        phone.vswipe("1600", "1100", str(SCROLL_DURATION_MS),
         )
         time.sleep(1.2)
         found = phone.find(phone.dump(), hints)
@@ -2149,9 +2173,7 @@ def verify_liked(phone: Phone, group_id: str, caption: str) -> dict:
     # พอดี = ไม่ได้ใช้เวลาค้นหาเลยแม้แต่วินาทีเดียว
     scrolled = 0
     while not found_post and scrolled < VERIFY_SCROLL_TRIES:
-        phone.run(
-            "shell", "input", "swipe", "540", str(700 + SCROLL_STEP),
-            "540", "700", str(SCROLL_DURATION_MS),
+        phone.vswipe(str(700 + SCROLL_STEP), "700", str(SCROLL_DURATION_MS),
         )
         time.sleep(1.8)
         scrolled += 1
@@ -2418,9 +2440,7 @@ def count_comments(phone: Phone) -> int | None:
         if xml == last:
             break
         last = xml
-        phone.run(
-            "shell", "input", "swipe", "540", "1800",
-            "540", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
+        phone.vswipe("1800", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
         )
         time.sleep(1.8)
     return len(seen) if entered else None
@@ -2506,9 +2526,7 @@ def read_post_stats(phone: Phone, caption: str, single_post: bool = True,
             return stats
         if attempt >= STAT_SCROLL_TRIES:
             break
-        phone.run(
-            "shell", "input", "swipe", "540", "1800",
-            "540", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
+        phone.vswipe("1800", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS),
         )
         time.sleep(1.8)
     phone.log("  หาแถวตัวนับของโพสต์ไม่เจอ")

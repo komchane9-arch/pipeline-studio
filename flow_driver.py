@@ -368,6 +368,50 @@ class FlowDriver:
             },
         )
 
+    def dismiss_notices(self) -> list[str]:
+        """ปิดป๊อปอัปประกาศของ Flow — คืนรายชื่อที่ปิดไป
+
+        **เหตุการณ์ที่ทำให้ต้องมี (28 ส.ค. 2569)** — Google ขึ้นกล่องประกาศ
+        ฟีเจอร์ 360p คลุมทั้งหน้า มีปุ่ม "เริ่มต้นใช้งาน" ปุ่มเดียว
+        ผลคือ **ปุ่ม New project กับปุ่มบัญชีถูกบังหมด** ระบบจึงล้มทุกใบด้วย
+        "หาปุ่ม 'New project' ไม่เจอ" — เผางานไป 15 ใบระหว่าง 10:59-14:48
+        โดยไม่มีใครรู้ว่าสาเหตุคือกล่องประกาศ เพราะไม่มีการเก็บภาพไว้เลย
+
+        Google ขึ้นกล่องแบบนี้ทุกครั้งที่ออกฟีเจอร์ใหม่ **จะเกิดอีกแน่นอน**
+        การไปเพิ่มคำใหม่ลงรายการทีหลังทุกครั้งไม่ใช่ทางแก้ ต้องปิดให้เป็น
+
+        ปิดตามลำดับความปลอดภัย — ปุ่มปิด (X) ก่อน แล้วค่อยปุ่มยืนยัน
+        **ห้ามกดปุ่มที่พาไปหน้าอื่นหรือสมัครบริการ** (เช่น "สมัครใช้บริการ"
+        บนแถบโปรโมชัน) จึงระบุชื่อปุ่มไว้ชัดเจน ไม่กดอะไรก็ตามที่เจอ
+        """
+        closed: list[str] = []
+        try:
+            dialog = self.page.get_by_role("dialog")
+            if not dialog.count():
+                return closed
+        except Exception:                                        # noqa: BLE001
+            return closed
+
+        for role, pattern, label in (
+            ("button", re.compile(r"^\s*(ปิด|Close|Dismiss)\s*$", re.I), "ปุ่มปิด"),
+            ("button", re.compile(r"เริ่มต้นใช้งาน|Get started|Got it|ตกลง|OK",
+                                  re.I), "ปุ่มรับทราบ"),
+        ):
+            try:
+                found = self.page.get_by_role(role, name=pattern)
+                if not found.count():
+                    continue
+                found.first.click(timeout=3000)
+                closed.append(label)
+                time.sleep(1.0)
+                if not self.page.get_by_role("dialog").count():
+                    break
+            except Exception:                                    # noqa: BLE001
+                continue
+        if closed:
+            self.log(f"  ปิดกล่องประกาศของ Flow แล้ว ({' · '.join(closed)})")
+        return closed
+
     def _signed_in_marks(self) -> list[str]:
         """ของที่ **มีเฉพาะตอนล็อกอินแล้วจริง** บนหน้า Flow — คืนรายชื่อที่เจอ
 
@@ -403,7 +447,12 @@ class FlowDriver:
         """
         if self.snapshot().get("signedOut"):
             raise NeedsLogin("หลุดไปหน้าล็อกอิน Google")
+        # ปิดกล่องประกาศก่อนตรวจ ไม่งั้นกล่องจะบังปุ่มบัญชีแล้วตัวตรวจสรุปผิดว่า
+        # "ยังไม่ได้ล็อกอิน" ทั้งที่ล็อกอินอยู่ — เกิดจริงแล้ว 28 ส.ค. 2569
         marks = self._signed_in_marks()
+        if not marks:
+            self.dismiss_notices()
+            marks = self._signed_in_marks()
         if not marks:
             self.shot(f"Flow ไม่มีร่องรอยว่าล็อกอินแล้ว ({where})")
             raise NeedsLogin(

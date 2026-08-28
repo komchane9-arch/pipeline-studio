@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import msvcrt
 import os
@@ -20,6 +21,7 @@ import re
 import subprocess
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from ctypes import wintypes
 from datetime import datetime
@@ -104,8 +106,151 @@ for _folder in (POST_STATE, POST_IMAGES, POST_EVIDENCE):
 
 
 def post_file(name: str) -> Path:
-    """ที่อยู่ไฟล์สถานะของสายโพสต์"""
+    """ที่อยู่ไฟล์สถานะของสายโพสต์ **ที่ทุกบัญชีใช้ร่วมกัน**
+
+    เหลือแค่ของที่เป็นของ "เครื่อง" ไม่ใช่ของ "บัญชี" เช่นสถานะล้างเครื่อง
+    ของที่เป็นของบัญชีต้องไปทาง `account_file()` ดูเหตุผลข้างล่าง
+    """
+    if name in ACCOUNT_FILES:
+        # **ล้มเสียงดัง ห้ามคืนพาธเก่าให้** — แฟ้มพวกนี้ย้ายไปอยู่ใต้บัญชีแล้ว
+        # (ย้ายจริง 28 ส.ค. 2569) ถ้าปล่อยให้คืนพาธเก่า ตัวเรียกจะอ่านได้ว่าง
+        # แล้วสร้างแฟ้มใหม่ทับตรงนั้น → ข้อมูลแตกเป็นสองที่โดยไม่มีอะไรฟ้อง
+        # กว่าจะรู้ตัวคือตอนกลุ่มหาย หรือประวัติ "ลงไปแล้ว" ไม่ตรง
+        raise ValueError(
+            f"{name} เป็นแฟ้มรายบัญชีแล้ว — ต้องเรียกผ่าน "
+            "studio_shared.account_file(<ชื่อบัญชี>, ...) ไม่ใช่ post_file()"
+        )
     return POST_STATE / name
+
+
+# ------------------------------------------------- ที่เก็บแยกรายบัญชี Facebook
+#
+# **เจ้าของสั่ง 28 ส.ค. 2569** — *"ให้สร้างที่เก็บใหม่แยกกันทั้งหมดเลย ตั้งแต่
+# bot 1-10 โดยถ้ามีการเพิ่ม bot11 ก็ให้สร้างที่เก็บใหม่แยกโดยอัตโนมัติ"*
+#
+# **ปัญหาที่แก้** ของเดิมทุกบัญชีใช้แฟ้มใบเดียวกันหมด 8 ใบ พอสลับบัญชีที่ทำงาน
+# (เจ้าของเรียกว่า "เปลี่ยนเฟสที่ทำงาน") จะเกิดสามอย่างนี้ทันทีโดยไม่มีอะไรเตือน
+#
+#   1. **กลุ่มปนกัน** บัญชี A เห็นรายชื่อกลุ่มของบัญชี B ทั้งที่ไม่ได้เป็นสมาชิก
+#      → กดโพสต์แล้วล้มทุกกลุ่ม หรือแย่กว่านั้นคือไปโผล่ผิดที่
+#   2. **ประวัติปนกัน** "กลุ่มนี้ลงไปแล้ว" ของ A ไปห้าม B ลงทั้งที่ B ยังไม่เคยลง
+#   3. **เพดานคอมเมนต์ปนกัน** A คอมเมนต์จนเต็มโควตา B โดนห้ามตามทั้งที่ยังไม่ได้
+#      เริ่ม — อาการเดียวกับที่ CLAUDE.md ข้อ 8 เตือนไว้ว่า "เช็คแยก แต่จดรวมกัน"
+#
+# **กุญแจคือชื่อบัญชี ไม่ใช่เลขบอท** เพราะเจ้าของผูกบัญชีไว้กับมือถือแล้ว
+# (`devices.py account <serial> "<ชื่อ>"` — หนึ่งเครื่องต่อหนึ่งไอดี)
+# เลข Bot1..Bot10 เป็นชื่อโปรไฟล์เบราว์เซอร์ ซึ่งเป็นคนละเรื่องกับบัญชีที่โพสต์
+POST_ACCOUNTS = POST_STATE / "accounts"
+ACCOUNT_INDEX = POST_ACCOUNTS / "_index.json"
+
+# ไฟล์ที่ **ต้อง** แยกรายบัญชี — ประกาศไว้ให้ครบเพื่อให้พลาดแล้วดังทันที
+#
+# ใครเพิ่มไฟล์สถานะใหม่ในสายโพสต์ ต้องมาตัดสินใจตรงนี้ว่า "ของบัญชี" หรือ
+# "ของเครื่อง" ไม่ใช่เลือกเงียบๆ ตอนเรียก — เพราะเลือกผิดแล้วข้อมูลปนกัน
+# โดยไม่มีอะไรฟ้อง กว่าจะรู้ตัวคือตอนโพสต์ผิดบัญชีซึ่งกู้คืนไม่ได้
+ACCOUNT_FILES = frozenset({
+    "fb_groups.json",          # กลุ่มที่บันทึกไว้ + การแบ่งชุด
+    "fb_jobs.json",            # งานโพสต์ + ประวัติว่าลงกลุ่มไหนไปแล้ว
+    "fb_post_stats.json",      # ยอดของโพสต์ที่ลงไป
+    "fb_replies.json",         # คอมเมนต์ที่ตอบไปแล้ว
+    "fb_pending.json",         # โพสต์ที่รอกลุ่มอนุมัติ
+    "fb_routines.json",        # ตารางงานประจำของบัญชีนั้น
+    "comment_times.json",      # เวลาคอมเมนต์ล่าสุด (กันคอมเมนต์ถี่จนโดนแบน)
+    "fb_comment_guard.json",   # ด่านกันคอมเมนต์ถี่
+    "shopee_feeder_used.json", # สินค้าที่ป้อนให้บัญชีนี้ไปแล้ว
+    "comment_times_reply.json",  # เวลาคอมเมนต์ของเลนตอบกลับ (คนละเพดานกับเลนโพสต์)
+})
+
+
+class AccountMissing(RuntimeError):
+    """ไม่รู้ว่าจะใช้บัญชีไหน — ห้ามเดา ให้บอกชื่อทุกบัญชีแล้วให้คนเลือก"""
+
+
+def account_slug(name: str) -> str:
+    """แปลงชื่อบัญชีเป็นชื่อโฟลเดอร์ที่ปลอดภัย — คงภาษาไทยไว้ อ่านออกด้วยตา
+
+    ตัดอักขระที่ Windows ห้ามใช้ในชื่อไฟล์ทิ้ง ที่เหลือคงไว้ให้เปิดโฟลเดอร์แล้ว
+    รู้ทันทีว่าของใคร ไม่ใช่รหัสสุ่มที่ต้องเปิดตารางเทียบ
+    """
+    clean = str(name or "").strip()
+    keep = []
+    for ch in clean:
+        # **สระบนล่างและวรรณยุกต์ไทยไม่นับเป็นตัวอักษร** ( เป็นเท็จ)
+        # ถ้าไม่รับหมวด M เข้ามาด้วย "ร้าน" จะกลายเป็น "ราน" — อ่านผิดความหมาย
+        # และไปชนกับบัญชีที่ชื่อ "ราน" จริงๆ ได้ (จับได้ตอนทดสอบ 28 ส.ค. 2569)
+        if ch.isalnum() or unicodedata.category(ch).startswith("M") or ch in "-_":
+            keep.append(ch.lower() if ch.isascii() else ch)
+        elif ch in " .":
+            keep.append("-")
+    slug = "-".join(part for part in "".join(keep).split("-") if part)[:40]
+    if not slug:
+        # ชื่อที่เหลือแต่อักขระต้องห้าม — ใช้แฮชแทน ดีกว่าโยนทุกคนลงโฟลเดอร์ว่าง
+        slug = "acct-" + hashlib.sha256(clean.encode("utf-8")).hexdigest()[:10]
+    return slug
+
+
+def _account_index() -> dict:
+    try:
+        return json.loads(ACCOUNT_INDEX.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def account_dir(name: str) -> Path:
+    """โฟลเดอร์ของบัญชีนี้ — **สร้างให้เองถ้ายังไม่มี**
+
+    นี่คือส่วนที่ทำให้ "เพิ่มบัญชีใหม่แล้วมีที่เก็บของตัวเองทันที" เป็นจริง
+    ไม่ต้องมีใครไปสร้างโฟลเดอร์รอไว้ล่วงหน้า และไม่ต้องแก้โค้ดเพิ่มบัญชี
+
+    **ด่านกันชื่อชนกัน** สองบัญชีที่ชื่อต่างกันแต่ย่อแล้วได้โฟลเดอร์เดียวกัน
+    (เช่น "ร้าน A" กับ "ร้าน-A") จะทำให้ข้อมูลสองบัญชีกองรวมกันเงียบๆ
+    จึงจดชื่อเต็มไว้ในสมุด แล้วถ้าเจอว่าโฟลเดอร์นี้เป็นของชื่ออื่นอยู่แล้ว
+    ให้ต่อท้ายด้วยแฮชสั้นๆ แทนที่จะเขียนทับกัน
+    """
+    clean = str(name or "").strip()
+    if not clean:
+        raise AccountMissing(
+            "ยังไม่รู้ว่าจะใช้บัญชีไหน — ผูกบัญชีกับเครื่องก่อนด้วย "
+            'python devices.py account <serial> "<ชื่อบัญชี>"'
+        )
+    slug = account_slug(clean)
+    index = _account_index()
+    owner = index.get(slug)
+    if owner and owner != clean:
+        slug = f"{slug}-{hashlib.sha256(clean.encode('utf-8')).hexdigest()[:6]}"
+        owner = index.get(slug)
+    folder = POST_ACCOUNTS / slug
+    folder.mkdir(parents=True, exist_ok=True)
+    if owner != clean:
+        index[slug] = clean
+        try:
+            ACCOUNT_INDEX.write_text(
+                json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    return folder
+
+
+def account_file(account: str, name: str) -> Path:
+    """ที่อยู่ไฟล์สถานะ **ของบัญชีนั้นโดยเฉพาะ**
+
+    ล้มทันทีถ้าเรียกผิดสองแบบ แทนที่จะปล่อยให้เขียนผิดที่แล้วรู้ตัวทีหลัง
+
+      ไม่บอกบัญชี      → AccountMissing (ห้ามเดา ดู CLAUDE.md ข้อ 8)
+      ไฟล์ไม่ได้อยู่ในรายการ → ValueError พร้อมบอกว่าให้ไปตัดสินใจที่ ACCOUNT_FILES
+    """
+    if name not in ACCOUNT_FILES:
+        raise ValueError(
+            f"{name} ไม่ได้ประกาศว่าเป็นไฟล์รายบัญชี — ถ้าเป็นของบัญชีจริง "
+            "ให้เพิ่มชื่อลงใน studio_shared.ACCOUNT_FILES ถ้าเป็นของเครื่อง "
+            "ให้ใช้ post_file() แทน"
+        )
+    return account_dir(account) / name
+
+
+def known_accounts() -> list[str]:
+    """ทุกบัญชีที่เคยมีที่เก็บ — เรียงตามตัวอักษร ไว้โชว์ให้คนเลือก"""
+    return sorted(_account_index().values())
 
 
 # ล็อกที่แยกต่อทรัพยากร (มือถือรายเครื่อง / โปรไฟล์บอทรายตัว) อยู่ในโฟลเดอร์นี้

@@ -34,9 +34,16 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import fb_limits
+import fb_auto_post
 import studio_shared
 
-STATE_FILE = studio_shared.post_file("fb_comment_guard.json")
+def STATE_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    return fb_auto_post.state_file("fb_comment_guard.json")
 EVIDENCE_DIR = studio_shared.POST_EVIDENCE / "comment_blocks"
 
 # ล้มติดกันกี่ครั้งถึงถือว่าโดนบล็อก
@@ -113,7 +120,7 @@ def _blank() -> dict:
 def load() -> dict:
     """อ่านสถานะจากไฟล์ — พังยังไงก็ต้องคืน dict ที่ใช้ได้"""
     try:
-        raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        raw = json.loads(STATE_FILE().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return _blank()
     if not isinstance(raw, dict):
@@ -127,8 +134,8 @@ def load() -> dict:
 
 def save(state: dict) -> None:
     try:
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2),
+        STATE_FILE().parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE().write_text(json.dumps(state, ensure_ascii=False, indent=2),
                               encoding="utf-8")
     except OSError:
         pass                          # เขียนไม่ได้ต้องไม่ล้มทั้งงาน

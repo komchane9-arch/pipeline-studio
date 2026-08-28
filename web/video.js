@@ -2329,7 +2329,9 @@ async function showJob(jobId, force = false) {
   // ของช่องที่เห็น ใหญ่เกินกว่าจะตรึงค้างไว้ตลอด)
   const pub = publishBlock(payload.publish_order, run.item_id);
   const pubFold = pub.length
-    ? [fold(job, "publish", "📤 ลำดับการลง 3 ที่ — กดลงได้จากตรงนี้", pub.slice(1))]
+    // หุบไว้เป็นค่าตั้งต้น (เจ้าของสั่ง 28 ส.ค. 2569) — แผงนี้ยาวและไม่ได้ใช้ทุกครั้ง
+    // กางค้างไว้แล้วดันของที่ต้องดูจริงตกจอ · กดครั้งเดียวแล้วระบบจำให้เอง
+    ? [fold(job, "publish", "📤 ลำดับการลง 3 ที่ — กดลงได้จากตรงนี้", pub.slice(1), false)]
     : [];
   box.replaceChildren(...pubFold, whole);
 }

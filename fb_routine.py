@@ -20,9 +20,16 @@ from __future__ import annotations
 import re
 from datetime import datetime, time as clock, timedelta
 
+import fb_auto_post
 import studio_shared
 
-STATE_FILE = studio_shared.post_file("fb_routines.json")
+def STATE_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    return fb_auto_post.state_file("fb_routines.json")
 
 # ถึงเวลาแล้วแต่เพิ่งมาเห็นทีหลัง — ยอมลงช้าได้ไม่เกินเท่านี้ (นาที)
 CATCHUP_MINUTES = 120
@@ -38,11 +45,11 @@ class RoutineError(RuntimeError):
 
 
 def load() -> dict:
-    return studio_shared.read_json(STATE_FILE, {}) or {}
+    return studio_shared.read_json(STATE_FILE(), {}) or {}
 
 
 def save(state: dict) -> None:
-    studio_shared.write_json_atomic(STATE_FILE, state)
+    studio_shared.write_json_atomic(STATE_FILE(), state)
 
 
 def parse_time(text: str) -> str:

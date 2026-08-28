@@ -28,9 +28,16 @@ from pathlib import Path
 
 import facebook_group_post as fb
 import fb_preflight
+import fb_auto_post
 import studio_shared
 
-JOBS_FILE = studio_shared.post_file("fb_jobs.json")
+def JOBS_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    return fb_auto_post.state_file("fb_jobs.json")
 
 # ป้ายปุ่มลบในเมนู "…" ของโพสต์ตัวเอง
 #
@@ -52,9 +59,9 @@ NOT_MINE_HINTS = ("รายงานโพสต์", "Report post", "บล็
 
 def load_jobs() -> list[dict]:
     try:
-        return json.loads(JOBS_FILE.read_text(encoding="utf-8"))
+        return json.loads(JOBS_FILE().read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        raise SystemExit(f"อ่าน {JOBS_FILE} ไม่ได้: {error}")
+        raise SystemExit(f"อ่าน {JOBS_FILE()} ไม่ได้: {error}")
 
 
 def targets_of_group(group_id: str, jobs: list[dict]) -> list[dict]:

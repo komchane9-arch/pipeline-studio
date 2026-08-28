@@ -38,14 +38,33 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import facebook_group_post as fb
+import fb_auto_post
 import studio_shared
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = DATA_DIR / "fb_engage_config.json"
-STATS_FILE = studio_shared.post_file("fb_post_stats.json")
-REPLIES_FILE = studio_shared.post_file("fb_replies.json")
-JOBS_FILE = studio_shared.post_file("fb_jobs.json")
+def STATS_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    return fb_auto_post.state_file("fb_post_stats.json")
+def REPLIES_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    return fb_auto_post.state_file("fb_replies.json")
+def JOBS_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    return fb_auto_post.state_file("fb_jobs.json")
 STUDIO_API = "http://127.0.0.1:8866"
 
 # ช่องโควตาคอมเมนต์ของสายนี้ — แยกขาดจากช่องของงานโพสต์ (ดู COMMENT_LANES ใน
@@ -193,7 +212,7 @@ def post_targets() -> list[dict]:
     อ่านจากไฟล์งานของสายโพสต์ตรงๆ ไม่ผ่าน API เพราะไฟล์นี้เป็นแหล่งจริง และ
     โมดูลนี้ต้องทำงานได้แม้ app.py ปิดอยู่
     """
-    raw = _read_json(JOBS_FILE, [])
+    raw = _read_json(JOBS_FILE(), [])
     jobs = raw if isinstance(raw, list) else (raw.get("jobs") or [])
     found: list[dict] = []
     for job in jobs:
@@ -300,7 +319,7 @@ def resolve_serial(config: dict) -> str:
 # ---------------------------------------------------------------- เก็บยอด
 
 def load_stats() -> dict:
-    return _read_json(STATS_FILE, {})
+    return _read_json(STATS_FILE(), {})
 
 
 def _due(record: dict, hours: float) -> bool:
@@ -388,8 +407,8 @@ def refresh_stats(config: dict, log=print, stop=lambda: False,
         record["history"] = record["history"][-40:]
         updated += 1
         log(f"  {fb.format_stats(numbers)}")
-        _write_json(STATS_FILE, stats)      # เขียนทุกใบ ล้มกลางคันแล้วของที่เก็บมาไม่หาย
-    _write_json(STATS_FILE, stats)
+        _write_json(STATS_FILE(), stats)      # เขียนทุกใบ ล้มกลางคันแล้วของที่เก็บมาไม่หาย
+    _write_json(STATS_FILE(), stats)
     return {"checked": len(due), "updated": updated,
             "total": len(targets), "failed": failed}
 
@@ -434,7 +453,7 @@ def mass_report(config: dict, top: int = 10) -> list[dict]:
 # --------------------------------------------------- ตอบกลับคอมเมนต์คนอื่น
 
 def load_replies() -> dict:
-    return _read_json(REPLIES_FILE, {})
+    return _read_json(REPLIES_FILE(), {})
 
 
 def _fingerprint(target_key: str, author: str, text: str) -> str:
@@ -622,6 +641,6 @@ def reply_round(config: dict, log=print, stop=lambda: False,
             finally:
                 if original_ime:
                     phone.restore_keyboard(original_ime)
-                _write_json(REPLIES_FILE, replied)
+                _write_json(REPLIES_FILE(), replied)
     return {"sent": sent, "skipped": skipped, "posts": seen_posts,
             "quota_left": fb.comment_quota_left(REPLY_LANE, serial)}

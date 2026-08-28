@@ -4761,10 +4761,10 @@ def sync_extra_watchers() -> None:
             log=lambda message, n=name: append_log("input", f"[{n}] {message}"),
         )
         watcher.on_chat_seen = lambda chat, i=bot_id: _remember_extra_chat(i, chat)
-        watcher.on_photo = _telegram_photo
-        watcher.on_text = _telegram_text
-        watcher.on_command = _telegram_command
-        watcher.on_callback = _telegram_callback
+        watcher.on_photo = _as_bot(_telegram_photo, bot_id)
+        watcher.on_text = _as_bot(_telegram_text, bot_id)
+        watcher.on_command = _as_bot(_telegram_command, bot_id)
+        watcher.on_callback = _as_bot(_telegram_callback, bot_id)
         _extra_watchers[bot_id] = watcher
         watcher.start()
         append_log("input", f"เปิดตัวเฝ้าข้อความของบอท {name} ({bot.get('role')})")
@@ -5259,8 +5259,19 @@ async def decide_approval(approval_id: str, request: Request) -> dict:
 #   โพสต์ลงกลุ่มแล้วเรียกคืนไม่ได้ และผิดกลุ่มทีเดียวโดนเตะออกจากกลุ่มได้เลย
 #   จะให้ยิงทันทีที่ส่งรูปก็ทำได้ แต่ต้องเปิด auto_start เอง
 
-fb_groups = fb_auto_post.GroupStore(studio_shared.post_file("fb_groups.json"))
-fb_jobs = fb_auto_post.JobStore(studio_shared.post_file("fb_jobs.json"))
+# **ที่เก็บแยกรายบัญชี** (เจ้าของสั่ง 28 ส.ค. 2569)
+#
+# ส่งฟังก์ชันเข้าไปแทนพาธ เพื่อให้ "จะอ่าน/เขียนแฟ้มของใคร" ตัดสินตอนเรียกใช้
+# ตามบัญชีที่เธรดนั้นกำลังทำงานให้ ไม่ใช่ฝังตายตั้งแต่ตอนเปิดเซิร์ฟเวอร์
+#
+# ของเดิมทุกบัญชีใช้แฟ้มใบเดียวกัน พอมีบัญชีที่สองจะเกิดสามอย่างนี้ทันที
+# โดยไม่มีอะไรเตือน — กลุ่มปนกัน · ประวัติ "ลงไปแล้ว" ปนกัน · เพดานคอมเมนต์ปนกัน
+def _fb_state(name: str):
+    return lambda: studio_shared.account_file(posting_account(), name)
+
+
+fb_groups = fb_auto_post.GroupStore(_fb_state("fb_groups.json"))
+fb_jobs = fb_auto_post.JobStore(_fb_state("fb_jobs.json"))
 fb_runner = fb_auto_post.RunnerPool()
 
 # กลุ่มที่ผู้ใช้เคยโพสต์จริงมาแล้ว — ใส่ให้ตั้งแต่แรกจะได้ไม่ต้องพิมพ์ใหม่
@@ -5305,11 +5316,21 @@ def _fb_reclaim_interrupted() -> None:
 
 
 def _fb_seed_groups() -> None:
-    if studio_shared.post_file("fb_groups.json").is_file():
-        return
-    for group_id, name in FB_SEED_GROUPS:
-        fb_groups.add(group_id, name)
-    append_log("publish", f"ใส่กลุ่มตั้งต้นให้ {len(FB_SEED_GROUPS)} กลุ่ม (ลบได้)")
+    """**ไม่ใส่กลุ่มตั้งต้นให้ใครแล้ว** (หยุด 28 ส.ค. 2569)
+
+    เดิมบัญชีไหนที่ยังไม่มีแฟ้มกลุ่ม จะได้ `FB_SEED_GROUPS` ไปทั้งชุด
+    **และเปิดใช้ไว้ทุกกลุ่ม** ซึ่งถูกต้องตอนมีบัญชีเดียว แต่พอแยกที่เก็บ
+    รายบัญชีแล้วมันกลายเป็นตัวปนข้อมูลเสียเอง
+
+    เจอจริงวันที่แยก: เพิ่งผูกบัญชี `Kp Oo` เข้ากับจอ 2 ระบบใส่กลุ่มจาก
+    ประวัติของบัญชี `kamolchanok lill` ให้ 5 กลุ่ม เปิดใช้ครบทุกกลุ่ม
+    **ถ้ากดโพสต์ตอนนั้นคือยิงเข้ากลุ่มที่บัญชีนี้อาจไม่ได้เป็นสมาชิก**
+    ซึ่งเสี่ยงโดนเตะออกจากกลุ่ม และถอนคืนไม่ได้
+
+    บัญชีใหม่ต้องเริ่มจากศูนย์เสมอ — เจ้าของวางลิงก์กลุ่มเข้าบอทได้ทันที
+    หรือสั่ง /groups ดูรายการ ใช้เวลาไม่กี่วินาที ส่วนโพสต์ผิดกลุ่มกู้ไม่ได้
+    """
+    return
 
 
 def _fb_settings() -> dict:
@@ -5357,12 +5378,74 @@ def _fb_serial(serial: str = "", *, allow_default: bool = True) -> str:
     return picked
 
 
+# ใช้ตัวเดียวกับที่โมดูลสายโพสต์อื่นเรียก — ห้ามมีสองสำเนาที่เพี้ยนกันได้
+posting_account = fb_auto_post.posting_account
+
+
+def _bot_channel(bot_id: str = "") -> tuple[str, str, str]:
+    """(โทเคน · chat · บัญชี) ของบอทตัวนั้น — bot_id ว่าง = บอทหลัก"""
+    if bot_id:
+        bot = next((b for b in extra_bots() if b.get("id") == bot_id), {})
+        return (extra_bot_token(bot_id), str(bot.get("chat_id") or ""),
+                str(bot.get("account") or ""))
+    config = load_config()
+    return (load_telegram_token() or "",
+            str(config.get("telegram_chat_id") or ""),
+            str(config.get("telegram_main_account") or ""))
+
+
+def _as_bot(handler, bot_id: str = ""):
+    """ห่อตัวจัดการข้อความให้ทำงาน **ในนามบอทตัวที่รับสารมา**
+
+    ทั้งการตอบกลับและการเขียนแฟ้มจะไปช่อง/บัญชีของบอทตัวนั้น ไม่ใช่ของบอทหลัก
+    """
+    def wrapped(*args, **kwargs):
+        token, chat_id, account = _bot_channel(bot_id)
+        with reply_as(token, chat_id, account):
+            return handler(*args, **kwargs)
+    return wrapped
+
+
+# ------------------------------------------------- ช่องคุยแยกรายบอท
+#
+# **เจ้าของสั่ง 28 ส.ค. 2569** — *"แยกช่องมาเลยต่างหากอีกช่องนึงเลย"*
+#
+# **อาการที่ทำให้เกิดกติกานี้** เจ้าของพิมพ์ /start ไปที่ @Richmantai1Bot
+# ตัวนั้นรับได้จริง แต่ **@BeginerABot เด้งตอบแทน** เพราะตอนจะตอบกลับ ระบบ
+# ไปหยิบ "โทเคนบอทหลัก" มาส่งเสมอ ไม่สนว่าใครเป็นคนรับสารมา
+#
+# เปรียบเทียบ: มีพนักงานรับโทรศัพท์ 4 คน แต่มีสายโทรออกเส้นเดียว ทุกคนต้อง
+# ยืมเส้นนั้นตอบ ปลายทางจึงเห็นเบอร์เดียวตลอด ไม่ว่าคุยกับใคร
+#
+# แก้ด้วยการจำไว้ว่า "ข้อความนี้เข้ามาทางบอทตัวไหน" ตลอดช่วงที่จัดการข้อความนั้น
+# แล้วตอบกลับออกทางเดิมเสมอ เก็บเป็นตัวแปรประจำเธรดด้วยเหตุผลเดียวกับที่
+# `fb_auto_post` ใช้ — หลายข้อความเข้ามาพร้อมกันได้ ใบเดียวร่วมกันจะทับกันเอง
+_REPLY = threading.local()
+
+
+@contextlib.contextmanager
+def reply_as(token: str, chat_id: str, account: str):
+    """จัดการข้อความในนามบอทตัวนี้ — ตอบกลับออกช่องเดิม และเขียนลงแฟ้มของบัญชีนี้"""
+    before = getattr(_REPLY, "channel", None)
+    _REPLY.channel = (str(token or ""), str(chat_id or ""))
+    try:
+        with fb_auto_post.use_account(account):
+            yield
+    finally:
+        _REPLY.channel = before
+
+
 def _fb_telegram() -> tuple[str, str]:
     """โทเคน + chat id ที่ใช้คุยเรื่องงานโพสต์
 
-    บอทหลักไม่พร้อม (โทเคนหาย/ยังไม่ตั้ง) ก็ใช้บอทเพิ่มเติมที่ตั้งหน้าที่เป็น
-    facebook แทน — จะได้ไม่เงียบทั้งระบบเพราะบอทตัวเดียวมีปัญหา
+    **ลำดับความสำคัญ**
+      1. ช่องของบอทที่รับสารเข้ามา — ถามอะไรมาทางไหน ตอบกลับทางนั้น
+      2. บอทหลัก
+      3. บอทเพิ่มเติมที่ตั้งหน้าที่เป็น facebook (กันเงียบทั้งระบบเมื่อบอทหลักหาย)
     """
+    channel = getattr(_REPLY, "channel", None)
+    if channel and channel[0] and channel[1]:
+        return channel
     token = load_telegram_token() or ""
     chat_id = load_config().get("telegram_chat_id", "")
     if token and chat_id:
@@ -8966,10 +9049,12 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
     return ""
 
 
-approval_watcher.on_photo = _telegram_photo
-approval_watcher.on_text = _telegram_text
-approval_watcher.on_command = _telegram_command
-approval_watcher.on_callback = _telegram_callback
+# ห่อด้วย `_as_bot` ทุกตัว — ตอบกลับต้องออกช่องเดียวกับที่รับสารมา
+# และเขียนลงแฟ้มของบัญชีที่ผูกกับบอทตัวนั้น (เจ้าของสั่ง 28 ส.ค. 2569)
+approval_watcher.on_photo = _as_bot(_telegram_photo)
+approval_watcher.on_text = _as_bot(_telegram_text)
+approval_watcher.on_command = _as_bot(_telegram_command)
+approval_watcher.on_callback = _as_bot(_telegram_callback)
 
 
 # บอทเจนคลิปย้ายไปอยู่ที่ clip_app.py (พอร์ต 8877) แล้ว

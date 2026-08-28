@@ -46,7 +46,13 @@ PRODUCTS_CSV = PRODUCT_DIR / "products.csv"
 OLD_PREFIX = r"C:\project\2.Auto gen Video\12.เก็บข้อมูล\data"
 
 IMAGE_DIR = studio_shared.POST_DIR / "images"
-USED_FILE = studio_shared.post_file("shopee_feeder_used.json")
+def USED_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    return fb_auto_post.state_file("shopee_feeder_used.json")
 
 # โซนรูปสินค้าบนภาพหน้าจอเต็มจอ — วัดจาก 40 ใบสุ่ม พบว่า 30 ใบตรงกันเป๊ะที่
 # y 504-1583 เพราะเป็นมือถือเครื่องเดียวหน้าจอเดียวกัน โครง Shopee จึงอยู่ที่เดิม
@@ -120,7 +126,7 @@ def _images(folder: Path) -> list[Path]:
 
 def load_used() -> set[str]:
     """ลิงก์ที่เคยทำแม่แบบไปแล้ว — กันสินค้าซ้ำ ซึ่งเป็นปัญหาที่เรากำลังแก้อยู่พอดี"""
-    data = studio_shared.read_json(USED_FILE, {})
+    data = studio_shared.read_json(USED_FILE(), {})
     return set(data.get("links") or [])
 
 
@@ -133,7 +139,7 @@ def mark_used(link: str, job_id: str, name: str) -> None:
         current["jobs"][job_id] = {"link": link, "name": name}
         return current
 
-    studio_shared.update_json(USED_FILE, mutate, default={},
+    studio_shared.update_json(USED_FILE(), mutate, default={},
                               label="จดสินค้าที่ทำแม่แบบแล้ว")
 
 
@@ -283,8 +289,9 @@ def create_template(item: dict, index: int, jobs: fb_auto_post.JobStore,
 # --------------------------------------------------------------------- CLI
 
 def _stores() -> tuple[fb_auto_post.JobStore, fb_auto_post.GroupStore, str]:
-    jobs = fb_auto_post.JobStore(studio_shared.post_file("fb_jobs.json"))
-    groups = fb_auto_post.GroupStore(studio_shared.post_file("fb_groups.json"))
+    # ที่เก็บรายบัญชี — หาพาธตอนใช้งานเหมือนฝั่ง app.py
+    jobs = fb_auto_post.JobStore(lambda: fb_auto_post.state_file("fb_jobs.json"))
+    groups = fb_auto_post.GroupStore(lambda: fb_auto_post.state_file("fb_groups.json"))
     config = studio_shared.read_json(studio_shared.post_file("config.json"), {})
     set_name = (config.get("facebook") or {}).get("set", "") if config else ""
     return jobs, groups, set_name

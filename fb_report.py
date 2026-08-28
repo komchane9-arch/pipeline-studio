@@ -21,9 +21,16 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import fb_auto_post
 import studio_shared
 
-STATS_FILE = studio_shared.post_file("fb_post_stats.json")
+def STATS_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    return fb_auto_post.state_file("fb_post_stats.json")
 
 DEFAULT_DAYS = 30
 # กลุ่มที่โพสต์ไปกี่ครั้งขึ้นไปถึงจะเอามาตัดสิน — น้อยกว่านี้ยังไม่พอสรุป
@@ -136,7 +143,7 @@ def hour_report(jobs: list[dict], days: int = DEFAULT_DAYS,
 
 
 def load_stats() -> dict:
-    return studio_shared.read_json(STATS_FILE, {}) or {}
+    return studio_shared.read_json(STATS_FILE(), {}) or {}
 
 
 def engagement_report(stats: dict | None = None, top: int = 5) -> list[dict]:

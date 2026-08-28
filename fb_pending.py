@@ -22,9 +22,16 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import fb_auto_post
 import studio_shared
 
-STATE_FILE = studio_shared.post_file("fb_pending.json")
+def STATE_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    return fb_auto_post.state_file("fb_pending.json")
 
 # โพสต์เก่ากว่านี้ = เลิกตาม (ชั่วโมง)
 WINDOW_HOURS = 48
@@ -54,11 +61,11 @@ def _job_time(job: dict) -> datetime | None:
 
 
 def load_state() -> dict:
-    return studio_shared.read_json(STATE_FILE, {}) or {}
+    return studio_shared.read_json(STATE_FILE(), {}) or {}
 
 
 def save_state(state: dict) -> None:
-    studio_shared.write_json_atomic(STATE_FILE, state)
+    studio_shared.write_json_atomic(STATE_FILE(), state)
 
 
 def key_of(job_id: str, group_id: str) -> str:

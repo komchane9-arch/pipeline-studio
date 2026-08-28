@@ -18,6 +18,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -274,6 +275,89 @@ class _StoreLock:
         return False
 
 
+# แคชล็อกตามชื่อ — ดูเหตุผลที่ `_JsonStore.lock`
+_LOCKS: dict[str, "_StoreLock"] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(name: str) -> "_StoreLock":
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(name)
+        if lock is None:
+            lock = _LOCKS[name] = _StoreLock(name)
+        return lock
+
+
+# ------------------------------------------------- บัญชีที่กำลังทำงานอยู่
+#
+# **เจ้าของสั่ง 28 ส.ค. 2569** ให้แยกที่เก็บรายบัญชี และตอบว่าจะรู้ว่าบัญชีไหน
+# ด้วยการ *"ผูกบัญชีกับมือถือ 1 เครื่อง = 1 บัญชี"* ต่อมาสั่งเพิ่มว่าบอท Telegram
+# แต่ละตัวต้อง *"แยกช่องมาเลยต่างหาก"* — รวมกันเป็นกติกาเดียว
+#
+#     บอท 1 ตัว = บัญชี 1 บัญชี = ที่เก็บ 1 ชุด = ช่องคุย 1 ช่อง
+#
+# เก็บเป็น **ตัวแปรประจำเธรด** ไม่ใช่ตัวแปรกลางใบเดียว เพราะเซิร์ฟเวอร์รับ
+# หลายข้อความพร้อมกัน ถ้าใช้ใบเดียวร่วมกัน ข้อความของบอท A จะไปเปลี่ยนบัญชี
+# ใต้เท้าข้อความของบอท B ที่กำลังเขียนอยู่ แล้วงานไปโผล่ผิดบัญชีเงียบๆ
+_ACTIVE = threading.local()
+
+
+def posting_account() -> str:
+    """บัญชี Facebook ที่ควรใช้ตอนนี้ — **ห้ามเดา** (CLAUDE.md ข้อ 8)
+
+    ลำดับ
+      1. บัญชีของบอทที่รับข้อความเข้ามา (ตั้งไว้โดย `use_account`)
+      2. บัญชีที่ผูกไว้กับมือถือสายโพสต์ — เฉพาะตอนมีเครื่องเดียวที่ผูกไว้
+      3. ตอบไม่ได้แน่ชัด → โยน error พร้อมบอกชื่อทุกบัญชีให้เลือก
+
+    เหตุผลที่ไม่หยิบตัวแรกมาใช้เมื่อกำกวม: "โพสต์ลงบัญชีผิด" กู้คืนไม่ได้
+    ส่วน "งานไม่เริ่มพร้อมเหตุผล" เสียแค่เวลากดใหม่
+    """
+    account = active_account()
+    if account:
+        return account
+    import devices          # นำเข้าตรงนี้เพื่อไม่ให้ผูกกันตั้งแต่ตอนโหลดไฟล์
+    post_serials = set(devices.enabled_serials("post"))
+    bound = {name: serials for name, serials in devices.accounts().items()
+             if post_serials.intersection(serials)}
+    if len(bound) == 1:
+        return next(iter(bound))
+    if not bound:
+        raise studio_shared.AccountMissing(
+            "ยังไม่มีมือถือสายโพสต์เครื่องไหนผูกบัญชี Facebook ไว้ — ผูกก่อนด้วย "
+            'python devices.py account <serial> "<ชื่อบัญชี>"'
+        )
+    raise studio_shared.AccountMissing(
+        "มีหลายบัญชีในสายโพสต์ (" + " · ".join(sorted(bound))
+        + ") — บอกมาว่าจะใช้บัญชีไหน ระบบไม่เดาให้"
+    )
+
+
+def state_file(name: str):
+    """พาธแฟ้มสถานะของบัญชีที่กำลังทำงาน — ตัวช่วยที่ทุกโมดูลสายโพสต์เรียกใช้"""
+    return studio_shared.account_file(posting_account(), name)
+
+
+def active_account() -> str:
+    """บัญชีที่เธรดนี้กำลังทำงานให้ — ว่าง = ยังไม่ได้ตั้ง"""
+    return str(getattr(_ACTIVE, "account", "") or "")
+
+
+@contextmanager
+def use_account(name: str):
+    """ทำงานในนามบัญชีนี้ชั่วคราว แล้วคืนค่าเดิมเสมอ
+
+    ต้องคืนค่าเดิม ไม่ใช่ล้างทิ้ง เพราะบล็อกซ้อนกันได้ (งานโพสต์เรียกตัวช่วยที่
+    เรียกซ้อนอีกที) ถ้าล้างทิ้ง ชั้นในจะทำให้ชั้นนอกลืมบัญชีไปกลางคัน
+    """
+    before = getattr(_ACTIVE, "account", "")
+    _ACTIVE.account = str(name or "").strip()
+    try:
+        yield _ACTIVE.account
+    finally:
+        _ACTIVE.account = before
+
+
 class _JsonStore:
     """อ่าน/เขียนไฟล์ JSON ก้อนเดียวใต้ล็อก + เขียนแบบสลับไฟล์
 
@@ -288,9 +372,34 @@ class _JsonStore:
     และการอ่านเกิดหลายร้อยครั้งต่องาน ถ้าล็อกทุกครั้งจะช้าโดยไม่ได้อะไร
     """
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.lock = _StoreLock(path.stem)
+    def __init__(self, path) -> None:
+        # **รับได้ทั้งพาธตรงๆ และฟังก์ชันที่คืนพาธ** — แบบหลังคือหัวใจของการแยก
+        # ที่เก็บรายบัญชี เพราะ "จะเขียนลงแฟ้มของใคร" รู้ตอนเรียกใช้ ไม่ใช่ตอน
+        # สร้างตัวเก็บ (ตัวเก็บสร้างครั้งเดียวตอนเปิดเซิร์ฟเวอร์ แต่บัญชีที่
+        # ทำงานเปลี่ยนได้ทุกข้อความที่เข้ามา ตามบอทที่รับสาร)
+        #
+        # ถ้าฝังพาธตายตอนสร้างแบบเดิม ต้องไล่แก้ทุกจุดที่เรียกใช้ ซึ่งใน app.py
+        # อย่างเดียวมี 145 จุด — ไล่มือเมื่อไรก็พลาดเมื่อนั้น
+        self._source = path
+
+    @property
+    def path(self) -> Path:
+        return self._source() if callable(self._source) else self._source
+
+    @property
+    def lock(self) -> "_StoreLock":
+        """ล็อกของแฟ้มนี้ — **แยกรายบัญชี**
+
+        ⚠️ ต้องเอาชื่อโฟลเดอร์บัญชีมาประกอบเป็นชื่อล็อกด้วย ไม่งั้นบัญชี A
+        เขียนแฟ้มของตัวเองอยู่ แล้วไปกันบัญชี B ไม่ให้เขียนแฟ้มคนละใบ ทั้งที่
+        ไม่ได้แตะของกันเลย — อาการ "เช็คแยก แต่จดรวมกัน" ตาม CLAUDE.md ข้อ 8
+
+        ต้องแคชตามชื่อ ห้ามสร้างใหม่ทุกครั้งที่เรียก เพราะชั้นกันเธรดของ
+        `_StoreLock` เก็บสถานะไว้ในตัวเอง ถ้าได้คนละใบทุกครั้ง สองเธรดจะเข้าไป
+        พร้อมกันได้ทั้งคู่ โดยที่ล็อกดูเหมือนทำงานปกติ
+        """
+        here = self.path
+        return _lock_for(f"{here.parent.name}-{here.stem}")
 
     def _read(self) -> list[dict]:
         try:

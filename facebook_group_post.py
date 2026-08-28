@@ -1049,16 +1049,29 @@ DEFAULT_COMMENT_LANE = fb_limits.DEFAULT_LANE
 # STUDIO_DATA_DIR ไม่มีผลกับไฟล์นี้ แล้วสนามทดสอบจะไปอ่าน/เขียนโควตา
 # ของจริง: เทสอ่านโควตาจริงจนผลเพี้ยน (เจอจริง 18 ส.ค.) และร้ายกว่านั้นคือ
 # **เทสเขียนทับโควตาจริง** = กินโควตาคอมเมนต์ของวันนั้นไปฟรีๆ โดยไม่มีใครรู้
-COMMENT_TIMES_FILE = studio_shared.post_file("comment_times.json")
+def COMMENT_TIMES_FILE():
+    """แฟ้มของบัญชีที่กำลังทำงาน — ย้ายมาแยกรายบัญชี 28 ส.ค. 2569
+
+    เดิมเป็นค่าคงที่ชี้แฟ้มใบเดียวที่ทุกบัญชีใช้ร่วมกัน พอมีบัญชีที่สอง
+    ข้อมูลจะปนกันเงียบๆ จึงเปลี่ยนเป็นฟังก์ชันที่หาพาธตอนเรียกใช้
+    """
+    # นำเข้าตรงนี้ ไม่ใช่หัวไฟล์ — `fb_auto_post` นำเข้าไฟล์นี้กลับมา
+    # ถ้าไว้หัวไฟล์จะเป็นวงกลม แล้วเซิร์ฟเวอร์เปิดไม่ขึ้นทั้งตัว (เจอจริง 28 ส.ค.)
+    import fb_auto_post
+    return fb_auto_post.state_file("comment_times.json")
 # **เลนละไฟล์ ไม่ใช่ไฟล์เดียวหลายคีย์**
 #
 # app.py รันค้างข้ามวันโดยถือโค้ดเก่าไว้ในหน่วยความจำ ถ้าเปลี่ยนไฟล์เดิมให้เป็น
 # รูปแบบใหม่ (dict แยกเลน) โค้ดเก่าที่ยังรันอยู่จะเขียนทับด้วยรูปแบบเดิม (list)
 # แล้วยอดของอีกเลนหายเงียบๆ โดยไม่มี error — แยกไฟล์แล้วโค้ดเก่าที่ไม่รู้จักเลน
 # ก็ยังทำงานถูกต้องต่อไปในเลน post ตามเดิม **ไม่ต้องรีสตาร์ต app.py**
-_COMMENT_LANE_FILES = {
-    "post": COMMENT_TIMES_FILE,
-    "reply": COMMENT_TIMES_FILE.with_name("comment_times_reply.json"),
+#
+# ⚠️ เก็บเป็น **ชื่อไฟล์** ไม่ใช่พาธสำเร็จรูป — ตั้งแต่ย้ายมาแยกรายบัญชี
+# (28 ส.ค. 2569) พาธขึ้นกับบัญชีที่กำลังทำงาน ซึ่งยังไม่รู้ตอนโหลดไฟล์
+# คิดพาธตรงนี้เมื่อไร จะได้พาธของบัญชีแรกที่บังเอิญเจอ แล้วค้างอย่างนั้นทั้งวัน
+_COMMENT_LANE_NAMES = {
+    "post": "comment_times.json",
+    "reply": "comment_times_reply.json",
 }
 _comment_lock = threading.Lock()
 
@@ -1074,7 +1087,9 @@ def comment_limit_per_hour(account: str = "") -> int:
 
 
 def _lane_file(lane: str) -> Path:
-    return _COMMENT_LANE_FILES.get(lane, COMMENT_TIMES_FILE)
+    import fb_auto_post
+    return fb_auto_post.state_file(
+        _COMMENT_LANE_NAMES.get(lane, "comment_times.json"))
 
 
 def _comment_times(lane: str = DEFAULT_COMMENT_LANE) -> list[float]:

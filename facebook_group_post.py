@@ -1312,6 +1312,81 @@ def _comment_already_there(phone: Phone, probe: str) -> bool:
     return False
 
 
+# ป้ายที่ Facebook ขึ้นเมื่อคอมเมนต์ถูกปฏิเสธ — เห็นเฉพาะคนเขียน คนอื่นไม่เห็นเลย
+COMMENT_REJECTED_MARKS = ("ถูกปฏิเสธ", "was rejected", "ไม่ผ่านการตรวจสอบ")
+
+
+def links_only(text: str) -> str:
+    """เหลือแต่ลิงก์ ตัดคำพูดทิ้ง — ใช้ตอนคอมเมนต์เต็มถูกปฏิเสธ
+
+    **เจ้าของสั่ง 28 ส.ค. 2569** — *"ถ้าไลค์ไม่ขึ้นแสดงว่าคอมเมนต์ถูกปฏิเสธ
+    ให้ตัดคำพูดออก เหลือแต่ลิ้ง แล้วคอมเมนต์ใหม่"*
+    """
+    urls = re.findall(r"https?://\S+", text or "")
+    return chr(10).join(dict.fromkeys(urls))   # ตัดลิงก์ซ้ำ คงลำดับเดิม
+
+
+def comment_rejected(phone: Phone, probe: str) -> bool:
+    """คอมเมนต์นี้ถูกปฏิเสธไหม — ดูป้ายที่อยู่ใต้ข้อความของเรา
+
+    ป้ายนี้โผล่ **เฉพาะบนจอของคนเขียน** คนอื่นเปิดดูจะไม่เห็นคอมเมนต์เลย
+    จึงเป็นสัญญาณเดียวที่จับได้จากฝั่งเรา
+    """
+    xml = phone.dump()
+    bottom = None
+    for labels, (_, _, _, y2) in iter_nodes(xml):
+        if any(probe in label for label in labels):
+            bottom = y2
+            break
+    if bottom is None:
+        return False
+    for labels, (_, y1, _, _) in iter_nodes(xml):
+        if y1 < bottom:
+            continue
+        joined = " ".join(labels)
+        if any(mark in joined for mark in COMMENT_REJECTED_MARKS):
+            return True
+        if any(mark in joined for mark in COMMENT_HEAD_MARKS):
+            break                       # ถึงคอมเมนต์ถัดไปแล้ว
+    return False
+
+
+def delete_own_comment(phone: Phone, text: str) -> bool:
+    """ลบคอมเมนต์ของเราเอง — กดค้างบนข้อความแล้วเลือก "ลบความคิดเห็น"
+
+    ท่าเดียวกับที่คนกดเอง (กติกาข้อ 2.7 ทุกอย่างต้องเป็นการกดจริง)
+    ต้องเจอเมนูแบบ **ตรงเป๊ะ** เพราะบนเมนูนั้นมี "รายงาน" อยู่ใกล้ๆ ด้วย
+    """
+    probe = (text or "").strip()[:10]
+    if not probe:
+        return False
+    spot = None
+    for labels, (x1, y1, x2, y2) in iter_nodes(phone.dump()):
+        if any(probe in label for label in labels):
+            spot = ((x1 + x2) // 2, (y1 + y2) // 2)
+            break
+    if spot is None:
+        phone.log("  ไม่เห็นคอมเมนต์ที่จะลบบนจอ")
+        return False
+    phone.run("shell", "input", "swipe", str(spot[0]), str(spot[1]),
+              str(spot[0]), str(spot[1]), "900")          # กดค้าง
+    time.sleep(3.0)
+    menu = phone.find_exact(phone.dump(), ["ลบความคิดเห็น", "Delete comment"])
+    if menu is None:
+        phone.log("  ไม่เห็นเมนู 'ลบความคิดเห็น' — ไม่ลบ")
+        phone.back()
+        return False
+    phone.tap(menu)
+    time.sleep(2.5)
+    confirm = phone.find_exact(phone.dump(), ["ลบ", "Delete"])
+    if confirm is not None:
+        phone.tap(confirm)
+        time.sleep(2.5)
+    gone = not screen_has(phone.dump(), probe)
+    phone.log("  ลบคอมเมนต์เดิมแล้ว" if gone else "  ลบไม่สำเร็จ")
+    return gone
+
+
 def comment_single_post(phone: Phone, comment, photos=None) -> dict:
     """คอมเมนต์บน "หน้าโพสต์เดี่ยว" — ช่องพิมพ์ตรึงอยู่ล่างจอตลอด
 
@@ -1333,7 +1408,28 @@ def comment_single_post(phone: Phone, comment, photos=None) -> dict:
         if not _write_comment(phone, text, shots[order - 1]):
             break
         done += 1
-        liked += 1 if like_own_comment(phone, text) else 0
+        ok = like_own_comment(phone, text)
+        if not ok:
+            # **ไลก์ไม่ขึ้น = คอมเมนต์ถูกปฏิเสธ** (เจ้าของสรุปไว้ 28 ส.ค. 2569)
+            #
+            # คอมเมนต์ที่ถูกปฏิเสธไม่มีแถว "ถูกใจ · ตอบกลับ" ให้กดเลย เพราะมัน
+            # ไม่ได้เผยแพร่จริง — เราเห็นในฐานะคนเขียน แต่คนอื่นไม่เห็น
+            # ตรวจของจริง 28 ส.ค.: ใต้คอมเมนต์ขึ้นว่า "ถูกปฏิเสธ / ดูความเห็น"
+            # และคำว่า "ถูกใจ" ไม่ปรากฏบนจอเลยสักครั้ง
+            #
+            # เจ้าของสั่งให้ **ตัดคำพูดออก เหลือแต่ลิงก์ แล้วส่งใหม่**
+            # เพราะตัวที่โดนคัดออกคือข้อความโฆษณา ไม่ใช่ตัวลิงก์
+            bare = links_only(text)
+            if bare and bare != text.strip():
+                phone.log("  ไลก์คอมเมนต์ไม่ขึ้น = น่าจะถูกปฏิเสธ "
+                          "— ลบแล้วส่งใหม่เหลือแต่ลิงก์")
+                delete_own_comment(phone, text)
+                time.sleep(2.0)
+                if _write_comment(phone, bare, shots[order - 1]):
+                    ok = like_own_comment(phone, bare)
+                else:
+                    done -= 1       # ส่งใหม่ไม่ผ่านด้วย = ใบนี้ไม่นับว่าลงแล้ว
+        liked += 1 if ok else 0
         if order < len(texts):
             time.sleep(2.0)         # เว้นจังหวะก่อนพิมพ์ข้อความถัดไป
     return {

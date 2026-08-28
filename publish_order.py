@@ -318,13 +318,69 @@ def summary(run: dict, today: date | None = None) -> str:
 
 # ------------------------------------------------------------------ คำสั่ง
 
+def ready_now(runs, target: str) -> list[dict]:
+    """คลิปที่ลงปลายทางนี้ได้ **เดี๋ยวนี้** — ผ่านครบทั้งลำดับ · ระยะวัน · โควตา
+
+    **ต้องตอบด้วยเกณฑ์เดียวกับด่านที่กั้นจริงตอนโพสต์** ไม่ใช่คิดเกณฑ์ใหม่
+    ไม่งั้นรายชื่อบนจอกับสิ่งที่กดได้จริงจะไม่ตรงกัน แล้วคนจะเชื่อรายชื่อ
+    แล้วไปงงว่าทำไมกดแล้วไม่ได้ (กติกาข้อ 2.3 — ตัวที่บอกว่าผ่านทั้งที่ไม่ผ่าน)
+    จึงเรียก `check()` ตัวเดียวกับที่ `app.py` ใช้ ไม่ได้เขียนเงื่อนไขซ้ำ
+
+    เรียง**ตัวที่รอนานสุดขึ้นก่อน** เพราะคลิปที่ลง Shopee ไปตั้งแต่วันก่อนๆ
+    ควรได้ลงก่อนตัวที่เพิ่งลงเมื่อวาน
+    """
+    out = []
+    for run in runs or []:
+        info = ((run.get("publish") or {}).get(target) or {})
+        if info.get("status") == "posted":
+            continue
+        ok, _ = check(run, target)
+        if not ok:
+            continue
+        last = last_posted(run)
+        out.append({
+            "item_id": str(run.get("item_id") or ""),
+            "name": run.get("name") or "",
+            "videos": len(run.get("videos") or []),
+            "since": last[1].isoformat() if last and last[1] else "",
+            "after": NAMES.get(last[0], last[0]) if last else "",
+        })
+    out.sort(key=lambda r: r["since"] or "9999")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv:
-        print("ใช้: python publish_order.py <item_id>")
+        print("ใช้: python publish_order.py <item_id>       ← ดูใบเดียว")
+        print("     python publish_order.py ready [ปลายทาง]  ← ดูรวมว่าใบไหนลงได้แล้ว")
         print("ลำดับที่กำหนดไว้: " + " → ".join(NAMES[t] for t in ORDER))
         print(f"เว้นระยะอย่างน้อย {GAP_DAYS} วัน (นับวันในปฏิทิน)")
         return 0
+
+    if argv[0] in ("ready", "พร้อม"):
+        import clip_store
+        root = Path(__file__).resolve().parent / "data"
+        runs = clip_store.list_runs(root) + clip_store.list_done(root)
+        targets = [argv[1]] if len(argv) > 1 and argv[1] in NAMES else list(ORDER)
+        for target in targets:
+            rows = ready_now(runs, target)
+            used = day_used(runs, target)
+            left = max(0, DAY_LIMIT - used)
+            print(f"\n=== {NAMES[target]} — ลงได้เลยตอนนี้ {len(rows)} คลิป "
+                  f"(โควตาวันนี้เหลือ {left}/{DAY_LIMIT}) ===")
+            if not rows:
+                print("   ไม่มีคลิปที่พร้อม — ดูเหตุผลรายใบด้วย "
+                      "python publish_order.py <item_id>")
+                continue
+            for i, r in enumerate(rows, 1):
+                since = f"ลง{r['after']}ไปเมื่อ {r['since'][5:]}" if r["since"] else "ยังไม่เคยลงที่ไหน"
+                print(f"  {i:>2}. {r['item_id']:13} คลิป {r['videos']} ไฟล์ · {since}")
+                print(f"      {r['name'][:70]}")
+            if len(rows) > left:
+                print(f"   ⚠️ วันนี้ลงได้อีกแค่ {left} คลิป ที่เหลือจะค้างไว้ทำวันพรุ่งนี้")
+        return 0
+
     import clip_store
     root = Path(__file__).resolve().parent / "data"
     run = clip_store.load_run(root, argv[0])

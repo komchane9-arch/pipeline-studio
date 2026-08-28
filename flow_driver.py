@@ -670,6 +670,26 @@ class FlowDriver:
     def credit_cost(self) -> int | None:
         return self.snapshot().get("creditCost")
 
+    @staticmethod
+    def _model_matches(target: str, text: str) -> bool:
+        """ข้อความนี้คือโมเดลที่ต้องการไหม — **ทนกับเลขรุ่นที่ Google แทรกเข้ามา**
+
+        **เหตุการณ์ที่ทำให้ต้องมี (28 ส.ค. 2569)** — Google เปลี่ยนชื่อโมเดลจาก
+        "Omni Flash" เป็น "Omni 1.1 Flash" การเทียบแบบ `target in text` จึงไม่เจอ
+        ทั้งที่โมเดลตัวนั้นเลือกค้างอยู่บนหน้าจอแล้วด้วยซ้ำ ผลคืองานล้มรวดทุกใบ
+        ด้วยข้อความ "เลือก Omni Flash ไม่ได้" และ **ไม่มี log บอกว่าเมนูมีอะไร**
+        จึงไล่หาสาเหตุไม่ได้เลยจนต้องมานั่งเปิดดูเอง
+
+        Google ขยับเลขรุ่นเรื่อยๆ (Veo 3.1 · Omni 1.1 …) ถ้าแก้ด้วยการไปเปลี่ยน
+        ชื่อที่ตั้งไว้ให้ตรง เดือนหน้าก็พังอีก — เทียบแบบ **มีครบทุกคำ** แทน
+        "Omni Flash" จึงตรงกับ "Omni 1.1 Flash" และ "Omni 2 Flash" ในอนาคตด้วย
+
+        เทียบเฉพาะคำที่เป็นตัวอักษร ตัวเลขรุ่นถูกมองข้ามโดยตั้งใจ
+        """
+        words = [w for w in re.split(r"[^A-Za-z]+", target or "") if w]
+        low = (text or "").lower()
+        return bool(words) and all(w.lower() in low for w in words)
+
     def select_video_model(
         self, target: str = "Veo 3.1 - Lite", allow_paid_fallback: bool = False
     ) -> bool:
@@ -687,7 +707,7 @@ class FlowDriver:
             return False
 
         current = (trigger.inner_text() or "").replace("\n", " ")
-        if target in current:
+        if self._model_matches(target, current):
             if not want_free:
                 return True
             if re.search(r"Lower Priority|ลำดับความสำคัญต่ำ", current, re.I):
@@ -737,8 +757,18 @@ class FlowDriver:
             )
             return True
 
-        chosen = next((item for item in items if target in item["text"]), None)
+        chosen = next(
+            (item for item in items if self._model_matches(target, item["text"])),
+            None)
         if chosen is None:
+            # **ห้ามคืนค่าล้มเหลวเงียบๆ** (กติกาข้อ 2.4) — ทางนี้เคยไม่เขียน log
+            # อะไรเลย ผลคือ 28 ส.ค. 2569 งานล้มรวดหลายใบด้วยข้อความ
+            # "เลือก Omni Flash แบบ Lower Priority ไม่ได้" โดยไม่มีใครรู้ว่า
+            # เมนูจริงมีอะไรให้เลือกบ้าง ต้องไปเปิดดูเองถึงจะรู้
+            # Google เปลี่ยนชื่อ/เพิ่มตัวเลือกโมเดลเป็นระยะ ข้อมูลนี้จำเป็นเสมอ
+            seen = " | ".join(item["text"][:45] for item in items[:10])
+            self.log(f"  ไม่พบโมเดล \"{target}\" ในเมนู — เห็น: [{seen}]")
+            self.shot(f"Flow ไม่พบโมเดล {target} ในเมนู")
             self.page.keyboard.press("Escape")
             return False
         self._click_menu_item(chosen["i"])
@@ -748,12 +778,14 @@ class FlowDriver:
         trigger = self._model_trigger()
         if trigger is None:
             return False
-        if target in (trigger.inner_text() or ""):
+        if self._model_matches(target, trigger.inner_text() or ""):
             return True
         trigger.click()
         time.sleep(0.8)
         items = self._menu_items()
-        chosen = next((item for item in items if target in item["text"]), None)
+        chosen = next(
+            (item for item in items if self._model_matches(target, item["text"])),
+            None)
         if chosen is None:
             self.page.keyboard.press("Escape")
             self.log(f"  เลือกโมเดลรูป {target} ไม่สำเร็จ")

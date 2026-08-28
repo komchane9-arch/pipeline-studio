@@ -321,12 +321,13 @@ class ClipQueue:
         self.jobs: list[dict] = []
         self._held = False           # คิวถูกพักเพราะติด CAPTCHA/โดนบล็อกอยู่ไหม
         self.hold_why: str = ""
+        self.hold_scope: str = "new"      # "new" = ห้ามรับงานใหม่ · "all" = หยุดทุกขั้น
         self.hold_at: str = ""
         # เวลาที่จะปลดพักเอง (0 = รอคนยืนยัน ไม่มีวันหมดอายุ)
         self.hold_until: float = 0.0
         self._load()
 
-    def hold(self, why: str, seconds: float = 0.0) -> None:
+    def hold(self, why: str, seconds: float = 0.0, scope: str = "new") -> None:
         """พักการเริ่มงานใหม่ — รอคน หรือรอเวลา แล้วแต่ชนิดของหน้าที่โดนบล็อก
 
         ผู้ใช้สั่งไว้ 25 ส.ค. 2026: *"ถ้าติด capcha ให้หยุดและส่งกลับมาบอกผมทาง
@@ -345,6 +346,22 @@ class ClipQueue:
         with self.lock:
             self._held = True
             self.hold_why = why
+            # **ขอบเขตของการหยุด — ของเดิมมีแบบเดียวและหยุดไม่จริง**
+            #
+            #   "new" หยุดรับงานใหม่ งานที่เริ่มไปแล้วเดินต่อจนจบ
+            #         ใช้กับหน้าบล็อกของ Shopee — ปัญหาอยู่ที่ "การดึงลิงก์"
+            #         อย่างเดียว งานที่ผ่านขั้นนั้นไปแล้วไม่เกี่ยวเลย
+            #
+            #   "all" หยุดทุกขั้น ไม่หยิบงานใหม่มาทำเลยไม่ว่าขั้นไหน
+            #         ใช้กับ "ยังไม่ได้ล็อกอิน" และ "ล้มด้วยเหตุเดิมติดกัน"
+            #         ซึ่งเป็นปัญหาที่ทุกใบเจอเหมือนกันหมด ไล่ต่อ = เผางานทิ้ง
+            #
+            # **เกิดจริง 28 ส.ค. 2569 16:45–16:53** ด่านล้มซ้ำสั่งหยุดคิวสำเร็จ
+            # เขียน log ว่า "🛑 หยุดคิวไว้ก่อน" ถึงสองรอบ **แต่คิวไม่ได้หยุดเลย**
+            # เพราะ `claim_next` เอา `held()` ไปกันแค่งานสถานะ queued
+            # งานขั้นเจนคลิปจึงไหลต่อและล้มไปอีกหลายใบ — ป้ายบอกว่าหยุด
+            # ทั้งที่ไม่ได้หยุด คือกติกาข้อ 2.3 เป๊ะ
+            self.hold_scope = scope if scope in ("new", "all") else "new"
             self.hold_at = _now()
             self.hold_until = (time.time() + seconds) if seconds > 0 else 0.0
 
@@ -359,6 +376,7 @@ class ClipQueue:
                 self._held = False
                 self.hold_why = ""
                 self.hold_at = ""
+                self.hold_scope = "new"
                 self.hold_until = 0.0
             return self._held
 
@@ -560,7 +578,12 @@ class ClipQueue:
             # แบบมีกำหนดเวลา (หน้า "Please Try Again Later") ปลดตัวเองในเมท็อดนั้น
             # อ่านตัวแปรตรงๆ = พักแล้วไม่มีวันปลด กลายเป็นค้างถาวรเงียบๆ
             # (ล็อกเป็น RLock อยู่แล้ว เรียกซ้อนในล็อกเดิมได้)
-            full = busy >= BATCH_LIMIT or self.held()
+            paused = self.held()
+            # หยุดแบบ "all" = ไม่หยิบงานใหม่มาทำเลยสักขั้น
+            # (งานที่กำลังทำอยู่ในเธรดตอนนี้เดินต่อจนจบ หยุดกลางคันไม่ได้อยู่แล้ว)
+            if paused and getattr(self, "hold_scope", "new") == "all":
+                return None
+            full = busy >= BATCH_LIMIT or paused
 
             # เลือกงานที่ "มีคนรออยู่" ก่อนงานที่ไม่มีใครรอ (ดู STAGE_PRIORITY)
             # ตัวเลขเท่ากันให้ตัวที่อยู่ก่อนในลิสต์ชนะ — ลำดับเข้าคิวเดิมไม่สลับ
@@ -855,7 +878,7 @@ class ClipRunner:
                 # พักแบบ **ไม่มีกำหนดเวลา** เพราะล็อกอินแทนกันไม่ได้ ต้องรอคนจริงๆ
                 if _looks_login_error(str(error)):
                     already = self.queue.held()
-                    self.queue.hold(str(error)[:200])
+                    self.queue.hold(str(error)[:200], scope="all")
                     self.log(
                         "🛑 ยังไม่ได้ล็อกอินปลายทาง — หยุดคิวทันที "
                         "งานที่เหลือยังอยู่ครบ ไม่ได้ถูกเผาทิ้ง "
@@ -911,7 +934,7 @@ class ClipRunner:
                 # ทั้งคิวก่อน แล้วค่อยมีคนมาเพิ่มคำใหม่ลงรายการทีหลัง
                 elif (getattr(self, "_same_fail", 0) >= REPEAT_FAIL_LIMIT
                         and not self.queue.held()):
-                    self.queue.hold(str(error)[:200])
+                    self.queue.hold(str(error)[:200], scope="all")
                     self.log(
                         f"🛑 ล้มด้วยเรื่องเดิม {self._same_fail} ใบติดกัน — หยุดคิวไว้ก่อน "
                         f"ยิงต่อไปก็ได้ผลเดิม มีแต่เผางานทิ้ง "

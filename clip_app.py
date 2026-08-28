@@ -2580,7 +2580,203 @@ AUTO_STEPS: dict[str, dict] = {
         # **ขั้นนี้โพสต์ขึ้นจริง ถอนคืนไม่ได้** ต้องบอกให้ชัดบนปุ่ม
         "risk": "กดเปิดแล้วคลิปจะขึ้น TikTok เองโดยไม่ถามอีก — ถอนคืนไม่ได้",
     },
+    # ---- สองอันล่างเป็นคนละชนิดกับสี่อันบน (เจ้าของสั่งเพิ่ม 28 ส.ค. 2569) ----
+    #
+    # *"shopee กับ facebook reels ทำโพสต์อัตโนมัติด้วยนะ"*
+    #
+    # สี่อันบนคือ **กดผ่านขั้นตอน** — งานเดินต่อในระบบเรา ผิดแล้วแก้ได้
+    # สองอันนี้คือ **สั่งกดจอมือถือให้โพสต์ขึ้นจริง** — ผิดแล้วแก้ไม่ได้
+    # ต้องไปลบเองในแอป และถ้าลงผิดบัญชีคือกู้ไม่ได้เลย
+    #
+    # จึงใช้ `target` + `kind="publish"` แล้วไปหาคลิปที่ลงได้จาก
+    # `publish_order.ready_now()` ซึ่งเป็นตัวเดียวกับด่านที่กั้นจริงตอนโพสต์
+    # (ลำดับ · เว้นวัน · โควตา) ไม่เขียนเงื่อนไขซ้ำ
+    "shopee_post": {
+        "label": "ลง Shopee Video เอง",
+        "kind": "publish",
+        "target": "shopee_video",
+        "stages": [],
+        "actions": [],
+        "risk": ("กดเปิดแล้วระบบจะแตะจอมือถือลง Shopee Video เองทีละคลิป "
+                 "โดยไม่ถามอีก — โพสต์แล้วถอนคืนไม่ได้ ต้องไปลบเองในแอป"),
+    },
+    "facebook_post": {
+        "label": "ลง Facebook Reels เอง",
+        "kind": "publish",
+        "target": "facebook_reels",
+        "stages": [],
+        "actions": [],
+        "risk": ("กดเปิดแล้วระบบจะแตะจอมือถือลง Facebook Reels เองทีละคลิป "
+                 "โดยไม่ถามอีก — โพสต์แล้วถอนคืนไม่ได้ ต้องไปลบเองในแอป"),
+    },
 }
+
+# เว้นระยะระหว่างการลงอัตโนมัติแต่ละใบ (วินาที)
+#
+# **ไม่ได้มีไว้กันโดนบล็อก** — การลงหนึ่งใบใช้เวลาราว 10 นาทีอยู่แล้ว
+# ระยะห่างตามธรรมชาติจึงมากพอ ตัวนี้มีไว้กัน **การลองซ้ำรัวๆ ตอนล้มเหลว**
+# ถ้าไม่มี พอชนด่าน (เช่นโควตาเต็ม) ตัวกวาดจะยิงใหม่ทุก 20 วินาทีไม่หยุด
+AUTO_PUBLISH_GAP_OK = 180.0
+AUTO_PUBLISH_GAP_FAIL = 600.0
+
+_auto_pub_next: dict[str, float] = {}
+_auto_pub_said: dict[str, str] = {}
+
+
+def _device_label(serial: str) -> str:
+    try:
+        import devices                                          # noqa: PLC0415
+        return devices.label(serial)
+    except Exception:                                           # noqa: BLE001
+        return serial
+
+
+def _auto_publish_device(target: str) -> tuple[str, str]:
+    """เครื่องที่ใช้ลงปลายทางนี้ได้ — คืน (serial, เหตุผลที่ลงไม่ได้)
+
+    **ไม่เขียน serial ตายตัว และไม่เดา** (กติกาข้อ 8 · 9.1 ของโปรเจกต์)
+    หาเองจากทะเบียนว่าเครื่องไหนอยู่สายคลิป **และ** เทรนพิกัดปลายทางนี้ไว้แล้ว
+    ตอนนี้เข้าเงื่อนไขเครื่องเดียว ระบบจึงลงให้เองโดยไม่ต้องถาม —
+    ซึ่งได้ผลเหมือนฟิกไว้ แต่ **วันที่เสียบเครื่องที่สองเข้ามาจะไม่ลงผิดบัญชี**
+    เพราะเจอสองเครื่องแล้วจะหยุดถามแทนที่จะเดา ("โพสต์ลงบัญชีผิด" กู้ไม่ได้)
+    """
+    try:
+        import devices                                          # noqa: PLC0415
+        import publish_flow                                     # noqa: PLC0415
+    except Exception as error:                                  # noqa: BLE001
+        return "", "อ่านทะเบียนมือถือไม่ได้: " + str(error)
+    ready = []
+    for serial in devices.enabled_serials("clip"):
+        try:
+            if publish_flow.FlowStore(serial).positions(target):
+                ready.append(serial)
+        except Exception:                                       # noqa: BLE001
+            continue
+    if not ready:
+        return "", ("ยังไม่มีเครื่องสายคลิปที่เทรนวิธีลงปลายทางนี้ไว้ — "
+                    "ไปเทรนในแท็บมือถือก่อน")
+    if len(ready) > 1:
+        names = " · ".join(devices.label(s) for s in ready)
+        return "", (f"มีเครื่องที่ลงได้ {len(ready)} เครื่อง ({names}) — "
+                    "ระบบไม่เดาให้ว่าจะลงเครื่องไหน กดลงเองทีละใบแทน")
+    return ready[0], ""
+
+
+def _auto_publish_ready(target: str) -> list[dict]:
+    """คลิปที่ลงปลายทางนี้ได้เดี๋ยวนี้ เรียงตัวที่รอนานสุดก่อน
+
+    ใช้ `publish_order.ready_now()` ซึ่งเรียก `check()` ตัวเดียวกับด่านที่กั้น
+    ตอนโพสต์จริง (ลำดับ Shopee→Facebook→TikTok · เว้นอย่างน้อย 1 วันตามปฏิทิน)
+    **ไม่เขียนเงื่อนไขซ้ำ** ไม่งั้นวันหนึ่งรายชื่อกับด่านจะไม่ตรงกัน
+
+    ตัดงานที่กด พักไว้รอแก้ ออกทั้งสองแบบ — ที่พักในคิว และที่พักหลังออกจากคิว
+    ไปแล้ว เพราะคลิปขั้นโพสต์ส่วนใหญ่จบจากคิวไปแล้ว เช็คแค่คิวจะข้ามไม่ครบ
+    """
+    runs = clip_store.list_runs(DATA_DIR) + clip_store.list_done(DATA_DIR)
+    by_id = {str(r.get("item_id")): r for r in runs}
+    parked = {str(j.get("item_id")) for j in clip_jobs.all() if j.get("parked")}
+    out = []
+    for row in publish_order.ready_now(runs, target):
+        item = row["item_id"]
+        if item in parked or (by_id.get(item) or {}).get("parked"):
+            continue
+        out.append(row)
+    return out
+
+
+def _auto_publish_one(step: str) -> bool:
+    """ลงหนึ่งใบถ้าถึงเวลาและมีของพร้อม — คืน True ถ้าลงสำเร็จ
+
+    **บอกเจ้าของทุกครั้งที่จะลงและลงเสร็จ** การกระทำที่ถอนคืนไม่ได้ห้ามเงียบ
+    """
+    meta = AUTO_STEPS[step]
+    target = meta["target"]
+    now = time.time()
+    if now < _auto_pub_next.get(step, 0.0):
+        return False
+
+    def hush(why: str) -> bool:
+        if _auto_pub_said.get(step) != why:
+            _auto_pub_said[step] = why
+            _clip_log("ยังไม่ลง " + meta["label"] + " อัตโนมัติ — " + why)
+        _auto_pub_next[step] = now + AUTO_PUBLISH_GAP_FAIL
+        return False
+
+    try:
+        with urllib.request.urlopen(MAIN_SERVER + "/api/busy", timeout=10) as res:
+            if json.loads(res.read().decode("utf-8")).get("busy"):
+                return False          # มีงานกดจออยู่ รอรอบหน้า ไม่ต้องบ่น
+    except Exception:                                           # noqa: BLE001
+        return hush("ติดต่อเซิร์ฟเวอร์หลัก (8866) ไม่ได้")
+
+    serial, why = _auto_publish_device(target)
+    if not serial:
+        return hush(why)
+
+    rows = _auto_publish_ready(target)
+    if not rows:
+        _auto_pub_next[step] = now + AUTO_PUBLISH_GAP_OK
+        return False
+
+    row = rows[0]
+    item_id = row["item_id"]
+    name = (row.get("name") or "")[:45]
+    left = len(rows) - 1
+    chat_id = _default_clip_chat()
+    _auto_pub_said.pop(step, None)
+    _clip_log("ลง " + meta["label"] + " อัตโนมัติ: " + item_id + " · " + name
+              + f" (รออยู่อีก {left} ใบ)")
+    if chat_id:
+        _clip_say(chat_id, NEWLINE.join([
+            "🤖 <b>กำลังลง " + telegram_bot._escape(meta["label"]) + " ให้เอง</b>",
+            telegram_bot._escape(name),
+            "เครื่อง " + telegram_bot._escape(_device_label(serial))
+            + f" · เหลือรออีก {left} ใบ",
+            "ปิดสวิตช์อัตโนมัติได้ที่หน้าเว็บถ้าไม่อยากให้ลงต่อ",
+        ]))
+
+    body = json.dumps({"serial": serial, "target": target,
+                       "item_id": item_id}).encode("utf-8")
+    request = urllib.request.Request(
+        MAIN_SERVER + "/api/publish/flow/run", data=body,
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=1800) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:300]
+        try:
+            detail = json.loads(detail).get("detail") or detail
+        except Exception:                                       # noqa: BLE001
+            pass
+        if chat_id:
+            _clip_say(chat_id, NEWLINE.join([
+                "❌ <b>ลงอัตโนมัติไม่สำเร็จ</b>",
+                telegram_bot._escape(str(detail)),
+            ]))
+        return hush(f"{error.code} {detail}")
+    except Exception as error:                                  # noqa: BLE001
+        return hush(f"{type(error).__name__}: {error}")
+
+    done = result.get("done", 0)
+    total = result.get("total", 0)
+    if result.get("ok"):
+        _auto_pub_next[step] = time.time() + AUTO_PUBLISH_GAP_OK
+        _clip_log("ลง " + meta["label"] + " อัตโนมัติสำเร็จ: " + item_id
+                  + f" ({done}/{total} ขั้น)")
+        if chat_id:
+            _clip_say(chat_id, NEWLINE.join([
+                "✅ <b>ลง " + telegram_bot._escape(meta["label"]) + " แล้ว</b>"
+                + f" ({done}/{total} ขั้น)",
+                telegram_bot._escape(name),
+            ]))
+        return True
+    if chat_id:
+        _clip_say(chat_id, NEWLINE.join([
+            f"⚠️ <b>เดินผังไม่จบ</b> — ทำได้ {done}/{total} ขั้น",
+            telegram_bot._escape(str(result.get("error") or "")),
+        ]))
+    return hush(f"เดินผังไม่จบ {done}/{total} ขั้น")
 
 
 def _auto_on() -> dict:
@@ -2600,6 +2796,9 @@ def _auto_eligible(step: str) -> list[dict]:
     **ข้ามงานที่พักไว้รอแก้เสมอ** (เจ้าของสั่งไว้ตรงๆ) — การพักคือการบอกว่า
     "ใบนี้ฉันจะมาดูเอง" ถ้าอัตโนมัติไปกดผ่านให้ ก็เท่ากับลบเจตนานั้นทิ้ง
     """
+    if AUTO_STEPS[step].get("kind") == "publish":
+        # ขั้นโพสต์นับ "คลิปที่ลงได้เดี๋ยวนี้" ไม่ใช่ "ใบงานที่ค้างในคิว"
+        return _auto_publish_ready(AUTO_STEPS[step]["target"])
     stages = set(AUTO_STEPS[step]["stages"])
     return [job for job in clip_jobs.all()
             if job.get("stage") in stages and not job.get("parked")]
@@ -2639,6 +2838,11 @@ def _auto_sweep(only: str = "") -> dict:
     result: dict[str, int] = {}
     for step in steps:
         if step not in AUTO_STEPS or not on.get(step):
+            continue
+        if AUTO_STEPS[step].get("kind") == "publish":
+            # **ลงทีละใบเท่านั้น ห้ามไล่ลงรวด** — ลงหนึ่งใบกินเวลาราว 10 นาที
+            # และมือถือมีจอเดียว ที่สำคัญกว่าคือถ้าอะไรผิดพลาด จะผิดแค่ใบเดียว
+            result[step] = 1 if _auto_publish_one(step) else 0
             continue
         count = 0
         for job in _auto_eligible(step):
@@ -7047,7 +7251,10 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
         # เพราะสองกองนั้นไม่ใช่การ "กดผ่าน" แต่เป็นการ "สั่งโพสต์ด้วยเครื่องไหน"
         # ซึ่งโพสต์แล้วถอนไม่ได้ และต้องเลือกมือถือเสมอ (กติกาข้อ 8)
         auto_of = {"link": "images", "story": "storyboard",
-                   "clip": "clip", "tiktok": "tiktok_post"}
+                   "clip": "clip", "tiktok": "tiktok_post",
+                   # เจ้าของสั่งเพิ่ม 28 ส.ค. 2569 — สองกองนี้ลงเองได้แล้ว
+                   "shopee_video": "shopee_post",
+                   "facebook_reels": "facebook_post"}
         auto = {s["key"]: s for s in _auto_view()["steps"]}
         # โควตา 70/วัน มีเฉพาะสามปลายทางที่โพสต์จริง
         all_runs = runs + clip_store.list_done(DATA_DIR)
@@ -7114,12 +7321,27 @@ async def auto_approve_set(request: Request) -> dict:
         )
         _clip_log(("เปิด" if want else "ปิด")
                   + f"อนุมัติอัตโนมัติขั้น “{AUTO_STEPS[step]['label']}”")
-        swept = _auto_sweep(step)[step] if want else 0
+        # ขั้นโพสต์ **ไม่ลงทันทีตอนกดเปิด** — ปล่อยให้ตัวกวาดทยอยลงเอง
+        # กดเปิดแล้วมือถือขยับทันทีโดยไม่ทันตั้งตัวคือเรื่องน่าตกใจ
+        # และถ้ากดผิดจะไม่มีจังหวะให้ปิดทัน
+        if want and AUTO_STEPS[step].get("kind") == "publish":
+            swept = 0
+        else:
+            swept = _auto_sweep(step)[step] if want else 0
         return {"swept": swept, **_auto_view()}
 
     result = await asyncio.to_thread(work)
-    message = (f"เปิดแล้ว — อนุมัติงานที่รออยู่ให้ {result['swept']} ใบ"
-               if want else "ปิดแล้ว — งานถัดไปจะรอให้คุณกดเอง")
+    publish_kind = AUTO_STEPS[step].get("kind") == "publish"
+    if not want:
+        message = ("ปิดแล้ว — ใบที่กำลังลงอยู่จะลงจนจบ ที่เหลือรอให้คุณกดเอง"
+                   if publish_kind else "ปิดแล้ว — งานถัดไปจะรอให้คุณกดเอง")
+    elif publish_kind:
+        ready = len(_auto_publish_ready(AUTO_STEPS[step]["target"]))
+        message = (f"เปิดแล้ว — มี {ready} คลิปที่ลงได้ ระบบจะทยอยลงให้เองทีละใบ "
+                   "และแจ้งในแชททุกครั้ง" if ready else
+                   "เปิดแล้ว — ตอนนี้ยังไม่มีคลิปที่ถึงคิวลง พอถึงเวลาจะลงให้เอง")
+    else:
+        message = f"เปิดแล้ว — อนุมัติงานที่รออยู่ให้ {result['swept']} ใบ"
     return {"ok": True, "step": step, "on": want, "message": message, **result}
 
 

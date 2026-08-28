@@ -5408,6 +5408,24 @@ def _fb_serial(serial: str = "", *, allow_default: bool = True) -> str:
 posting_account = fb_auto_post.posting_account
 
 
+def _account_channel(account: str) -> tuple[str, str]:
+    """(โทเคน · chat) ของบอทที่ดูแลบัญชีนี้ — ไม่เจอคืนค่าว่าง
+
+    **ต้องหาจากบัญชี ไม่ใช่จากบอทหลัก** เพราะงานโพสต์ทำงานอยู่เบื้องหลังคนละเส้น
+    กับตอนรับข้อความ ตัวจำช่องแบบประจำเธรดจึงว่างเปล่าเมื่อถึงเวลารายงานผล
+    """
+    account = str(account or "").strip()
+    if not account:
+        return "", ""
+    for bot in extra_bots():
+        if bot.get("role") == "facebook" and str(bot.get("account") or "") == account:
+            return extra_bot_token(bot.get("id", "")), str(bot.get("chat_id") or "")
+    config = load_config()
+    if str(config.get("telegram_main_account") or "") == account:
+        return load_telegram_token() or "", str(config.get("telegram_chat_id") or "")
+    return "", ""
+
+
 def _bot_channel(bot_id: str = "") -> tuple[str, str, str]:
     """(โทเคน · chat · บัญชี) ของบอทตัวนั้น — bot_id ว่าง = บอทหลัก"""
     if bot_id:
@@ -5493,6 +5511,14 @@ def _fb_telegram() -> tuple[str, str]:
     channel = getattr(_REPLY, "channel", None)
     if channel and channel[0] and channel[1]:
         return channel
+    # ไม่มีช่องประจำเธรด (เช่นงานเบื้องหลัง) — หาจากบัญชีที่กำลังทำงานก่อน
+    # **ห้ามข้ามไปบอทหลักทันที** ไม่งั้นงานของบัญชี B จะไปรายงานในบอทของ A
+    try:
+        by_account = _account_channel(fb_auto_post.posting_account())
+    except Exception:
+        by_account = ("", "")
+    if by_account[0] and by_account[1]:
+        return by_account
     token = load_telegram_token() or ""
     chat_id = load_config().get("telegram_chat_id", "")
     if token and chat_id:
@@ -9070,11 +9096,29 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
         def read() -> str:
             return scrcpy_control.get_clipboard(ADB, serial)
 
+    # **ผูกทุกตัวรายงานเข้ากับบัญชีของเครื่องที่จะลง** (แก้ 28 ส.ค. 2569)
+    #
+    # เจอจริง: งานที่สั่งผ่าน @Richmantai1Bot ไปรายงานความคืบหน้าใน @BeginerABot
+    # เพราะตัวจำช่องเป็นตัวแปรประจำเธรด แต่งานโพสต์แยกไปทำงานคนละเธรด
+    # พอถึงเวลารายงาน ตัวจำจึงว่างเปล่าแล้วถอยไปใช้บอทหลักตามทางสำรอง
+    #
+    # แก้ที่ต้นทาง: หาบัญชีจากเครื่องที่จะลง (หนึ่งเครื่อง = หนึ่งไอดี) แล้วห่อ
+    # ทุกตัวรายงานให้ทำงานในนามบัญชีนั้น ทั้งการส่งข้อความและการเขียนแฟ้ม
+    job_account = device_book.account(serial)
+    job_token, job_chat = _account_channel(job_account)
+
+    def _in_channel(handler):
+        def wrapped(*args, **kwargs):
+            with reply_as(job_token, job_chat or chat_id, job_account):
+                return handler(*args, **kwargs)
+        return wrapped
+
     try:
         fb_runner.for_device(serial).start(
             job={**job, "groups": groups}, adb=ADB, serial=serial, image=image,
-            gap_range=_fb_gap_range(serial), on_log=on_log, on_result=on_result,
-            on_done=on_done, clipboard=Clipboard,
+            gap_range=_fb_gap_range(serial),
+            on_log=_in_channel(on_log), on_result=_in_channel(on_result),
+            on_done=_in_channel(on_done), clipboard=Clipboard,
             # ส่งเป็นฟังก์ชัน ไม่ใช่ค่าคงที่ — ผู้ใช้พิมพ์ /comment กลางคันได้
             comment=lambda: _fb_comments(fb_jobs.get(job_id) or {}),
             comment_images=lambda: _fb_comment_images(fb_jobs.get(job_id) or {}),

@@ -22,7 +22,7 @@
 
 ## ทำไมใช้บัญชีคนละตัว
 
-เจ้าของสั่งให้ล็อกอินบัญชีอื่นในโปรไฟล์ `Collector` แยกต่างหาก เพื่อไม่ให้
+เจ้าของสั่งให้ล็อกอินบัญชีอื่นในโปรไฟล์ `Bot11` แยกต่างหาก เพื่อไม่ให้
 บัญชีที่โพสต์ (Kp Oo) มีสองที่ล็อกอินพร้อมกัน ซึ่งเสี่ยงโดนตีธง
 
 ⚠️ **ข้อแลกที่ต้องรู้** บัญชีเก็บข้อมูล **ต้องเป็นสมาชิกกลุ่มนั้นด้วย** ถึงจะ
@@ -71,7 +71,14 @@ DB_FILE = shared.DATA_DIR / "fb_engagement.db"
 LOG_FILE = shared.DATA_DIR / "logs" / "fb_engagement.log"
 
 # โปรไฟล์เบราว์เซอร์ที่ใช้เก็บข้อมูล — คนละบัญชีกับที่ใช้โพสต์
-COLLECTOR_PROFILE = "Collector"
+# เจ้าของเลือกชื่อ Bot11 ให้ต่อจากฟาร์มเดิม (28 ส.ค. 2569)
+COLLECTOR_PROFILE = "Bot11"
+
+# บัญชีที่ตามเก็บ — ว่าง = ทุกบัญชีที่มีลิงก์โพสต์เก็บไว้
+#
+# เจ้าของสั่ง 28 ส.ค. 2569: "ตอนนี้ตามแค่โพสต์ของ Kp Oo"
+# เป็นรายการ ไม่ใช่ค่าเดี่ยว — วันที่อยากตามหลายบัญชีจะได้เติมชื่อ ไม่ต้องแก้โค้ด
+WATCH_ACCOUNTS: tuple[str, ...] = ("Kp Oo",)
 
 CHECK_EVERY_SECONDS = 3600.0      # เจ้าของสั่ง "ทุก 1 ชั่วโมงก่อน"
 PAGE_TIMEOUT_MS = 45_000
@@ -139,7 +146,10 @@ def our_posts() -> list[dict]:
     รวม — ไม่งั้นพอมีบัญชีที่สองจะเก็บของปนกัน
     """
     out: list[dict] = []
+    wanted = {name.strip().lower() for name in WATCH_ACCOUNTS if name.strip()}
     for account in shared.known_accounts():
+        if wanted and account.strip().lower() not in wanted:
+            continue
         try:
             raw = (shared.account_dir(account) / "fb_groups.json").read_text(
                 encoding="utf-8")

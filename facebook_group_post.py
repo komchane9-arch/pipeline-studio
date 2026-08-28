@@ -259,6 +259,43 @@ class Phone:
         self._size = size
         return size
 
+    def hide_keyboard(self, tries: int = 2) -> bool:
+        """ปิดคีย์บอร์ดถ้ามันขึ้นอยู่ — คืน True เมื่อปิดแล้วจริง
+
+        **เหตุการณ์ที่ทำให้ต้องมี 28 ส.ค. 2569** บนจอ 720x1600 พอพิมพ์แคปชันเสร็จ
+        คีย์บอร์ดยังค้างอยู่ แล้ว **ปุ่ม "โพสต์" หายไปจากผังจอทั้งอัน** เพราะมันอยู่
+        ติดขอบล่าง (y≈1504 จากจอสูง 1600) คีย์บอร์ดกินพื้นที่ตรงนั้นไปหมด
+
+        ผลคือบอทหาปุ่มไม่เจอครบ 15 วินาทีแล้วล้ม ทั้งที่กดเองด้วยมือได้ปกติ
+        จอ Xiaomi 1080x2400 ไม่เป็นเพราะสูงพอให้ปุ่มยังโผล่อยู่ — บั๊กนี้จึงโผล่
+        เฉพาะตอนย้ายมาเครื่องจอเล็ก
+
+        ใช้ BACK เพราะเป็นวิธีเดียวที่ปิดคีย์บอร์ดได้ทุกยี่ห้อ **แต่ต้องเช็คก่อนว่า
+        คีย์บอร์ดขึ้นอยู่จริง** ไม่งั้น BACK จะกลายเป็นการถอยออกจากหน้าเขียนโพสต์
+        แล้วเด้งกล่อง "บันทึกเป็นฉบับร่างหรือทิ้งโพสต์" ซึ่งเสียงานทั้งใบ
+        """
+        for _ in range(max(1, tries)):
+            try:
+                shown = "mInputShown=true" in self.shell(
+                    "dumpsys input_method | grep mInputShown")
+            except Exception:
+                return False
+            if not shown:
+                return True
+            self.run("shell", "input", "keyevent", "KEYCODE_BACK")
+            time.sleep(1.2)
+        return False
+
+    def to_ref_y(self, y: float) -> float:
+        """แปลงพิกัดแนวตั้ง**ที่อ่านมาจากหน้าจอจริง** ให้เป็นพิกัดอ้างอิง
+
+        ต้องมีเพราะ `vswipe()` รับพิกัดอ้างอิงเสมอ ถ้าเอาค่าที่อ่านจากผังจอ
+        (ซึ่งเป็นพิกัดจริงของเครื่องนั้น) ยัดเข้าไปตรงๆ มันจะโดนย่อซ้ำอีกรอบ
+        — บนจอ 720x1600 จะเลื่อนได้แค่ 2 ใน 3 ของที่ตั้งใจ แล้วเลื่อนไม่ถึงปุ่ม
+        (เจอตอนตรวจซ้ำ 28 ส.ค. 2569 ก่อนยิงทดสอบจริง)
+        """
+        return float(y) * self.REF_H / max(1, self.size[1])
+
     def vswipe(self, y_from, y_to, ms=None, x_ref: int = 540) -> None:
         """เลื่อนจอแนวตั้ง — **รับพิกัดบนจออ้างอิง 1080x2400 แล้วย่อขยายให้ตรงจอจริง**
 
@@ -314,15 +351,50 @@ class Phone:
                     break
         return best[1] if best else None
 
-    def wait_for(self, texts: list[str], timeout: float = UI_TIMEOUT) -> tuple[int, int]:
-        """รอจนเจอปุ่มที่ต้องการ — ไม่ใช้ sleep ตายตัวเพราะแอปโหลดช้าเร็วไม่แน่นอน"""
+    def find_exact(self, xml: str, texts: list[str]) -> tuple[int, int] | None:
+        """หาเฉพาะ node ที่ป้าย **ตรงเป๊ะ** — ไม่รับ "กล่องที่มีคำนั้นอยู่ข้างใน"
+
+        **ทำไมต้องแยกจาก `find()` 28 ส.ค. 2569** `find()` ยอมรับป้ายที่แค่มีคำนั้น
+        อยู่ข้างในด้วย ซึ่งดีเวลาหาของที่ชื่อไม่แน่นอน แต่**อันตรายมากกับปุ่มที่กด
+        แล้วย้อนไม่ได้** อย่างปุ่มโพสต์
+
+        วัดจริงบนหน้าเขียนโพสต์ที่มีข้อความแล้ว: ปุ่มจริงอยู่ (610,1504)
+        แต่ `find()` คืน (211,794) ซึ่งเป็นกล่องอื่นที่บังเอิญมีคำว่า "โพสต์"
+        อยู่ในคำอธิบาย — กดไปแล้วไปโดนกล่อง "บันทึกเป็นฉบับร่างหรือทิ้งโพสต์"
+        แล้วเสียงานทั้งใบโดยไม่มีอะไรเตือนว่ากดผิดปุ่ม
+        """
+        best: tuple[int, tuple[int, int]] | None = None
+        for labels, (x1, y1, x2, y2) in iter_nodes(xml):
+            for order, hint in enumerate(texts):
+                low = hint.lower()
+                for label in labels:
+                    if label.lower().strip() != low:
+                        continue
+                    point = ((x1 + x2) // 2, (y1 + y2) // 2)
+                    if best is None or order < best[0]:
+                        best = (order, point)
+                    break
+        return best[1] if best else None
+
+    def wait_for(self, texts: list[str], timeout: float = UI_TIMEOUT,
+                 exact: bool = False) -> tuple[int, int]:
+        """รอจนเจอปุ่มที่ต้องการ — ไม่ใช้ sleep ตายตัวเพราะแอปโหลดช้าเร็วไม่แน่นอน
+
+        `exact=True` = รับเฉพาะป้ายที่ตรงเป๊ะ ใช้กับปุ่มที่กดผิดแล้วเสียงานทั้งใบ
+        ล้มพร้อมบอกว่าเห็นป้ายอะไรอยู่บนจอบ้าง จะได้ไล่ต่อได้โดยไม่ต้องเดา
+        """
         deadline = time.time() + timeout
+        last = ""
         while time.time() < deadline:
-            found = self.find(self.dump(), texts)
+            last = self.dump()
+            found = (self.find_exact(last, texts) if exact
+                     else self.find(last, texts))
             if found:
                 return found
             time.sleep(1.0)
-        raise PostError(f"หาปุ่มไม่เจอภายในเวลา: {texts[0]}")
+        near = self.find(last, texts) if exact else None
+        extra = f" (เจอกล่องที่มีคำนี้อยู่ข้างในที่ {near} แต่ไม่ใช่ปุ่มจริง)" if near else ""
+        raise PostError(f"หาปุ่มไม่เจอภายในเวลา: {texts[0]}{extra}")
 
     def tap(self, point: tuple[int, int]) -> None:
         self.run("shell", "input", "tap", str(point[0]), str(point[1]))
@@ -1037,6 +1109,9 @@ COMMENT_POSTED_HINTS = ["ตอบกลับความคิดเห็น�
 # เสมอ ส่วนข้อความที่ยังค้างในช่องพิมพ์ไม่มี
 COMMENT_TIME_HINTS = ["เมื่อสักครู่", "นาที", "ชม.", "ชั่วโมง", "Just now", "ago"]
 COMMENT_HEADER_GAP = 200
+# ระยะจากท้ายข้อความคอมเมนต์ลงไปถึงป้ายเวลา (พิกัดอ้างอิงบนจอ 1080x2400)
+# กว้างกว่าฝั่งบนมาก เพราะการ์ดลิงก์/รูปแนบมาคั่นระหว่างข้อความกับเวลาได้
+COMMENT_FOOTER_GAP = 700
 
 
 NO_COMMENT = {"commented": False, "comment_liked": False, "comment_count": 0}
@@ -1153,7 +1228,7 @@ def _comment_times(lane: str = DEFAULT_COMMENT_LANE) -> list[float]:
 def _all_comment_times() -> list[float]:
     """เวลาที่คอมเมนต์สำเร็จของ **ทุกเลนรวมกัน** — ใช้คุมเพดานของบัญชี"""
     merged: list[float] = []
-    for lane in _COMMENT_LANE_FILES:
+    for lane in _COMMENT_LANE_NAMES:
         merged.extend(_comment_times(lane))
     return sorted(merged)
 
@@ -1365,9 +1440,11 @@ def comment_post_of(phone: Phone, caption: str, comment,
             }
         if attempt >= LIKE_SCROLL_TRIES:
             break
-        distance = min(1100, max(300, top - 350))
-        phone.log(f"  ยังไม่เห็นปุ่มคอมเมนต์ — เลื่อนขึ้น {distance}px")
-        phone.vswipe("1800", str(1800 - distance), 500)
+        # `top` มาจากผังจอ = พิกัดจริงของเครื่องนี้ ต้องแปลงเป็นพิกัดอ้างอิงก่อน
+        # ไม่งั้น vswipe จะย่อซ้ำอีกรอบ แล้วเลื่อนสั้นกว่าที่ตั้งใจ
+        distance = min(1100, max(300, phone.to_ref_y(top) - 350))
+        phone.log(f"  ยังไม่เห็นปุ่มคอมเมนต์ — เลื่อนขึ้น {distance:.0f}px (พิกัดอ้างอิง)")
+        phone.vswipe(1800, 1800 - distance, 500)
         time.sleep(2.0)
     phone.log("  หาปุ่มคอมเมนต์ของโพสต์นี้ไม่เจอ")
     return dict(NO_COMMENT)
@@ -1658,17 +1735,39 @@ def _comment_is_live(xml: str, probe: str) -> bool:
     """
     if not probe:
         return False
-    top = None
-    for labels, (_, y1, _, _) in iter_nodes(xml):
+    top = bottom = None
+    for labels, (_, y1, _, y2) in iter_nodes(xml):
         if any(probe in label for label in labels):
-            top = y1
+            top, bottom = y1, y2
             break
     if top is None:
         return False
+    # **ป้ายเวลาอยู่ได้ทั้งเหนือและใต้ข้อความ แล้วแต่รุ่นแอป/ขนาดจอ**
+    # (แก้ 28 ส.ค. 2569)
+    #
+    # เดิมมองหาเฉพาะ "เหนือข้อความ" ตามโครง [ชื่อ · เวลา] / [ข้อความ]
+    # แต่วัดกับเครื่องจริง (REDMI 15C 720x1600) พบว่าแอปรุ่นนี้วางเวลา **ใต้**
+    # ข้อความ และมีการ์ดลิงก์ Shopee คั่นกลางอีก
+    #
+    #     y= 874  Kp Oo              ← หัวแถว ไม่มีเวลา
+    #     y= 913  ข้อความคอมเมนต์
+    #     y=1211  ลิงก์ที่แชร์: ...   ← การ์ดลิงก์คั่น
+    #     y=1383  "2 นาที"           ← เวลาอยู่ตรงนี้ ห่างลงไป 470 จุด
+    #
+    # ผลคือคอมเมนต์ **ขึ้นจริงแล้วแต่ระบบรายงานว่ายังไม่ขึ้น** ซึ่งอันตรายกว่า
+    # ส่งไม่สำเร็จ เพราะรอบตามเก็บจะส่งซ้ำจนกลายเป็นคอมเมนต์คู่
+    #
+    # ระยะทั้งสองฝั่งเป็น "พิกัดอ้างอิงบนจอ 1080x2400" ต้องย่อขยายตามจอจริง
+    # ไม่งั้นบนจอเตี้ยหน้าต่างจะกว้างเกินไปจนไปคว้าเวลาของคอมเมนต์อื่น
+    height = 0
+    for match in re.finditer(r'bounds="\[\d+,\d+\]\[(\d+),(\d+)\]"', xml):
+        height = max(height, int(match.group(2)))
+    scale = (height / 2400) if height else 1.0
+    above = COMMENT_HEADER_GAP * scale
+    below = COMMENT_FOOTER_GAP * scale
     for labels, (_, y1, _, _) in iter_nodes(xml):
         joined = " ".join(labels)
-        # แถวหัวอยู่เหนือข้อความนิดเดียว
-        if top - COMMENT_HEADER_GAP <= y1 <= top + 20:
+        if top - above <= y1 <= (bottom or top) + below:
             if any(hint in joined for hint in COMMENT_TIME_HINTS):
                 return True
         # แถวปุ่มใต้ข้อความ (คอมเมนต์เก่าที่โหลดมาเต็มแล้ว)
@@ -2831,8 +2930,11 @@ def post_to_group(
         phone.log("  [ซ้อม] ยังไม่กดโพสต์ — ตรวจหน้าจอได้เลย")
         return {"group_id": group_id, "posted": False, "dry_run": True}
 
+    # ปิดคีย์บอร์ดก่อนเสมอ — ไม่งั้นปุ่มโพสต์ถูกคีย์บอร์ดบังจนหายไปจากผังจอ
+    # บนเครื่องจอเตี้ย แล้วหาไม่เจอทั้งที่ปุ่มอยู่ตรงนั้น (ดู Phone.hide_keyboard)
+    phone.hide_keyboard()
     phone.log("  กดโพสต์")
-    phone.tap(phone.wait_for(POST_HINTS, timeout=15))
+    phone.tap(phone.wait_for(POST_HINTS, timeout=15, exact=True))
     time.sleep(4.0)
 
     # ลำดับนี้สำคัญ: **เก็บลิงก์ก่อน แล้วค่อยใช้ลิงก์เปิดโพสต์ไปกดถูกใจ**
@@ -2855,8 +2957,32 @@ def post_to_group(
     liked = like_post_of(phone, caption)
     outcome = dict(NO_COMMENT)
     if _as_texts(comment):
-        # ทำหลังไลก์ เพราะแผงคอมเมนต์เปิดทับหน้าฟีด แล้วหาปุ่มถูกใจไม่เจอ
-        outcome = comment_post_of(phone, caption, comment, photos=comment_images)
+        # **มีลิงก์แล้วให้เปิดหน้าโพสต์เดี่ยวไปคอมเมนต์ ดีกว่าไล่หาในฟีดมาก**
+        # (เปลี่ยน 28 ส.ค. 2569)
+        #
+        # ในฟีดต้อง "เลื่อนหาโพสต์ตัวเอง → หาปุ่มคอมเมนต์ → กดเปิดแผง" สามด่าน
+        # ที่พึ่งการเลื่อนจอทั้งหมด ส่วนหน้าโพสต์เดี่ยว **ช่องพิมพ์ตรึงอยู่ล่างจอ
+        # ตลอด** ไม่ต้องเลื่อนเลยสักครั้ง
+        #
+        # วัดกับหน้าจอจริง 28 ส.ค. (REDMI 15C 720x1600) บนหน้าโพสต์เดี่ยว:
+        #   ข้อความโพสต์ y 303..591 · ปุ่มคอมเมนต์ y 1397 · ช่องพิมพ์ (428,1436)
+        #   ปุ่มส่ง (672,1519)  — เจอครบทุกตัวโดยไม่ต้องเลื่อน
+        # ส่วนทางฟีดวันเดียวกันล้ม 6 จาก 6 กลุ่ม ("หาปุ่มคอมเมนต์ไม่เจอ")
+        #
+        # ยังเก็บทางฟีดไว้เป็นทางถอย — เปิดจากลิงก์ไม่ได้ทุกครั้ง (ดู open_post_link)
+        opened = False
+        if link:
+            try:
+                opened = open_post_link(phone, link, caption, group_id=group_id)
+            except Exception as error:      # เปิดไม่ได้ต้องไม่ทำให้ทั้งกลุ่มล้ม
+                phone.log(f"  เปิดโพสต์จากลิงก์ไม่ได้ ({error}) — ถอยไปคอมเมนต์ในฟีด")
+        if opened:
+            phone.log("  คอมเมนต์บนหน้าโพสต์เดี่ยว (ไม่ต้องเลื่อนหา)")
+            outcome = comment_post_of(phone, caption, comment,
+                                      single_post=True, photos=comment_images)
+        else:
+            # ทำหลังไลก์ เพราะแผงคอมเมนต์เปิดทับหน้าฟีด แล้วหาปุ่มถูกใจไม่เจอ
+            outcome = comment_post_of(phone, caption, comment, photos=comment_images)
         phone.back()
         time.sleep(1.5)
     return {

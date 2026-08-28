@@ -19,7 +19,10 @@ import threading
 import time
 import traceback
 
+import facebook_group_post as fb
 import fb_engage
+import fb_limits
+import heartbeat
 import studio_shared
 import telegram_bot
 
@@ -35,7 +38,8 @@ HELP = (
     "• /owner &lt;ชื่อ&gt; — เพิ่มบัญชี ใส่หลายชื่อคั่นด้วย , ได้\n"
     "• /owner ลบ &lt;ชื่อ&gt; — เอาบัญชีออก\n\n"
     "<b>อื่นๆ</b>\n"
-    "• /set — ดูค่าที่ตั้งไว้\n"
+    "• /set — ดูค่าที่ตั้งไว้ + ตามทันไหม\n"
+    "• /limit — ดู/ตั้งเพดานคอมเมนต์ต่อชั่วโมงและต่อวัน (แยกรายบัญชีได้)\n"
     "• /auto on | off — เดินรอบเก็บยอดเองอัตโนมัติ\n"
     "• /stop — สั่งหยุดงานที่ทำอยู่"
 )
@@ -202,6 +206,84 @@ def do_reply(token: str, chat_id: str, argument: str) -> None:
     run_job(token, chat_id, "ตอบคอมเมนต์", work)
 
 
+_LIMIT_HELP = (
+    "<code>/limit ชม 12</code> เพดานรวมต่อชั่วโมง\n"
+    "<code>/limit วัน 50</code> เพดานต่อวัน\n"
+    "<code>/limit เลน reply 4</code> ช่องของสายนั้น (post = งานโพสต์)\n"
+    "<code>/limit บัญชี 7a95129e วัน 30</code> ตั้งเฉพาะเครื่องนั้น\n"
+    "<code>/limit ล้าง 7a95129e</code> กลับไปใช้ค่าส่วนกลาง"
+)
+
+
+def _limit_view(config: dict) -> str:
+    """เพดานทั้งหมดที่ใช้อยู่จริง — ค่าส่วนกลางก่อน แล้วตามด้วยบัญชีที่ตั้งเอง"""
+    lines = ["🚦 <b>เพดานการคอมเมนต์</b>", ""]
+    lines += [telegram_bot._escape(x) for x in fb_limits.describe("")]
+    for account in sorted(fb_limits.accounts()):
+        lines.append("")
+        lines += [telegram_bot._escape(x) for x in fb_limits.describe(account)]
+    serial = str(config.get("serial") or "").strip()
+    if serial and serial not in fb_limits.accounts():
+        lines.append("")
+        lines.append(f"<i>เครื่องที่สายนี้ใช้ ({telegram_bot._escape(serial)}) "
+                     "ยังไม่ได้ตั้งเอง จึงใช้ค่าส่วนกลาง</i>")
+    lines.append("")
+    lines.append(_LIMIT_HELP)
+    return "\n".join(lines)
+
+
+def do_limit(token: str, chat_id: str, argument: str) -> None:
+    """ดู/ตั้งเพดานคอมเมนต์ — **ตั้งแยกรายบัญชีได้** เพราะแต่ละบัญชีโดนไม่เท่ากัน
+
+    ตั้งใจให้ค่าที่ตั้งผิดเถียงกลับทันทีตรงนี้ (fb_limits โยน LimitError) แทนที่
+    จะรับไว้เงียบๆ แล้วไปพังตอนคอมเมนต์จริงซึ่งไล่ย้อนกลับมาหาต้นเหตุยากกว่ามาก
+    """
+    config = fb_engage.load_config()
+    words = (argument or "").split()
+    if not words:
+        say(token, chat_id, _limit_view(config))
+        return
+
+    account = ""
+    if words[0] in ("บัญชี", "account", "เครื่อง"):
+        if len(words) < 2:
+            say(token, chat_id, "บอกด้วยว่าบัญชีไหน เช่น <code>/limit บัญชี 7a95129e วัน 30</code>")
+            return
+        account, words = words[1], words[2:]
+    if words and words[0] in ("ล้าง", "clear", "ลบ"):
+        target = account or (words[1] if len(words) > 1 else "")
+        if not target:
+            say(token, chat_id, "บอกด้วยว่าจะล้างของบัญชีไหน")
+            return
+        gone = fb_limits.forget(target)
+        say(token, chat_id,
+            (f"ล้างค่าเฉพาะของ <b>{telegram_bot._escape(target)}</b> แล้ว "
+             "กลับไปใช้ค่าส่วนกลาง" if gone
+             else f"<b>{telegram_bot._escape(target)}</b> ไม่เคยตั้งค่าเฉพาะไว้")
+            + "\n\n" + _limit_view(config))
+        return
+
+    try:
+        if words[0] in ("เลน", "lane"):
+            if len(words) < 3:
+                say(token, chat_id, "ใช้ <code>/limit เลน reply 4</code>")
+                return
+            fb_limits.set_limits(account, lanes={words[1]: int(words[2])})
+        elif words[0] in ("ชม", "ชั่วโมง", "hour", "hourly"):
+            fb_limits.set_limits(account, per_hour=int(words[1]))
+        elif words[0] in ("วัน", "day", "daily"):
+            fb_limits.set_limits(account, per_day=int(words[1]))
+        else:
+            say(token, chat_id, "อ่านคำสั่งไม่ออก\n\n" + _LIMIT_HELP)
+            return
+    except (IndexError, ValueError) as error:
+        # LimitError สืบทอดจาก ValueError จึงกินทั้งค่าที่ใส่ผิดชนิดและใส่ไม่ครบ
+        say(token, chat_id, f"❌ {telegram_bot._escape(str(error) or 'ใส่ตัวเลขไม่ครบ')}"
+                            "\n\n" + _LIMIT_HELP)
+        return
+    say(token, chat_id, "✅ ตั้งเพดานแล้ว\n\n" + _limit_view(config))
+
+
 def do_set(token: str, chat_id: str) -> None:
     config = fb_engage.load_config()
     tracked = len(fb_engage.load_stats())
@@ -219,9 +301,33 @@ def do_set(token: str, chat_id: str) -> None:
         f" (ทุก {config.get('auto_every_minutes')} นาที)",
         "",
         f"ตามยอดอยู่ {tracked} โพสต์ · ตอบไปแล้ว {len(fb_engage.load_replies())} คอมเมนต์",
-        "",
-        f"<i>แก้ค่าอื่นๆ ได้ที่ {fb_engage.CONFIG_FILE.name}</i>",
     ]
+
+    # **ตามทันไหม** — ความล้มเหลวชนิด "โพสต์ท้ายแถวไม่เคยถูกอ่าน" เงียบสนิท
+    # ถ้าไม่เอาตัวเลขมาโชว์ตรงนี้ ก็ไม่มีทางรู้จนกว่าจะมานั่งคำนวณเอง
+    fit = fb_engage.capacity_check(config)
+    lines.append("")
+    lines.append(
+        f"📐 <b>กำลังเก็บยอด</b>: ต้องการ {fit['demand_per_day']} ครั้ง/วัน · "
+        f"ทำได้ {fit['capacity_per_day']} ครั้ง/วัน "
+        f"(ใช้จอ {fit['screen_minutes_per_day']} นาที/วัน)")
+    lines.append("   ✅ ตามทัน" if fit["keeps_up"] else
+                 f"   ⚠️ <b>ตามไม่ทัน {fit['short_by']} เท่า</b> — "
+                 "โพสต์ท้ายแถวจะไม่ถูกอ่านเลย ลด refresh_hours หรือ "
+                 "เพิ่ม max_posts_per_round")
+
+    # โควตาที่เหลือของ **เลนตัวเอง** ไม่ใช่ของทั้งบัญชี — ตัวเลขนี้คือสิ่งที่
+    # จำกัดสายนี้จริง และทำให้เห็นว่าไม่ได้ไปกินช่องของงานโพสต์
+    serial = str(config.get("serial") or "").strip()
+    lines.append("")
+    lines.append(
+        f"🚦 <b>ช่องคอมเมนต์เลนตอบกลับ</b>: เหลือ "
+        f"{fb.comment_quota_left(fb_engage.REPLY_LANE, serial)}/"
+        f"{fb.comment_lane_limit(fb_engage.REPLY_LANE, serial)} ชั่วโมงนี้ "
+        f"(เพดานบัญชี {fb.comment_limit_per_hour(serial)}/ชม. · "
+        f"{fb_limits.per_day(serial)}/วัน) — ดู/แก้ที่ /limit")
+    lines.append("")
+    lines.append(f"<i>แก้ค่าอื่นๆ ได้ที่ {fb_engage.CONFIG_FILE.name}</i>")
     say(token, chat_id, "\n".join(lines))
 
 
@@ -331,6 +437,8 @@ def on_command(token: str, chat_id: str, text: str) -> None:
         do_owner(token, chat_id, argument)
     elif command == "/set":
         do_set(token, chat_id)
+    elif command == "/limit":
+        do_limit(token, chat_id, argument)
     elif command == "/auto":
         do_auto(token, chat_id, argument)
     elif command == "/stop":

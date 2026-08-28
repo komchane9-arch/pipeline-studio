@@ -518,6 +518,27 @@ def _merge_result(old: dict, new: dict) -> dict:
     return merged
 
 
+def _trim_jobs(items: list[dict]) -> list[dict]:
+    """ตัดงานเก่าให้เหลือ `JOB_LIMIT` — แต่ **งานที่ตรึงไว้ห้ามหลุด**
+
+    งานที่ตารางโพสต์ประจำวันใช้เป็นแม่แบบ (`fb_routine` → `sources`) ถูกอ้างด้วย
+    รหัสงานเท่านั้น พอมันถูกตัดตกขอบคิว ตารางจะหาแม่แบบไม่เจอแล้ว**ข้ามเงียบ**
+    ทุกรอบ — ผู้ใช้จะรู้ตัวก็ต่อเมื่อทั้งวันไม่มีโพสต์ขึ้นเลย
+
+    วัดจริง 21 ส.ค. 2026: คิวเต็ม 50/50 และแม่แบบ `p194893071` ที่ตารางทั้ง 4 รอบ
+    (09:30 · 12:50 · 14:30 · 16:40) ใช้อยู่ ถูกดันมาถึงลำดับที่ 44 แล้ว — เหลืออีก
+    แค่ 5 งานใหม่ก็ตกขอบ ซึ่งระบบสร้างเองวันละ 4 งาน = พังภายในไม่ถึงสองวัน
+
+    ตรึงแล้วนับแยก ไม่กินโควตา 50 ของงานปกติ — แม่แบบจึงไม่ไปเบียดงานจริงให้หายเร็วขึ้น
+    """
+    kept = items[-JOB_LIMIT:]
+    if len(kept) == len(items):
+        return items
+    dropped = items[:-JOB_LIMIT]
+    pinned = [job for job in dropped if job.get("pinned")]
+    return pinned + kept if pinned else kept
+
+
 class JobStore:
     """งานโพสต์ที่รับมาจาก Telegram (หรือสร้างจากหน้าเว็บ)"""
 
@@ -542,6 +563,7 @@ class JobStore:
             "chat_id": "",
             "message_id": 0,
             "media_group": "",
+            "pinned": False,         # ตรึงไว้เป็นแม่แบบ — ห้ามถูกตัดทิ้งตอนคิวเต็ม
             "results": [],
             "log": [],
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -552,7 +574,7 @@ class JobStore:
         with self.store.lock:
             items = self.store._read()
             items.append(entry)
-            self.store._write(items[-JOB_LIMIT:])
+            self.store._write(_trim_jobs(items))
         return entry
 
     def update(self, job_id: str, **changes) -> dict | None:

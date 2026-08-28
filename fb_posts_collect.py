@@ -31,6 +31,7 @@ import fb_mass_finder as mf
 import fb_posts_comments as fc
 import fb_posts_parse as pp
 import fb_posts_store as store
+import heartbeat
 import telegram_bot
 from bot_profiles import ProfileFarm
 
@@ -412,6 +413,9 @@ def main() -> int:
     args = sys.argv[1:]
     bot = next((a for a in args if not a.startswith("--")), "Bot8")
     BOT_TAG = bot
+    # ชีพจร — เต้นทุก 15 วิให้ app.py รู้ว่ายังมีชีวิต ตั้งชื่อแยกรายบอท
+    # (Bot8 กับ Bot9 คนละโปรเซส ตายคนละเวลา ต้องแยกกันดูให้ออก)
+    heartbeat.watch(f"fb_posts_collect_{bot}")
     groups_limit = 1
     target = POSTS_TARGET
     only_gid = ""
@@ -518,6 +522,10 @@ def guarded_main() -> int:
         except Exception:
             pass
         return 1
+    finally:
+        # ไม่ว่าจะจบแบบไหน ต้องลบชีพจรทิ้งเสมอ ไม่งั้นไฟล์เก่าค้างเป็นผี
+        # แล้วยามเฝ้าจะร้องว่า "ตาย" ทั้งที่มันแค่ทำงานเสร็จแล้วเดินออกไป
+        heartbeat.stop(f"fb_posts_collect_{BOT_TAG}")
 
 
 if __name__ == "__main__":

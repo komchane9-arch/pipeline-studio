@@ -22,6 +22,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+import chat_log
 import studio_shared
 
 API_BASE = "https://api.telegram.org/bot"
@@ -109,7 +110,17 @@ def call(token: str, method: str, payload: dict | None = None,
         raise TelegramError(f"ต่อ Telegram ไม่ได้: {error}") from error
     if not result.get("ok"):
         raise TelegramError(result.get("description", "Telegram ปฏิเสธคำขอ"))
-    return result.get("result", {})
+    payload_out = result.get("result", {})
+    # บันทึกบทสนทนา — จุดดักหลักของทั้งระบบ ครอบทุกเมธอดที่ส่งเป็น JSON
+    # ห่อ try ไว้เพราะการบันทึกล้มเหลวห้ามทำให้ข้อความส่งไม่ออก
+    try:
+        if method == "getUpdates":
+            chat_log.incoming(token, payload_out)
+        else:
+            chat_log.outgoing(token, method, payload or {}, payload_out)
+    except Exception:
+        pass
+    return payload_out
 
 
 def describe_bot(token: str) -> dict:
@@ -251,7 +262,13 @@ def send_video(
         raise TelegramError(f"ส่งคลิปไม่สำเร็จ: {error}") from error
     if not result.get("ok"):
         raise TelegramError(result.get("description", "Telegram ปฏิเสธคลิป"))
-    return result["result"].get("message_id", 0)
+    sent_id = result["result"].get("message_id", 0)
+    try:
+        chat_log.outgoing_media(token, "sendVideo", chat_id, [video], caption,
+                                keyboard, sent_id)
+    except Exception:
+        pass
+    return sent_id
 
 
 def send_video_approval(
@@ -369,7 +386,13 @@ def send_media_group(
         raise TelegramError(f"ส่งอัลบั้มรูปไม่สำเร็จ: {error}") from error
     if not result.get("ok"):
         raise TelegramError(result.get("description", "Telegram ปฏิเสธอัลบั้ม"))
-    return [item.get("message_id", 0) for item in result.get("result", [])]
+    sent_ids = [item.get("message_id", 0) for item in result.get("result", [])]
+    try:
+        chat_log.outgoing_media(token, "sendMediaGroup", chat_id, files, caption,
+                                None, sent_ids)
+    except Exception:
+        pass
+    return sent_ids
 
 
 def edit_message(
@@ -415,7 +438,13 @@ def send_photo(
         raise TelegramError(f"ส่งรูปไม่สำเร็จ: {error}") from error
     if not result.get("ok"):
         raise TelegramError(result.get("description", "Telegram ปฏิเสธรูป"))
-    return result["result"].get("message_id", 0)
+    sent_id = result["result"].get("message_id", 0)
+    try:
+        chat_log.outgoing_media(token, "sendPhoto", chat_id, [photo], caption,
+                                keyboard, sent_id)
+    except Exception:
+        pass
+    return sent_id
 
 
 def download_file(token: str, file_id: str, destination: Path) -> Path:

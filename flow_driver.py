@@ -30,6 +30,10 @@ TIMEOUTS = {
     "image_per_scene": 300,
     "video_per_scene": 600,
     "download": 120,
+    # โหลด 1080p ผ่านเมนู — Google ต้อง upscale ให้ก่อนถึงจะส่งไฟล์มา
+    # จึงนานกว่าโหลดไฟล์ต้นฉบับมาก (วัดจริง 22 ส.ค. 2026: คลิป 10 วินาที
+    # ใช้เวลาตั้งแต่กดจนไฟล์มาถึงราว 1 นาที ตั้งเผื่อไว้ 5 เท่า)
+    "upscale_download": 300,
 }
 POLL_IMAGE = 5      # poll ทุก 5 วิ ตอนเจนรูป
 POLL_VIDEO = 10     # poll ทุก 10 วิ ตอนเจนวิดีโอ
@@ -1171,6 +1175,128 @@ class FlowDriver:
 
     # ------------------------------------------------------------ ดาวน์โหลด
 
+    # ตัวเลือกในเมนู Download ของ Flow (ยืนยันจากหน้าจริง 22 ส.ค. 2026)
+    #     270p   Animated GIF
+    #     720p   Original Size          ← ที่ Veo เจนออกมาจริง
+    #     1080p  Upscaled               ← Google ขยายให้ **ไม่เสียเครดิต**
+    #     4K     Upscaled · 50 credits  ← เสียเครดิต ห้ามกดอัตโนมัติ
+    DOWNLOAD_QUALITIES = ("270p", "720p", "1080p", "4K")
+    PAID_QUALITIES = ("4K",)
+
+    def download_quality(self, url: str, target: Path, quality: str = "1080p") -> str:
+        """โหลดคลิปผ่านเมนู ⋮ → Download → <ความละเอียด> · คืนความละเอียดที่ได้จริง
+
+        **ทำไมไม่โหลดจาก url ตรงๆ** url ใน `<video src>` คือไฟล์ต้นฉบับ 720p เสมอ
+        ส่วน 1080p เป็นไฟล์ที่ Google สร้างให้ตอนกดในเมนูเท่านั้น
+        (วัดจริง: 720p = 2.71 MB / 2,164 kbps · 1080p = 8.58 MB / 6,867 kbps)
+
+        **ล้มแล้วไม่ทิ้งงาน** ทุกขั้นที่พลาดจะถอยไปโหลด 720p จาก url เดิม เพราะคลิป
+        นั้นจ่ายเครดิตเจนไปแล้ว ไม่ได้ 1080p เสียแค่ความละเอียด แต่โยน error ทิ้งคือ
+        เสียคลิปทั้งตัว — **แต่ต้อง log ทุกครั้งที่ถอย ห้ามเงียบ**
+        """
+        if quality in self.PAID_QUALITIES:
+            raise FlowError(f"{quality} กินเครดิต — ห้ามสั่งอัตโนมัติ")
+        try:
+            if self._download_from_tile(url, target, quality):
+                self.log(f"  โหลด {quality} จากเมนูสำเร็จ")
+                return quality
+            self.log(f"  หาเมนู {quality} ไม่เจอ — ถอยไปโหลดไฟล์ต้นฉบับ 720p")
+        except Exception as error:                           # noqa: BLE001
+            self.log(f"  โหลด {quality} ไม่สำเร็จ ({type(error).__name__}: "
+                     f"{str(error)[:80]}) — ถอยไปโหลดไฟล์ต้นฉบับ 720p")
+        self.download(url, target)
+        return "720p"
+
+    def _download_from_tile(self, url: str, target: Path, quality: str) -> bool:
+        """กดเมนูของไทล์ที่มีวิดีโอ url นี้ แล้วเลือกความละเอียด — True เมื่อได้ไฟล์
+
+        จับไทล์จาก **url ของวิดีโอในไทล์นั้น** ไม่ใช่ "ไทล์ล่าสุด" เพราะโปรเจกต์เดียว
+        มีหลายฉาก หยิบผิดไทล์จะได้คลิปของฉากอื่นมาทับ (บทเรียน KVID v3.8.5 ที่จับ
+        start frame แบบหลวมจนได้รูปฉาก 1 ไปทุกวิดีโอ)
+        """
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tile = self._tile_with_video(url)
+        if tile is None:
+            return False
+        tile.scroll_into_view_if_needed()
+        tile.hover()
+        self.page.wait_for_timeout(1200)
+        if not self._open_tile_menu(tile):
+            return False
+
+        item = self.page.locator(
+            '[role="menuitem"],li,button'
+        ).filter(has_text="Download").first
+        if not item.count():
+            self.page.keyboard.press("Escape")
+            return False
+        item.hover()
+        self.page.wait_for_timeout(1800)
+        if quality not in self._visible_qualities():
+            item.click()          # UI บางรุ่นต้องคลิกถึงจะกางเมนูย่อย
+            self.page.wait_for_timeout(1800)
+        if quality not in self._visible_qualities():
+            self.page.keyboard.press("Escape")
+            return False
+
+        with self.page.expect_download(
+            timeout=TIMEOUTS["upscale_download"] * 1000
+        ) as info:
+            self.page.get_by_text(quality, exact=True).first.click()
+        info.value.save_as(str(target))
+        return target.is_file() and target.stat().st_size > 0
+
+    def _tile_with_video(self, url: str):
+        """ไทล์ที่มี <video> ตรงกับ url นี้ — ไม่เจอคืน None"""
+        tiles = self.page.locator("[data-tile-id]")
+        for index in range(tiles.count()):
+            tile = tiles.nth(index)
+            try:
+                srcs = tile.locator("video").evaluate_all(
+                    "els => els.map(el => el.src || el.currentSrc || '')"
+                )
+            except Exception:                                # noqa: BLE001
+                continue
+            if any(src and (src == url or src in url or url in src) for src in srcs):
+                return tile
+        return None
+
+    def _open_tile_menu(self, tile) -> bool:
+        """กดปุ่ม ⋮ ของไทล์ — ปุ่มโผล่เฉพาะตอนชี้เมาส์ค้างไว้"""
+        buttons = tile.locator("button")
+        for index in range(buttons.count()):
+            try:
+                label = (buttons.nth(index).inner_text() or "").strip().lower()
+            except Exception:                                # noqa: BLE001
+                continue
+            if "more" not in label:
+                continue
+            try:
+                buttons.nth(index).click()
+                self.page.wait_for_timeout(1500)
+            except Exception:                                # noqa: BLE001
+                continue
+            if self.page.locator(
+                '[role="menuitem"],li,button'
+            ).filter(has_text="Download").count():
+                return True
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(500)
+        return False
+
+    def _visible_qualities(self) -> list[str]:
+        """ความละเอียดที่กางอยู่ในเมนูย่อยตอนนี้"""
+        try:
+            return self.page.evaluate(
+                """(known) => [...document.querySelectorAll('*')]
+                    .filter(el => el.children.length === 0)
+                    .map(el => (el.innerText || '').trim())
+                    .filter(t => known.includes(t))""",
+                list(self.DOWNLOAD_QUALITIES),
+            )
+        except Exception:                                    # noqa: BLE001
+            return []
+
     def download(self, url: str, target: Path) -> None:
         """โหลดไฟล์ผ่าน request ของเบราว์เซอร์ (ติดคุกกี้ไปด้วย)
         blob: อ่านจาก network ไม่ได้ ต้อง fetch ในหน้าแล้วส่งไบต์ออกมา"""
@@ -1212,6 +1338,9 @@ class FlowDriver:
         on_retry=None,
         # ความยาวคลิปเป็นวินาที (4/6/8/10) — None = ใช้ค่าที่ตั้งอยู่ใน UI
         seconds: int | None = None,
+        # ความละเอียดตอนโหลดคลิป — "1080p" (Google upscale ให้ ฟรี) หรือ
+        # "720p" (ไฟล์ต้นฉบับที่ Veo เจน) · ใส่ "" เพื่อโหลดจาก url ตรงๆ แบบเดิม
+        video_quality: str = "1080p",
     ) -> None:
         """เจนหนึ่งชิ้นพร้อม retry ตามกติกาเดิม
 
@@ -1262,7 +1391,13 @@ class FlowDriver:
                 self.submit(prompt, baseline["counts"]["tiles"])
                 submitted = True          # จากจุดนี้ไป = เครดิตถูกใช้ไปแล้ว
                 url = self.wait_result(kind, before, timeout_s, poll_s)
-                self.download(url, target)
+                # วิดีโอ: โหลดผ่านเมนูเพื่อเอา 1080p (Google upscale ให้ฟรี)
+                # ส่วนรูปโหลดจาก url ตรงๆ เหมือนเดิม — เมนู Download ของรูป
+                # ไม่มีตัวเลือกความละเอียด และรูปถูกใช้เป็นเฟรมตั้งต้นเท่านั้น
+                if kind == "video" and video_quality:
+                    self.download_quality(url, target, video_quality)
+                else:
+                    self.download(url, target)
                 return
             except (PolicyBlocked, UnusualActivity, NeedsLogin):
                 raise  # ห้าม retry — ผู้เรียกต้องจัดการเอง

@@ -704,9 +704,16 @@ TRANSFORM_STORYBOARD_ASK = (
 
 
 def transform_hint(highlights: list[str], name: str = "") -> str:
-    """คืนเกณฑ์เพิ่มสำหรับคัดรูป ถ้าจุดเด่นบอกว่าสินค้าปรับเปลี่ยนได้"""
-    blob = " ".join(list(highlights or []) + [name or ""])
-    return TRANSFORM_JUDGE_RULE if TRANSFORM_RE.search(blob) else ""
+    """คืนเกณฑ์เพิ่มสำหรับคัดรูป ถ้าจุดเด่นบอกว่าสินค้าปรับเปลี่ยนได้
+
+    **ตัวจริงย้ายไปอยู่ที่ `shopee_scrape` แล้ว** (28 ส.ค. 2569) เพราะขั้นดึงสินค้า
+    ต้องใช้กติกานี้ตั้งแต่รอบคัดรูปรอบแรก ตัวนี้เหลือไว้เป็นทางเข้าเดิมของสายคลิป
+    **ห้ามก๊อปกติกามาไว้สองที่** — วันหลังแก้ที่เดียวแล้วอีกที่ไม่ตาม จะกลายเป็น
+    สองสายพานที่คัดรูปคนละเกณฑ์โดยไม่มีใครรู้
+    """
+    import shopee_scrape                                        # noqa: PLC0415
+
+    return shopee_scrape.transform_rule(*(list(highlights or []) + [name or ""]))
 
 
 
@@ -1110,8 +1117,26 @@ def _clip_collect(job: dict) -> None:
     hint = transform_hint(data.get("highlights") or [], data.get("name", ""))
     want = CLIP_TRANSFORM_IMAGES if hint else CLIP_START_IMAGES
 
+    # ---- เคารพชุดรูปที่คัดมาพร้อมจุดเด่นแล้ว (แก้ 28 ส.ค. 2569) ----------
+    #
+    # **บั๊กที่แก้** ขั้นดึงสินค้าคัดรูปพร้อมเขียนจุดเด่นให้ตรงกันทีละใบมาแล้ว
+    # แต่ตรงนี้เห็นว่าคลังรูปเยอะกว่าที่ต้องการ **จึงเลือกรูปใหม่ทับทั้งชุด
+    # โดยไม่แตะจุดเด่นเลย** จุดเด่นจึงไปบรรยายรูปที่ถูกทิ้งไปแล้ว
+    #
+    # เกิดกับ 90 ใบจาก 100 ใบ เพราะเงื่อนไข "คลังรูปเยอะกว่าที่ต้องการ" เป็นจริง
+    # เกือบทุกใบ เจ้าของเจอเองจากใบโซฟา `42653351351` (จุดเด่นพูดถึงช่อง USB
+    # กับที่วางแก้ว แต่รูปที่เห็นเป็นคนละชุด)
+    #
+    # เหตุผลเดิมของการเลือกใหม่คือ "กันส่งรูป 20 ใบเข้า GPT" ซึ่ง **ถูกต้องตอนที่
+    # เขียน** แต่ตอนนี้ขั้นดึงสินค้าคืนมาแค่ 3-5 ใบอยู่แล้ว จึงไม่ต้องคัดซ้ำ
     picked = []
-    if len(paired) > want:
+    curated = data.get("picked") or []
+    if data.get("highlights_match_images") and curated:
+        # ห้ามตัดให้เหลือ `want` — ตัดรูปแต่ไม่ตัดจุดเด่น = กลับไปไม่ตรงกันอีก
+        picked = curated
+        _clip_log(f"ใช้ชุดรูปที่คัดมาพร้อมจุดเด่นแล้ว {len(picked)} ใบ "
+                  f"— ไม่คัดซ้ำ จุดเด่นจึงตรงกับรูปที่เห็น")
+    elif len(paired) > want:
         if hint:
             # จุดเด่นบอกว่าปรับเปลี่ยนได้ → ให้ Gemini ดูรูปจริงแล้วเลือกให้ครบทุกท่า
             # เลือกแบบกระจายเฉยๆ ไม่การันตีว่าจะได้ท่าที่ต่างกัน
@@ -1125,9 +1150,14 @@ def _clip_collect(job: dict) -> None:
             picked = [paired[i] for i in indexes if 0 <= i < len(paired)]
         if not picked:
             picked = shopee_scrape.spread_pick(paired)
+        picked = picked[:want]
+        # **ต้องดัง** ใบที่เดินมาทางนี้ จุดเด่นเขียนจากรูปคนละชุดกับที่เลือกใหม่
+        # ปล่อยเงียบแล้วไม่มีใครรู้ว่าใบไหนตรงใบไหนไม่ตรง
+        _clip_log("⚠️ คัดรูปใหม่เอง — จุดเด่นที่มีอยู่เขียนไว้ก่อนคัด "
+                  "อาจไม่ตรงกับรูปที่เห็น กด 🖼 ให้ AI ดูรูป เพื่อเขียนใหม่ให้ตรง")
+        data["highlights_match_images"] = False
     else:
-        picked = paired
-    picked = picked[:want]
+        picked = paired[:want]
     data["picked"] = picked
     data["saved_images"] = [item["file"] for item in picked]
 

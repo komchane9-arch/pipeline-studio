@@ -93,9 +93,14 @@ def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
         # `want_all` คุมแค่ว่า **คลังรูปมีกี่ใบ** ไม่ได้คุมว่าจะให้ Gemini กรองไหม
         say(f"ส่งรูป {len(paired)} ใบ + รายละเอียด ให้ Gemini กรองให้ก่อน…")
         try:
+            # สินค้าปรับท่าได้ ต้องบอกตั้งแต่รอบนี้ ไม่ใช่ปล่อยให้ขั้นถัดไปคัดใหม่
+            rule = shopee_scrape.transform_rule(data["name"], data["detail"])
+            if rule:
+                say("สินค้านี้ปรับเปลี่ยนรูปทรงได้ — สั่งให้คัดรูปครบทุกท่า")
             curated = shopee_scrape.curate_for_ad(
                 data["name"], data["detail"],
                 [item["file"] for item in paired], api_key, log=say,
+                extra_rule=rule,
             )
             data["picked"] = [paired[i] for i in curated["indexes"]]
             data["highlights"] = curated["highlights"]
@@ -107,6 +112,12 @@ def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
             # (เจ้าของสั่งเพิ่มขั้นนี้ 28 ส.ค. 2569) เก็บไว้กับใบงานเพื่อให้ย้อนดูได้ว่า
             # จุดเด่นที่เลือกมา **มาจากความเดือดร้อนข้อไหน** ไม่ใช่เลือกมาลอยๆ
             data["pains"] = curated.get("pains") or []
+            # ⭐ ธงบอกขั้นถัดไปว่า **จุดเด่นข้อที่ i เขียนจากรูปใบที่ i จริง**
+            #
+            # ต้องเป็นธงชัดๆ ห้ามให้ขั้นถัดไปเดาจากจำนวน เพราะทางถอยข้างล่างก็คืน
+            # จุดเด่น 3 ข้อกับรูป 3 ใบเท่ากันเป๊ะ (HIGHLIGHT_COUNT = IMAGE_PICK_COUNT = 3)
+            # นับเท่ากันแล้วสรุปว่าตรงกัน = หลอกตัวเอง
+            data["highlights_match_images"] = True
             say(f"Gemini คัดเหลือ {len(data['picked'])} ใบจาก {len(paired)} ใบ "
                 f"พร้อมคำโฆษณาครบทุกใบ — รอคุณกดอนุมัติ")
         except Exception as error:                           # noqa: BLE001
@@ -128,5 +139,8 @@ def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
             data["highlights"] = analysis["highlights"]
             data["features"] = analysis["features"]
             data["highlight_why"] = analysis["why"]
+            # ทางถอยนี้เลือกรูปกับเขียนจุดเด่น **คนละคำขอ คนละสายตา** ตัวเลือกรูป
+            # ไม่เห็นคำบรรยาย ตัวเขียนจุดเด่นไม่เห็นรูป จึงไม่มีทางตรงกันโดยตั้งใจ
+            data["highlights_match_images"] = False
         data["saved_images"] = [item["file"] for item in data["picked"]]
     return data

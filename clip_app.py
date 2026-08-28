@@ -1199,8 +1199,103 @@ def _clip_collect(job: dict) -> None:
         raise
     data["affiliate_url"] = job["link"]      # ลิงก์ที่ผู้ใช้ส่งมา = ลิงก์ affiliate
 
-    # want_all=True ทำให้ saved_images กลายเป็นรูปทุกใบ ต้องคัดเองอีกชั้น
-    # ไม่งั้นจะส่งเข้า GPT ทั้ง 20 ใบ (เกินเพดานที่รับได้ และรูปซ้ำกันเอง)
+    _clip_finish_collect(job, data)
+
+
+def _clip_manual_build(name: str, detail: str, images: list, source_item: str = "",
+                       link: str = "", say=None) -> dict:
+    """สร้างข้อมูลสินค้าจากของที่คนป้อนเอง — ไม่แตะ Shopee เลย
+
+    เจ้าของสั่ง 28 ส.ค. 2569: *"ทำเลยแบบป้อนเอง ผมจะเอาไว้เทสพรอมพ์
+    เปลี่ยนพรอมพ์ใหม่"*
+
+    **รูปมาได้ 2 ทาง**
+      · `source_item` — ก๊อปจากสินค้าที่ดึงมาแล้วในเครื่อง (เร็วสุด สำหรับทดสอบ
+        พรอมพ์ เพราะได้ของเดิมเป๊ะทุกครั้ง เทียบผลก่อน–หลังได้จริง)
+      · `images` — ไฟล์ที่ส่งขึ้นมาเอง (base64 หรือพาธในเครื่อง)
+
+    **รหัสสินค้าขึ้นต้นด้วย `m`** เพราะรหัสของ Shopee เป็นตัวเลขล้วน
+    ขึ้นต้นด้วยตัวอักษรจึงชนกันไม่ได้แน่นอน และมองปราดเดียวรู้ว่าเป็นงานป้อนเอง
+    """
+    import base64                                               # noqa: PLC0415
+    import shutil                                               # noqa: PLC0415
+    import time as _time                                        # noqa: PLC0415
+
+    log = say or _clip_log
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("ต้องมีชื่อสินค้า")
+
+    item_id = "m" + _time.strftime("%y%m%d%H%M%S")
+    folder = DATA_DIR / "shopee_products" / item_id
+    if folder.exists():
+        item_id += "x"
+        folder = DATA_DIR / "shopee_products" / item_id
+    folder.mkdir(parents=True, exist_ok=True)
+
+    saved: list[Path] = []
+    if source_item:
+        src = clip_store.load_run(DATA_DIR, str(source_item)) or {}
+        src_folder = Path(src.get("folder") or "")
+        if not src_folder.is_dir():
+            raise ValueError(f"ไม่พบสินค้าต้นแบบ {source_item}")
+        for index, path in enumerate(sorted(src_folder.glob("*.jpg")), start=1):
+            target = folder / f"{index:02d}.jpg"
+            shutil.copyfile(path, target)
+            saved.append(target)
+        if not detail:
+            got = src_folder / "detail.txt"
+            detail = got.read_text(encoding="utf-8", errors="replace") if got.is_file() else ""
+        log(f"ก๊อปรูปจากสินค้า {source_item} มา {len(saved)} ใบ — ไม่ได้ยิงถาม Shopee")
+    else:
+        for index, item in enumerate(images or [], start=1):
+            target = folder / f"{index:02d}.jpg"
+            try:
+                if isinstance(item, str) and Path(item).is_file():
+                    shutil.copyfile(item, target)
+                else:
+                    blob = item.split(",", 1)[-1] if isinstance(item, str) else item
+                    target.write_bytes(base64.b64decode(blob))
+            except Exception as error:                          # noqa: BLE001
+                # บอกว่าใบไหนพัง ไม่ใช่เงียบแล้วได้รูปไม่ครบโดยไม่รู้ตัว
+                log(f"รูปที่ {index} ใช้ไม่ได้ ({type(error).__name__}) — ข้าม")
+                continue
+            if target.stat().st_size < 2048:
+                target.unlink(missing_ok=True)
+                log(f"รูปที่ {index} เล็กผิดปกติ — ข้าม")
+                continue
+            saved.append(target)
+
+    if len(saved) < 2:
+        raise ValueError(f"ต้องมีรูปอย่างน้อย 2 ใบ (ได้ {len(saved)} ใบ)")
+
+    (folder / "detail.txt").write_text(str(detail or ""), encoding="utf-8")
+    return {
+        "item_id": item_id,
+        "shop_id": "",
+        "name": name[:120],
+        "detail": str(detail or ""),
+        "folder": str(folder),
+        "candidates": [{"id": p.name, "url": "", "kind": "manual", "label": "",
+                        "file": str(p)} for p in saved],
+        # ไม่มีลิงก์ = โพสต์ไม่ได้ (ทั้ง Shopee Video และ Facebook Reels มีขั้นวางลิงก์)
+        # ด่านตอนโพสต์จะกันไว้เองพร้อมบอกเหตุผล ไม่ปล่อยให้ไปตายกลางทางบนมือถือ
+        "affiliate_url": str(link or ""),
+        "url": "",
+        "manual": True,
+    }
+
+
+def _clip_finish_collect(job: dict, data: dict) -> None:
+    """ครึ่งหลังของขั้นดึงสินค้า — คัดรูป เก็บลงคลัง แล้วส่งใบงานให้คนตรวจ
+
+    **แยกออกมาเมื่อ 28 ส.ค. 2569** เพื่อให้ **งานป้อนเอง** (ที่ไม่มีลิงก์ Shopee)
+    เดินเส้นทางเดียวกันเป๊ะกับงานที่มาจากลิงก์ ตั้งแต่การคัดรูปจนถึงหน้าตาใบงาน
+
+    ถ้าก๊อปตรรกะนี้ไปไว้อีกที่ วันหลังแก้ข้างเดียวแล้วสองเส้นทางจะให้ผลต่างกัน
+    ซึ่งเป็นบั๊กที่โปรเจกต์นี้เจอมาแล้วหลายรอบในวันเดียว
+    """
+    chat_id = job["chat_id"]
     import shopee_scrape
 
     paired = data.get("candidates") or []
@@ -1268,6 +1363,8 @@ def _clip_collect(job: dict) -> None:
         images_ok=False, highlights_ok=False,
     )
     _clip_send_worksheet(clip_jobs.get(job["id"]))
+
+
 
 
 def _clip_make(job: dict) -> None:
@@ -6309,6 +6406,84 @@ def _find_job(job_id: str) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="ไม่พบงานนี้ในคิว")
     return job
+
+
+@app.post("/api/jobs/manual")
+async def jobs_manual(request: Request) -> dict:
+    """สร้างใบงานเองโดยไม่ต้องมีลิงก์ Shopee (เจ้าของสั่ง 28 ส.ค. 2569)
+
+    ส่งมาได้ 2 แบบ
+      ก. ก๊อปจากสินค้าที่มีอยู่แล้ว — `{"name": "...", "source_item": "16820466802"}`
+         เหมาะกับ **การทดสอบพรอมพ์** เพราะได้รูปชุดเดิมเป๊ะทุกครั้ง
+         ไม่ยิงถาม Shopee เลย จึงไม่เสี่ยงโดนบล็อกและไม่เสียเวลาโหลด
+      ข. ส่งรูปมาเอง — `{"name": "...", "detail": "...", "images": ["<base64>", ...]}`
+         รับเป็น base64 (มี `data:image/...;base64,` นำหน้าก็ได้) หรือพาธไฟล์ในเครื่อง
+
+    ใส่ `detail` ได้ ไม่ใส่ก็ได้ — ถ้าก๊อปจากสินค้าเดิมจะหยิบคำบรรยายเดิมมาให้
+    ใส่ `link` ได้ถ้าอยากเอาไปโพสต์จริงทีหลัง **ไม่ใส่ = ทำคลิปได้แต่โพสต์ไม่ได้**
+    เพราะทั้ง Shopee Video และ Facebook Reels มีขั้นวางลิงก์สินค้า
+
+    งานที่สร้างจะเดิน **เส้นทางเดียวกับงานที่มาจากลิงก์ทุกประการ** ตั้งแต่ให้ AI
+    คัดรูป+เขียนจุดเด่น ไปจนถึงหน้าตาใบงานที่ส่งให้ตรวจ
+    """
+    payload = await request.json()
+    name = str(payload.get("name") or "").strip()
+    detail = str(payload.get("detail") or "")
+    link = str(payload.get("link") or "").strip()
+    source = str(payload.get("source_item") or "").strip()
+    images = payload.get("images") or payload.get("image_paths") or []
+    if not name:
+        raise HTTPException(status_code=400, detail="ต้องใส่ชื่อสินค้า")
+    if not source and not images:
+        raise HTTPException(
+            status_code=400,
+            detail="ต้องมีรูป — ส่ง images มา หรือระบุ source_item เพื่อก๊อปจากสินค้าที่มีอยู่",
+        )
+
+    def work() -> dict:
+        # **ห่อทั้งก้อนไว้เขียน log** — ของเดิม error หลุดไปเป็น 500 เปล่าๆ
+        # ไม่มีร่องรอยใน log สักบรรทัด ไล่ต่อไม่ได้เลย (ผิดกติกาข้อ 2.4)
+        try:
+            return _manual_work(name, detail, images, source, link)
+        except HTTPException:
+            raise
+        except Exception as error:                              # noqa: BLE001
+            import traceback                                    # noqa: PLC0415
+
+            _clip_log(f"งานป้อนเองล้ม: {type(error).__name__}: {error}")
+            _clip_log(traceback.format_exc()[:1500])
+            raise HTTPException(status_code=500,
+                                detail=f"{type(error).__name__}: {error}"[:300]) from error
+
+    def _manual_work(name, detail, images, source, link) -> dict:
+        with _web_lock:
+            try:
+                data = _clip_manual_build(name, detail, images, source, link)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            chat_id = _default_clip_chat()
+            job = clip_jobs.add(link or f"manual:{data['item_id']}", chat_id)
+            clip_jobs.update(job["id"], kind="manual", source="web",
+                             item_id=data["item_id"], name=data["name"][:80],
+                             stage=clip_queue.STAGE_COLLECTING)
+            _clip_log(f"งานป้อนเอง {job['id']} — {data['name'][:40]} "
+                      f"· รูป {len(data['candidates'])} ใบ")
+            # คัดรูป + เขียนจุดเด่น ด้วยขั้นตอนเดียวกับงานที่มาจากลิงก์
+            from flow_worker import load_gemini_api_key       # noqa: PLC0415
+            import shopee_service                             # noqa: PLC0415
+
+            shopee_service.curate_into(
+                data, data["candidates"], load_gemini_api_key(), _clip_log)
+            data["saved_images"] = [i["file"] for i in data["picked"]]
+            _clip_finish_collect(clip_jobs.get(job["id"]), data)
+            return {"job_id": job["id"], "item_id": data["item_id"],
+                    "images": len(data["candidates"]),
+                    "picked": len(data.get("picked") or []),
+                    "highlights": data.get("highlights") or [],
+                    "can_post": bool(link)}
+
+    result = await asyncio.to_thread(work)
+    return {"ok": True, **result}
 
 
 def _job_card(job: dict, run: dict | None = None) -> dict:

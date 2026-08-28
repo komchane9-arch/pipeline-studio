@@ -91,56 +91,71 @@ def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
         # (ผมพลาดแบบนี้จริงตอน 12:27 — ล้มเงียบโดยไม่มี log สักบรรทัด)
         #
         # `want_all` คุมแค่ว่า **คลังรูปมีกี่ใบ** ไม่ได้คุมว่าจะให้ Gemini กรองไหม
-        say(f"ส่งรูป {len(paired)} ใบ + รายละเอียด ให้ Gemini กรองให้ก่อน…")
-        try:
-            # สินค้าปรับท่าได้ ต้องบอกตั้งแต่รอบนี้ ไม่ใช่ปล่อยให้ขั้นถัดไปคัดใหม่
-            rule = shopee_scrape.transform_rule(data["name"], data["detail"])
-            if rule:
-                say("สินค้านี้ปรับเปลี่ยนรูปทรงได้ — สั่งให้คัดรูปครบทุกท่า")
-            curated = shopee_scrape.curate_for_ad(
-                data["name"], data["detail"],
-                [item["file"] for item in paired], api_key, log=say,
-                extra_rule=rule,
-            )
-            data["picked"] = [paired[i] for i in curated["indexes"]]
-            data["highlights"] = curated["highlights"]
-            data["highlight_why"] = curated["why"]
-            # เก็บจุดขายที่ไล่ได้ทั้งหมดไว้เป็นคลังสำรอง ให้สลับข้อที่ไม่ถูกใจได้
-            # โดยไม่ต้องยิง AI ใหม่ (ผู้ใช้สั่ง 22 ส.ค. 2026)
-            data["features"] = curated["features"]
-            # ความเดือดร้อนของคนซื้อ + คะแนน 1-10 ที่ AI ไล่มาก่อนเลือกรูป
-            # (เจ้าของสั่งเพิ่มขั้นนี้ 28 ส.ค. 2569) เก็บไว้กับใบงานเพื่อให้ย้อนดูได้ว่า
-            # จุดเด่นที่เลือกมา **มาจากความเดือดร้อนข้อไหน** ไม่ใช่เลือกมาลอยๆ
-            data["pains"] = curated.get("pains") or []
-            # ⭐ ธงบอกขั้นถัดไปว่า **จุดเด่นข้อที่ i เขียนจากรูปใบที่ i จริง**
-            #
-            # ต้องเป็นธงชัดๆ ห้ามให้ขั้นถัดไปเดาจากจำนวน เพราะทางถอยข้างล่างก็คืน
-            # จุดเด่น 3 ข้อกับรูป 3 ใบเท่ากันเป๊ะ (HIGHLIGHT_COUNT = IMAGE_PICK_COUNT = 3)
-            # นับเท่ากันแล้วสรุปว่าตรงกัน = หลอกตัวเอง
-            data["highlights_match_images"] = True
-            say(f"Gemini คัดเหลือ {len(data['picked'])} ใบจาก {len(paired)} ใบ "
-                f"พร้อมคำโฆษณาครบทุกใบ — รอคุณกดอนุมัติ")
-        except Exception as error:                           # noqa: BLE001
-            # **ล้มแล้วต้องดัง ไม่ใช่เงียบ** ขั้นตอนนี้ผู้ใช้สั่งให้เพิ่มเอง
-            # ถ้าถอยเงียบๆ จะไม่มีใครรู้เลยว่ามันไม่เคยทำงาน
-            say(f"⚠️ Gemini กรองชุดรูปไม่สำเร็จ ({error}) — ถอยไปใช้วิธีเดิม "
-                f"(เลือกรูปกับเขียนจุดเด่นแยกกัน ซึ่งอาจไม่ตรงกัน)")
-            indexes = shopee_scrape.judge_images(
-                [item["file"] for item in paired], api_key, log=say
-            )
-            data["picked"] = (
-                [paired[i] for i in indexes] if indexes
-                else shopee_scrape.spread_pick(paired)
-            )
-            say(f"คัดรูปเหลือ {len(data['picked'])} ใบจาก {len(paired)} ใบ")
-            analysis = shopee_scrape.analyse_features(
-                data["name"], data["detail"], api_key, log=say
-            )
-            data["highlights"] = analysis["highlights"]
-            data["features"] = analysis["features"]
-            data["highlight_why"] = analysis["why"]
-            # ทางถอยนี้เลือกรูปกับเขียนจุดเด่น **คนละคำขอ คนละสายตา** ตัวเลือกรูป
-            # ไม่เห็นคำบรรยาย ตัวเขียนจุดเด่นไม่เห็นรูป จึงไม่มีทางตรงกันโดยตั้งใจ
-            data["highlights_match_images"] = False
+        curate_into(data, paired, api_key, say)
         data["saved_images"] = [item["file"] for item in data["picked"]]
     return data
+
+
+def curate_into(data: dict, paired: list[dict], api_key, say=print) -> None:
+    """คัดรูป + เขียนจุดเด่นให้ตรงกัน แล้วเขียนผลลงใน `data`
+
+    **แยกออกมาเป็นฟังก์ชันเมื่อ 28 ส.ค. 2569** เพื่อให้ **งานป้อนเอง** (ที่ไม่มี
+    ลิงก์ Shopee) ใช้ขั้นตอนเดียวกันเป๊ะ ไม่ใช่เขียนสายพานเส้นที่สอง
+
+    เหตุผล: โปรเจกต์นี้เจอปัญหา "สองทางที่ทำเรื่องเดียวกันแล้ววันหลังเพี้ยนคนละทาง"
+    มาหลายรอบ (คัดรูปสองรอบทับกัน · กติกาสินค้าปรับท่าเขียนไว้สองที่) การก๊อป
+    ตรรกะนี้ไปไว้อีกไฟล์จะได้บั๊กแบบเดียวกันอีกแน่นอน
+    """
+    import shopee_scrape                                        # noqa: PLC0415
+
+    say(f"ส่งรูป {len(paired)} ใบ + รายละเอียด ให้ Gemini กรองให้ก่อน…")
+    try:
+        # สินค้าปรับท่าได้ ต้องบอกตั้งแต่รอบนี้ ไม่ใช่ปล่อยให้ขั้นถัดไปคัดใหม่
+        rule = shopee_scrape.transform_rule(data["name"], data["detail"])
+        if rule:
+            say("สินค้านี้ปรับเปลี่ยนรูปทรงได้ — สั่งให้คัดรูปครบทุกท่า")
+        curated = shopee_scrape.curate_for_ad(
+            data["name"], data["detail"],
+            [item["file"] for item in paired], api_key, log=say,
+            extra_rule=rule,
+        )
+        data["picked"] = [paired[i] for i in curated["indexes"]]
+        data["highlights"] = curated["highlights"]
+        data["highlight_why"] = curated["why"]
+        # เก็บจุดขายที่ไล่ได้ทั้งหมดไว้เป็นคลังสำรอง ให้สลับข้อที่ไม่ถูกใจได้
+        # โดยไม่ต้องยิง AI ใหม่ (ผู้ใช้สั่ง 22 ส.ค. 2026)
+        data["features"] = curated["features"]
+        # ความเดือดร้อนของคนซื้อ + คะแนน 1-10 ที่ AI ไล่มาก่อนเลือกรูป
+        # (เจ้าของสั่งเพิ่มขั้นนี้ 28 ส.ค. 2569) เก็บไว้กับใบงานเพื่อให้ย้อนดูได้ว่า
+        # จุดเด่นที่เลือกมา **มาจากความเดือดร้อนข้อไหน** ไม่ใช่เลือกมาลอยๆ
+        data["pains"] = curated.get("pains") or []
+        # ⭐ ธงบอกขั้นถัดไปว่า **จุดเด่นข้อที่ i เขียนจากรูปใบที่ i จริง**
+        #
+        # ต้องเป็นธงชัดๆ ห้ามให้ขั้นถัดไปเดาจากจำนวน เพราะทางถอยข้างล่างก็คืน
+        # จุดเด่น 3 ข้อกับรูป 3 ใบเท่ากันเป๊ะ (HIGHLIGHT_COUNT = IMAGE_PICK_COUNT = 3)
+        # นับเท่ากันแล้วสรุปว่าตรงกัน = หลอกตัวเอง
+        data["highlights_match_images"] = True
+        say(f"Gemini คัดเหลือ {len(data['picked'])} ใบจาก {len(paired)} ใบ "
+            f"พร้อมคำโฆษณาครบทุกใบ — รอคุณกดอนุมัติ")
+    except Exception as error:                           # noqa: BLE001
+        # **ล้มแล้วต้องดัง ไม่ใช่เงียบ** ขั้นตอนนี้ผู้ใช้สั่งให้เพิ่มเอง
+        # ถ้าถอยเงียบๆ จะไม่มีใครรู้เลยว่ามันไม่เคยทำงาน
+        say(f"⚠️ Gemini กรองชุดรูปไม่สำเร็จ ({error}) — ถอยไปใช้วิธีเดิม "
+            f"(เลือกรูปกับเขียนจุดเด่นแยกกัน ซึ่งอาจไม่ตรงกัน)")
+        indexes = shopee_scrape.judge_images(
+            [item["file"] for item in paired], api_key, log=say
+        )
+        data["picked"] = (
+            [paired[i] for i in indexes] if indexes
+            else shopee_scrape.spread_pick(paired)
+        )
+        say(f"คัดรูปเหลือ {len(data['picked'])} ใบจาก {len(paired)} ใบ")
+        analysis = shopee_scrape.analyse_features(
+            data["name"], data["detail"], api_key, log=say
+        )
+        data["highlights"] = analysis["highlights"]
+        data["features"] = analysis["features"]
+        data["highlight_why"] = analysis["why"]
+        # ทางถอยนี้เลือกรูปกับเขียนจุดเด่น **คนละคำขอ คนละสายตา** ตัวเลือกรูป
+        # ไม่เห็นคำบรรยาย ตัวเขียนจุดเด่นไม่เห็นรูป จึงไม่มีทางตรงกันโดยตั้งใจ
+        data["highlights_match_images"] = False

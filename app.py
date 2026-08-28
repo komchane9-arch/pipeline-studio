@@ -1638,6 +1638,24 @@ async def publish_flow_run(request: Request) -> dict:
         # เต็มแล้วตอบ 409 ซึ่งฝั่งเรียกถือว่า "ยังไม่ได้ทำ" งานจึงค้างอยู่ในคิว
         # ตัวรันตื่นเองทุก 30 วินาที พอพ้นตี 4 ยอดนับกลับเป็น 0 งานเดินต่อเอง
         # **ไม่ต้องมีตัวตั้งเวลาเพิ่ม** และงานไม่หายไปไหน
+        # ---- ไม่มีลิงก์สินค้า = โพสต์ไม่ได้ (เพิ่ม 28 ส.ค. 2569) --------
+        #
+        # งานป้อนเองอาจไม่มีลิงก์ Shopee ซึ่งทำคลิปได้แต่โพสต์ไม่ได้ เพราะผัง
+        # **ทั้งสองปลายทาง** มีขั้นวางลิงก์สินค้า (ตรวจจากผังจริง ไม่ได้เดา)
+        #     shopee_video    product_link_field · link_paste
+        #     facebook_reels  custom_link · link_paste
+        #
+        # ดูจากตัวผังเองว่ามีขั้นชนิด `paste_link` ไหม ไม่ฝังชื่อปลายทางไว้
+        # ปลายทางใหม่ที่เพิ่มทีหลังจึงได้ด่านนี้เองโดยไม่ต้องมาแก้
+        needs_link = any(getattr(step, "kind", "") == "paste_link"
+                         for step in _flow_store(serial).sequence(target))
+        if needs_link and not str(run.get("affiliate_url") or "").strip():
+            detail = ("งานนี้ไม่มีลิงก์สินค้า จึงโพสต์ไม่ได้ — "
+                      "ผังของปลายทางนี้มีขั้นวางลิงก์ ถ้าปล่อยให้เดินต่อจะไปค้าง "
+                      "กลางหน้าโพสต์บนมือถือ ใส่ลิงก์ในใบงานก่อนแล้วค่อยลงใหม่")
+            append_log("publish", f"[{target}] ไม่ได้เดินผัง — {detail}")
+            raise HTTPException(status_code=409, detail=detail)
+
         who = device_book.account_for(serial, target)
         all_runs = clip_store.list_runs(DATA_DIR)
         ok, why = publish_order.quota_check(all_runs, target, who)

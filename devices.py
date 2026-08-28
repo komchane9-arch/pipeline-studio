@@ -376,6 +376,34 @@ def account(serial: str) -> str:
     return str(device.get("account") or "").strip()
 
 
+# บัญชีของแต่ละปลายทางเก็บคนละที่ — **เครื่องเดียวมีหลายบัญชี**
+#
+# เจอจริง 28 ส.ค. 2569: เครื่องสายคลิป `W4FYY…` ล็อกอิน Shopee เป็น "ยาย"
+# แต่ล็อกอิน Facebook เป็น "Squishy cute club" ถ้าใช้ `account()` ตัวเดียว
+# ยอดโควตาของ Shopee จะไปเกาะชื่อบัญชี Facebook ซึ่งอ่านแล้วสับสน
+# และจะพังทันทีถ้าวันหน้ามีสองเครื่องใช้บัญชี Shopee เดียวกันแต่ Facebook คนละอัน
+ACCOUNT_KEY_OF = {
+    "shopee_video": "shopee_account",
+    "tiktok": "tiktok_account",
+    # facebook_reels ใช้ช่อง `account` หลัก ซึ่งเป็นบัญชี Facebook อยู่แล้ว
+}
+
+
+def account_for(serial: str, target: str = "") -> str:
+    """บัญชีที่ใช้ลงปลายทางนี้บนเครื่องนี้ — ว่าง = ยังไม่ได้ผูก
+
+    ไม่ได้ตั้งเฉพาะปลายทางไว้ ให้ถอยไปใช้บัญชีหลักของเครื่อง ไม่ใช่คืนค่าว่าง
+    เพราะค่าว่างแปลว่า "นับรวมทุกบัญชี" ซึ่งหลวมกว่าที่ควร
+    """
+    device = load()["devices"].get(str(serial or "").strip()) or {}
+    key = ACCOUNT_KEY_OF.get(str(target or ""), "")
+    if key:
+        got = str((device.get("settings") or {}).get(key) or "").strip()
+        if got:
+            return got
+    return str(device.get("account") or "").strip()
+
+
 def accounts() -> dict:
     """{ชื่อบัญชี: serial} ของทุกเครื่องที่เปิดใช้และผูกบัญชีไว้แล้ว"""
     data = load()

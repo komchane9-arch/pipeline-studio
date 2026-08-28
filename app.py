@@ -1628,6 +1628,24 @@ async def publish_flow_run(request: Request) -> dict:
             append_log("publish", f"[{target}] ไม่ได้เดินผัง — {why}")
             raise HTTPException(status_code=409, detail=why)
 
+        # ---- โควตา 70 คลิป/วัน/ปลายทาง/บัญชี (เจ้าของสั่ง 28 ส.ค. 2569) ----
+        #
+        # *"ถ้าเกินโควต้าแล้วมีงานเข้ามา ให้ต่อคิวแล้วไปรันในวันถัดไป"*
+        #
+        # อยู่ตรงนี้ด้วยเหตุผลเดียวกับด่านลำดับข้างบน — **ต้องกั้นก่อนแตะมือถือ**
+        # ปล่อยให้เดินผังไปแล้วค่อยรู้ = โพสต์ขึ้นจริงแล้ว ถอนไม่ได้
+        #
+        # เต็มแล้วตอบ 409 ซึ่งฝั่งเรียกถือว่า "ยังไม่ได้ทำ" งานจึงค้างอยู่ในคิว
+        # ตัวรันตื่นเองทุก 30 วินาที พอพ้นตี 4 ยอดนับกลับเป็น 0 งานเดินต่อเอง
+        # **ไม่ต้องมีตัวตั้งเวลาเพิ่ม** และงานไม่หายไปไหน
+        who = device_book.account_for(serial, target)
+        all_runs = clip_store.list_runs(DATA_DIR)
+        ok, why = publish_order.quota_check(all_runs, target, who)
+        if not ok:
+            append_log("publish", f"[{target}] {why}")
+            raise HTTPException(status_code=409, detail=why)
+        append_log("publish", f"[{target}] {why}")
+
         # ---- ต้องมีแฮชแท็กก่อนถึงจะลงได้ (เพิ่ม 28 ส.ค. 2569) --------
         #
         # **ตรวจก่อนแตะมือถือ ไม่ใช่ไปตายกลางผัง** ผังใช้เวลา 10 นาทีต่อใบ
@@ -1717,8 +1735,10 @@ async def publish_flow_run(request: Request) -> dict:
         note = ("" if result["ok"]
                 else f"เดินผังไม่จบ หยุดที่ขั้น {result['done']}/{result['total']}")
         try:
+            # จดบัญชีที่ลงไปด้วย — โควตา 70/วันนับต่อบัญชี ไม่ใช่ต่อเครื่อง
             await asyncio.to_thread(
-                clip_store.mark_posted, DATA_DIR, item_id, target, "", note)
+                clip_store.mark_posted, DATA_DIR, item_id, target, "", note,
+                device_book.account_for(serial, target))
         except clip_store.ClipStoreError as error:
             append_log("publish", f"[{target}] บันทึกผลการโพสต์ไม่ได้: {error}")
 

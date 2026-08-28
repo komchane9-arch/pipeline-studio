@@ -28,7 +28,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # ลำดับที่ต้องลง — **ห้ามสลับ ห้ามข้าม** (ผู้ใช้กำหนดเอง 25 ส.ค. 2026)
@@ -42,6 +42,27 @@ NAMES = {
 
 # กี่วันในปฏิทินที่ต้องเว้นระหว่างสองปลายทางของคลิปเดียวกัน
 GAP_DAYS = 1
+
+# ---- โควตาต่อวัน (เจ้าของสั่ง 28 ส.ค. 2569) ------------------------------
+#
+# *"shopee video 70/วัน · facebook reels 70/วัน · tiktok 70/วัน
+#   ถ้าเกินโควต้าแล้วมีงานเข้ามา ให้ต่อคิวแล้วไปรันในวันถัดไป"*
+#
+# **ทำไมต้องอยู่ในไฟล์นี้** ด้วยเหตุผลเดียวกับกติกาลำดับ — ตัวโพสต์มีสองระบบ
+# ที่ไม่รู้จักกัน (`publish_flow.py` กดจอมือถือ · `tiktok_post.py` เปิดเว็บบนคอม)
+# ถ้าฝังโควตาไว้ในตัวใดตัวหนึ่ง อีกตัวจะโพสต์ทะลุเพดานทันทีโดยไม่มีใครรู้
+#
+# **นับต่อบัญชี ไม่ใช่ต่อเครื่อง** (เจ้าของเลือกเอง) เพราะเพดานเป็นของบัญชี
+# บนแพลตฟอร์ม ไม่ใช่ของเครื่อง — วันหน้าถ้าเอาสองเครื่องมาใช้บัญชีเดียวกัน
+# การนับต่อเครื่องจะปล่อยให้ลงได้ 140 ใบต่อบัญชี ซึ่งพังทั้งจุดประสงค์
+DAY_LIMIT = 70
+
+# วันใหม่เริ่มตี 4 (เจ้าของเลือกเอง 28 ส.ค. 2569)
+#
+# ไม่ใช่เที่ยงคืน เพราะรอบไล่โพสต์กลางคืนมักคาบเกี่ยวข้ามเที่ยงคืน
+# (คืน 27→28 ส.ค. รันตั้งแต่ 00:08 ถึง 02:31) ถ้าตัดที่เที่ยงคืน
+# งานรอบเดียวกันจะถูกนับแยกเป็นสองวันโดยไม่มีเหตุผล
+DAY_START_HOUR = 4
 
 
 class OrderError(RuntimeError):
@@ -70,6 +91,73 @@ def _as_date(stamp) -> date | None:
         return datetime.strptime(text[:10], "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def posting_day(stamp=None) -> date | None:
+    """วันของรอบโพสต์ — วันใหม่เริ่มตี 4 ไม่ใช่เที่ยงคืน
+
+    โพสต์ตอน 02:00 ของวันที่ 28 ยังนับเป็นวันที่ 27 เพราะเป็นรอบเดียวกับ
+    ที่เริ่มตั้งแต่คืนวันที่ 27 — ตัดที่เที่ยงคืนจะผ่ารอบเดียวออกเป็นสองวัน
+    """
+    if stamp is None:
+        moment = datetime.now()
+    elif isinstance(stamp, datetime):
+        moment = stamp
+    else:
+        text = str(stamp or "").strip()
+        if not text:
+            return None
+        try:
+            moment = datetime.fromisoformat(text.replace("Z", ""))
+        except ValueError:
+            got = _as_date(text)
+            return got                     # มีแค่วันที่ ไม่มีเวลา ใช้ตามนั้น
+    shifted = moment - timedelta(hours=DAY_START_HOUR)
+    return shifted.date()
+
+
+def day_used(runs, target: str, account: str = "", today: date | None = None) -> int:
+    """นับว่าวันนี้ลงปลายทางนี้ไปกี่คลิปแล้ว สำหรับบัญชีนั้น
+
+    **นับจากบันทึกการลงจริง ไม่ใช่ตัวนับแยก** (ตั้งใจ) — เพราะตัวนับแยกจะเพี้ยน
+    จากความจริงได้ ซึ่งเจอมาแล้วทั้งวัน 28 ส.ค. 2569 (ระบบจดว่าลงแล้วทั้งที่ไม่ได้ลง)
+    นับจากที่เดียวกับที่ `clip_store.mark_posted` เขียน จึงได้ของแถมสองอย่าง
+      · **งานที่เจ้าของกดจดเองในแชทถูกนับด้วย** (เจ้าของสั่งไว้)
+      · แก้บันทึกที่ผิดแล้ว ยอดนับแก้ตามเองทันที
+    บัญชีว่าง = นับทุกบัญชีรวมกัน (ใช้ตอนยังไม่ได้ผูกบัญชีกับเครื่อง)
+    """
+    if today is None:
+        today = posting_day()
+    used = 0
+    for run in runs or []:
+        info = ((run.get("publish") or {}).get(target) or {})
+        if info.get("status") != "posted":
+            continue
+        if posting_day(info.get("posted_at")) != today:
+            continue
+        if account and str(info.get("account") or "") not in ("", account):
+            continue
+        used += 1
+    return used
+
+
+def quota_check(runs, target: str, account: str = "",
+                today: date | None = None) -> tuple[bool, str]:
+    """ยังลงปลายทางนี้ได้อีกไหมวันนี้ — คืน (ลงได้ไหม, เหตุผลภาษาคน)
+
+    เต็มแล้ว **ไม่ทิ้งงาน** ผู้เรียกต้องคาไว้ในคิวแล้วลองใหม่ ตัวรันตื่นเองทุก
+    30 วินาทีอยู่แล้ว พอพ้นตี 4 ยอดนับกลับเป็น 0 งานที่ค้างจึงเดินต่อเอง
+    """
+    used = day_used(runs, target, account, today)
+    left = DAY_LIMIT - used
+    who = f"บัญชี {account}" if account else "ทุกบัญชีรวมกัน"
+    if left > 0:
+        return True, f"{NAMES.get(target, target)} วันนี้ลงไป {used}/{DAY_LIMIT} · เหลืออีก {left} ({who})"
+    return False, (
+        f"⏳ {NAMES.get(target, target)} เต็มโควตาวันนี้แล้ว "
+        f"({used}/{DAY_LIMIT} · {who}) — งานไม่ได้หายไปไหน "
+        f"ค้างอยู่ในคิวและจะเริ่มเองหลังตี 4"
+    )
 
 
 def posted_rows(run: dict) -> list[tuple[str, date | None]]:

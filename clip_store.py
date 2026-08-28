@@ -911,9 +911,17 @@ def mark_ready_to_post(root: Path, item_id: str) -> dict:
 
 
 def mark_posted(
-    root: Path, item_id: str, target: str, url: str = "", error: str = ""
+    root: Path, item_id: str, target: str, url: str = "", error: str = "",
+    account: str = "",
 ) -> dict:
-    """บันทึกผลการโพสต์ของปลายทางหนึ่ง"""
+    """บันทึกผลการโพสต์ของปลายทางหนึ่ง
+
+    `account` = บัญชีที่ลง (เพิ่ม 28 ส.ค. 2569) — โควตา 70 คลิป/วันนับ**ต่อบัญชี**
+    ตามที่เจ้าของสั่ง เพราะเพดานเป็นของบัญชีบนแพลตฟอร์ม ไม่ใช่ของเครื่อง
+    ที่นี่คือที่เดียวที่บันทึกการลง ทั้งตอนระบบลงเองและตอนเจ้าของกดจดในแชท
+    **ตัวนับจึงอ่านจากที่นี่ที่เดียว ไม่มีตัวนับแยก** ที่จะเพี้ยนจากความจริงได้
+    ว่างไว้ได้ ตอนนับจะถือว่าเป็นของทุกบัญชีรวมกัน
+    """
     if target not in PUBLISH_TARGETS:
         raise ClipStoreError(f"ไม่รู้จักปลายทาง {target}")
     folder = target_dir(root, item_id)
@@ -926,6 +934,7 @@ def mark_posted(
         "posted_at": _now(),
         "url": url,
         "error": error,
+        "account": str(account or ""),
     }
     run["publish"] = publish
     _write_json(folder / RUN_FILE, run)

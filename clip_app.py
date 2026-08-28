@@ -1089,14 +1089,104 @@ def _clip_send_script(job: dict, run: dict) -> None:
                   _clip_buttons(job["id"], "script") if last else None)
 
 
+def _clip_have_product(item_id: str) -> dict | None:
+    """สินค้านี้ดึงมาแล้วและของยังใช้ได้จริงไหม — ไม่ใช่แค่มีโฟลเดอร์
+
+    ต้องมีทั้งชื่อและไฟล์รูปจริง **เคยดึงแล้วรูปหาย = ต้องดึงใหม่**
+    ไม่งั้นจะข้ามการดึงแล้วได้ใบงานเปล่าที่เดินต่อไม่ได้
+    """
+    try:
+        run = clip_store.load_run(DATA_DIR, item_id)
+    except Exception:                                           # noqa: BLE001
+        return None
+    if not run or not str(run.get("name") or "").strip():
+        return None
+    folder = Path(run.get("folder") or "")
+    if not folder.is_dir() or not sorted(folder.glob("*.jpg")):
+        return None
+    return run
+
+
+def _clip_job_working_on(item_id: str, skip_id: str = "") -> dict | None:
+    """มีใบงานอื่นที่กำลังทำสินค้าชิ้นนี้อยู่ไหม (ยังไม่จบ ไม่ถูกยกเลิก)"""
+    for other in clip_jobs.all():
+        if other.get("id") == skip_id or other.get("item_id") != item_id:
+            continue
+        if other.get("stage") in clip_queue.OPEN_STAGES:
+            return other
+    return None
+
+
 def _clip_collect(job: dict) -> None:
     """ขั้นแรก: ดึงสินค้า → เก็บ → ส่งชุดรูปให้ผู้ใช้ตรวจ/แก้ก่อนส่งเข้า GPT"""
     chat_id = job["chat_id"]
+
+    # ---- ด่านกันดึงสินค้าซ้ำ (เจ้าของสั่ง 28 ส.ค. 2569) ------------------
+    #
+    # *"ทำตัวกันสินค้าซ้ำด้วย ตัวซ้ำดึงมาตัวเดียวพอ"*
+    #
+    # **เหตุการณ์ที่ทำให้ต้องมี** 27 ส.ค. 16:00 น. มีลิงก์ส่งเข้ามา 41 อัน
+    # **หน้าตาไม่ซ้ำกันสักอัน** แต่คลี่ออกมาแล้วชี้ไปสินค้าตัวเดียวกันหมด
+    # (โซฟา INDEX `50608473425` — สุ่มคลี่ยืนยันแล้ว 6 อัน ได้รหัสเดียวกันทั้ง 6)
+    # ระบบไม่รู้ จึงไปดึงจาก Shopee ซ้ำครบ 41 รอบ เสียเวลา 27 นาที
+    # ค่า Gemini ราว 14 บาท และยิงคำขอฟรีๆ 41 ครั้ง ซึ่งเป็นตัวที่ทำให้โดนบล็อก
+    #
+    # **คลี่ลิงก์ก่อนแล้วค่อยตัดสิน** การคลี่ยิงแค่ 1 คำขอ ส่วนการดึงเต็มยิงหลายสิบ
+    # (โหลดรูปทุกใบ) — ดักตรงนี้จึงประหยัดได้เกือบทั้งหมด
+    # และส่งลิงก์เต็มที่คลี่แล้วเข้าไปต่อ ตัวดึงจะไม่คลี่ซ้ำ (รวมแล้วยิงเท่าเดิม)
+    link = job["link"]
+    item_id = ""
+    try:
+        import shopee_scrape as _scrape                          # noqa: PLC0415
+
+        full = _scrape.resolve_link(link)
+        _, item_id = _scrape.parse_ids(full)
+        link = full
+    except Exception:                                            # noqa: BLE001
+        # คลี่ไม่ได้ก็ไม่ใช่เรื่องใหญ่ ปล่อยให้ตัวดึงจัดการและรายงานสาเหตุจริงเอง
+        link, item_id = job["link"], ""
+
+    if item_id:
+        have = _clip_have_product(item_id)
+        busy = _clip_job_working_on(item_id, job["id"]) if have else None
+        if have and busy:
+            # มีใบอื่นทำอยู่แล้ว = ลิงก์ซ้ำของจริง ยกเลิกใบนี้ทิ้ง
+            clip_jobs.update(
+                job["id"], item_id=item_id, stage=clip_queue.STAGE_CANCELLED,
+                note=f"ลิงก์ซ้ำกับใบงาน {busy['id']} (สินค้า {item_id})",
+            )
+            _clip_say(
+                chat_id,
+                f"♻️ <b>ลิงก์นี้เป็นสินค้าตัวเดิม ไม่ดึงซ้ำ</b>\n"
+                f"{telegram_bot._escape(str(have.get('name') or '')[:60])}\n\n"
+                f"มีใบงานทำอยู่แล้ว ยกเลิกใบนี้ให้ — "
+                f"ไม่ได้เสียเวลาและไม่ได้ยิงถาม Shopee เพิ่ม",
+            )
+            return
+        if have:
+            # เคยดึงไว้แล้วแต่ไม่มีใบไหนทำอยู่ → ใช้ของเดิม ไม่ดึงซ้ำ
+            clip_jobs.update(
+                job["id"], item_id=item_id, name=str(have.get("name") or "")[:80],
+                stage=clip_queue.STAGE_IMAGE_REVIEW,
+                images_ok=False, highlights_ok=False,
+            )
+            _clip_say(
+                chat_id,
+                f"♻️ <b>สินค้านี้ดึงมาแล้ว ใช้ของเดิมเลย</b>\n"
+                f"{telegram_bot._escape(str(have.get('name') or '')[:60])}\n\n"
+                f"ไม่ได้ยิงถาม Shopee ใหม่ ประหยัดเวลาและลดโอกาสโดนบล็อก\n"
+                f"อยากดึงใหม่จริงๆ ให้ลบโฟลเดอร์ <code>{item_id}</code> ก่อนแล้วส่งลิงก์ซ้ำ",
+            )
+            _clip_send_worksheet(clip_jobs.get(job["id"]))
+            return
+
     _clip_say(chat_id, "🔎 กำลังเปิดหน้าสินค้า… รอสักครู่")
     try:
         # โหลด **รูปทั้งหมด** ไม่ใช่เฉพาะที่คัดแล้ว — ต้องมีคลังไว้ให้กดเปลี่ยน/เพิ่ม
         # ในแชท ถ้าโหลดแต่ที่คัดไว้ (บางสินค้าเหลือใบเดียว) จะไม่มีอะไรให้สลับเลย
-        data = shopee_collect(job["link"], want_all=True)
+        # ส่ง `link` ที่คลี่แล้ว ไม่ใช่ `job["link"]` — ตัวดึงจะได้ไม่คลี่ซ้ำ
+        # (ลิงก์เต็มที่อ่านรหัสได้ `resolve_link` คืนทันทีโดยไม่ยิงคำขอ)
+        data = shopee_collect(link, want_all=True)
     except Exception as error:
         hint = ""
         if type(error).__name__ == "ShopeeNeedsLogin":
@@ -5348,11 +5438,24 @@ def _clip_mark_posted(chat_id: str, item_id: str, target: str) -> str:
     already = ((run.get("publish") or {}).get(target) or {}).get("status")
     if already == "posted":
         return f"ใบนี้จดว่าลง {POSTED_LABEL[target]} ไปแล้ว"
+    # จดบัญชีที่ลงด้วย — **งานที่เจ้าของกดเองต้องนับเข้าโควตา 70/วัน ด้วย**
+    # (เจ้าของสั่ง 28 ส.ค. 2569) ไม่งั้นระบบจะเห็นแค่ที่ตัวเองลง แล้วยอมลงเกิน
+    # เครื่องสายคลิปมีตัวเดียวและผูกบัญชีไว้แล้ว จึงอ่านจากทะเบียนได้ตรงๆ
     try:
-        fresh = clip_store.mark_posted(DATA_DIR, item_id, target, "")
+        import devices as device_book                            # noqa: PLC0415
+
+        pair = _post_devices()
+        # มีเครื่องเดียว = รู้แน่ว่าบัญชีไหน · หลายเครื่อง = เดาไม่ได้ ปล่อยว่าง
+        # **ห้ามหยิบเครื่องแรกมาใช้** เดาผิดแล้วยอดโควตาไปเกาะบัญชีที่ไม่ได้ลง
+        who = device_book.account_for(pair[0][0], target) if len(pair) == 1 else ""
+    except Exception:                                            # noqa: BLE001
+        who = ""
+    try:
+        fresh = clip_store.mark_posted(DATA_DIR, item_id, target, "", "", who)
     except clip_store.ClipStoreError as error:
         return str(error)
-    _clip_log(f"ติ๊กด้วยมือว่า {item_id} ลง {target} แล้ว")
+    _clip_log(f"ติ๊กด้วยมือว่า {item_id} ลง {target} แล้ว"
+              + (f" (บัญชี {who})" if who else ""))
     nxt = publish_order.next_target(fresh)
     _clip_say(chat_id,
               f"✅ จดแล้วว่าลง <b>{POSTED_LABEL[target]}</b> ไปแล้ว" + '\n' +

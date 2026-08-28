@@ -14,9 +14,10 @@
 ║  ได้    เปิดแอปด้วย monkey หรือ am start (ขั้น open_app) — ข้อยกเว้นเดียว  ║
 ║  ห้าม   เรียก API ของแพลตฟอร์ม · ฉีดโค้ดเข้าแอป · accessibility service   ║
 ║         · ยิง intent ข้ามขั้นตอนที่ควรกด                                  ║
+║         · พิมพ์ผ่านช่องควบคุม scrcpy (POST /api/phone/type)                ║
 ║                                                                          ║
 ║  เพิ่มปลายทางใหม่เมื่อไร ต้องผ่านคำสั่งนี้โดยไม่เจออะไรเลย:                 ║
-║    grep -rn "graph.facebook.com\\|/me/videos\\|open_api\\|upload_video" *.py ║
+║    python publish_flow_check.py                                          ║
 ║                                                                          ║
 ║  เหตุผลเต็มอยู่ที่ CLAUDE.md ข้อ 2.7                                       ║
 ╚══════════════════════════════════════════════════════════════════════════╝

@@ -1607,6 +1607,73 @@ def _build_context(
     )
 
 
+QUOTA_NOTICE_FILE = DATA_DIR / "quota_notice.json"
+
+
+def _quota_notice(target: str, account: str, why: str) -> None:
+    """บอกเจ้าของทางแชทว่าโควตาวันนี้เต็มแล้ว — **ครั้งเดียวต่อวันต่อบัญชี**
+
+    เจ้าของสั่งไว้ 28 ส.ค. 2569 ว่า *"ให้เด้งมาถามเวลา / แจ้งด้วย"*
+
+    **จุดตายของงานนี้คือการแจ้งซ้ำ ไม่ใช่การแจ้ง** — ด่านโควตาถูกยิงซ้ำเรื่อยๆ
+    เพราะตัวรันคิวตื่นเองทุก 30 วินาทีแล้วลองใหม่ ถ้าแจ้งทุกครั้งที่ชนด่าน
+    เจ้าของจะได้ข้อความ 120 ฉบับต่อชั่วโมง แล้วจะปิดการแจ้งเตือนทิ้งภายในวันเดียว
+    ผลคือกลายเป็นระบบที่ "มีการแจ้งเตือน" แต่ไม่มีใครอ่าน ซึ่งแย่กว่าไม่มีเลย
+
+    กันด้วยการจดว่าบอกไปแล้วลงไฟล์ **คีย์เป็น วัน+ปลายทาง+บัญชี**
+      · วัน — พ้นตี 4 ยอดกลับเป็น 0 วันใหม่ต้องแจ้งได้ใหม่
+      · ปลายทาง — Shopee เต็มไม่ได้แปลว่า Facebook เต็ม
+      · บัญชี — โควตานับแยกรายบัญชี คนละบัญชีต้องแจ้งแยกกัน
+
+    เขียนผ่าน `update_json` เพราะสองเซิร์ฟเวอร์แตะไฟล์ใน `data/` ร่วมกัน
+    (กติกาข้อ 7.5) และ **ห้ามให้การแจ้งเตือนทำให้การโพสต์ล้ม** — งานหลักคือ
+    กั้นไม่ให้ลงเกินโควตา ซึ่งทำสำเร็จไปแล้วตั้งแต่ก่อนถึงบรรทัดนี้
+    """
+    day = str(publish_order.posting_day() or "")
+    key = f"{day}|{target}|{account}"
+    try:
+        told: list[bool] = []
+
+        def mark(data: dict) -> dict:
+            if not isinstance(data, dict):
+                data = {}
+            told.append(bool(data.get(key)))
+            # เก็บเฉพาะของวันนี้ ไฟล์จึงไม่โตขึ้นเรื่อยๆ โดยไม่มีใครมาล้าง
+            data = {k: v for k, v in data.items() if str(k).startswith(day)}
+            data[key] = True
+            return data
+
+        # **หาห้องแชทให้ได้ก่อน แล้วค่อยจดว่าบอกแล้ว — ห้ามสลับลำดับ**
+        #
+        # เคยเขียนกลับกันแล้วเจอตอนทดสอบ 28 ส.ค. 2569: ถ้ายังไม่ได้ตั้งบอท
+        # มันจดว่า "บอกแล้ว" ไปก่อนทั้งที่ยังไม่ได้บอกใคร พอเจ้าของมาตั้งบอท
+        # ตอนบ่าย ก็จะเงียบไปทั้งวันโดยไม่มีอะไรฟ้อง — เข้าข่ายกติกาข้อ 2.3
+        # (จดว่าสำเร็จทั้งที่ยังไม่สำเร็จ) ซึ่งอันตรายกว่าไม่มีตัวแจ้งเลย
+        token, chat_id = clip_channel()
+        if not token or not chat_id:
+            append_log("publish", "โควตาเต็มแต่ยังไม่ได้ตั้งบอทแชท จึงแจ้งไม่ได้")
+            return
+
+        # จดก่อนส่ง ไม่ใช่หลังส่ง — กันสองเซิร์ฟเวอร์ชนกันแล้วส่งซ้ำสองฉบับ
+        # ส่งไม่สำเร็จจะไปโผล่ใน log ที่ except ข้างล่าง ไม่ได้เงียบหาย
+        studio_shared.update_json(QUOTA_NOTICE_FILE, mark, default={})
+        if told and told[0]:
+            return                      # บอกไปแล้ววันนี้ เงียบไว้
+
+        lines = [
+            "⏳ <b>โควตาวันนี้เต็มแล้ว</b>",
+            "",
+            why,
+            "",
+            "อยากดูว่าค้างกี่ใบ พิมพ์ /queue",
+        ]
+        telegram_bot.send_message(token, chat_id, chr(10).join(lines))
+        append_log("publish", f"แจ้งแชทแล้วว่า {target} เต็มโควตา ({account or 'ทุกบัญชี'})")
+    except Exception as error:          # noqa: BLE001
+        # แจ้งไม่ได้ต้องดังพอให้เห็นใน log แต่ห้ามลากงานโพสต์ตายตาม
+        append_log("publish", f"แจ้งโควตาเต็มไม่สำเร็จ: {error}")
+
+
 @app.post("/api/publish/flow/run")
 async def publish_flow_run(request: Request) -> dict:
     """เดินผังทั้งชุด หรือทดลองทีละขั้น (ส่ง only มาเป็นเลขขั้น)"""
@@ -1661,6 +1728,7 @@ async def publish_flow_run(request: Request) -> dict:
         ok, why = publish_order.quota_check(all_runs, target, who)
         if not ok:
             append_log("publish", f"[{target}] {why}")
+            _quota_notice(target, who, why)
             raise HTTPException(status_code=409, detail=why)
         append_log("publish", f"[{target}] {why}")
 

@@ -1033,19 +1033,52 @@ def like_post_of(phone: Phone, caption: str, single_post: bool = False) -> bool:
       2. ตัวนับรีแอคชันอ่านจากช่วงติดเหนือปุ่มนั้นเท่านั้น (กวาดกว้างจะได้เลขของคนอื่น)
       3. เลื่อนช้าๆ ด้วย duration 900ms — เร็วกว่านี้แอปตีเป็นการสะบัดแล้วเลื่อนเกิน
          จนโพสต์เราหลุดจอ (วัดจริง: สั่ง 600 เลื่อนไป 746)
+      4. **เลื่อนจนโพสต์เราหลุดจอไปแล้ว = หยุด ห้ามกดต่อ** (เพิ่ม 29 ส.ค. 2569)
+
+    ข้อ 4 มาจากของจริงที่หลุดไปแล้ว — 29 ส.ค. 13:56 น. ระบบไป**กดถูกใจโพสต์
+    ขายตึกของคนอื่น** ในกลุ่มที่เพิ่งโพสต์เสร็จ เจ้าของเห็นเองบนจอมือถือ
+
+    ที่เป็นแบบนั้นเพราะด่านกันกดผิดโพสต์เดิมเขียนว่า `if not scrolled and ...`
+    คือ **ตรวจเฉพาะรอบแรกก่อนเลื่อน** พอเลื่อนแล้วด่านถูกข้ามทุกรอบ ระบบจึง
+    เลื่อนหาปุ่มไปเรื่อยๆ 4 รอบ (700px x 4 = 2,800px) แล้วเจอปุ่มของใครก็กด
+
+    ลำดับจริงจาก log:
+        13:56:04  ไม่มีเมนูคัดลอกลิงก์ — เลื่อนหาแล้วไม่เจอ
+        13:56:08  แถบปุ่มยังไม่โผล่ — เลื่อนช้าๆ 700px      (ซ้ำ 4 รอบ)
+        13:56:44  กดถูกใจแล้ว                                <- โพสต์คนอื่น
+        13:57:05  เลื่อนกลับมาเจอโพสต์ของเราแล้ว            <- เพิ่งเจอ หลังกดไปแล้ว
+
+    สังเกตว่าตัวคอมเมนต์มีด่านนี้อยู่แล้วและทำงานถูกต้อง ("ไม่เห็นข้อความโพสต์
+    ของเราบนจอ — ไม่คอมเมนต์") ขาดแค่ตัวกดถูกใจตัวเดียว
     """
     if single_post:
         return like_single_post(phone)
     scrolled = False
+    seen_caption = False        # เคยเห็นข้อความของเราบนจอแล้วหรือยัง
+    since_seen = 0              # เลื่อนมากี่รอบแล้ว นับจากรอบที่เห็นครั้งสุดท้าย
     for attempt in range(LIKE_SCROLL_TRIES + 1):
         target, xml = _stable_like_button(phone, caption, scrolled)
-        if not scrolled and _caption_box(xml, caption) is None:
-            if attempt == 0:
-                time.sleep(2.5)         # ฟีดอาจยังโหลดไม่เสร็จ ให้โอกาสอีกรอบ
-                target, xml = _stable_like_button(phone, caption, scrolled)
-            if _caption_box(xml, caption) is None:
-                phone.log("  ไม่เห็นข้อความโพสต์ของเราบนจอ — ไม่กดถูกใจ (กันกดผิดโพสต์)")
-                return False
+        here = _caption_box(xml, caption) is not None
+        if not here and attempt == 0:
+            time.sleep(2.5)         # ฟีดอาจยังโหลดไม่เสร็จ ให้โอกาสอีกรอบ
+            target, xml = _stable_like_button(phone, caption, scrolled)
+            here = _caption_box(xml, caption) is not None
+        if here:
+            seen_caption = True
+            since_seen = 0
+        elif seen_caption:
+            since_seen += 1
+
+        if not seen_caption:
+            phone.log("  ไม่เห็นข้อความโพสต์ของเราบนจอ — ไม่กดถูกใจ (กันกดผิดโพสต์)")
+            return False
+        # **เลื่อนเลยโพสต์เราไปแล้ว** — ปุ่มที่เห็นตอนนี้เป็นของโพสต์อื่นแน่นอน
+        # ยอมให้เกินได้ 1 รอบ เพราะตอนข้อความเพิ่งหลุดขอบบน ปุ่มของเราก็ยังอยู่
+        # เหนือหัวโพสต์ถัดไป ซึ่ง `_own_like_button` ชี้ได้ถูกจริง
+        if since_seen > 1:
+            phone.log("  เลื่อนจนโพสต์ของเราหลุดจอไปแล้ว — ไม่กดถูกใจ (กันกดผิดโพสต์)")
+            return False
+
         if _liked_in_post(xml, caption):
             phone.log("  โพสต์นี้ถูกใจอยู่แล้ว")
             return True
@@ -1068,9 +1101,9 @@ def like_post_of(phone: Phone, caption: str, single_post: bool = False) -> bool:
             moved, after_xml = _stable_like_button(phone, caption, scrolled)
             after = _post_reactions(after_xml, moved[1] if moved else target[1])
             if after is not None and after > (before or 0):
-                phone.log(f"  กดถูกใจแล้ว (รีแอคชัน {before or 0} → {after})")
+                phone.log(f"  กดถูกใจแล้ว (รีแอคชัน {before or 0} -> {after})")
                 return True
-            phone.log(f"  กดแล้วแต่ยืนยันไม่ได้ (รีแอคชัน {before} → {after})")
+            phone.log(f"  กดแล้วแต่ยืนยันไม่ได้ (รีแอคชัน {before} -> {after})")
             return False
 
         if attempt >= LIKE_SCROLL_TRIES:
@@ -1082,6 +1115,7 @@ def like_post_of(phone: Phone, caption: str, single_post: bool = False) -> bool:
         time.sleep(2.0)
 
     phone.log("  ชี้ปุ่มถูกใจของโพสต์นี้ไม่ได้ — ไม่กด")
+    return False
     return False
 
 

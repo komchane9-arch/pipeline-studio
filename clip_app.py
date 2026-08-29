@@ -2703,6 +2703,48 @@ def _auto_publish_ready(target: str) -> list[dict]:
     return out
 
 
+# ลำดับที่ต้องลงให้หมดก่อนถึงจะไปตัวถัดไป — เรียงตามกติกาข้อ 2.8 ของโปรเจกต์
+# (Shopee Video → Facebook Reels → TikTok)
+AUTO_PUBLISH_PRIORITY = ["shopee_post", "facebook_post", "tiktok_post"]
+_auto_wait_said = ""
+
+
+def _auto_publish_blocker(on: dict) -> str:
+    """ปลายทางที่ต้องลงให้หมดก่อน — คืนชื่อขั้น หรือ "" ถ้าไม่มีใครกั้น
+
+    **เจ้าของสั่ง 29 ส.ค. 2569** — *"ถ้ากดเลือกไว้ 2 อัน จะจัดลำดับ priority
+    ให้ทำ shopee ให้หมดก่อน ค่อยไป facebook reels"*
+
+    ตัวแรกในลำดับที่ **เปิดสวิตช์ไว้และยังมีคลิปค้างอยู่จริง** คือตัวที่กั้น
+    ตัวหลังจากนั้นทั้งหมด ตัวที่ไม่มีของค้างไม่กั้นใคร — Shopee หมดเมื่อไร
+    Facebook เดินต่อทันทีโดยไม่ต้องรอใครมาปลด
+    """
+    global _auto_wait_said
+    for step in AUTO_PUBLISH_PRIORITY:
+        if step not in AUTO_STEPS or not on.get(step):
+            continue
+        if AUTO_STEPS[step].get("kind") != "publish":
+            continue
+        left = len(_auto_publish_ready(AUTO_STEPS[step]["target"]))
+        if not left:
+            continue
+        # มีคนรอต่อคิวอยู่ข้างหลังไหม — ถ้าไม่มีก็ไม่ต้องบอกอะไร
+        behind = [s for s in AUTO_PUBLISH_PRIORITY
+                  if s != step and on.get(s)
+                  and AUTO_STEPS.get(s, {}).get("kind") == "publish"
+                  and AUTO_PUBLISH_PRIORITY.index(s) > AUTO_PUBLISH_PRIORITY.index(step)]
+        if behind:
+            note = f"{step}:{left}"
+            if _auto_wait_said != note:
+                _auto_wait_said = note
+                names = " · ".join(AUTO_STEPS[s]["label"] for s in behind)
+                _clip_log(f"ลง {AUTO_STEPS[step]['label']} ให้หมดก่อน "
+                          f"(เหลือ {left} ใบ) แล้วค่อยไป {names}")
+        return step
+    _auto_wait_said = ""
+    return ""
+
+
 def _auto_publish_one(step: str) -> bool:
     """ลงหนึ่งใบถ้าถึงเวลาและมีของพร้อม — คืน True ถ้าลงสำเร็จ
 
@@ -2855,6 +2897,22 @@ def _auto_sweep(only: str = "") -> dict:
     on = _auto_on()
     steps = [only] if only else [s for s in AUTO_STEPS if on.get(s)]
     result: dict[str, int] = {}
+    # ---- ลำดับก่อนหลังของขั้นโพสต์ (เจ้าของสั่ง 29 ส.ค. 2569) ----------------
+    #
+    # *"ถ้ากดเลือกไว้ 2 อัน จะจัดลำดับ priority ให้ทำ shopee ให้หมดก่อน
+    #   ค่อยไป facebook reels"*
+    #
+    # **ทำไมต้องมี** มือถือมีจอเดียว ลงได้ทีละใบอยู่แล้ว ถ้าไม่จัดลำดับ
+    # สองปลายทางจะสลับกันลงไปเรื่อยๆ กว่า Shopee จะหมดก็ปนกันมั่ว
+    # และลำดับที่ถูกคือ Shopee → Facebook อยู่แล้วตามกติกาข้อ 2.8
+    #
+    # **กันเฉพาะตอน Shopee ยังมีของค้างจริงๆ** — Shopee หมดเมื่อไร Facebook
+    # เดินต่อทันที ไม่ต้องรอให้ใครมาปลด
+    if not only:
+        blocker = _auto_publish_blocker(on)
+        if blocker:
+            steps = [s for s in steps
+                     if AUTO_STEPS[s].get("kind") != "publish" or s == blocker]
     for step in steps:
         if step not in AUTO_STEPS or not on.get(step):
             continue

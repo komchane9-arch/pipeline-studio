@@ -956,6 +956,63 @@ def find_ad_close(
     return None
 
 
+# ---------------------------------------------- กล่องถามที่รู้จักหน้าตาแน่ชัด
+#
+# **เจ้าของสั่ง 29 ส.ค. 2569** — *"เขียนการตรวจจับและการแก้ถ้าเจอขั้นตอนนี้ด้วย"*
+#
+# ต่างจาก `dismiss_ads` ตรงที่ตัวนั้นเดาจาก**รูปทรง** (แผ่นคลุมจอ + ปุ่มกากบาท)
+# ส่วนตัวนี้รู้จัก **กล่องเฉพาะใบ** และรู้ว่าต้องกดปุ่มไหน จึงกดปุ่มที่มีคำว่า
+# "ทิ้ง" ได้อย่างปลอดภัย — เพราะจะกดก็ต่อเมื่อ **เจอข้อความหัวกล่องตรงเป๊ะ**
+# เท่านั้น ไม่ใช่เจอคำว่า "ทิ้ง" ที่ไหนก็กด
+#
+# **เหตุการณ์ที่ทำให้ต้องมี** — 28 ส.ค. งานลง Facebook Reels ล้มกลางคัน
+# ทิ้งฉบับร่างค้างไว้ในแอป พอรอบใหม่เข้าหน้าสร้าง Reels แอปเด้งกล่องถามว่า
+# **"แก้ไขคลิป Reels ล่าสุดต่อไหม"** ซึ่งบังทุกอย่าง ผังจึงล้มซ้ำทุกครั้ง
+# กลายเป็นวงจรที่แก้ตัวเองไม่ได้ — ยิ่งล้มยิ่งมีร่างค้าง ยิ่งมีร่างยิ่งล้ม
+#
+# **ทิ้งร่างแล้วไม่เสียงาน** ระบบเราจดสถานะการลงไว้แยกจากแอป
+# (`publish.<ปลายทาง>.status`) ร่างในแอปเป็นแค่ของค้างจากรอบที่ล้ม
+# คลิปใบนั้นยังอยู่ในรายการรอลงเหมือนเดิม และจะถูกลงใหม่ตั้งแต่ต้น
+KNOWN_DIALOGS = [
+    {
+        "name": "ฉบับร่าง Reels ที่ค้างจากรอบก่อน",
+        # หัวกล่อง — ต้องเจอถึงจะกด
+        "when": r"แก้ไขคลิป Reels ล่าสุด|Continue editing your reel"
+                r"|Resume editing your reel",
+        # ปุ่มที่ต้องกด — ตัวเลือกอื่นคือ "บันทึกเป็นฉบับร่าง" (ค้างเพิ่ม)
+        # และ "แก้ไขต่อ" (ได้คลิปเก่าผิดใบ) ทั้งคู่ใช้กับงานอัตโนมัติไม่ได้
+        "press": r"^ทิ้ง$|^Discard$",
+    },
+]
+
+
+def answer_known_dialog(context: "RunContext", xml: str = "") -> list[str]:
+    """ตอบกล่องถามที่รู้จักหน้าตา — คืนรายการที่จัดการไป (ว่าง = ไม่เจอ)
+
+    **กดก็ต่อเมื่อเจอข้อความหัวกล่องตรงเป๊ะ** ไม่งั้นห้ามแตะ — ปุ่มพวกนี้
+    เป็นปุ่มตัดสินใจแทนผู้ใช้ (ทิ้งงาน) ซึ่งกดผิดแล้วเรียกคืนไม่ได้
+    """
+    if not getattr(context, "ad_guard", True):
+        return []
+    current = xml or context.dump()
+    if not current:
+        return []
+    done: list[str] = []
+    for rule in KNOWN_DIALOGS:
+        if not re.search(rule["when"], current):
+            continue
+        point = find_node(current, rule["press"])
+        if not point:
+            context.log(f"   เจอกล่อง “{rule['name']}” แต่หาปุ่มที่ต้องกดไม่เจอ "
+                        "— หน้าตากล่องอาจเปลี่ยน ต้องไปแก้ KNOWN_DIALOGS")
+            continue
+        context.tap_at(*point)
+        time.sleep(1.0)
+        done.append(f"ตอบกล่อง “{rule['name']}”")
+        context.log(f"   เจอกล่อง “{rule['name']}” — กดปุ่มที่ตั้งไว้ให้แล้ว")
+    return done
+
+
 def dismiss_ads(
     context: "RunContext", xml: str = "", force: bool = False
 ) -> list[str]:
@@ -1652,6 +1709,12 @@ def run_step(context: RunContext, step: Step) -> str:
     width, height = context.screen
     xml, before = context.read()
     typed = ""
+
+    # กล่องถามที่รู้จักหน้าตาแน่ชัด → ตอบให้ก่อน (ดู KNOWN_DIALOGS)
+    dialog_notes = answer_known_dialog(context, xml)
+    if dialog_notes:
+        context.ads_closed.extend(dialog_notes)
+        xml, before = context.read()
 
     # โฆษณาเด้งมาบังก่อนขั้นนี้จะเริ่ม → ปิดก่อน แล้วอ่านจอใหม่
     # ใช้ผัง xml ที่เพิ่งอ่านมา ไม่ยิง adb เพิ่ม

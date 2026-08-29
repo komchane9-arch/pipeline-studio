@@ -4932,6 +4932,21 @@ def posts_collect_work_left() -> int:
         return 0
 
 
+# ธงจองคิว Chrome ของโปรไฟล์ที่ตัวตามยอดใช้ (29 ส.ค. 2569)
+#
+# **ทำไมต้องมี** — ตัวเก็บโพสต์กับตัวตามยอด engagement ใช้ Chrome โปรไฟล์
+# เดียวกัน (Bot11) และ `find_bot` โยน error ทันทีถ้าโปรไฟล์นั้นเปิดอยู่
+# ไม่ได้รอคิว
+#
+# ตัวเก็บโพสต์ถูกปลุกทุก 60 วินาที เก็บกลุ่มละราว 12 นาที และตอนนี้มี 189 กลุ่ม
+# ค้างคิว = ยึด Chrome ต่อเนื่องราว 37 ชั่วโมง **ตัวตามยอดจึงไม่มีโอกาสได้ใช้เลย**
+# วัดจริง 20:48 น.: ตัวตามยอดสะดุดทันทีที่รอบแรกเริ่ม
+#
+# ให้ตัวตามยอดปักธงขอคิวไว้ แล้วตัวเก็บโพสต์ไม่ปลุกรอบใหม่จนกว่าธงจะลง
+# — รอบที่กำลังทำอยู่เดินต่อจนจบตามปกติ ไม่ตัดกลางคัน
+_chrome_wanted = threading.Event()
+
+
 def ensure_posts_collect() -> list[str]:
     """ปลุกตัวเก็บข้อมูลที่ไม่ได้ทำงานอยู่ — คืนรายชื่อบอทที่ปลุก
 
@@ -4940,6 +4955,9 @@ def ensure_posts_collect() -> list[str]:
     "ตอนนี้ไม่มีใครเก็บข้อมูล ทั้งที่ยังมีงานค้าง" ซึ่งต้องปลุกเหมือนกัน
     """
     if POSTS_COLLECT_OFF.exists() or not POSTS_COLLECT_SCRIPT.is_file():
+        return []
+    # ตัวตามยอดจองคิวไว้ — ไม่ปลุกรอบใหม่ ให้มันได้ Chrome ก่อน
+    if _chrome_wanted.is_set():
         return []
     left = posts_collect_work_left()
     if left <= 0:
@@ -5074,7 +5092,18 @@ def _engagement_keeper() -> None:
         return
     while True:
         try:
-            done = fb_engagement.check_once()
+            # ปักธงขอคิว Chrome ก่อน แล้วรอรอบเก็บโพสต์ที่ค้างอยู่ให้จบ
+            # (ไม่ตัดกลางคัน — รอบหนึ่งใช้ราว 12 นาที)
+            _chrome_wanted.set()
+            try:
+                if not _wait_chrome_free(fb_engagement.COLLECTOR_PROFILE):
+                    append_log("publish",
+                               "ข้ามรอบตามยอด — Chrome ของตัวเก็บโพสต์ไม่ว่าง "
+                               "ภายในเวลาที่รอ ไว้รอบหน้า")
+                    continue
+                done = fb_engagement.check_once()
+            finally:
+                _chrome_wanted.clear()
             if done.get("posts"):
                 append_log("publish",
                            f"ตามยอดโพสต์ — อ่านได้ {done.get('ok', 0)} ใบ · "
@@ -5086,6 +5115,36 @@ def _engagement_keeper() -> None:
             # **ห้ามเงียบ** ตัวที่ตายเงียบแย่กว่าไม่มีตัวเลย เพราะจะนึกว่ามีคนตามอยู่
             append_log("publish", f"ตัวตามยอด engagement สะดุด: {error}")
         time.sleep(fb_engagement.CHECK_EVERY_SECONDS)
+
+
+# รอ Chrome ว่างได้นานสุดเท่าไร — รอบเก็บโพสต์หนึ่งกลุ่มใช้ราว 12 นาที
+# ตั้ง 20 นาทีให้เผื่อกลุ่มใหญ่ เกินนั้นข้ามไปรอบหน้า (อีกชั่วโมง) ดีกว่าค้างรอ
+CHROME_WAIT_MAX = 1200.0
+
+
+def _wait_chrome_free(profile: str) -> bool:
+    """รอจน Chrome ของโปรไฟล์นั้นว่าง — คืน False ถ้ารอนานเกินกำหนด"""
+    from bot_profiles import ProfileFarm                 # noqa: PLC0415
+
+    farm = ProfileFarm(DATA_DIR)
+    waited = 0.0
+    said = False
+    while waited < CHROME_WAIT_MAX:
+        try:
+            entry = next(
+                (row for row in farm.list_profiles()["profiles"]
+                 if row["name"].casefold() == profile.casefold()), None)
+        except Exception:                               # noqa: BLE001
+            return True         # อ่านทะเบียนไม่ได้ ปล่อยให้ไปลองเอง
+        if entry is None or not entry.get("running"):
+            return True
+        if not said:
+            append_log("publish",
+                       f"ตามยอดขอคิว Chrome ของ {profile} — รอตัวเก็บโพสต์จบรอบก่อน")
+            said = True
+        time.sleep(20.0)
+        waited += 20.0
+    return False
 
 
 # รอได้นานสุดเท่าไรก่อนยอมส่งทับ — งานโพสต์หนึ่งใบใช้ 8-10 นาที

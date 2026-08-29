@@ -1575,6 +1575,92 @@ def _clip_sender(serial: str, item_id: str, run: dict):
     return work
 
 
+# ================================ ความคืบหน้าการโพสต์รายคลิป (29 ส.ค. 2569)
+#
+# **เจ้าของสั่ง** — *"ในแต่ละคลิปโชว์ log ที่ด้านข้างหน่อยว่ากำลังทำขั้นตอนไหน
+# กำลังทำอะไรอยู่"*
+#
+# **ของเดิมไม่ได้จดเลยว่าอยู่ขั้นไหน** — `/api/busy` มีช่อง `step`/`steps`
+# แต่ตั้งเป็น 0 ตอนเริ่มแล้วไม่เคยอัปเดต ส่วนรายละเอียดรายขั้นไปอยู่ใน
+# `data/logs/publish.log` ซึ่งเป็นไฟล์รวมของทุกคลิปปนกัน หน้าเว็บจึงตอบ
+# "คลิปนี้ทำถึงไหนแล้ว" ไม่ได้เลย ต้องเปิดไฟล์ log มานั่งไล่หาเอง
+#
+# เกาะ `context.report(step, ok, message)` ซึ่งถูกเรียกหลังจบ**ทุกขั้น**อยู่แล้ว
+# ไม่ต้องไปแก้ตัวเดินผัง และไม่เพิ่มงานให้มือถือแม้แต่คำสั่งเดียว
+#
+# **เก็บในหน่วยความจำ ไม่เขียนไฟล์** — เป็นข้อมูลสดที่มีค่าเฉพาะตอนกำลังทำ
+# ส่วนผลสรุปถาวรอยู่ใน `publish.<ปลายทาง>.status` และ `publish.log` อยู่แล้ว
+# เขียนไฟล์เพิ่มจะได้สมุดเล่มที่สามที่วันหนึ่งจะไม่ตรงกับสองเล่มแรก
+PROGRESS_KEEP = 12          # เก็บคลิปล่าสุดกี่ใบ (ที่จบแล้วก็ยังดูย้อนได้)
+PROGRESS_LINES = 40         # เก็บบรรทัดต่อคลิปกี่บรรทัด
+_progress_lock = threading.Lock()
+_progress: dict[str, dict] = {}
+
+
+def _progress_start(item_id: str, target: str, serial: str, total: int) -> None:
+    if not item_id:
+        return
+    with _progress_lock:
+        _progress[item_id] = {
+            "item_id": item_id, "target": target, "serial": serial,
+            "device": device_book.label(serial),
+            "total": total, "step": 0, "ok": None,
+            "status": "running", "now": "กำลังเริ่ม…",
+            "started": _now_text(), "ended": "", "lines": [],
+        }
+        # เก่าเกินก็ทิ้ง — ไม่ให้โตไม่รู้จบ
+        while len(_progress) > PROGRESS_KEEP:
+            oldest = min(_progress.items(), key=lambda kv: kv[1]["started"])[0]
+            if oldest == item_id:
+                break
+            _progress.pop(oldest, None)
+
+
+def _progress_step(item_id: str, name: str, ok: bool, message: str) -> None:
+    with _progress_lock:
+        row = _progress.get(item_id)
+        if not row:
+            return
+        row["step"] += 1
+        row["ok"] = ok
+        row["now"] = name
+        row["lines"].append({
+            "at": _now_text(), "no": row["step"], "name": name,
+            "ok": bool(ok), "message": str(message)[:200],
+        })
+        del row["lines"][:-PROGRESS_LINES]
+
+
+def _progress_end(item_id: str, ok: bool, detail: str = "") -> None:
+    with _progress_lock:
+        row = _progress.get(item_id)
+        if not row:
+            return
+        row["status"] = "done" if ok else "failed"
+        row["ended"] = _now_text()
+        row["now"] = ("ลงเรียบร้อยแล้ว" if ok
+                      else (detail or "หยุดกลางคัน")[:160])
+
+
+@app.get("/api/publish/progress")
+async def publish_progress(item_id: str = "") -> dict:
+    """คลิปนี้กำลังทำขั้นไหน ทำอะไรอยู่ — ใส่ item_id = เอาใบเดียว
+
+    หน้าเว็บเอาไปโชว์ข้างการ์ดคลิปได้เลย ไม่ต้องคิดเอง
+    """
+    with _progress_lock:
+        rows = [dict(v, lines=list(v["lines"])) for v in _progress.values()]
+    rows.sort(key=lambda r: r["started"], reverse=True)
+    if item_id:
+        rows = [r for r in rows if r["item_id"] == item_id]
+    return {
+        "ok": True,
+        "clips": rows,
+        "note": ("เก็บในหน่วยความจำ — รีสตาร์ตเซิร์ฟเวอร์แล้วหาย "
+                 "ผลถาวรดูที่สถานะการลงของใบงาน"),
+    }
+
+
 def _shot_after_step(serial: str, target: str, item_id: str):
     """เก็บภาพหน้าจอ **หลังจบทุกขั้น** (เจ้าของสั่ง 28 ส.ค. 2569)
 
@@ -1590,6 +1676,10 @@ def _shot_after_step(serial: str, target: str, item_id: str):
     import evidence                                            # noqa: PLC0415
 
     def shot(step, ok: bool, message: str) -> None:
+        # จดความคืบหน้าก่อนเสมอ — การเก็บภาพใช้เวลาหลายวินาที ถ้าจดทีหลัง
+        # หน้าเว็บจะเห็นช้ากว่าความจริงทุกขั้น และถ้าการเก็บภาพพัง
+        # ความคืบหน้าจะหายไปด้วยทั้งที่คนละเรื่องกัน
+        _progress_step(item_id, getattr(step, "name", ""), ok, message)
         mark = "ผ่าน" if ok else "ไม่ผ่าน"
         try:
             xml = run_adb("-s", serial, "shell", "uiautomator", "dump",
@@ -1836,9 +1926,15 @@ async def publish_flow_run(request: Request) -> dict:
                                   lane="post", timeout=600.0):
                 # จดตั้งแต่ก่อนแตะจอขั้นแรก — ถ้าไปจดทีหลังจะมีช่องว่างที่
                 # รีสตาร์ตแทรกเข้ามาได้พอดี ซึ่งคือเคสที่เกิดจริงเมื่อ 15:38
+                try:
+                    total = len(_flow_store(serial).sequence(target))
+                except Exception:                              # noqa: BLE001
+                    total = 0
                 _busy_mark(busy_key, what=f"{what} ({item_id or 'ไม่ระบุใบงาน'})",
                            serial=serial, target=target, item_id=item_id,
-                           step=0, steps=0)
+                           step=0, steps=total)
+                if not only:
+                    _progress_start(item_id, target, serial, total)
                 context = _build_context(serial, target, item_id,
                                          _shot_after_step(serial, target, item_id))
                 if only:
@@ -1861,7 +1957,18 @@ async def publish_flow_run(request: Request) -> dict:
     try:
         result = await asyncio.to_thread(work)
     except publish_flow.StepError as error:
+        # ล้มแบบมีเหตุผลชัด — ต้องบอกหน้าเว็บด้วย ไม่ใช่ค้างอยู่ที่ "กำลังทำ"
+        # ตลอดกาล (ป้ายที่ไม่ตรงความจริง = กติกาข้อ 2.3.1)
+        if not only:
+            _progress_end(item_id, False, str(error))
         raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:                                   # noqa: BLE001
+        if not only:
+            _progress_end(item_id, False, f"{type(error).__name__}: {error}")
+        raise
+    if not only:
+        _progress_end(item_id, bool(result.get("ok")),
+                      str(result.get("error") or ""))
     # โฆษณาที่ปิดไประหว่างทางต้องขึ้น log ด้วย — ถ้าตัวเลขนี้ค่อยๆ เพิ่ม แปลว่า
     # แอปเริ่มยิงโฆษณาถี่ขึ้น ควรรู้ตั้งแต่ก่อนที่ผังจะพังเอง ไม่ใช่ปิดเงียบๆ
     ads = result.get("ads_closed") or []

@@ -600,11 +600,19 @@
       <details class="block">
         <summary>Gemini API <span id="geminiStatus" class="status-dot" title="สถานะ"></span></summary>
         <div class="block-body">
+          <!-- คีย์หลายใบ — ระบบสลับไปใช้ใบถัดไปเองเมื่อใบแรกใช้ไม่ได้
+               (สเปคสายคลิป 30 ส.ค. 2569 · เจ้าของคอนเฟิร์มแล้ว) -->
+          <ul id="geminiKeyList" class="key-list"></ul>
+          <p id="geminiKeyNote" class="note"></p>
           <div class="inline-row">
-            <input id="geminiKey" type="password" autocomplete="new-password" placeholder="วาง API Key แล้วกดบันทึก" />
-            <button id="geminiSave" class="primary" type="button">บันทึก</button>
-            <button id="geminiClear" class="ghost danger" type="button">clear</button>
+            <input id="geminiKey" type="password" autocomplete="new-password" placeholder="วางคีย์ใบใหม่ที่นี่" />
+            <button id="geminiSave" class="primary" type="button">เพิ่ม</button>
+            <button id="geminiTestAll" class="ghost" type="button">ทดสอบทุกใบ</button>
           </div>
+          <!-- ⚠️ เตือนถาวร ห้ามเอาออก — ไม่บอกไว้เจ้าของจะเสียเวลาสร้างคีย์
+               ในโปรเจกต์เดิมซึ่งใช้เครดิตถังเดียวกัน ไม่ช่วยอะไรเลย -->
+          <p class="note warn">คีย์ใบใหม่ต้องมาจาก<b>คนละโปรเจกต์คนละบัญชี</b> —
+            สร้างคีย์เพิ่มในโปรเจกต์เดิมจะใช้เครดิตถังเดียวกัน ไม่ช่วยอะไร</p>
           <p id="geminiNote" class="note"></p>
         </div>
       </details>

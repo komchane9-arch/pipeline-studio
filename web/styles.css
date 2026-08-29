@@ -2425,3 +2425,37 @@ body.typing-through {
 .prog-line.bad { background: rgba(255, 59, 48, 0.08); border-radius: 6px; }
 .prog-line.bad .prog-tick { color: var(--danger); font-weight: 700; }
 .prog-line.bad .prog-name { color: var(--danger); font-weight: 600; }
+
+/* ================== รายการคีย์ Gemini หลายใบ (30 ส.ค. 2569) ==================
+   สเปคจากสายคลิป — ใบที่ใช้อยู่ต้องเห็นชัด ไม่งั้นเจ้าของเติมเงินผิดใบ
+   ใช้ตัวแปรสีชุดเดิม จึงตามธีมสว่าง/มืดได้เองโดยไม่ต้องเขียนซ้ำ */
+
+.key-list { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; }
+
+.key-row {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 7px 10px;
+  display: grid;
+  gap: 3px;
+}
+/* ใบที่ระบบใช้อยู่ตอนนี้ — ขอบเขียวหนาขึ้น ไม่ใช่แค่สีตัวหนังสือ */
+.key-row.using { border-color: var(--olive); border-width: 2px; padding: 6px 9px; }
+.key-row.off { border-style: dashed; }
+
+.key-head {
+  display: flex; gap: 8px; align-items: baseline;
+  justify-content: space-between; flex-wrap: wrap;
+}
+.key-head > b { font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+.key-state { color: var(--ink-3); font-size: 0.82rem; margin-inline-start: auto; }
+.key-row.using .key-state { color: var(--olive); font-weight: 600; }
+.key-row.off .key-state { color: var(--warn); }
+
+/* เหตุผลที่ใช้ไม่ได้ — ต้องอ่านออกเสมอ ห้ามจางจนมองข้าม
+   เพราะสามสาเหตุแก้คนละทาง (เติมเงิน · รอรอบใหม่ · รอสองนาที) */
+.key-why { color: var(--warn); font-size: 0.78rem; }
+
+.key-head > .mini-btn {
+  font-size: 0.76rem; padding: 2px 8px; border-radius: 999px; flex: 0 0 auto;
+}

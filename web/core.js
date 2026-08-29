@@ -632,6 +632,7 @@ $("#openSettings").addEventListener("click", () => {
   fillSettings();
   dialog.showModal();
   testKeys();
+  loadGeminiKeys();            // รายการคีย์ Gemini ทุกใบ + สถานะ
   hooks.loadAccessDevices();   // อยู่ใน phone.js — เรียกผ่าน hooks กัน import วงกลม
   loadTelegram();
   loadBots();
@@ -753,9 +754,169 @@ async function saveKey(url, inputId, noteId) {
   }
 }
 
-$("#geminiSave").addEventListener("click", () => saveKey("/api/gemini-key", "#geminiKey", "#geminiNote"));
+// =========================================== คีย์ Gemini หลายใบ (30 ส.ค. 2569)
+//
+// **สเปคจากสายคลิป · เจ้าของคอนเฟิร์มแล้ว** (กติกาข้อ 7.1.1)
+//
+// ที่มา — คืน 29 ส.ค. สายคลิปหยุดยาวเพราะ Gemini ตอบ 429 ทุกรุ่น อ่านข้อความ
+// จริงแล้วพบว่า "เครดิตที่เติมเงินไว้หมด" ไม่ใช่โควตาฟรีรายวัน **รอเท่าไรก็ไม่คืน**
+// ต้องใส่คีย์ใบที่สองจากคนละบัญชีให้ระบบสลับไปใช้เอง
+
+/** แปลงเหตุผลที่ Google ตอบมา เป็นคำที่บอกว่า "ต้องไปทำอะไร"
+ *
+ *  **สามสาเหตุแก้คนละทางสิ้นเชิง** ขึ้นแค่ไอคอนแดงเหมือนกันหมดไม่พอ —
+ *  ยิงถี่ไปรอสองนาที · โควตารายวันรอถึงพรุ่งนี้ · เครดิตหมดต้องเติมเงิน
+ *  ถ้าแยกไม่ออก เจ้าของจะนั่งรอเก้อทั้งที่ต้องไปเติมเงิน
+ */
+function geminiWhy(row) {
+  const why = String(row.why || "");
+  if (/prepayment|credit/i.test(why)) return "เครดิตที่เติมไว้หมด — ต้องเติมเงิน";
+  if (/quota|daily/i.test(why)) return "โควตารายวันหมด — รอรอบใหม่";
+  if (/rate|429|too many/i.test(why)) return "ยิงถี่เกินไป — เดี๋ยวกลับมาเอง";
+  return why || "ใช้ไม่ได้ตอนนี้ (ไม่มีเหตุผลจากผู้ให้บริการ)";
+}
+
+function waitText(minutes) {
+  const m = Math.max(0, Math.round(minutes || 0));
+  if (!m) return "";
+  if (m < 60) return `อีก ${m} นาที`;
+  const h = Math.floor(m / 60);
+  const rest = m % 60;
+  return rest ? `อีก ${h} ชม. ${rest} นาที` : `อีก ${h} ชม.`;
+}
+
+function paintGeminiKeys(rows) {
+  const list = $("#geminiKeyList");
+  const note = $("#geminiKeyNote");
+  if (!list) return;
+  list.replaceChildren();
+  if (!rows.length) {
+    note.textContent = "ยังไม่ได้ใส่คีย์ Gemini — ระบบจะใช้กฎธรรมดาแทน ผลจะหยาบกว่า";
+    note.className = "note warn";
+    return;
+  }
+  // ใบที่ระบบใช้อยู่ = ใบแรกที่ยังใช้ได้ · ต้องเห็นชัด ไม่งั้นเติมเงินผิดใบ
+  const usingNo = (rows.find((row) => row.ok) || {}).no;
+  rows.forEach((row) => {
+    const item = document.createElement("li");
+    item.className = `key-row ${row.ok ? "ok" : "off"}${row.no === usingNo ? " using" : ""}`;
+
+    const head = document.createElement("div");
+    head.className = "key-head";
+    const name = document.createElement("b");
+    name.textContent = `${row.no}. …${row.tail || "??????"}`;
+    const state = document.createElement("span");
+    state.className = "key-state";
+    state.textContent = row.no === usingNo ? "✅ ใช้อยู่ตอนนี้"
+      : (row.ok ? "พร้อมใช้ (สำรอง)" : `⏸ พักอยู่ ${waitText(row.wait_min)}`.trim());
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.className = "ghost danger mini-btn";
+    drop.textContent = "ลบ";
+    drop.addEventListener("click", () => removeGeminiKey(row));
+    head.append(name, state, drop);
+    item.append(head);
+
+    // พักอยู่ต้องบอกเหตุผลเสมอ ห้ามขึ้นแค่ไอคอน
+    if (!row.ok) {
+      const why = document.createElement("small");
+      why.className = "key-why";
+      why.textContent = geminiWhy(row);
+      item.append(why);
+    }
+    list.append(item);
+  });
+
+  const ready = rows.filter((row) => row.ok).length;
+  if (!ready) {
+    const soon = rows.slice().sort((a, b) => (a.wait_min || 0) - (b.wait_min || 0))[0];
+    note.textContent = `คีย์ทุกใบใช้ไม่ได้ตอนนี้ — ใบที่ ${soon.no} จะกลับมาก่อน `
+      + `${waitText(soon.wait_min) || "เร็วๆ นี้"}`;
+    note.className = "note warn";
+  } else if (rows.length === 1) {
+    note.textContent = "";
+    note.className = "note";
+  } else {
+    note.textContent = `ใช้ได้ ${ready} จาก ${rows.length} ใบ`;
+    note.className = "note";
+  }
+}
+
+async function loadGeminiKeys() {
+  try {
+    const payload = await api("/api/gemini-keys");
+    paintGeminiKeys(payload.keys || []);
+  } catch {
+    // ดูสถานะไม่ได้ ไม่ได้แปลว่าคีย์เสีย — งานเบื้องหลังยังใช้คีย์ได้ตามปกติ
+    const note = $("#geminiKeyNote");
+    if (note) {
+      note.textContent = "ดูสถานะคีย์ไม่ได้ตอนนี้ — งานเบื้องหลังยังทำงานตามปกติ";
+      note.className = "note";
+    }
+  }
+}
+
+async function removeGeminiKey(row) {
+  // ลบแล้วเอากลับไม่ได้ ต้องไปหาคีย์มาใส่ใหม่ — ถามก่อนเสมอ
+  if (!window.confirm(`ลบคีย์ใบที่ ${row.no} (…${row.tail}) ไหม
+
+`
+      + "เอากลับไม่ได้ ต้องไปหาคีย์มาใส่ใหม่")) return;
+  const note = $("#geminiNote");
+  try {
+    const payload = await api(`/api/gemini-keys/${row.no}`, { method: "DELETE" });
+    paintGeminiKeys(payload.keys || []);
+    note.textContent = `ลบคีย์ใบที่ ${row.no} แล้ว`;
+  } catch (error) {
+    note.textContent = `ลบไม่สำเร็จ: ${error.message}`;
+  }
+}
+
+async function addGeminiKey() {
+  const box = $("#geminiKey");
+  const note = $("#geminiNote");
+  const key = (box.value || "").trim();
+  if (!key) { note.textContent = "ยังไม่ได้วางคีย์"; return; }
+  if (key.length < 20) {
+    note.textContent = "คีย์สั้นผิดปกติ — ตรวจว่าก๊อปมาครบไหม";
+    return;
+  }
+  note.textContent = "กำลังเพิ่ม…";
+  try {
+    const payload = await api("/api/gemini-keys", {
+      method: "POST", body: JSON.stringify({ key }),
+    });
+    box.value = "";                 // ล้างช่องทันที ไม่ทิ้งคีย์ค้างบนจอ
+    paintGeminiKeys(payload.keys || []);
+    note.textContent = payload.note || "เพิ่มแล้ว";
+    testKeys();
+  } catch (error) {
+    note.textContent = `เพิ่มไม่สำเร็จ: ${error.message}`;
+  }
+}
+
+async function testGeminiKeys() {
+  const note = $("#geminiNote");
+  note.textContent = "กำลังยิงถามจริงทีละใบ…";
+  try {
+    const payload = await api("/api/gemini-keys/test", { method: "POST" });
+    paintGeminiKeys(payload.keys || []);
+    const ready = (payload.keys || []).filter((row) => row.ok).length;
+    note.textContent = `ทดสอบแล้ว — ใช้ได้ ${ready}/${(payload.keys || []).length} ใบ`;
+  } catch (error) {
+    note.textContent = `ทดสอบไม่สำเร็จ: ${error.message}`;
+  }
+}
+
+// ปุ่มนี้เปลี่ยนจาก "บันทึกทับ" เป็น "เพิ่มใบใหม่" — ของเดิมที่อยู่ฝั่งเซิร์ฟเวอร์
+// (`POST /api/gemini-key`) ยังอยู่ครบ ไม่ได้ลบ เพราะมีที่อื่นเรียกอยู่
+$("#geminiSave").addEventListener("click", addGeminiKey);
+$("#geminiTestAll")?.addEventListener("click", testGeminiKeys);
 $("#claudeSave").addEventListener("click", () => saveKey("/api/claude-key", "#claudeKey", "#claudeNote"));
-$("#geminiClear").addEventListener("click", async () => {
+// ปุ่ม clear เดิมถูกแทนด้วยปุ่ม "ลบ" รายใบในรายการ — ใช้ `?.` กันไว้เผื่อ
+// หน้าเวอร์ชันเก่าที่ยังมีปุ่มนี้อยู่ ไม่งั้น addEventListener กับ null
+// จะโยน error แล้วสคริปต์ทั้งไฟล์หยุดทำงานตั้งแต่บรรทัดนั้น
+$("#geminiClear")?.addEventListener("click", async () => {
   await api("/api/gemini-key", { method: "POST", body: JSON.stringify({ clear: true }) });
   $("#geminiNote").textContent = "ลบ key แล้ว";
   testKeys();

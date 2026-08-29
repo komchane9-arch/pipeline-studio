@@ -617,6 +617,26 @@ async def update_settings(request: Request) -> dict:
     return {"ok": True, "settings": config["settings"]}
 
 
+
+def _looks_fake_key(key: str) -> str:
+    """คีย์นี้หน้าตาเหมือนของทดสอบไหม — คืนเหตุผล ("" = ดูปกติ)
+
+    **เหตุการณ์ที่ทำให้ต้องมี — 30 ส.ค. 2569 00:23 น.**
+    ผมทดสอบ endpoint ด้วยคีย์ปลอม `"x" * 25` แล้วมันไป **เขียนทับคีย์จริง
+    ของเจ้าของ** ที่ใช้งานอยู่ กู้คืนได้จากไฟล์สำรองที่ห่างกัน 16 วินาที
+    ถ้าช้ากว่านั้นอีกนิดคือหายถาวร ต้องไปขอคีย์ใหม่จาก Google
+
+    คีย์จริงของ Google ยาว ~39-53 ตัวและมีทั้งตัวพิมพ์เล็กใหญ่กับตัวเลขปนกัน
+    ไม่มีทางเป็นตัวอักษรตัวเดียวซ้ำกันทั้งสาย — ด่านนี้จึงกันของทดสอบได้
+    โดยไม่กันคีย์จริงสักใบ
+    """
+    body = (key or "").strip()
+    if len(set(body)) <= 2:
+        return "คีย์นี้เป็นตัวอักษรซ้ำกันทั้งสาย — น่าจะเป็นค่าทดสอบ ไม่ใช่คีย์จริง"
+    if body.lower().startswith(("test", "dummy", "fake", "xxxx")):
+        return "คีย์นี้ขึ้นต้นเหมือนค่าทดสอบ — ตรวจว่าวางคีย์จริงมาหรือยัง"
+    return ""
+
 @app.post("/api/gemini-key")
 async def set_gemini_key(request: Request) -> dict:
     payload = await request.json()
@@ -626,9 +646,114 @@ async def set_gemini_key(request: Request) -> dict:
         return {"ok": True, "saved": False}
     if len(key) < 20:
         raise HTTPException(status_code=400, detail="API Key สั้นเกินไป")
+    # **ทางนี้เขียนทับคีย์เดิม** ค่าทดสอบหลุดเข้ามาเมื่อไรคีย์จริงหายทันที
+    fake = _looks_fake_key(key)
+    if fake:
+        raise HTTPException(status_code=400, detail=fake)
     await asyncio.to_thread(save_gemini_key, key)
     return {"ok": True, "saved": True}
 
+
+
+# ---------------------------------------------- คีย์ Gemini หลายใบ (30 ส.ค. 2569)
+#
+# **สเปคจากสายคลิป — เจ้าของคอนเฟิร์มแล้ว** (กติกาข้อ 7.1.1)
+#
+# ที่มา: คืน 29 ส.ค. สายคลิปหยุดยาวเพราะ Gemini ตอบ 429 ทุกรุ่น ยิงถามตรงๆ
+# แล้วได้ข้อความจริงว่า "Your prepayment credits are depleted" — เครดิตที่
+# เติมเงินไว้หมด **ไม่ใช่โควตาฟรีรายวัน รอเท่าไรก็ไม่คืน** จึงต้องใส่คีย์ใบที่สอง
+# จากคนละบัญชีให้ระบบสลับไปใช้เอง
+#
+# ⚠️ **ห้ามส่งคีย์เต็มออกไปที่หน้าเว็บเด็ดขาด** คีย์เก็บเข้ารหัสด้วย DPAPI
+# ส่งออกไปแสดงผลเมื่อไรคือรูรั่วที่เราเปิดเอง — ใช้ `tail` (6 ตัวท้าย) พอ
+# ตรวจซ้ำด้วยเทสว่าคำตอบไม่มีคีย์เต็มปนอยู่จริง
+#
+# ของเดิม `POST /api/gemini-key` **ยังต้องใช้ได้เหมือนเดิม** มีคนเรียกอยู่
+
+GEMINI_KEY_MIN = 20
+
+
+def _gemini_board() -> list[dict]:
+    import flow_worker                                   # noqa: PLC0415
+    return flow_worker.gemini_key_board()
+
+
+@app.get("/api/gemini-keys")
+async def gemini_keys_list() -> dict:
+    board = await asyncio.to_thread(_gemini_board)
+    return {"ok": True, "keys": board}
+
+
+@app.post("/api/gemini-keys")
+async def gemini_keys_add(request: Request) -> dict:
+    """เพิ่มคีย์ใบใหม่ **ต่อท้าย** ไม่ทับของเดิม"""
+    import flow_worker                                   # noqa: PLC0415
+    import gemini_keys as key_store                      # noqa: PLC0415
+
+    payload = await request.json() if await request.body() else {}
+    key = str((payload or {}).get("key", "")).strip()
+    if len(key) < GEMINI_KEY_MIN:
+        raise HTTPException(status_code=400,
+                            detail="คีย์สั้นผิดปกติ — ตรวจว่าก๊อปมาครบไหม")
+    fake = _looks_fake_key(key)
+    if fake:
+        raise HTTPException(status_code=400, detail=fake)
+
+    def work() -> dict:
+        keys = flow_worker.load_gemini_keys()
+        if key in keys:
+            # ไม่ใช่ error — บอกให้รู้ว่าไม่ได้เพิ่มซ้ำ แล้วคืนกระดานเดิม
+            return {"added": False, "note": "คีย์นี้ใส่ไว้แล้ว ไม่ได้เพิ่มซ้ำ"}
+        key_store.save_keys([*keys, key])
+        return {"added": True, "note": f"เพิ่มคีย์ใบที่ {len(keys) + 1} แล้ว"}
+
+    done = await asyncio.to_thread(work)
+    board = await asyncio.to_thread(_gemini_board)
+    if done["added"]:
+        append_log("publish", f"เพิ่มคีย์ Gemini — ตอนนี้มี {len(board)} ใบ")
+    return {"ok": True, **done, "keys": board}
+
+
+@app.delete("/api/gemini-keys/{no}")
+async def gemini_keys_remove(no: int) -> dict:
+    """เอาคีย์ใบที่ `no` ออก (นับจาก 1 ตามที่กระดานแสดง)"""
+    import flow_worker                                   # noqa: PLC0415
+    import gemini_keys as key_store                      # noqa: PLC0415
+
+    def work() -> str:
+        keys = flow_worker.load_gemini_keys()
+        if not 1 <= no <= len(keys):
+            return f"ไม่มีคีย์ใบที่ {no} — ตอนนี้มี {len(keys)} ใบ"
+        key_store.save_keys([k for i, k in enumerate(keys, 1) if i != no])
+        return ""
+
+    problem = await asyncio.to_thread(work)
+    if problem:
+        raise HTTPException(status_code=404, detail=problem)
+    board = await asyncio.to_thread(_gemini_board)
+    append_log("publish", f"ลบคีย์ Gemini ใบที่ {no} — เหลือ {len(board)} ใบ")
+    return {"ok": True, "keys": board}
+
+
+@app.post("/api/gemini-keys/test")
+async def gemini_keys_test() -> dict:
+    """ยิงจริงทีละใบแล้วคืนกระดานใหม่
+
+    ยิงจริงเท่านั้น ไม่เดาจากสถานะที่จำไว้ — สถานะที่จำไว้อาจเก่าไปแล้ว
+    (เครดิตเติมเพิ่มแล้วก็กลับมาใช้ได้ทันทีโดยที่ระบบยังจำว่าพักอยู่)
+    """
+    import flow_worker                                   # noqa: PLC0415
+
+    def work() -> list[dict]:
+        for key in flow_worker.load_gemini_keys():
+            flow_worker.clear_gemini_key(key)      # ล้างโทษเก่าก่อนยิงจริง
+        flow_worker.load_gemini_api_key()          # ยิงถามจริงหนึ่งรอบ
+        return flow_worker.gemini_key_board()
+
+    board = await asyncio.to_thread(work)
+    ready = sum(1 for row in board if row.get("ok"))
+    append_log("publish", f"ทดสอบคีย์ Gemini — ใช้ได้ {ready}/{len(board)} ใบ")
+    return {"ok": True, "keys": board}
 
 @app.post("/api/claude-key")
 async def set_claude_key(request: Request) -> dict:

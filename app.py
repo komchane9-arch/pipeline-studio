@@ -4910,11 +4910,29 @@ def posts_collect_bots() -> list[str]:
     เครื่องใหม่ที่ไม่เคยรันเลยจะไม่ถูกแตะ จนกว่าเจ้าของจะสั่งรันเองครั้งแรก
     """
     import sqlite3                                             # noqa: PLC0415
+
+    # **กันบอทของตัวตามยอดออกจากรายการนี้** (29 ส.ค. 2569)
+    #
+    # รายการนี้เอาจาก "บอทที่เคยเก็บข้อมูลมาก่อน" ซึ่งถูกต้องตามเจตนาเดิม
+    # แต่บ่ายวันนี้ผมสั่ง Bot11 เก็บโพสต์ 6 กลุ่มด้วยมือ มันจึงถูกจดลงฐานว่า
+    # เป็นบอทเก็บข้อมูล แล้วระบบก็ปลุกมันเรื่อยๆ ตั้งแต่นั้น
+    #
+    # ผลคือมันไปแย่ง Chrome กับ **ตัวตามยอด engagement ที่ใช้โปรไฟล์เดียวกัน**
+    # วัดจริง 21:15-21:36 น.: ตัวตามยอดรอคิวจนครบ 20 นาทีแล้วยังไม่ได้ ต้องข้ามรอบ
+    #
+    # กันออกตรงนี้ตรงกว่าการให้สองตัวแย่งคิวกัน — คนละหน้าที่ ไม่ควรใช้บัญชีร่วมกัน
+    reserved = set()
+    try:
+        import fb_engagement                                    # noqa: PLC0415
+        reserved.add(fb_engagement.COLLECTOR_PROFILE.casefold())
+    except Exception:                                           # noqa: BLE001
+        pass
     try:
         with sqlite3.connect(f"file:{DATA_DIR / 'fb_posts.db'}?mode=ro", uri=True,
                              timeout=5) as conn:
             return [r[0] for r in conn.execute(
-                "SELECT DISTINCT bot FROM collect_run WHERE bot!='' ORDER BY bot")]
+                "SELECT DISTINCT bot FROM collect_run WHERE bot!='' ORDER BY bot")
+                    if r[0].casefold() not in reserved]
     except Exception:                                          # noqa: BLE001
         return []
 
@@ -5098,11 +5116,15 @@ def _engagement_keeper() -> None:
             try:
                 if not _wait_chrome_free(fb_engagement.COLLECTOR_PROFILE):
                     append_log("publish",
-                               "ข้ามรอบตามยอด — Chrome ของตัวเก็บโพสต์ไม่ว่าง "
-                               "ภายในเวลาที่รอ ไว้รอบหน้า")
-                    continue
-                done = fb_engagement.check_once()
+                               "ข้ามรอบตามยอด — Chrome ไม่ว่างภายในเวลาที่รอ "
+                               "ไว้รอบหน้า")
+                    done = {}
+                else:
+                    done = fb_engagement.check_once()
             finally:
+                # **ต้องลดธงเสมอ** ค้างไว้เมื่อไรตัวเก็บโพสต์หยุดถาวร
+                # (บั๊กจริง 21:36 น. — `continue` ข้าม sleep ไปด้วย ตัวตามยอด
+                #  จึงวนปักธงรัวไม่หยุด ตัวเก็บโพสต์ไม่ถูกปลุกเลยสักครั้ง)
                 _chrome_wanted.clear()
             if done.get("posts"):
                 append_log("publish",

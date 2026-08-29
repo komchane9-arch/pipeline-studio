@@ -3502,9 +3502,16 @@ def _clean_phone_when_free(serial: str) -> None:
         append_log("publish", f"หน่วยความจำ {label} เต็ม"
                               + (f" ({why})" if why else "")
                               + " — ขอคิวเพื่อเคลียร์ ถ้ามีงานทำอยู่จะรอให้จบก่อน")
+        # ---- ขอแทรกคิว (เจ้าของสั่ง 29 ส.ค. 2569) --------------------------
+        #
+        # *"ให้ทำงานนั้นๆจบก่อน แล้วแทรกคิวให้ล้างเลยก่อนทำงานถัดไป"*
+        #
+        # **ไม่ตัดงานที่กำลังทำ** — คิวเรียกคนถัดไปก็ต่อเมื่อเคาน์เตอร์ว่างแล้ว
+        # ใบที่ถือบัตรอยู่จึงทำจนจบเสมอ สิทธิ์นี้แค่ทำให้ได้คิวถัดไปแทนที่จะ
+        # ไปต่อท้ายแถว ซึ่งในวันที่คิวยาวแปลว่าไม่ได้ล้างเลยจนแรมเต็มแล้วแอปพัง
         with phone_queue.slot(serial, owner="ตัวเฝ้าหน่วยความจำ",
                               task="เคลียร์แรม/เนื้อที่", lane="ดูแลเครื่อง",
-                              timeout=PHONE_CLEAN_WAIT):
+                              timeout=PHONE_CLEAN_WAIT, priority=True):
             before = _read_phone_health(serial, force=True)
             fb_phone_clean.clean(serial, adb=ADB,
                                  log=lambda text: append_log("publish", text))

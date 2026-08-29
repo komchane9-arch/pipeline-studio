@@ -209,6 +209,26 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         " note       TEXT NOT NULL DEFAULT '',"
         " pid        INTEGER,"
         " host       TEXT NOT NULL DEFAULT '')")
+    # ---- ช่องแทรกคิว (เจ้าของสั่ง 29 ส.ค. 2569) --------------------------
+    #
+    # *"เชื่อมต่อคิวกับตัวล้างแรมหน่อย ถ้าเกิดต้องล้าง ให้ทำงานนั้นๆจบก่อน
+    #   แล้วแทรกคิวให้ล้างเลยก่อนทำงานถัดไป"*
+    #
+    # ของเดิมเป็น **มาก่อนได้ก่อนล้วน ไม่มีใครแซง** (เจ้าของสั่งไว้ 21 ส.ค.)
+    # ซึ่งถูกสำหรับงานจริงที่แย่งจอกัน แต่ **ตัวล้างแรมไม่ใช่งานแย่งจอ
+    # มันคือของที่ต้องทำเพื่อให้งานอื่นทำได้ต่อ** ถ้ามันต่อท้ายเรื่อยๆ
+    # ในวันที่คิวยาว มันจะไม่ได้ล้างเลย แล้วแรมเต็มจนแอปพัง
+    # (สายกลางเจอจริง: มือถือหลุดเงียบ 17 ชม. เพราะแรมเต็มแล้ว adbd ตาย)
+    #
+    # ⚠️ **แทรกได้เฉพาะ "คิวถัดไป" ห้ามตัดงานที่กำลังทำ** — `_promote` ทำงาน
+    # ก็ต่อเมื่อเคาน์เตอร์ว่างอยู่แล้วเท่านั้น งานที่ถือบัตรอยู่จึงทำจนจบเสมอ
+    # ตรงกับที่เจ้าของสั่งว่า "ให้ทำงานนั้นๆจบก่อน"
+    #
+    # เพิ่มช่องแบบไม่ทำลายฐานเดิม — ฐานที่มีอยู่แล้วจะได้ค่า 0 ทั้งหมด
+    # แปลว่าทุกใบเดิมยังเป็นคิวธรรมดาเหมือนเดิม ไม่มีใครถูกแซงย้อนหลัง
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(ticket)")}
+    if "priority" not in have:
+        conn.execute("ALTER TABLE ticket ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
     conn.execute("CREATE INDEX IF NOT EXISTS ticket_open ON ticket(device, state, id)")
 
 
@@ -254,8 +274,11 @@ def _promote(conn: sqlite3.Connection, device: str) -> None:
         (device, RUNNING)).fetchone()
     if busy:
         return
+    # ใบที่ขอแทรก (priority=1) มาก่อน ที่เหลือยังเป็นมาก่อนได้ก่อนตามเดิม
+    # **ไม่ได้ตัดใครที่กำลังทำ** ฟังก์ชันนี้ถูกเรียกตอนเคาน์เตอร์ว่างเท่านั้น
     nxt = conn.execute(
-        "SELECT id FROM ticket WHERE device=? AND state=? ORDER BY id LIMIT 1",
+        "SELECT id FROM ticket WHERE device=? AND state=? "
+        "ORDER BY priority DESC, id LIMIT 1",
         (device, WAITING)).fetchone()
     if nxt:
         conn.execute("UPDATE ticket SET state=?, started_at=? WHERE id=?",
@@ -283,7 +306,8 @@ def _settle(conn: sqlite3.Connection, device: str) -> None:
 
 
 # ---------------------------------------------------------------- คำสั่งหลัก
-def take(device: str, owner: str, task: str = "", lane: str = "") -> int:
+def take(device: str, owner: str, task: str = "", lane: str = "",
+         priority: bool = False) -> int:
     """กดบัตรเข้าคิว — คืนเลขบัตร (ยังไม่ได้แปลว่าถึงคิวแล้ว)
 
     ห้ามคนเดิมถือสองใบบนเครื่องเดียวกัน — คนที่ถืออยู่แล้วไปต่อท้ายแถวตัวเอง
@@ -304,10 +328,10 @@ def take(device: str, owner: str, task: str = "", lane: str = "") -> int:
             "ต้องคืนใบเดิมก่อนถึงจะกดใหม่ได้")
     now = _now()
     cur = conn.execute(
-        "INSERT INTO ticket(device,owner,task,lane,state,created_at,beat_at,pid,host) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ticket(device,owner,task,lane,state,created_at,beat_at,pid,host,priority) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
         (key, who, str(task or ""), str(lane or ""), WAITING, now, now,
-         os.getpid(), socket.gethostname()))
+         os.getpid(), socket.gethostname(), 1 if priority else 0))
     ticket = int(cur.lastrowid)
     _settle(conn, key)
     return ticket
@@ -383,13 +407,15 @@ def finish(ticket: int, state: str = DONE, note: str = "") -> None:
 
 @contextlib.contextmanager
 def slot(device: str, owner: str, task: str = "", lane: str = "",
-         timeout: float = 1800.0, on_wait=None):
+         timeout: float = 1800.0, on_wait=None, priority: bool = False):
     """ทางที่ควรใช้ที่สุด — กดบัตร รอคิว ทำงาน คืนคิว ครบในบล็อกเดียว
 
     ชีพจรระหว่างทำงานเต้นให้เองด้วยเธรดเบื้องหลัง งานที่กินเวลาหลายนาที
     (เช่นโหลดรูปเป็นพันไฟล์) จึงไม่ถูกเข้าใจผิดว่าตายแล้ว
     """
-    ticket = take(device, owner, task, lane)
+    # priority=True ใช้กับ **งานดูแลเครื่องเท่านั้น** (ล้างแรม/เนื้อที่)
+    # ไม่ใช่งานที่แย่งจอทำผลงาน — งานพวกนั้นต้องมาก่อนได้ก่อนตามเดิม
+    ticket = take(device, owner, task, lane, priority=priority)
     stop = threading.Event()
 
     def _pump() -> None:

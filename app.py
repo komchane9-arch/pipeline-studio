@@ -8535,6 +8535,11 @@ def _fb_apply_pick(chat_id: str, job_id: str) -> str:
     if pending["kind"] == "comment":
         current = _fb_comments(job)
         if len(current) >= facebook_group_post.MAX_COMMENTS:
+            # **ปฏิเสธแล้วต้องลง log ด้วย** ของเดิมตอบในแชทอย่างเดียว
+            # พอเจ้าของถามว่า "คอมเมนต์หายไปไหน" จึงไม่มีร่องรอยให้ไล่เลย
+            append_log("publish",
+                       f"ไม่รับคอมเมนต์ของงาน {job_id} — มีครบแล้ว · "
+                       f"ที่ส่งมา: {pending['text'][:60]}")
             return f"{job_id} มีคอมเมนต์ครบแล้ว — ใช้ /comment 1 หรือ 2 เพื่อแก้"
         current.append(pending["text"])
         job = _fb_set_comments(job_id, current) or job
@@ -8848,6 +8853,9 @@ def _telegram_command(chat_id: str, text: str) -> bool:
                 current[slot - 1] = text_value
                 note = f"แก้คอมเมนต์ช่อง {slot} แล้ว"
             elif len(current) >= maximum:
+                append_log("publish",
+                           f"ไม่รับคอมเมนต์ของงาน {job['id']} — มีครบ "
+                           f"{maximum} ข้อความแล้ว · ที่ส่งมา: {text_value[:60]}")
                 _fb_say(
                     chat_id,
                     f"งาน <b>{job['id']}</b> มีคอมเมนต์ครบ {maximum} ข้อความแล้ว\n"

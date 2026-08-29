@@ -2476,7 +2476,8 @@ def _copy_link_from_menu(phone: Phone, menu: tuple[int, int], clipboard) -> str:
     return link
 
 
-def verify_liked(phone: Phone, group_id: str, caption: str) -> dict:
+def verify_liked(phone: Phone, group_id: str, caption: str,
+                 link: str = "", comment=None) -> dict:
     """เปิดกลุ่มซ้ำแล้วตรวจว่าโพสต์ขึ้นจริงและถูกใจไปแล้วจริง
 
     ตรวจทีหลังต่างหากเพราะตอนกดเสร็จใหม่ๆ ฟีดยังไม่นิ่ง บางทีขึ้นว่าถูกใจแล้ว
@@ -2487,11 +2488,27 @@ def verify_liked(phone: Phone, group_id: str, caption: str) -> dict:
     ยิงเข้าไปได้แค่หน้าเข้าแอป ส่วนถ้าระบุแอปจะเด้งหน้าเลือกแอปแทน)
     ลิงก์นั้นมีไว้ให้ "คนกดเปิดดู" ไม่ใช่ให้เครื่องเปิด
     """
-    phone.run(
-        "shell", "am", "start", "-a", "android.intent.action.VIEW",
-        "-d", f"fb://group/{group_id}", timeout=30,
-    )
-    time.sleep(8.0)
+    # **มีลิงก์แล้วเปิดจากลิงก์ก่อนเสมอ** (แก้ 29 ส.ค. 2569)
+    #
+    # วัดจริงวันนี้: ทางฟีดหาโพสต์ไม่เจอ **6 จาก 6 กลุ่ม** ทั้งที่เปิดลิงก์ดูเอง
+    # แล้วโพสต์อยู่ครบทุกกลุ่ม — ตัวตรวจผิด ไม่ใช่งานผิด
+    # (ก่อนหน้านี้เคยวัดได้ 10/106 ครั้ง มีคนเพิ่มการเลื่อนหาแล้วยังไม่พอ)
+    #
+    # สาเหตุ: ฟีดกลุ่มเรียงตาม "ความเกี่ยวข้อง" ไม่ใช่เวลา โพสต์เราจึงอยู่ลึกกว่า
+    # ที่เลื่อนไหว ส่วนหน้าโพสต์เดี่ยวเปิดตรงเข้าโพสต์เราเลย ไม่ต้องเดาว่าอันไหน
+    # — ทางเดียวกับที่ตัวคอมเมนต์เปลี่ยนไปใช้เมื่อ 28 ส.ค. แล้วสำเร็จทุกครั้ง
+    on_post = False
+    if link:
+        try:
+            on_post = open_post_link(phone, link, caption, group_id=group_id)
+        except Exception as error:                  # noqa: BLE001
+            phone.log(f"  เปิดโพสต์จากลิงก์เพื่อตรวจไม่ได้ ({error}) — ถอยไปดูในฟีด")
+    if not on_post:
+        phone.run(
+            "shell", "am", "start", "-a", "android.intent.action.VIEW",
+            "-d", f"fb://group/{group_id}", timeout=30,
+        )
+        time.sleep(8.0)
     xml = phone.dump()
     # ข้อความยาวถูกตัดท้ายด้วย "..." จึงเทียบแค่ท่อนต้น
     probe = caption.strip()[:12]
@@ -2512,7 +2529,7 @@ def verify_liked(phone: Phone, group_id: str, caption: str) -> dict:
     # ยืนยันจาก log: ตรวจซ้ำใช้เวลา 10-12 วินาทีต่อกลุ่ม เท่ากับ sleep(8)+dump
     # พอดี = ไม่ได้ใช้เวลาค้นหาเลยแม้แต่วินาทีเดียว
     scrolled = 0
-    while not found_post and scrolled < VERIFY_SCROLL_TRIES:
+    while not on_post and not found_post and scrolled < VERIFY_SCROLL_TRIES:
         phone.vswipe(str(700 + SCROLL_STEP), "700", str(SCROLL_DURATION_MS),
         )
         time.sleep(1.8)
@@ -2538,11 +2555,36 @@ def verify_liked(phone: Phone, group_id: str, caption: str) -> dict:
             ]
             if own:
                 liked = (_post_reactions(xml, own[0][1]) or 0) >= 1
-    phone.log(
-        f"  ตรวจซ้ำ: เจอโพสต์={'ใช่' if found_post else 'ไม่เจอ'} "
-        f"· ถูกใจแล้ว={'ใช่' if liked else 'ยัง'}"
-    )
-    return {"group_id": group_id, "post_visible": found_post, "liked": liked}
+    # **ตรวจคอมเมนต์ด้วย ไม่ใช่แค่ไลก์** (เพิ่ม 29 ส.ค. 2569)
+    #
+    # เจ้าของทักว่า "log ขึ้นว่าทำครบหมด แต่ของจริงคอมเมนต์ไม่ครบ" — ไล่ดูแล้วพบว่า
+    # ทั้งระบบ**ไม่มีจุดไหนเลย**ที่ยืนยันว่าคอมเมนต์ยังอยู่จริงหลังงานจบ
+    # เชื่อผลตอนพิมพ์อย่างเดียว ถ้า Facebook ลบทีหลังก็ไม่มีใครรู้
+    #
+    # นับเฉพาะตอนอยู่บนหน้าโพสต์เดี่ยว — ในฟีดคอมเมนต์ไม่ได้กางให้เห็น
+    # นับไม่ได้แล้วต้องบอกว่า "นับไม่ได้" (None) ห้ามตอบ 0 ซึ่งแปลว่า "ไม่มี"
+    wanted = _as_texts(comment) if comment else []
+    seen_comments = None
+    if on_post and wanted:
+        seen_comments = sum(
+            1 for text in wanted
+            if (probe := comment_probe(text)) and screen_has(xml, probe)
+        )
+
+    parts = [f"เจอโพสต์={'ใช่' if found_post else 'ไม่เจอ'}",
+             f"ถูกใจแล้ว={'ใช่' if liked else 'ยัง'}"]
+    if seen_comments is not None:
+        parts.append(f"คอมเมนต์ {seen_comments}/{len(wanted)} ใบ")
+    phone.log("  ตรวจซ้ำ: " + " · ".join(parts))
+    return {
+        "group_id": group_id, "post_visible": found_post, "liked": liked,
+        # **"ตรวจไม่ได้" ต้องแยกจาก "ตรวจแล้วไม่ผ่าน"** (กติกาข้อ 2.3.1 ข้อ 4)
+        # ไม่งั้นวันที่ตรวจไม่ได้ ของเสียจะได้เครื่องหมายถูกไปด้วย
+        "checked": bool(found_post),
+        "comments_seen": seen_comments,
+        "comments_wanted": len(wanted) or None,
+        "by_link": on_post,
+    }
 
 
 def action_bar_top(xml: str, after: int | None = None) -> int | None:
@@ -3410,15 +3452,29 @@ def post_to_groups(
                 if stop():
                     break
                 link = entry.get("link", "")
-                check = verify_liked(phone, entry["group_id"], caption)
+                # ส่งลิงก์กับคอมเมนต์เข้าไปด้วย — เปิดโพสต์ตรงแทนการเลื่อนหาในฟีด
+                # และนับได้ว่าคอมเมนต์ยังอยู่จริงกี่ใบ (ดูคำอธิบายใน verify_liked)
+                check = verify_liked(phone, entry["group_id"], caption,
+                                     link=link, comment=comment)
                 entry["verified"] = check
+                # **คอมเมนต์หายหลังโพสต์ = ต้องดังไว้** ไม่ใช่ปล่อยผ่านเพราะ
+                # ตอนพิมพ์บอกว่าสำเร็จแล้ว (เจ้าของทัก 29 ส.ค.: "log ขึ้นว่า
+                # ทำครบหมด แต่ของจริงคอมเมนต์ไม่ครบ")
+                seen = check.get("comments_seen")
+                want = check.get("comments_wanted")
+                if seen is not None and want and seen < want:
+                    log(f"  ⚠️ คอมเมนต์เหลือ {seen}/{want} ใบบนโพสต์จริง "
+                        f"— ตอนพิมพ์รายงานว่าขึ้นครบ")
+                    entry["comment_count"] = seen
+                    entry["commented"] = seen > 0
                 # ถูกใจไม่ติดตอนตรวจซ้ำ ลองกดให้อีกรอบตรงนั้นเลย
                 # กดซ้ำได้เฉพาะตอนรอบแรก**ยังไม่สำเร็จ** — ปุ่มถูกใจเป็นสวิตช์
                 # ถ้ารอบแรกกดติดแล้วมากดอีกทีคือยกเลิกไลก์ของตัวเอง
                 if not entry.get("liked") and not check["liked"]:
                     log("  ถูกใจยังไม่ติด — กดใหม่")
                     entry["liked"] = like_post_of(phone, caption)
-                    entry["verified"] = verify_liked(phone, entry["group_id"], caption)
+                    entry["verified"] = verify_liked(
+                        phone, entry["group_id"], caption, link=link, comment=comment)
                 # รอบแรกเก็บลิงก์ไม่ได้ (โพสต์ยังไม่ขึ้นฟีด) — รอบนี้ลองอีกครั้ง
                 if not link and clipboard is not None:
                     entry["link"] = copy_post_link(

@@ -128,6 +128,17 @@ KINDS = {
     # ปัดจอไม่ต้องเทรนพิกัด — ปัดกลางจอใช้ได้กับทุกหน้า และ "ปัดให้ถูกที่" ไม่มีอยู่จริง
     # สิ่งที่ต้องถูกคือ **ปัดแล้วเห็นของที่ต้องการ** ซึ่งขั้นถัดไปเป็นคนพิสูจน์เอง
     "swipe":        "ปัดจอขึ้น/ลง",
+    # **กดค้างแล้วลาก** — ต่างจาก swipe ตรงที่ลากจาก "จุดที่เทรนไว้" ไปยัง
+    # ตำแหน่งที่ระบุ ไม่ใช่ปัดกลางจอ
+    #
+    # เจ้าของบอกเอง 29 ส.ค. 2569 ว่าแถบเลือกเฟรมหน้าปกของ Facebook Reels
+    # **แตะเฉยๆ ไม่ได้ ต้องกดแล้วลากจากเฟรมปัจจุบัน** — แตะแล้วรูปตัวอย่าง
+    # ไม่เปลี่ยน (ผังเคยรายงานว่า "สำเร็จ" ทั้งที่หน้าปกยังเป็นของเดิม
+    # เพราะตัวตรวจดูแค่ว่ายังอยู่หน้าเดิมไหม — กติกาข้อ 2.3 อีกครั้ง)
+    #
+    # ปลายทางเขียนใน `value` เป็นสัดส่วนของจอ เช่น "0.19,0.82"
+    # ใช้สัดส่วนเพราะมือถือคนละรุ่นจอคนละขนาด (กติกาข้อ 2.7.3)
+    "drag":         "กดค้างแล้วลากจากพิกัดที่เทรนไว้",
     "wait":         "รอเฉยๆ",
 }
 
@@ -1785,6 +1796,23 @@ def run_step(context: RunContext, step: Step) -> str:
             str(middle), str(start), str(middle), str(end), "400",
         )
         summary = f"ปัดจอ{'ลง' if direction in ('down', 'ลง') else 'ขึ้น'}"
+
+    elif step.kind == "drag":
+        start = context.store.point_for(context.target, step.id, width, height)
+        if not start:
+            raise StepError(f"ขั้น \"{step.name}\" ยังไม่ได้เทรนจุดเริ่มลาก")
+        try:
+            rx, ry = [float(v) for v in str(step.value or "").split(",")[:2]]
+        except Exception as error:                           # noqa: BLE001
+            raise StepError(
+                f"ขั้นลากต้องบอกปลายทางเป็นสัดส่วนของจอ เช่น \"0.19,0.82\" "
+                f"— ตอนนี้ใส่ไว้ว่า {step.value!r}") from error
+        end = (int(rx * width), int(ry * height))
+        # 600 มิลลิวินาที — ช้าพอให้แอปรู้ว่าเป็นการลาก ไม่ใช่ปัดเร็ว
+        context.run_adb("shell", "input", "swipe",
+                        str(start[0]), str(start[1]),
+                        str(end[0]), str(end[1]), "600")
+        summary = f"ลากจาก {start[0]}, {start[1]} ไป {end[0]}, {end[1]}"
 
     elif step.kind == "type_hashtag":
         summary = run_hashtag_step(context, step)

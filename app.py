@@ -5063,8 +5063,22 @@ def _engagement_message(done: dict) -> str:
 
     lines = [f"📊 <b>ตามยอดโพสต์</b> — {datetime.now():%H:%M}"]
     if fresh:
-        lines.append(f"💬 <b>คอมเมนต์ใหม่ {fresh} อัน</b> — ดูด้วย "
-                     f"<code>python fb_engagement.py pending</code>")
+        # **โชว์ข้อความเลย** ไม่ใช่บอกแค่จำนวน — เจ้าของจะได้ตัดสินใจได้ทันที
+        # ว่าต้องไปตอบไหม โดยไม่ต้องเปิดคอมมาสั่งดูอีกที
+        lines.append(f"💬 <b>คอมเมนต์ใหม่จากคนอื่น {fresh} อัน</b>")
+        shown = 0
+        for row in rows:
+            for item in (row.get("new_from_others") or []):
+                if shown >= 5:      # เกินนี้ยาวเกินอ่านในแชท
+                    break
+                who = telegram_bot._escape(str(item.get("author", ""))[:22])
+                what = telegram_bot._escape(
+                    " ".join(str(item.get("body", "")).split())[:90])
+                lines.append(f"   ↳ <b>{who}</b>: {what}")
+                shown += 1
+        if fresh > shown:
+            lines.append(f"   (อีก {fresh - shown} อัน — "
+                         f"<code>python fb_engagement.py pending</code>)")
     if moved:
         lines.append("")
         for row in moved:

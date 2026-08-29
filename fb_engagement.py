@@ -440,7 +440,16 @@ def clean_comment_body(text: str, author: str) -> str:
 # --------------------------------------------------------------------- บันทึก
 
 def save(conn: sqlite3.Connection, post: dict, result: dict) -> tuple[int, int]:
-    """เก็บผลลงฐาน — คืน (คอมเมนต์ใหม่, คอมเมนต์ทั้งหมดที่เห็น)"""
+    """เก็บผลลงฐาน — คืน (**คอมเมนต์ของคนอื่น**ที่เพิ่งเห็น, คอมเมนต์ทั้งหมด)
+
+    **นับเฉพาะของคนอื่น** (แก้ 29 ส.ค. 2569) — ของเดิมนับรวมคอมเมนต์ที่บอทเรา
+    พิมพ์เอง ผลคือรอบแรกหลังโพสต์แจ้งว่า "คอมเมนต์ใหม่ 10 อัน" ทั้งที่ทั้ง 10 อัน
+    เป็นของเราเอง ส่วนของคนอื่นมีแค่ 2 อัน — เจ้าของจะเข้าใจว่ามีคน 10 คน
+    รอให้ไปตอบ
+
+    เหตุผลที่ตัวเลขนี้ต้องหมายถึงของคนอื่นเท่านั้น: มันถูกใช้ตัดสินว่า
+    "มีอะไรต้องไปตอบไหม" ซึ่งคอมเมนต์ของตัวเองไม่เกี่ยวเลย
+    """
     now = datetime.now().isoformat(timespec="seconds")
     conn.execute(
         """INSERT INTO my_post (post_url, group_id, group_name, account,
@@ -489,7 +498,8 @@ def save(conn: sqlite3.Connection, post: dict, result: dict) -> tuple[int, int]:
             (key, post["post_url"], item["seq"], author, item["body"],
              item.get("when_text", ""), item.get("reply_to", ""),
              ours, answered, now, now))
-        fresh += 1
+        if not ours:
+            fresh += 1          # ของเราเองไม่นับ — ไม่มีอะไรต้องไปตอบ
     conn.commit()
     return fresh, len(items)
 
@@ -589,6 +599,13 @@ def check_once() -> dict:
                 new_comments += fresh
                 if result["reachable"]:
                     rows.append({
+                        "new_from_others": [
+                            {"author": c["author"], "body": c["body"]}
+                            for c in (result.get("comments_list") or [])
+                            if (post["account"] or "").lower()
+                            not in (c.get("author") or "").lower()
+                            and (c.get("body") or "").strip()
+                        ][-fresh:] if fresh else [],
                         "group": post["group_name"],
                         "url": post["post_url"],
                         "reactions": result.get("reactions"),

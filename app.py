@@ -1606,7 +1606,17 @@ def _progress_start(item_id: str, target: str, serial: str, total: int) -> None:
             "device": device_book.label(serial),
             "total": total, "step": 0, "ok": None,
             "status": "running", "now": "กำลังเริ่ม…",
-            "started": _now_text(), "ended": "", "lines": [],
+            # **ส่งเวลาแบบเต็มไปด้วย ไม่ใช่มีแต่ชั่วโมง:นาที:วินาที**
+            #
+            # สายกลางทักมา 29 ส.ค. 2569 ว่างานที่เริ่ม 23:50 แล้วเปิดดูตอน
+            # 00:10 จะคำนวณได้ "ผ่านไป -1420 นาที" เพราะเวลาไม่มีวันที่ติดมา
+            # เขาแก้ข้างหน้าเว็บด้วยการเดาว่าติดลบ = ข้ามวัน ซึ่งใช้ได้แต่เป็น
+            # การเดา — **แก้ที่ต้นทางจบกว่า** ส่งวันที่ไปด้วยเลย ไม่ต้องเดา
+            # (ช่องเดิมยังอยู่ครบ ของที่ใช้อยู่แล้วไม่พัง)
+            "started": _now_text(), "ended": "",
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "ended_at": "",
+            "lines": [],
         }
         # เก่าเกินก็ทิ้ง — ไม่ให้โตไม่รู้จบ
         while len(_progress) > PROGRESS_KEEP:
@@ -1625,7 +1635,9 @@ def _progress_step(item_id: str, name: str, ok: bool, message: str) -> None:
         row["ok"] = ok
         row["now"] = name
         row["lines"].append({
-            "at": _now_text(), "no": row["step"], "name": name,
+            "at": _now_text(),
+            "at_full": datetime.now().isoformat(timespec="seconds"),
+            "no": row["step"], "name": name,
             "ok": bool(ok), "message": str(message)[:200],
         })
         del row["lines"][:-PROGRESS_LINES]
@@ -1638,6 +1650,7 @@ def _progress_end(item_id: str, ok: bool, detail: str = "") -> None:
             return
         row["status"] = "done" if ok else "failed"
         row["ended"] = _now_text()
+        row["ended_at"] = datetime.now().isoformat(timespec="seconds")
         row["now"] = ("ลงเรียบร้อยแล้ว" if ok
                       else (detail or "หยุดกลางคัน")[:160])
 

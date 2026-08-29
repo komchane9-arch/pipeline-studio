@@ -696,17 +696,50 @@ def drop_storyboard(root: Path, item_id: str, name: str) -> dict:
     return run
 
 
+def video_height(path: Path) -> int | None:
+    """ความสูงของคลิปเป็นพิกเซล — **คืน None เมื่อวัดไม่ได้ ห้ามเดาเป็น 0**
+
+    "วัดไม่ได้" กับ "เตี้ยกว่าที่ควร" ต้องแยกกัน (กติกาข้อ 2.3.1 ข้อ 4)
+    ถ้าเดาเป็น 0 เวลาไม่มี ffprobe ระบบจะฟ้องว่าคลิปพังทุกใบทั้งที่ไม่รู้จริง
+    """
+    try:
+        import json as _json
+        import subprocess as _sp
+        out = _sp.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=height", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        streams = (_json.loads(out.stdout or "{}").get("streams") or [{}])
+        return int(streams[0].get("height") or 0) or None
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
 def save_video(root: Path, item_id: str, videos: list[Path], note: str = "") -> Path:
-    """บันทึกคลิปที่เจนได้จาก Google Flow ลงในงานของสินค้าชิ้นนั้น"""
+    """บันทึกคลิปที่เจนได้จาก Google Flow ลงในงานของสินค้าชิ้นนั้น
+
+    **วัดความละเอียดของไฟล์ที่ได้จริงทุกครั้ง** (เจ้าของสั่ง 29 ส.ค. 2569)
+
+    เดิมเชื่อว่าสั่งโหลด 1080p แล้วก็ต้องได้ 1080p — ไม่มีใครไปเปิดไฟล์ดู
+    ผลคือตอน Google Flow อัปเป็น 1.1 แล้วเพิ่มตัวเลือก 360p เข้ามา
+    **คลิป 8 ใบถูกเจนออกมาเป็น 360x640 ติดกันโดยไม่มีอะไรฟ้องเลย**
+    (28 ส.ค. 17:10–18:56) กว่าจะรู้ก็ตอนเจ้าของสังเกตเองจากหน้าจอ Flow
+
+    ตรวจผลลัพธ์ ไม่ใช่ตรวจว่าสั่งไปแล้ว — กติกาข้อ 2.3.1 ข้อ 2
+    """
     folder = target_dir(root, item_id)
     folder.mkdir(parents=True, exist_ok=True)
     names = []
+    heights: list[int | None] = []
     for path in videos:
         path = Path(path)
+        heights.append(video_height(path))
         try:
             names.append(path.relative_to(folder).as_posix())
         except ValueError:
             names.append(f"{VIDEO_DIR}/{path.name}")
+    known = [h for h in heights if h]
     run = _read_json(folder / RUN_FILE)
     run.update({
         "item_id": str(item_id),
@@ -714,6 +747,10 @@ def save_video(root: Path, item_id: str, videos: list[Path], note: str = "") -> 
         "video_count": len(names),
         "video_note": note,
         "video_at": _now(),
+        # None = วัดไม่ได้ (ไม่มี ffprobe) — ห้ามอ่านว่า "ผ่าน"
+        "video_heights": heights,
+        "video_min_height": min(known) if known else None,
+        "video_is_1080p": (min(known) >= 1080) if known else None,
     })
     _write_json(folder / RUN_FILE, run)
     _to_drive(root, str(item_id))

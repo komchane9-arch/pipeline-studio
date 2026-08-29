@@ -804,6 +804,9 @@ class FlowDriver:
         start_image: Path | None = None,
         # ความยาวคลิปเป็นวินาที — Flow ให้เลือก 4 / 6 / 8 / 10
         seconds: int | None = None,
+        # ความละเอียดตอนเจน — Flow 1.1 เพิ่ม 360p เข้ามาคู่กับ 720p
+        # **ต้องตั้งเป็น 720p เสมอ** เพราะ 360p อัปเป็น 1080p ตอนโหลดไม่ได้
+        resolution: str = "720p",
     ) -> None:
         """ตั้งชนิดผลลัพธ์ / สัดส่วน / ความยาว / จำนวนชิ้น / โมเดล ก่อนสั่งสร้าง
 
@@ -815,7 +818,7 @@ class FlowDriver:
             self._configure(
                 kind, aspect=aspect, count=count, video_model=video_model,
                 image_model=image_model, allow_paid_fallback=allow_paid_fallback,
-                seconds=seconds,
+                seconds=seconds, resolution=resolution,
             )
         except Exception:
             try:
@@ -833,6 +836,7 @@ class FlowDriver:
         image_model: str = "Nano Banana 2",
         allow_paid_fallback: bool = False,
         seconds: int | None = None,
+        resolution: str = "720p",
     ) -> None:
         self.open_settings()
         self.select_tab("Video" if kind == "video" else "Image")
@@ -853,12 +857,38 @@ class FlowDriver:
                 if not allow_paid_fallback:
                     self.close_settings()
                     raise FlowError(
-                        f"เลือก {video_model} แบบ Lower Priority (0 เครดิต) ไม่ได้ "
-                        "— หยุดไว้ก่อนเพื่อไม่ให้เผาเครดิตโดยไม่ตั้งใจ"
+                        f"เลือกโมเดล {video_model} ไม่ได้ "
+                        "— หยุดไว้ก่อนเพื่อไม่ให้เผาเครดิตกับโมเดลที่ไม่ได้ตั้งใจ"
                     )
                 self.log("  ใช้โมเดลที่กินเครดิตแทน (เปิดสวิตช์ยอมจ่ายไว้)")
+            # ---- ความละเอียดตอนเจน — **ของใหม่ที่มากับ Flow 1.1** -----------
+            #
+            # **เจ้าของสั่ง 29 ส.ค. 2569** — *"ตอนเจนต้องเลือก 720P"*
+            #
+            # Google เพิ่มแถว 360p / 720p เข้ามาพร้อมรุ่น Omni 1.1 Flash
+            # โค้ดเดิมไม่รู้จักแถวนี้ จึงปล่อยตามค่าที่ค้างอยู่ใน UI
+            # **ผลคือคลิป 8 ใบถูกเจนออกมาเป็น 360p** (28 ส.ค. 17:10–18:56)
+            # ซึ่งอัปเป็น 1080p ตอนโหลดไม่ได้ ต้องเจนใหม่ทั้งหมด
+            #
+            # ตั้งหลังเลือกโมเดลเสมอ เพราะรายการความละเอียดขึ้นกับโมเดลที่เลือก
+            # เลือกไม่ได้ = ไม่ล้มทั้งงาน แต่ **ต้องดังใน log** เพราะแปลว่า
+            # UI เปลี่ยนอีกแล้ว และคลิปที่ได้อาจไม่ใช่ความละเอียดที่ต้องการ
+            if resolution:
+                try:
+                    self.select_tab(resolution)
+                    self.log(f"  ความละเอียดตอนเจน: {resolution}")
+                except FlowError:
+                    self.log(f"  ⚠️ เลือกความละเอียด {resolution} ไม่ได้ "
+                             "— หน้า Flow อาจเปลี่ยนอีก คลิปที่ได้อาจไม่ใช่ "
+                             f"{resolution} ให้ไปตรวจไฟล์ที่ได้จริง")
+                    self.shot(f"Flow เลือกความละเอียด {resolution} ไม่ได้")
         else:
             self.select_image_model(image_model)
+        # จดค่าใช้จ่ายที่แผงบอกไว้ — เปลี่ยนเมื่อไรจะเห็นทันทีใน log
+        # ไม่ใช่มารู้ตอนเครดิตหมด (แผงเขียนว่า "Generating will use N credits")
+        cost = self.credit_cost()
+        if cost is not None:
+            self.log(f"  รอบนี้จะใช้ {cost} เครดิต")
         self.close_settings()
 
     # -------------------------------------------------- แนบรูปตั้งต้นให้วิดีโอ

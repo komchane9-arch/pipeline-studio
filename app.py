@@ -8849,11 +8849,15 @@ def _telegram_command(chat_id: str, text: str) -> bool:
         else:
             # ระบุช่องได้: /comment 2 ข้อความ = แก้คอมเมนต์อันที่ 2
             slot_text, _, rest = arg.partition(" ")
-            slot = int(slot_text) if slot_text.isdigit() and rest.strip() else 0
+            # **ตัวเลขนอกช่วง 1..N คือส่วนหนึ่งของข้อความ ไม่ใช่หมายเลขช่อง**
+            # (แก้ 29 ส.ค. 2569 หลังเจ้าของทักว่าคอมเมนต์ที่ 2 ส่งไปแล้วไม่เข้า)
+            #
+            # ของเดิมเห็นตัวเลขนำหน้าเมื่อไรก็ตีเป็นหมายเลขช่องทันที คอมเมนต์
+            # ขายของที่ขึ้นต้นด้วยตัวเลข — ซึ่งปกติมาก เช่น "500 บาทก็ได้เน็ต
+            # ทั้งปี" — จึงถูกตอบว่า "มีได้แค่ช่อง 1 ถึง 2" แล้วทิ้งข้อความไปเฉยๆ
+            raw_slot = int(slot_text) if slot_text.isdigit() and rest.strip() else 0
+            slot = raw_slot if 1 <= raw_slot <= maximum else 0
             text_value = rest.strip() if slot else arg
-            if slot and not 1 <= slot <= maximum:
-                _fb_say(chat_id, f"มีได้แค่ช่อง 1 ถึง {maximum}")
-                return True
             if slot:
                 while len(current) < slot:
                     current.append("")

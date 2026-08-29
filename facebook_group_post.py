@@ -3229,6 +3229,43 @@ def require_network(phone: Phone) -> None:
         raise PostError(OFFLINE_MESSAGE)
 
 
+
+def _keep_failure_shot(phone, group_id, index: int, total: int,
+                       caption: str, why: str) -> None:
+    """เก็บภาพ+ผังจอตอนโพสต์กลุ่มล้ม — กติกาข้อ 2.6.1 (เพิ่ม 29 ส.ค. 2569)
+
+    ตรวจจริงวันนี้: โพสต์ล้ม 2 กลุ่มติดกัน ("หาปุ่มไม่เจอภายในเวลา: โพสต์" ·
+    "เปิดหน้ากลุ่มไม่สำเร็จ") แต่ใน `evidence` ไม่มีภาพสักใบ ใบล่าสุดเป็นของ
+    เมื่อวาน — ไล่ต่อไม่ได้เลยว่าบนจอตอนนั้นมีอะไร ปุ่มไปอยู่ไหน
+    มีกล่องอะไรบังหรือเปล่า
+
+    **ต้องเรียกก่อนกดย้อนกลับ** ไม่ใช่ที่ชั้นนอก เพราะตัวเรียกกด back สามครั้ง
+    ทันทีหลังจากนี้ หน้าที่พังหายไปแล้ว แคปทีหลังได้แต่หน้าเปล่า
+
+    เก็บสามอย่างคู่กันตามกติกา: ภาพ .png (เห็นด้วยตา) · ผังจอ .xml (ค้นได้) ·
+    บริบท .txt (กลุ่มไหน ใบที่เท่าไร แคปชันอะไร)
+    """
+    import evidence                                     # noqa: PLC0415
+
+    try:
+        markup = phone.dump()
+    except Exception:                                   # noqa: BLE001
+        markup = ""
+    try:
+        png = phone.run("exec-out", "screencap", "-p", timeout=60).stdout
+    except Exception:                                   # noqa: BLE001
+        png = b""
+    saved = evidence.capture(
+        f"โพสต์กลุ่มไม่สำเร็จ — {why[:44]}", tag="publish", markup=markup,
+        note=(f"กลุ่ม {group_id} · ใบที่ {index}/{total}"
+              f"{chr(10)}แคปชัน: {caption[:80]}"
+              f"{chr(10)}สาเหตุ: {why}"))
+    if saved and png:
+        try:
+            Path(str(saved).replace(".txt", ".png")).write_bytes(png)
+        except Exception:                               # noqa: BLE001
+            pass
+
 def post_to_groups(
     adb: str, serial: str, image, caption: str, group_ids: list[str],
     gap_range: tuple[float, float] = DEFAULT_GAP_RANGE,
@@ -3295,6 +3332,20 @@ def post_to_groups(
                 log("  สำเร็จ")
             except PostError as error:
                 log(f"  ล้มเหลว: {error}")
+                # **แคปหน้าจอไว้ก่อนกดย้อนกลับ** (กติกาข้อ 2.6.1 · เพิ่ม 29 ส.ค. 2569)
+                #
+                # ตรวจจริงวันนี้: โพสต์ล้ม 2 กลุ่มติดกัน ("หาปุ่มไม่เจอภายในเวลา:
+                # โพสต์" · "เปิดหน้ากลุ่มไม่สำเร็จ") แต่ใน evidence ไม่มีภาพสักใบ
+                # ใบล่าสุดเป็นของเมื่อวาน — ไล่ต่อไม่ได้เลยว่าบนจอตอนนั้นมีอะไร
+                # ปุ่มไปอยู่ไหน มีกล่องอะไรบังหรือเปล่า
+                #
+                # ต้องแคป **ตรงนี้** ไม่ใช่ที่ชั้นนอก เพราะสามบรรทัดถัดไปกด back
+                # สามครั้ง หน้าที่พังหายไปแล้ว แคปทีหลังได้แต่หน้าเปล่า
+                try:
+                    _keep_failure_shot(phone, group_id, index, len(group_ids),
+                                       caption, str(error))
+                except Exception:                         # noqa: BLE001, S110
+                    pass        # เก็บหลักฐานไม่ได้ ต้องไม่ทำให้งานล้มหนักขึ้น
                 entry = {"group_id": group_id, "posted": False, "error": str(error)}
                 results.append(entry)
                 # เคลียร์หน้าค้างก่อนไปกลุ่มถัดไป ไม่งั้นกลุ่มถัดไปเริ่มจากหน้าผิด

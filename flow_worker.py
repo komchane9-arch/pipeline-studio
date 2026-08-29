@@ -134,8 +134,207 @@ class _DataBlob(ctypes.Structure):
     ]
 
 
+# ---- คีย์ Gemini หลายใบ (เจ้าของสั่ง 30 ส.ค. 2569) -------------------------
+#
+# *"ผมจะแอดเป็น 2 API key ทำได้เลยไหม"* — เดิมเก็บได้ใบเดียว พอเครดิตหมด
+# ทั้งระบบหยุดทันที (เกิดจริงคืน 29 ส.ค.: Gemini ตอบ
+# `Your prepayment credits are depleted` แล้วสายคลิปหยุดยาว)
+#
+# ⚠️ **คีย์ที่สองต้องอยู่คนละโปรเจกต์คนละบัญชี** เครดิตแบบเติมล่วงหน้าผูกกับ
+# โปรเจกต์ ไม่ได้ผูกกับคีย์ — สร้างคีย์ใหม่ในโปรเจกต์เดิมจะกินถังเดียวกัน
+# ไม่ช่วยอะไรเลย (เจ้าของยืนยันแล้วว่าเป็นคนละโปรเจกต์คนละบัญชี)
+#
+# **ทำที่ตัวจ่ายคีย์จุดเดียว** มี 9 ไฟล์ที่ยิงถาม Gemini ถ้าไปใส่ตรรกะสลับคีย์
+# ทีละไฟล์จะมี 9 ที่ให้พลาด ตรงนี้เป็นประตูเดียวที่ทุกไฟล์ผ่าน จึงคุมได้ที่เดียว
+#
+# เก็บหลายใบใน**ไฟล์เดิม** คั่นด้วยขึ้นบรรทัด — ใบเดียวไม่มีขึ้นบรรทัด
+# ของเก่าจึงอ่านได้เหมือนเดิมทุกประการ ไม่ต้องแปลงอะไร
+
+# ใบที่ใช้ไม่ได้ชั่วคราว จดไว้ที่นี่ — **เก็บแค่ลายนิ้วมือ ไม่เก็บคีย์จริง**
+# ไฟล์นี้ไม่ได้เข้ารหัส ถ้าเก็บคีย์จริงจะกลายเป็นรูรั่วที่เราสร้างเอง
+GEMINI_STATE_FILE = GEMINI_KEY_FILE.parent / "gemini_key_state.json"
+
+# พักใบที่มีปัญหานานแค่ไหน — แยกตามชนิดเพราะแก้คนละทาง
+GEMINI_REST = {
+    "credits": 12 * 3600.0,    # เครดิตเติมล่วงหน้าหมด — รอไม่คืน ต้องเติมเงิน
+    "daily": 6 * 3600.0,       # โควตารายวันหมด — คืนข้ามวัน
+    "rate": 120.0,             # ยิงถี่เกินไป — เดี๋ยวเดียวก็หาย
+}
+
+
+def _key_mark(key: str) -> str:
+    """ลายนิ้วมือของคีย์ ไว้จดสถานะโดยไม่ต้องเก็บคีย์จริง"""
+    import hashlib                                            # noqa: PLC0415
+
+    return hashlib.sha256((key or "").encode("utf-8")).hexdigest()[:12]
+
+
+def _key_state() -> dict:
+    import json                                               # noqa: PLC0415
+
+    try:
+        return json.loads(GEMINI_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:                                         # noqa: BLE001
+        return {}
+
+
+def _read_key_file() -> str:
+    """ถอดรหัสไฟล์คีย์ — คืนข้อความดิบ (อาจมีหลายบรรทัด)"""
+    if not GEMINI_KEY_FILE.is_file():
+        return ""
+    encrypted = GEMINI_KEY_FILE.read_bytes()
+    buffer = ctypes.create_string_buffer(encrypted, len(encrypted))
+    source = _DataBlob(
+        len(encrypted), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char))
+    )
+    destination = _DataBlob()
+    ok = ctypes.windll.crypt32.CryptUnprotectData(
+        ctypes.byref(source), None, None, None, None, 0, ctypes.byref(destination)
+    )
+    if not ok:
+        return ""
+    try:
+        return ctypes.string_at(destination.pbData, destination.cbData).decode("utf-8")
+    finally:
+        ctypes.windll.kernel32.LocalFree(
+            ctypes.cast(destination.pbData, wintypes.HLOCAL)
+        )
+
+
+def load_gemini_keys() -> list[str]:
+    """คีย์ทุกใบที่เก็บไว้ เรียงตามลำดับที่ใส่"""
+    return [line.strip() for line in _read_key_file().splitlines() if line.strip()]
+
+
+def gemini_key_board() -> list[dict]:
+    """สถานะคีย์ทุกใบให้คนอ่าน — ใบไหนใช้ได้ ใบไหนพักอยู่ เพราะอะไร"""
+    import time                                               # noqa: PLC0415
+
+    state = _key_state()
+    now = time.time()
+    rows = []
+    for index, key in enumerate(load_gemini_keys(), 1):
+        note = state.get(_key_mark(key)) or {}
+        until = float(note.get("until") or 0)
+        rows.append({
+            "no": index,
+            "tail": key[-6:],                 # ปลายคีย์พอให้แยกออกว่าใบไหน
+            "ok": until <= now,
+            "why": str(note.get("why") or ""),
+            "wait_min": max(0, round((until - now) / 60)),
+        })
+    return rows
+
+
+def mark_gemini_key_bad(key: str, why: str = "", kind: str = "rate") -> None:
+    """จดว่าคีย์ใบนี้ใช้ไม่ได้ชั่วคราว — ครั้งหน้าตัวจ่ายจะข้ามไปใบถัดไปเอง
+
+    `kind` = credits (เครดิตหมด) · daily (โควตารายวัน) · rate (ยิงถี่)
+    """
+    import json                                               # noqa: PLC0415
+    import time                                               # noqa: PLC0415
+
+    if not key:
+        return
+    # เก็บ **เฉพาะข้อความที่คนอ่านรู้เรื่อง** ไม่ใช่ JSON ดิบทั้งก้อน
+    # ไม่งั้นกระดานสถานะจะอ่านไม่ออกเลย
+    note = str(why or "")
+    if note.lstrip().startswith("{"):
+        try:
+            note = json.loads(note).get("error", {}).get("message", "") or note
+        except Exception:                                     # noqa: BLE001
+            pass
+    state = _key_state()
+    state[_key_mark(key)] = {
+        "until": time.time() + GEMINI_REST.get(kind, GEMINI_REST["rate"]),
+        "why": note[:200],
+        "kind": kind,
+    }
+    try:
+        GEMINI_STATE_FILE.write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def gemini_trouble_kind(body: str) -> str:
+    """อ่านคำตอบของ Google แล้วบอกว่าเป็นปัญหาชนิดไหน — ว่างแปลว่าไม่ใช่เรื่องโควตา
+
+    **ต้องแยกให้ออก เพราะแก้คนละทางสิ้นเชิง**
+      · เครดิตหมด    รอเท่าไรก็ไม่คืน ต้องเติมเงินหรือสลับคีย์
+      · โควตารายวัน  คืนข้ามวัน
+      · ยิงถี่        รอไม่กี่วินาทีก็หาย
+    ของเดิมจดแค่เลข 429 ทำให้แยกไม่ออก แล้วไปนั่งรอโควตาที่ไม่มีวันคืน
+    (เกิดจริง 29 ส.ค. 2569 — เข้าใจผิดว่ารอถึงเที่ยงคืนแล้วจะใช้ได้)
+    """
+    low = (body or "").lower()
+    if "prepayment credits" in low or "credits are depleted" in low:
+        return "credits"
+    if "billing" in low and "quota" in low:
+        return "credits"
+    if "perday" in low.replace("_", "").replace(" ", "") or "per day" in low:
+        return "daily"
+    if "resource_exhausted" in low or "quota" in low:
+        return "rate"
+    return ""
+
+
+def clear_gemini_key(key: str) -> None:
+    """ปลดโทษคีย์ใบนี้ — เรียกเองได้ หรือถูกเรียกอัตโนมัติเมื่อยิงผ่าน"""
+    import json                                               # noqa: PLC0415
+
+    if not key:
+        return
+    state = _key_state()
+    if state.pop(_key_mark(key), None) is None:
+        return
+    try:
+        GEMINI_STATE_FILE.write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def note_gemini_response(key: str, status: int, body: str) -> str:
+    """ให้ตัวเรียกส่งคำตอบที่ได้จาก Gemini มาที่นี่ — คืนชนิดปัญหาที่เจอ
+
+    เรียกได้ทุกครั้งไม่ว่าจะสำเร็จหรือไม่ ราคาถูกและปลอดภัย
+    """
+    if status == 200:
+        # **ยิงผ่านเมื่อไร ต้องปลดโทษทันที** ไม่งั้นเติมเงินแล้วคีย์ยังถูกพักต่อ
+        # อีก 12 ชั่วโมงโดยไม่มีเหตุผล แล้วเจ้าของจะนึกว่าเติมไปไม่ได้ผล
+        clear_gemini_key(key)
+        return ""
+    kind = gemini_trouble_kind(body)
+    if kind:
+        mark_gemini_key_bad(key, (body or "")[:200], kind)
+    return kind
+
+
 def load_gemini_api_key() -> str | None:
-    """อ่านคีย์ที่เว็บแอปเก็บไว้ (เข้ารหัสด้วย Windows DPAPI ผูกกับบัญชีผู้ใช้)"""
+    """คีย์ที่ **ใช้ได้ตอนนี้** — มีหลายใบจะข้ามใบที่เพิ่งมีปัญหาให้เอง
+
+    ทุกไฟล์ที่ยิงถาม Gemini เรียกตัวนี้ ไม่ต้องรู้ว่ามีกี่ใบ
+    ถ้าทุกใบติดปัญหาหมด **คืนใบที่จะพ้นโทษเร็วที่สุด ไม่คืนค่าว่าง** เพราะ
+    "ไม่มีคีย์" กับ "คีย์ติดโควตา" เป็นคนละอาการ ถ้าคืนว่างผู้เรียกจะรายงานว่า
+    ยังไม่ได้ตั้งคีย์ ซึ่งพาไปแก้ผิดที่
+    """
+    import time                                               # noqa: PLC0415
+
+    keys = load_gemini_keys()
+    if not keys:
+        return None
+    if len(keys) == 1:
+        return keys[0]
+    state, now = _key_state(), time.time()
+    ready = [k for k in keys if float((state.get(_key_mark(k)) or {}).get("until") or 0) <= now]
+    if ready:
+        return ready[0]
+    return min(keys, key=lambda k: float((state.get(_key_mark(k)) or {}).get("until") or 0))
+
+
+def _load_gemini_api_key_single() -> str | None:
+    """ตัวอ่านแบบเดิม เก็บไว้เผื่อต้องเทียบ — ไม่ได้ใช้ในสายงานปกติ"""
     if not GEMINI_KEY_FILE.is_file():
         return None
     encrypted = GEMINI_KEY_FILE.read_bytes()

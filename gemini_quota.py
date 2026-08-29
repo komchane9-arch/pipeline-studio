@@ -228,6 +228,24 @@ def record(model: str, ok: bool = True, response=None) -> None:
     daily, limit, why = (False, "", "")
     if not ok and response is not None:
         daily, limit, why = _quota_from_429(response)
+        # ---- บอกตัวจ่ายคีย์ด้วยว่าใบที่ใช้อยู่มีปัญหา (30 ส.ค. 2569) ----------
+        #
+        # **ทำที่นี่เพราะเป็นจุดเดียวที่ทุกไฟล์ผ่าน** — มี 8 ไฟล์ยิงถาม Gemini
+        # และทุกไฟล์เรียก record() ทุกครั้ง ถ้าไปใส่ตรรกะสลับคีย์ทีละไฟล์
+        # จะมี 8 ที่ให้ลืม แล้วไฟล์ที่ลืมจะยิงคีย์ที่ตายแล้วต่อไปเรื่อยๆ
+        #
+        # ตัวจ่ายคีย์จะพักใบนี้ไว้แล้วยกใบถัดไปมาให้เองในการเรียกครั้งหน้า
+        # **ห้ามทำให้งานหลักล้ม** เหมือนกฎของทั้งไฟล์นี้ — พลาดก็ปล่อยผ่าน
+        try:
+            import flow_worker                                # noqa: PLC0415
+
+            flow_worker.note_gemini_response(
+                flow_worker.load_gemini_api_key() or "",
+                getattr(response, "status_code", 0),
+                getattr(response, "text", "") or "",
+            )
+        except Exception:                                     # noqa: BLE001
+            pass
 
     # คิดเงินจากจำนวนโทเคนที่คำตอบบอกมา — คำตอบที่ล้มไม่มี usageMetadata
     # จึงไม่ถูกคิดเงิน ซึ่งตรงกับความจริง (Google ไม่คิดเงินคำขอที่ปฏิเสธ)

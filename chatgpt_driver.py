@@ -1144,27 +1144,29 @@ def make_storyboard(
                 # ขอซ้ำครั้งเดียวพอ — ถ้ายังไม่ครบแปลว่า GPT ไม่ยอมทำตาม
                 # การวนขอไม่รู้จบมีแต่จะกินเวลาโดยไม่ได้อะไรเพิ่ม
                 problem = flow_audio_problem(flow_prompts)
-                missing = [problem] if problem else []
-                if missing:
+                if problem:
                     log(f"  ⚠️ บรรทัดเสียงยังไม่ผ่านกติกา: {problem} — ขอใหม่อีกครั้ง")
                     retry = session.ask(
-                        "คำสั่งที่ให้มายังขาดบรรทัดสั่งเสียงพูดในบางฉาก\n"
-                        f"ฉากที่ขาดคือ: {', '.join(str(n) for n in missing)}\n"
-                        "ขอคำสั่งชุดเดิมใหม่ทั้งหมด โดย**ทุกฉากต้องมี**บรรทัดนี้"
-                        "ท้ายฉาก:\n"
-                        "Audio: Generate Thai voice-over narration: \"<คำพูดของฉากนั้น>\""
+                        f"คำสั่งที่ให้มายังไม่ถูกกติกา: {problem}"
+                        "\n\n"
+                        "ขอคำสั่งชุดเดิมใหม่ทั้งหมด โดยทำตามนี้ให้ครบ:"
+                        + FLOW_AUDIO_RULE
                     )
                     again = extract_prompts(retry)
-                    still = flow_prompts_missing_audio(again)
-                    if again and len(still) < len(missing):
+                    # **ตัวตัดสินต้องเป็นตัวเดียวกับด่าน** ของเดิมนับ "ฉากที่ไม่มีเสียง"
+                    # ซึ่งกลายเป็นผิดตั้งแต่เปลี่ยนกติกาเป็นพูดแค่ 3 จาก 5 ฉาก —
+                    # GPT ตอบถูกกติกามา ระบบจะเห็นว่ามี 2 ฉากไม่มีเสียงแล้ว
+                    # **ทิ้งของที่ถูก เก็บของผิดไว้แทน** (แก้ 29 ส.ค. 2569)
+                    still = flow_audio_problem(again) if again else "ไม่ได้คำสั่งกลับมา"
+                    if again and not still:
                         flow_reply, flow_prompts = retry, again
-                        log(f"  ได้คำสั่งใหม่ {len(again)} ชุด · ยังขาดเสียง {len(still)} ฉาก")
+                        log(f"  ได้คำสั่งใหม่ {len(again)} ชุด · ผ่านกติกาแล้ว")
                     else:
                         # ของใหม่ไม่ได้ดีกว่าเดิม เก็บของเดิมไว้ แต่**ต้องไม่เงียบ**
                         warnings.append(
-                            f"คำสั่ง Flow ยังขาดบรรทัดสั่งเสียงพูด {len(missing)} ฉาก "
-                            "— คลิปที่ได้อาจไม่มีเสียงพูด")
-                        log("  ⚠️ ขอใหม่แล้วยังไม่ครบ — เก็บของเดิมไว้และแจ้งเตือน")
+                            f"คำสั่ง Flow ยังไม่ถูกกติกา ({problem}) "
+                            "— คลิปที่ได้อาจมีเสียงไม่ครบหรือถูกตัดกลางคัน")
+                        log(f"  ⚠️ ขอใหม่แล้วยังไม่ผ่าน ({still}) — เก็บของเดิมไว้")
             except Exception as error:                          # noqa: BLE001
                 warnings.append(f"ขอคำสั่ง Flow ไม่สำเร็จ ({error})")
                 log(f"  ⚠️ ขอคำสั่ง Flow ไม่สำเร็จ: {error} — เก็บสตอรีบอร์ดที่ได้ไว้ก่อน")

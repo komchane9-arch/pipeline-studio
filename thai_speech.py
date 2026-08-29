@@ -176,6 +176,13 @@ _BODY = f"(?:{_BODY_VOWEL}|{_BODY_PLAIN})"
 # ("มีน้อง" เคยถูกแยกเป็น มีน้-อง เพราะยอมให้ ้ ตามหลังตัวสะกด น)
 _SYL_CLOSED = re.compile(f"{_BODY}{_FINAL}[{_SARA_A}]?[{_MAI}]?")
 _SYL_OPEN = re.compile(f"{_BODY}[{_SARA_A}]?[{_MAI}]?")
+# แบบสั้นสุด — พยัญชนะต้น + สระบน แล้วจบ **ไม่เก็บ ว/ย/อ ต่อท้าย**
+#
+# ต้องมีเพราะรูปแบบข้างบนคว้ายาวที่สุดเสมอ แล้ว **ไม่ถอยมาลองสั้นลงเอง**
+# "ทีวี" จึงถูกคว้าเป็น "ทีว" แล้วเหลือ "ี" ลอยเดี่ยวซึ่งต่อไม่ได้
+# ผลคือทั้งประโยคแยกไม่ลงแล้วคืนทั้งก้อนกลับไปโดยไม่มีขีดสักตัว
+# (เจ้าของเจอเอง 29 ส.ค. 2569: "ใครอยากอัปเกรดทีวีที่ทั้งสว่าง ทำไมประโยคนี้ไม่แยก")
+_SYL_MIN = re.compile(f"[{_LEAD}]?{_INIT}[{_TONE}]?[{_UPPER}]+[{_TONE}]?")
 _SYL_BARE = re.compile(f"{_INIT}(?=[{_CONS}])")
 _HAS_VOWEL = re.compile(f"[{_LEAD}{_UPPER}{_FOLLOW}{_O}{_SARA_A}]")
 _IS_CONS = re.compile(f"[{_CONS}]")
@@ -225,7 +232,7 @@ def split_syllables(word: str) -> list[str]:
             return cache[start]
         cache[start] = None                    # กันวนซ้ำตำแหน่งเดิม
         winner: tuple[int, list[str]] | None = None
-        for pattern in (_SYL_CLOSED, _SYL_OPEN, _SYL_BARE):
+        for pattern in (_SYL_CLOSED, _SYL_OPEN, _SYL_MIN, _SYL_BARE):
             found = pattern.match(text, start)
             if not found or found.end() == start:
                 continue
@@ -235,7 +242,7 @@ def split_syllables(word: str) -> list[str]:
             # **ไม้หันอากาศต้องมีตัวสะกดเสมอ** (ยกเว้นสระ ัว) — เป็นกฎการเขียน
             # ภาษาไทย ไม่ใช่การเดา "นั" เฉยๆ ไม่มีในภาษา ต้องเป็น นัก นัด นั่ง
             # ไม่มีกฎนี้ "นั่งสบาย" จะถูกแยกเป็น นั่-งส-บาย
-            if (pattern is _SYL_OPEN and "ั" in piece
+            if (pattern in (_SYL_OPEN, _SYL_MIN) and "ั" in piece
                     and not piece.endswith("ว")):
                 continue
             alone = pattern is not _SYL_CLOSED and not _HAS_VOWEL.search(piece)

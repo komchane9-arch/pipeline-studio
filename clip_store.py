@@ -570,7 +570,22 @@ def set_script(root: Path, item_id: str, lines: list[str]) -> dict:
     texts = [str(line or "").strip() for line in lines]
     if any(not text for text in texts):
         raise ClipStoreError("บทพูดต้องไม่มีฉากไหนว่าง")
-    if before and len(texts) != len(before):
+    # ---- จำนวนฉากพูดต้องเท่ากับบรรทัดเสียงในคำสั่ง Flow -------------------
+    #
+    # **แก้ 29 ส.ค. 2569** ของเดิมบังคับว่า "ต้องเท่ากับบทเดิม" ซึ่งกลายเป็นผิด
+    # ตั้งแต่เปลี่ยนกติกาเป็น **ภาพ 5 ฉาก แต่พูดแค่ 3 ฉาก** — ด่านเดิมจะไม่ยอมให้
+    # บันทึกบท 3 ฉากลงงานที่เคยมี 5 ฉาก ทั้งที่นั่นคือสิ่งที่ตั้งใจให้เกิด
+    #
+    # ตัวที่ถูกต้องคือ **นับจากบรรทัด `Audio:` ในคำสั่ง Flow** เพราะนั่นคือ
+    # จำนวนฉากที่ Veo จะพูดจริง ไม่ใช่จำนวนภาพในสตอรีบอร์ด
+    # (เดิมสองอย่างนี้เท่ากันเสมอ เลยไม่มีใครเห็นว่าใช้ตัวผิดอยู่)
+    spoken = script_in_prompts(run.get("flow_prompts") or [])
+    if spoken:
+        if len(texts) != len(spoken):
+            raise ClipStoreError(
+                f"บทพูดต้องมี {len(spoken)} ฉากเท่ากับบรรทัดสั่งเสียงในคำสั่ง Flow "
+                f"(ส่งมา {len(texts)} ฉาก) — อยากเพิ่ม/ลดฉากพูด ต้องแก้คำสั่ง Flow ก่อน")
+    elif before and len(texts) != len(before):
         raise ClipStoreError(
             f"บทพูดต้องมี {len(before)} ฉากเท่าเดิม (ส่งมา {len(texts)} ฉาก) "
             "— แก้ข้อความได้ แต่เพิ่ม/ลบฉากไม่ได้ เพราะผูกกับภาพสตอรีบอร์ด")

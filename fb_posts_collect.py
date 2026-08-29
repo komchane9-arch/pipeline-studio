@@ -311,8 +311,15 @@ def guard_blocked(page) -> bool:
 
 
 def collect_group(page, conn, group: dict, bot: str, target: int,
-                  log=log) -> dict:
-    """เก็บครบวงจรหนึ่งกลุ่ม — คืนสรุปผล"""
+                  log=log, skip_comments: bool = False) -> dict:
+    """เก็บครบวงจรหนึ่งกลุ่ม — คืนสรุปผล
+
+    `skip_comments=True` เก็บแค่ฟีด (ลิงก์ · ยอดไลก์ · ยอดคอมเมนต์) แล้วจบ
+    **ไม่เปิดโพสต์ทีละใบเพื่ออ่านคอมเมนต์** ซึ่งเป็นขั้นที่กินเวลามากที่สุด
+
+    เพิ่มเมื่อ 29 ส.ค. 2569 — เจ้าของขอแค่ "ลิงก์โพสต์ที่ไลก์เยอะ กลุ่มละ 5"
+    แต่ตัวเก็บเดินต่อไปอ่านคอมเมนต์ 367 โพสต์ (หลายชั่วโมง) ทั้งที่ไม่ได้ใช้เลย
+    """
     gid, name = group["gid"], group.get("name") or group["gid"]
     run_id = store.start_run(conn, gid, bot, "feed")
     log(f"▶ เริ่มกลุ่ม: {name}")
@@ -337,6 +344,20 @@ def collect_group(page, conn, group: dict, bot: str, target: int,
         log(f"  เก็บโพสต์ {len(posts)} (ใหม่ {new_posts})")
 
     images = download_images(conn, gid, name, log=log)
+
+    if skip_comments:
+        # ติดธงว่า "ข้ามโดยตั้งใจ" ไม่ใช่ "ยังไม่ได้ทำ" — ไม่งั้นรอบหน้าจะมาไล่
+        # อ่านย้อนหลังทั้งหมด ทั้งที่เจ้าของบอกแล้วว่าไม่ต้องการคอมเมนต์
+        left = conn.execute(
+            "UPDATE fb_post SET comments_state='skipped' "
+            "WHERE gid=? AND comments_state='pending'", (gid,)).rowcount
+        conn.commit()
+        log(f"  ข้ามการอ่านคอมเมนต์ตามที่สั่ง ({left} โพสต์)")
+        summary = store.group_summary(conn, gid)
+        store.end_run(conn, run_id, "done", posts_seen=len(posts),
+                      posts_new=new_posts, comments_new=0, images_new=images)
+        return {**summary, "posts_new": new_posts, "comments_new": 0,
+                "images": images, "opened": 0}
 
     # เปิดเฉพาะโพสต์ที่มีคอมเมนต์จริง เรียงจากคอมเมนต์เยอะไปน้อย
     todo = conn.execute("""
@@ -426,6 +447,7 @@ def main() -> int:
             target = int(args[i + 1])
         if a == "--gid" and i + 1 < len(args):
             only_gid = args[i + 1]
+    skip_comments = "--no-comments" in args
 
     conn = store.connect()
     stale = store.close_stale_runs(conn, bot)
@@ -473,7 +495,8 @@ def main() -> int:
                     break
                 started = time.time()
                 try:
-                    result = collect_group(page, conn, group, bot, target, log=log)
+                    result = collect_group(page, conn, group, bot, target,
+                                           log=log, skip_comments=skip_comments)
                     db_retry(store.finish_group, conn, group["gid"], "done")
                     mins = (time.time() - started) / 60
                     log(f"✅ จบกลุ่ม {group.get('name')} ใน {mins:.1f} นาที")

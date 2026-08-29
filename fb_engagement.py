@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS my_comment (
     author      TEXT,
     body        TEXT,
     when_text   TEXT,
+    reply_to    TEXT,                         -- ตอบต่อคอมเมนต์ของใคร (ว่าง = คอมเมนต์ชั้นบน)
     is_ours     INTEGER NOT NULL DEFAULT 0,   -- คอมเมนต์ของเราเอง ไม่ต้องตอบ
     answered    INTEGER NOT NULL DEFAULT 0,   -- ตอบไปแล้วหรือยัง
     first_seen  TEXT NOT NULL,
@@ -332,35 +333,108 @@ def read_post(page, url: str, expect: str = "") -> dict:
         seen_comments = sum(1 for x in labels if x.startswith("ความคิดเห็นจาก"))
         counts["comments"] = seen_comments
 
+    # อ่านคอมเมนต์จากในกล่องโพสต์เท่านั้น — ทั้งหน้ามี `div[role="article"]`
+    # หลายกล่องที่เป็นโพสต์คนอื่นในฟีดข้างหลังหน้าต่างซ้อน
     comments = []
+    skipped_post = 0
     try:
-        # อ่านคอมเมนต์จากในกล่องโพสต์เท่านั้น — `div[role="article"]` ทั้งหน้า
-        # มี 8 กล่อง ซึ่งส่วนใหญ่เป็นโพสต์คนอื่นในฟีดที่อยู่ข้างหลังหน้าต่างซ้อน
-        holder = None
-        for node in page.query_selector_all('div[role="dialog"]'):
-            try:
-                if expect and expect.strip()[:14] in (node.inner_text() or ""):
-                    holder = node
-                    break
-            except Exception:
+        for order, node in enumerate(holder_node.query_selector_all(
+                'div[role="article"]'), 1):
+            head = parse_comment_label(node.get_attribute("aria-label") or "")
+            if head is None:
+                # ไม่มีป้ายคอมเมนต์ = ตัวโพสต์เอง ไม่ใช่คอมเมนต์ (ดูคำอธิบายข้างบน)
+                skipped_post += 1
                 continue
-        nodes = (holder or page).query_selector_all('div[role="article"]')
-        for order, node in enumerate(nodes, 1):
-            text = (node.inner_text() or "").strip()
-            if not text or len(text) < 2:
-                continue
-            lines = [x for x in text.splitlines() if x.strip()]
-            if len(lines) < 2:
-                continue
+            body = clean_comment_body(node.inner_text() or "", head["author"])
             comments.append({
                 "seq": order,
-                "author": lines[0][:120],
-                "body": "\n".join(lines[1:])[:2000],
+                "author": head["author"][:120],
+                "body": body[:2000],
+                "when_text": head["when_text"][:60],
+                "reply_to": head["reply_to"][:120],
             })
     except Exception as error:            # อ่านคอมเมนต์ไม่ได้ ต้องไม่ทำให้ยอดหาย
         log(f"   อ่านคอมเมนต์ไม่ได้: {type(error).__name__}: {error}")
 
     return {"reachable": True, "note": "", **counts, "comments_list": comments}
+
+
+# ------------------------------------------------------- แยกคอมเมนต์จากป้ายกำกับ
+
+# **ตัวโพสต์เองก็เป็น `div[role="article"]` เหมือนคอมเมนต์** (28 ส.ค. 2569)
+#
+# ของเดิมหยิบ `div[role="article"]` ทุกอันมาเป็นคอมเมนต์ ผลคือใน 18 อันที่
+# เก็บมาได้ มีคอมเมนต์ของคนอื่นจริงแค่ 2 อัน ที่เหลือเป็นแคปชั่นโพสต์ของเราเอง
+# ที่ถูกนับเป็นคอมเมนต์ — และ `author` กลายเป็นชื่อกลุ่มเพราะบรรทัดแรกของโพสต์
+# คือชื่อกลุ่ม ไม่ใช่ชื่อคน
+#
+# นี่คือกติกาข้อ 2.3.1 เป๊ะ: ถามคำถามที่ตอบว่า "ใช่" ได้ทั้งตอนถูกและตอนผิด
+#   ถามว่า  "เป็น div[role=article] ไหม"      → โพสต์ก็ใช่ คอมเมนต์ก็ใช่
+#   ต้องถาม "มีป้าย aria-label ของคอมเมนต์ไหม" → **มีเฉพาะคอมเมนต์**
+#
+# แกะจากหน้าจริงแล้วป้ายบอกครบทุกอย่างที่ต้องรู้:
+#   ตัวโพสต์      (ไม่มีป้ายเลย)
+#   คอมเมนต์      "ความคิดเห็นจาก Pongpat … เมื่อ 4 ชั่วโมงที่แล้ว"
+#   คำตอบของเรา   "ข้อความตอบกลับจาก Kp Oo ต่อความคิดเห็นของ Pongpat … เมื่อ …"
+#
+# บรรทัดสุดท้ายสำคัญมาก — มันบอกว่า **เราตอบใครไปแล้ว** จึงตั้งธง answered
+# ได้จากของจริงบนหน้า แทนที่จะเดาหรือปล่อยให้เป็น 0 ตลอดกาล
+_LABEL_COMMENT = re.compile(
+    r"^(?:ความคิดเห็นจาก|Comment by)\s+(.+?)(?:\s+(?:เมื่อ|on)\s+(.+))?$")
+_LABEL_REPLY = re.compile(
+    r"^(?:ข้อความตอบกลับจาก|Reply by)\s+(.+?)"
+    r"\s+(?:ต่อความคิดเห็นของ|to)\s+(.+?)"
+    r"(?:'s comment)?(?:\s+(?:เมื่อ|on)\s+(.+))?$")
+
+
+def parse_comment_label(label: str) -> dict | None:
+    """แกะป้าย aria-label — คืน None ถ้าไม่ใช่ป้ายของคอมเมนต์ (เช่นตัวโพสต์)"""
+    text = (label or "").strip()
+    if not text:
+        return None
+    match = _LABEL_REPLY.match(text)
+    if match:
+        return {"author": match.group(1).strip(),
+                "reply_to": match.group(2).strip(),
+                "when_text": (match.group(3) or "").strip()}
+    match = _LABEL_COMMENT.match(text)
+    if match:
+        return {"author": match.group(1).strip(), "reply_to": "",
+                "when_text": (match.group(2) or "").strip()}
+    return None
+
+
+# บรรทัดที่ไม่ใช่เนื้อคอมเมนต์ — ปุ่มท้ายกล่อง ป้ายสถานะ และตัวคั่น
+_JUNK_LINES = {
+    "·", "•", "ตอบกลับ", "แชร์", "ถูกใจ", "แก้ไขแล้ว", "ดูคำแปล",
+    "Reply", "Share", "Like", "Edited", "See translation",
+    "ผู้มีส่วนร่วมดาวเด่น", "Top contributor", "ผู้เขียน", "Author",
+    "ผู้ดูแล", "Admin", "สมาชิกใหม่", "New member",
+}
+_TIME_LINE = re.compile(
+    r"^(?:เมื่อสักครู่|Just now|\d+\s*(?:วินาที|นาที|ชั่วโมง|ชม\.?|วัน|สัปดาห์|เดือน|ปี"
+    r"|s|m|h|d|w|y|min|mins|hr|hrs|hour|hours|day|days|week|weeks)"
+    r"(?:ที่แล้ว| ago)?)$", re.I)
+# หัวการ์ดพรีวิวลิงก์ — โดเมนตัวพิมพ์ใหญ่ล้วน เช่น "S.SHOPEE.CO.TH"
+# การ์ดอยู่ท้ายคอมเมนต์เสมอ เจอเมื่อไรตัดตั้งแต่ตรงนั้นถึงจบได้เลย
+_LINK_CARD = re.compile(r"^[A-Z0-9][A-Z0-9.\-]*\.[A-Z]{2,}$")
+
+
+def clean_comment_body(text: str, author: str) -> str:
+    """เอาเนื้อคอมเมนต์จริงออกมา — ตัดชื่อคน เวลา ปุ่ม และการ์ดพรีวิวลิงก์ทิ้ง"""
+    lines = [x.strip() for x in (text or "").splitlines()]
+    kept: list[str] = []
+    for line in lines:
+        if not line:
+            continue
+        if _LINK_CARD.match(line):     # เจอหัวการ์ดพรีวิว = จบเนื้อคอมเมนต์แล้ว
+            break
+        if line in _JUNK_LINES or _TIME_LINE.match(line):
+            continue
+        if author and line == author:
+            continue
+        kept.append(line)
+    return (chr(10).join(kept)).strip()
 
 
 # --------------------------------------------------------------------- บันทึก
@@ -376,25 +450,48 @@ def save(conn: sqlite3.Connection, post: dict, result: dict) -> tuple[int, int]:
          result.get("reactions"), result.get("comments"), result.get("shares"),
          1 if result.get("reachable") else 0, result.get("note", ""), now))
 
+    items = result.get("comments_list") or []
+    me = (post["account"] or "").lower()
+
+    # **ใครถูกเราตอบไปแล้วบ้าง — อ่านจากป้ายบนหน้า ไม่ใช่เดา**
+    # ป้ายของคำตอบเขียนว่า "ข้อความตอบกลับจาก <เรา> ต่อความคิดเห็นของ <เขา>"
+    # ชื่อ <เขา> ที่โผล่ในนั้นคือคนที่เราตอบไปแล้ว
+    answered_names = {
+        (item.get("reply_to") or "").lower()
+        for item in items
+        if item.get("reply_to") and me and me in (item.get("author") or "").lower()
+    }
+    answered_names.discard("")
+
     fresh = 0
-    for item in result.get("comments_list") or []:
-        key = f"{post['post_url']}#{item['seq']}#{item['author'][:40]}"
-        ours = post["account"].lower() in item["author"].lower()
+    for item in items:
+        author = item["author"]
+        # กุญแจต้องไม่ผูกกับลำดับ — คอมเมนต์ใหม่แทรกเข้ามาแล้วลำดับขยับทั้งแถว
+        # ของเดิมใช้ลำดับ จึงนับคอมเมนต์เดิมเป็นของใหม่ทุกครั้งที่มีคนมาคอมเมนต์เพิ่ม
+        key = f"{post['post_url']}#{author[:40]}#{(item['body'] or '')[:60]}"
+        ours = 1 if (me and me in author.lower()) else 0
+        answered = 1 if (not ours and author.lower() in answered_names) else 0
         row = conn.execute(
-            "SELECT comment_key FROM my_comment WHERE comment_key=?", (key,)).fetchone()
+            "SELECT comment_key, answered FROM my_comment WHERE comment_key=?",
+            (key,)).fetchone()
         if row:
-            conn.execute("UPDATE my_comment SET last_seen=?, body=? WHERE comment_key=?",
-                         (now, item["body"], key))
+            conn.execute(
+                """UPDATE my_comment SET last_seen=?, body=?, when_text=?, reply_to=?,
+                          answered=MAX(answered, ?) WHERE comment_key=?""",
+                (now, item["body"], item.get("when_text", ""),
+                 item.get("reply_to", ""), answered, key))
             continue
         conn.execute(
             """INSERT INTO my_comment (comment_key, post_url, seq, author, body,
-                                       when_text, is_ours, answered, first_seen, last_seen)
-               VALUES (?,?,?,?,?,?,?,0,?,?)""",
-            (key, post["post_url"], item["seq"], item["author"], item["body"],
-             "", 1 if ours else 0, now, now))
+                                       when_text, reply_to, is_ours, answered,
+                                       first_seen, last_seen)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (key, post["post_url"], item["seq"], author, item["body"],
+             item.get("when_text", ""), item.get("reply_to", ""),
+             ours, answered, now, now))
         fresh += 1
     conn.commit()
-    return fresh, len(result.get("comments_list") or [])
+    return fresh, len(items)
 
 
 # ----------------------------------------------------------------------- รอบเช็ค

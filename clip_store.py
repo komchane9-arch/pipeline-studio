@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from datetime import datetime
@@ -492,6 +493,62 @@ def set_highlights(root: Path, item_id: str, highlights: list[str]) -> dict:
     return run
 
 
+# บรรทัดสั่งเสียงในคำสั่ง Flow — จับส่วนที่เป็นคำพูดไว้ในกลุ่มที่ 2
+#
+# **ทำไมต้องรู้จักบรรทัดนี้ถึงในไฟล์เก็บข้อมูล** เพราะบทพูดที่ผู้ใช้เห็นและแก้
+# กับบทที่ Veo อ่านออกเสียงจริง **ต้องเป็นข้อความเดียวกัน** ถ้าเก็บแยกกันเมื่อไร
+# จะกลับไปเป็นบั๊กเดิมทันที (29 ส.ค. 2569 วัดได้ว่าบทสองฉบับตรงกัน 0 จาก 65 ใบ
+# ผลคือกดอนุมัติบทหรือพิมพ์แก้บท คลิปก็ยังพูดเหมือนเดิมทุกครั้ง)
+AUDIO_LINE_RE = re.compile(
+    r"(^[ \t]*Audio[ \t]*[:：][ \t]*"
+    r"(?:Generate[ \t]+Thai[ \t]+voice-?over[ \t]+narration[ \t]*[:：]?[ \t]*)?)"
+    r"(.*)$",
+    re.I | re.M)
+
+
+def script_in_prompts(prompts: list) -> list[str]:
+    """บทพูดที่ฝังอยู่ในคำสั่ง Flow เรียงตามฉาก — บทฉบับจริงที่ Veo จะอ่าน"""
+    out = []
+    for block in prompts or []:
+        for found in AUDIO_LINE_RE.finditer(str(block or "")):
+            line = (found.group(2) or "").strip().strip('"').strip("\u201c\u201d").strip()
+            if line:
+                out.append(line)
+    return out
+
+
+def _write_script_into_prompts(prompts: list, lines: list[str]) -> tuple[list, str]:
+    """เขียนบทพูดกลับลงบรรทัด Audio ในคำสั่ง Flow — คืน (คำสั่งใหม่, เหตุผลถ้าทำไม่ได้)
+
+    **ทำไมต้องเขียนกลับ ไม่ใช่แค่เก็บบทไว้เฉยๆ** — `run["script"]` เป็นแค่ที่
+    ให้คนอ่าน ตัวที่ส่งเข้า Google Flow จริงคือ `run["flow_prompts"]`
+    ถ้าแก้แต่ตัวแรก ผู้ใช้จะเห็นบทใหม่บนหน้าเว็บ แต่คลิปยังพูดบทเก่า
+    **แล้วไม่มีอะไรฟ้องเลย** ซึ่งเกิดขึ้นจริงมาตลอดจนถึง 29 ส.ค. 2569
+
+    จำนวนบรรทัด Audio ต้องเท่ากับจำนวนบทพูดพอดี ไม่งั้นไม่รู้ว่าบรรทัดไหนคู่กับ
+    ฉากไหน — กรณีนั้น **ไม่เดา** แต่คืนเหตุผลกลับไปให้ผู้เรียกบอกผู้ใช้
+    """
+    blocks = [str(block or "") for block in prompts or []]
+    spots = [(i, m) for i, block in enumerate(blocks)
+             for m in AUDIO_LINE_RE.finditer(block)]
+    if not spots:
+        return blocks, "คำสั่ง Flow ไม่มีบรรทัดสั่งเสียงพูด — บทที่แก้จะไม่ถูกนำไปใช้"
+    if len(spots) != len(lines):
+        return blocks, (
+            f"คำสั่ง Flow มีฉากพูด {len(spots)} ฉาก แต่บทที่ส่งมามี {len(lines)} ฉาก "
+            "— บทที่แก้จะไม่ถูกนำไปใช้จนกว่าจำนวนจะตรงกัน")
+    # เขียนจากท้ายมาหน้า ตำแหน่งของบรรทัดก่อนหน้าจะได้ไม่เลื่อน
+    for order in range(len(spots) - 1, -1, -1):
+        index, found = spots[order]
+        block = blocks[index]
+        was = (found.group(2) or "").strip()
+        # คงเครื่องหมายคำพูดไว้ตามรูปแบบเดิม — ตัวแกะฝั่ง Flow มองหารูปแบบนี้
+        quoted = len(was) >= 2 and was[0] in '"“' and was[-1] in '"”'
+        fresh = f'"{lines[order]}"' if quoted else lines[order]
+        blocks[index] = block[:found.start(2)] + fresh + block[found.end(2):]
+    return blocks, ""
+
+
 def set_script(root: Path, item_id: str, lines: list[str]) -> dict:
     """เขียนบทพูดที่ผู้ใช้พิมพ์แก้เองกลับลงงาน (ผู้ใช้สั่ง 26 ส.ค. 2026)
 
@@ -521,8 +578,42 @@ def set_script(root: Path, item_id: str, lines: list[str]) -> dict:
     run["script"] = texts
     run["script_count"] = len(texts)
     run["script_at"] = _now()
+
+    # ---- เขียนบทกลับลงคำสั่ง Flow ด้วย (เจ้าของสั่ง 29 ส.ค. 2569) -------------
+    #
+    # ถ้าไม่ทำขั้นนี้ การแก้บทพูดจะ **ไม่มีผลกับคลิปเลย** เพราะสิ่งที่ส่งเข้า
+    # Google Flow คือ `flow_prompts` ไม่ใช่ `script`
+    #
+    # ทำไม่ได้ก็ไม่เงียบ — เก็บเหตุผลไว้ใน `script_sync` ให้หน้าเว็บ/แชท
+    # เอาไปบอกผู้ใช้ได้ว่าบทที่เพิ่งแก้จะยังไม่ถูกนำไปใช้ เพราะอะไร
+    # (กติกาข้อ 2.3.1 — "ยังไม่ได้ตรวจ" ต้องหน้าตาต่างจาก "ตรวจแล้วผ่าน")
+    prompts, why = _write_script_into_prompts(run.get("flow_prompts") or [], texts)
+    if why:
+        run["script_sync"] = why
+    else:
+        run["flow_prompts"] = prompts
+        run["flow_prompts_at"] = _now()
+        run.pop("script_sync", None)
+
     _write_json(folder / RUN_FILE, run)
     _write_json(folder / SCRIPT_FILE, texts)
+    return run
+
+
+def set_auto_regen(root: Path, item_id: str, count: int) -> dict:
+    """จำว่าใบนี้ถูกสั่งเจนใหม่อัตโนมัติไปแล้วกี่รอบ
+
+    **ต้องเก็บถาวรในใบงาน ไม่ใช่ในหน่วยความจำ** เพราะเซิร์ฟเวอร์รีสตาร์ตได้ตลอด
+    ถ้าตัวนับหายไปกับการรีสตาร์ต คลิปที่เจนยังไงก็ไม่ผ่านจะถูกวนเจนใหม่เรื่อยๆ
+    ซึ่งเป็นเครดิต Flow จริงทุกรอบ (เพดานอยู่ที่ `clip_app.AUTO_REGEN_LIMIT`)
+    """
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+    run["auto_regen"] = int(count)
+    run["auto_regen_at"] = _now()
+    _write_json(folder / RUN_FILE, run)
     return run
 
 

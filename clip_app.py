@@ -235,6 +235,28 @@ def _credit_estimate(run: dict) -> int:
     return max(1, scenes) * FLOW_CREDIT_PER_CLIP
 
 
+def _speech_prompt(prompt: str, level: int = 1) -> str:
+    """เตรียมคำสั่งก่อนส่งเข้า Flow — **ใส่คำอ่านเฉพาะบรรทัดที่เป็นเสียงพูด**
+
+    เจ้าของสั่ง 29 ส.ค. 2569: *"ให้ใส่เป็นคำอ่านแทน ตอนพูดทุกคำ
+    เช่น ทำงาน เป็น ทำ-งาน"*
+
+    **ใส่เฉพาะบรรทัด Audio: เท่านั้น ห้ามใส่ทั้งก้อน** — คำไทยที่อยู่ในคำบรรยาย
+    ภาพไม่ได้ถูกอ่านออกเสียง มันเป็นคำสั่งว่าจะให้วาดอะไร ใส่ขีดตรงนั้นมีแต่
+    ทำให้ Veo สับสน
+
+    ปกติ ChatGPT เขียนคำอ่านมาให้อยู่แล้ว (กติกาข้อ 3 ใน `FLOW_AUDIO_RULE`)
+    ตรงนี้จึงเป็น **ทางถอย** สำหรับบทที่มาแบบยังไม่มีขีด เช่นบทที่ผู้ใช้
+    พิมพ์แก้เอง — ข้อความที่มีขีดอยู่แล้วผ่านตรงนี้ไปโดยไม่เปลี่ยนรูป
+    """
+    ready = thai_speech.speech_ready(prompt, level)
+
+    def one(found: "re.Match[str]") -> str:
+        return found.group(1) + thai_speech.spell_out(found.group(2))
+
+    return clip_store.AUDIO_LINE_RE.sub(one, ready)
+
+
 def one_clip_mode() -> bool:
     return bool(shared.read_config().get(FLOW_ONE_CLIP_KEY, True))
 
@@ -1653,7 +1675,7 @@ def _clip_policy_recover(
         try:
             driver.new_project()
             driver.generate(
-                thai_speech.speech_ready(current, 1), "video", target,
+                _speech_prompt(current, 1), "video", target,
                 start_image=start_image, on_retry=_speech_retry,
                 seconds=seconds, video_model=model,
             )
@@ -1748,6 +1770,95 @@ def _clip_video_paths(run: dict) -> list:
     folder = Path(run.get("folder") or "")
     return [folder / name for name in (run.get("videos") or [])
             if (folder / name).is_file()]
+
+
+# อาการที่ถือว่า "คลิปใช้ไม่ได้ ต้องเจนใหม่" — เจ้าของไล่มาเองจากคลิปที่ทำไปแล้ว
+# (29 ส.ค. 2569) เรียงตามที่เขาเขียนมา
+#
+#     1 + 5  มีเสียงพูดไทย แต่บทพูดไม่ตรง     matches_script
+#     2      จอถูกแบ่งเป็นช่องแบบสตอรีบอร์ด   split_screen
+#     3      พูดไทยไม่รู้เรื่อง                speech_clear
+#     4      ตัวอักษรในคลิปอ่านไม่ออก          text_readable
+#
+# ⚠️ **ไม่รวม `speech_ok`** (อ่านคำเพี้ยนเล็กน้อย เช่น ติ๊กตั่ง) ทั้งที่น่ารำคาญ
+# เหมือนกัน เพราะวัดแล้วเจอ 42% ของใบที่ตรวจได้ — ใส่เข้าไปจะกลายเป็นเจนใหม่
+# เกือบครึ่งหนึ่งของทุกคลิป ซึ่งเป็นเครดิต Flow จริงทุกใบ
+# ทางแก้ของอาการนั้นคือคำอ่านคั่นพยางค์ (`_speech_prompt`) ไม่ใช่การเจนใหม่
+AUTO_REGEN_CHECKS = (
+    ("matches_script", False, "เสียงพูดไม่ตรงกับบท"),
+    ("split_screen", True, "จอถูกแบ่งเป็นช่องแบบสตอรีบอร์ด"),
+    ("speech_clear", False, "พูดไทยไม่รู้เรื่อง"),
+    ("text_readable", False, "ตัวอักษรในคลิปอ่านไม่ออก"),
+)
+
+# เจนใหม่ได้กี่รอบ — เจ้าของกำหนดเอง: *"วนกลับไป gen ใหม่ทันที 1 ครั้ง
+# และเจนใหม่กลับมายังเจออีกให้หยุด"*
+#
+# **เพดานนี้ห้ามเอาออก** การเจนหนึ่งรอบคือเครดิต Flow จริง ถ้าปล่อยให้วนไม่จำกัด
+# คลิปที่เจนยังไงก็ไม่ผ่าน (เช่นสินค้าที่ Veo วาดไม่ได้) จะเผาเครดิตทั้งวัน
+# โดยไม่มีใครรู้ — ตรงกับหลักในคู่มือ "retry ทุกชั้นต้องมีเพดาน แล้วข้ามแทนที่จะค้าง"
+AUTO_REGEN_LIMIT = 1
+
+
+def _clip_bad_signs(result: dict) -> list[str]:
+    """อาการเสียที่เจอในผลตรวจคลิปใบนี้ — ว่างแปลว่าไม่เจอสักอย่าง
+
+    **นับเฉพาะช่องที่ตรวจได้จริง** ช่องที่เป็น None (ตรวจไม่ได้) ไม่นับว่าเสีย
+    ตามกติกาข้อ 2.3.1 — "ยังไม่ได้ตรวจ" ต้องไม่ถูกปฏิบัติเหมือน "ตรวจแล้วผ่าน"
+    และก็ต้องไม่ถูกปฏิบัติเหมือน "ตรวจแล้วไม่ผ่าน" ด้วย
+    """
+    found = []
+    for field, bad_value, label in AUTO_REGEN_CHECKS:
+        if (result or {}).get(field) is bad_value:
+            found.append(label)
+    return found
+
+
+def _clip_auto_regen(job: dict, run: dict) -> bool:
+    """เจอคลิปเสียแล้วสั่งเจนใหม่ให้เลยไหม — คืน True แปลว่าสั่งไปแล้ว อย่าส่งคลิปให้ดู
+
+    **เจ้าของสั่ง 29 ส.ค. 2569** — *"ถ้าเจออาการ 5 อันนี้ในคลิปให้วนกลับไป
+    gen ใหม่ทันที 1 ครั้ง และเจนใหม่กลับมายังเจออีกให้หยุด"*
+
+    ต้องลบไฟล์คลิปเดิมก่อนเสมอ — ตัวเจนเห็นว่ามีไฟล์อยู่แล้วจะข้ามทุกฉาก
+    แล้วส่งคลิปเดิมกลับมา (เคยเจอจริงตอนกดปุ่มเจนใหม่ของใบที่ไม่ถึง 1080p)
+    """
+    escape = telegram_bot._escape
+    item_id = str(job.get("item_id") or "")
+    result = run.get("video_check") or {}
+    signs = _clip_bad_signs(result)
+    if not signs:
+        return False
+
+    done = int(run.get("auto_regen") or 0)
+    why = " · ".join(signs)
+    if done >= AUTO_REGEN_LIMIT:
+        # เจนใหม่แล้วยังเสียอยู่ = หยุด ให้คนมาดู อย่าเผาเครดิตต่อ
+        _clip_log(f"คลิป {item_id} เจนใหม่ไปแล้ว {done} รอบ แต่ยังเจอ: {why} — หยุด")
+        _clip_say(job.get("chat_id"),
+                  f"🛑 <b>เจนใหม่แล้วยังไม่ผ่าน</b>\n{escape(why)}\n"
+                  f"เจนไป {done} รอบแล้ว หยุดไว้ก่อนเพื่อไม่ให้เสียเครดิตเปล่า "
+                  "— กดสั่งเจนใหม่เองได้ถ้าต้องการ")
+        return False
+
+    removed = 0
+    for name in run.get("videos") or []:
+        path = Path(run.get("folder", "")) / name
+        if path.is_file():
+            path.unlink()
+            removed += 1
+    clip_store.clear_videos(DATA_DIR, item_id)
+    clip_store.set_auto_regen(DATA_DIR, item_id, done + 1)
+
+    clip_jobs.update(job["id"], stage=clip_queue.STAGE_READY_FLOW,
+                     note=f"เจนใหม่อัตโนมัติ (รอบ {done + 1}) — {why}")
+    clip_runner.wake()
+    _clip_log(f"คลิป {item_id} เจอ: {why} — ลบคลิปเดิม {removed} ไฟล์ "
+              f"แล้วสั่งเจนใหม่รอบที่ {done + 1}")
+    _clip_say(job.get("chat_id"),
+              f"🔄 <b>คลิปยังไม่ผ่าน กำลังเจนใหม่ให้</b>\n{escape(why)}\n"
+              f"รอบที่ {done + 1} จาก {AUTO_REGEN_LIMIT} — ถ้ารอบนี้ยังไม่ผ่านจะหยุด")
+    return True
 
 
 def _clip_check_stale(run: dict) -> bool:
@@ -2000,7 +2111,7 @@ def _clip_generate(job: dict) -> None:
                             )
                         driver.generate(
                             # เตรียมบทให้ Veo อ่านออกตั้งแต่รอบแรก ไม่รอให้ล้มก่อน
-                            thai_speech.speech_ready(prompt, 1),
+                            _speech_prompt(prompt, 1),
                             "video", target, start_image=start_image,
                             on_retry=_speech_retry, seconds=seconds,
                             video_model=model,
@@ -2141,6 +2252,13 @@ def _clip_generate(job: dict) -> None:
     _clip_keep(lambda: _clip_check_videos(job["item_id"]), "ผลตรวจคลิป")
 
     fresh = clip_store.load_run(DATA_DIR, job["item_id"])
+
+    # ---- เจอคลิปเสีย วนกลับไปเจนใหม่เลย 1 รอบ (เจ้าของสั่ง 29 ส.ค. 2569) ----
+    #
+    # ต้องอยู่ **หลัง** ตรวจคลิปและ **ก่อน** ส่งคลิปเข้าแชท ไม่งั้นผู้ใช้จะเห็น
+    # คลิปเสียโผล่มาก่อนแล้วค่อยเห็นข้อความว่ากำลังเจนใหม่ ซึ่งสับสน
+    if fresh and _clip_auto_regen(job, fresh):
+        return
     # งานที่สั่งเจนตรง (ไม่ผ่านคิว) ไม่มีรายการในคิวให้อัปเดต — ปล่อยให้พังตรงนี้
     # จะทำให้งานที่ **เจนคลิปสำเร็จแล้ว** ถูกรายงานว่าล้มเหลว (เจอจริง 11 ส.ค.)
     if clip_jobs.get(job["id"]):
@@ -3046,6 +3164,46 @@ def _clip_take_edit(chat_id: str, text: str) -> bool:
     return bool(_apply_edit_text(job, text))
 
 
+# ขั้นที่ถือว่า "ลิงก์นี้มีคนทำอยู่แล้วหรือทำไปแล้ว" — ส่งมาซ้ำไม่ต้องทำใหม่
+#
+# **ไม่รวม failed กับ cancelled** เพราะสองอันนั้นคือของที่ยังไม่ได้คลิป
+# ส่งลิงก์เดิมมาอีกครั้งจึงถือเป็นการสั่งลองใหม่ ซึ่งถูกต้องแล้ว
+LINK_TAKEN_STAGES = frozenset(
+    s for s in (clip_queue.OPEN_STAGES or ()) if s
+) | {clip_queue.STAGE_DONE}
+
+
+def _link_key(link: str) -> str:
+    """กุญแจเทียบว่าเป็นลิงก์เดียวกันไหม
+
+    ⚠️ **ห้ามแปลงพาธเป็นตัวพิมพ์เล็ก** ลิงก์ย่อของ Shopee ใช้ตัวพิมพ์ใหญ่-เล็ก
+    แยกกันคนละสินค้า (`/112VE8Jc2y` กับ `/112ve8jc2y` คนละอัน) แปลงแล้วจะไป
+    รวมสินค้าคนละตัวเข้าด้วยกัน แล้วสินค้าที่ควรทำจะถูกทิ้งเงียบๆ
+    ตัดได้แค่ **ส่วนที่ไม่มีผลกับปลายทาง** คือชื่อโฮสต์กับพารามิเตอร์ติดตาม
+    """
+    text = (link or "").strip()
+    if not text:
+        return ""
+    body = text.split("?")[0].split("#")[0].rstrip("/")
+    if "://" in body:
+        head, _, rest = body.partition("://")
+        host, _, tail = rest.partition("/")
+        return f"{head.lower()}://{host.lower()}/{tail}"
+    return body
+
+
+def _links_already_here() -> dict:
+    """ลิงก์ที่มีใบงานอยู่แล้ว → ขั้นที่มันอยู่ (ไว้บอกผู้ใช้ว่าซ้ำกับอะไร)"""
+    taken = {}
+    for job in clip_jobs.all():
+        if job.get("stage") not in LINK_TAKEN_STAGES:
+            continue
+        key = _link_key(job.get("link"))
+        if key:
+            taken.setdefault(key, job.get("stage"))
+    return taken
+
+
 def _clip_telegram_text(chat_id: str, text: str) -> None:
     if _clip_take_edit(chat_id, text):
         return
@@ -3072,6 +3230,32 @@ def _clip_telegram_text(chat_id: str, text: str) -> None:
         )
         return
 
+    # ---- ตัดลิงก์ที่มีใบงานอยู่แล้วออก (เจ้าของถาม 29 ส.ค. 2569) --------------
+    #
+    # ของเดิมดักซ้ำ **เฉพาะในข้อความเดียวกัน** (ตัวแปร `seen` ข้างบน) ส่งลิงก์เดิม
+    # มาคนละข้อความ หรือส่งลิงก์ที่เคยทำคลิปไปแล้ว จะได้ใบงานใหม่ทุกครั้ง
+    # ตรวจคิวจริงตอนถามพบซ้ำ 3 แบบ 7 ใบ = ทำเกินไป 4 ใบ
+    #
+    # **หนึ่งใบที่ทำเกิน = เครดิต Flow จริงหนึ่งชุด** และยังไปกินที่ในเพดาน 8 งาน
+    # ทำให้ลิงก์ที่ยังไม่เคยทำต้องรอนานขึ้นโดยเปล่าประโยชน์
+    taken = _links_already_here()
+    fresh: list[tuple[str, str]] = []
+    skipped: list[str] = []
+    for kind, link in links:
+        if _link_key(link) in taken:
+            skipped.append(link)
+            continue
+        fresh.append((kind, link))
+    if skipped:
+        _clip_log(f"ข้ามลิงก์ซ้ำ {len(skipped)} อัน — มีใบงานอยู่แล้ว")
+    if not fresh:
+        _clip_say(chat_id,
+                  f"↩️ <b>ลิงก์ซ้ำทั้งหมด {len(skipped)} อัน</b> "
+                  "— มีใบงานอยู่แล้วหรือทำคลิปไปแล้ว ไม่ได้เพิ่มใหม่\n"
+                  "/queue ดูของเดิม")
+        return
+    links = fresh
+
     waiting = len(clip_jobs.waiting())
     for kind, link in links:
         job = clip_jobs.add(link, chat_id)
@@ -3081,7 +3265,9 @@ def _clip_telegram_text(chat_id: str, text: str) -> None:
         _clip_log(f"เข้าคิว {job['id']} [{kind}] — {link[:60]}")
     clip_runner.wake()
 
-    if len(links) == 1 and waiting == 0:
+    dup_note = (f"\n↩️ ข้ามลิงก์ซ้ำ <b>{len(skipped)}</b> อัน (มีใบงานอยู่แล้ว)"
+                if skipped else "")
+    if len(links) == 1 and waiting == 0 and not skipped:
         _clip_say(chat_id, "🔎 รับลิงก์แล้ว กำลังเริ่มทำ…")
     else:
         _clip_say(
@@ -3090,7 +3276,7 @@ def _clip_telegram_text(chat_id: str, text: str) -> None:
             f"(ในคิวตอนนี้ {waiting + len(links)} งาน)\n"
             # บอกเพดานตรงนี้ด้วย — ส่งมา 33 ใบแล้วเห็นขยับแค่ 8 ใบ
             # ถ้าไม่บอกไว้ก่อน ผู้ใช้จะนึกว่าระบบค้าง (25 ส.ค. 2026)
-            + clip_jobs.load_text() + "\n"
+            + clip_jobs.load_text() + dup_note + "\n"
             "/queue ดูสถานะ",
         )
 

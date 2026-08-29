@@ -7990,6 +7990,61 @@ async def jobs_cancel(job_id: str) -> dict:
     return {"ok": True, "message": "ยกเลิกแล้ว"}
 
 
+@app.post("/api/clips/{item_id}/regen")
+async def clip_regen(item_id: str) -> dict:
+    """สั่งเจนคลิปใหม่ให้สินค้าที่ **ไม่มีใบงานในคิวแล้ว**
+
+    **เจ้าของสั่ง 29 ส.ค. 2569** — *"คลิปที่ไม่ถึง 1080P ให้เจนใหม่ทั้งหมด"*
+
+    คลิปเก่าส่วนใหญ่จบจากคิวไปนานแล้ว เหลือแต่ไฟล์งาน (`/retry` ใช้ไม่ได้
+    เพราะต้องมีใบงานอยู่ก่อน) ตัวนี้สร้างใบงานใหม่ให้แล้ววางไว้ที่ขั้นเจนคลิปเลย
+    โดยใช้คำสั่ง Flow · สตอรีบอร์ด · บทพูด ที่เก็บไว้อยู่แล้ว
+    **ไม่ทำสตอรีบอร์ดใหม่ ไม่ยิงถาม Shopee ใหม่** จึงไม่เสียโควตาอะไรเพิ่ม
+    นอกจากเครดิต Flow ของการเจน
+
+    ลบไฟล์คลิปเดิมทิ้งก่อนเสมอ — ตัวเจนเห็นว่ามีไฟล์อยู่แล้วจะข้ามทุกฉาก
+    แล้วส่งคลิปเดิมกลับมา (เหตุผลเดียวกับปุ่ม vid_edit)
+    """
+    def work() -> dict:
+        run = clip_store.load_run(DATA_DIR, item_id) or {}
+        if not run:
+            raise HTTPException(status_code=404, detail=f"ไม่พบงานของสินค้า {item_id}")
+        if not run.get("flow_prompts"):
+            raise HTTPException(
+                status_code=400,
+                detail="ใบนี้ยังไม่มีคำสั่ง Flow เก็บไว้ — ต้องทำสตอรีบอร์ดก่อน")
+        # กันสั่งซ้ำระหว่างที่ใบเดิมยังเดินอยู่
+        for job in clip_jobs.all():
+            if (str(job.get("item_id")) == str(item_id)
+                    and job.get("stage") in clip_queue.OPEN_STAGES):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"สินค้านี้มีใบงานเดินอยู่แล้ว (ขั้น {job.get('stage')})")
+
+        removed = 0
+        for name in run.get("videos") or []:
+            path = Path(run.get("folder", "")) / name
+            if path.is_file():
+                path.unlink()
+                removed += 1
+        clip_store.clear_videos(DATA_DIR, item_id)
+
+        chat_id = _default_clip_chat()
+        job = clip_jobs.add(run.get("affiliate_url") or f"regen:{item_id}", chat_id)
+        clip_jobs.update(
+            job["id"], item_id=str(item_id), name=(run.get("name") or "")[:80],
+            stage=clip_queue.STAGE_READY_FLOW, source="เจนใหม่",
+            note="สั่งเจนใหม่เพราะคลิปเดิมไม่ถึง 1080p",
+        )
+        clip_runner.wake()
+        _clip_log(f"สั่งเจนคลิปใหม่ {item_id} — ลบคลิปเดิม {removed} ไฟล์ "
+                  f"· ใช้คำสั่ง Flow เดิม {len(run.get('flow_prompts') or [])} ชุด")
+        return {"job_id": job["id"], "item_id": str(item_id), "removed": removed,
+                "message": f"เข้าคิวเจนคลิปใหม่แล้ว (ลบคลิปเดิม {removed} ไฟล์)"}
+
+    return {"ok": True, **await asyncio.to_thread(work)}
+
+
 @app.post("/api/jobs/{job_id}/retry")
 async def jobs_retry(job_id: str) -> dict:
     """เอางานที่ล้ม/ยกเลิกกลับเข้าคิว โดย **ไม่ทำซ้ำขั้นที่ทำสำเร็จไปแล้ว**

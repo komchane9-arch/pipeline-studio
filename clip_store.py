@@ -697,21 +697,35 @@ def drop_storyboard(root: Path, item_id: str, name: str) -> dict:
 
 
 def video_height(path: Path) -> int | None:
-    """ความสูงของคลิปเป็นพิกเซล — **คืน None เมื่อวัดไม่ได้ ห้ามเดาเป็น 0**
+    """ความละเอียดของคลิป **นับจากด้านสั้น** — คืน None เมื่อวัดไม่ได้
 
-    "วัดไม่ได้" กับ "เตี้ยกว่าที่ควร" ต้องแยกกัน (กติกาข้อ 2.3.1 ข้อ 4)
-    ถ้าเดาเป็น 0 เวลาไม่มี ffprobe ระบบจะฟ้องว่าคลิปพังทุกใบทั้งที่ไม่รู้จริง
+    **ต้องนับด้านสั้น ไม่ใช่ความสูง** — คลิปของเราเป็นแนวตั้ง 9:16
+        720p  = 720 กว้าง × 1280 สูง
+        1080p = 1080 กว้าง × 1920 สูง
+    ถ้าเทียบ "ความสูง ≥ 1080" คลิป 720p (สูง 1280) จะผ่านทันทีทั้งที่ยังไม่ใช่
+    **ผมเขียนพลาดแบบนี้จริงเมื่อ 29 ส.ค. 2569** ตัวตรวจเลยบอกว่าคลิป 720p
+    จำนวน 12 ใบผ่านหมด — ตัวตรวจที่บอกว่าผ่านทั้งที่ยังไม่ผ่าน (กติกาข้อ 2.3)
+
+    ด้านสั้นใช้ได้กับทั้งแนวตั้งและแนวนอน จึงไม่ต้องเดาว่าคลิปวางแนวไหน
+
+    **คืน None เมื่อวัดไม่ได้ ห้ามเดาเป็น 0** — "วัดไม่ได้" กับ "ต่ำกว่าที่ควร"
+    ต้องแยกกัน (กติกาข้อ 2.3.1 ข้อ 4) ถ้าเดาเป็น 0 เวลาไม่มี ffprobe
+    ระบบจะฟ้องว่าคลิปพังทุกใบทั้งที่ไม่รู้จริง
     """
     try:
         import json as _json
         import subprocess as _sp
         out = _sp.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=height", "-of", "json", str(path)],
+             "-show_entries", "stream=width,height", "-of", "json", str(path)],
             capture_output=True, text=True, timeout=60,
         )
-        streams = (_json.loads(out.stdout or "{}").get("streams") or [{}])
-        return int(streams[0].get("height") or 0) or None
+        stream = (_json.loads(out.stdout or "{}").get("streams") or [{}])[0]
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+        if not width or not height:
+            return None
+        return min(width, height)
     except Exception:                                            # noqa: BLE001
         return None
 

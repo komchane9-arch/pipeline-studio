@@ -79,6 +79,7 @@ Wi-Fi เป็นทางสำรองเท่านั้น — งาน
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -95,6 +96,12 @@ GAP = 30.0                  # ตรวจทุกกี่วินาที
 WIFI_PORT = 5555            # พอร์ตช่อง Wi-Fi ADB
 MISSING_BEFORE_WIFI = 2     # หายกี่รอบก่อนลองต่อทาง Wi-Fi
 ALL_GONE_BEFORE_RESTART = 10   # หายหมดกี่รอบก่อนรีสตาร์ตตัวกลาง ADB (10 * 30 วิ = 5 นาที)
+
+# หลุดติดกันกี่รอบถึงร้องหาคน — 6 รอบ x 30 วิ = 3 นาที
+# ต่ำกว่านี้จะร้องตอนถอดสายสลับพอร์ตปกติ สูงกว่านี้จะรู้ตัวช้าเกินไป
+ALARM_AFTER = 6
+# ยังไม่กลับมา ร้องซ้ำทุกกี่วินาที — เงียบไปเลยแปลว่าหายเอง ซึ่งไม่จริง
+ALARM_REPEAT = 1800.0
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -353,6 +360,116 @@ def heal_once(*, verbose: bool = True) -> list[str]:
             log(f"🛑 {why}")
     return acted
 
+
+
+# ------------------------------------------------- แยกสาเหตุ + ร้องหาคน
+
+def usb_present(serial: str) -> bool | None:
+    """Windows ยังเห็นมือถือเครื่องนี้ในระดับสายไหม — None = ตอบไม่ได้
+
+    **นี่คือตัวแยกสาเหตุที่ขาดไปทั้งระบบ** (29 ส.ค. 2569)
+
+    ของเดิมเห็นแค่ว่า `adb devices` ไม่มีเครื่องนั้น แล้วสรุปรวบว่า "หลุด"
+    ซึ่งตอบว่าใช่ได้ทั้งตอนสายหลุดจริง · เครื่องดับ · และตอนตัวรับคำสั่งฝั่ง
+    มือถือ (`adbd`) ถูกระบบฆ่าทิ้งเพราะแรมเต็ม — สามอย่างนี้แก้คนละทางสิ้นเชิง
+    แต่หน้าตาเหมือนกันหมด (กติกาข้อ 2.3.1)
+
+    ผลจริงจากเหตุการณ์ 28 ส.ค. 20:17 น. เครื่อง DATCW8GQUOCUWK9P
+      เปิดเครื่องมา 7 วัน 14 ชม. แต่ `adbd` เพิ่งเริ่มมา 3 วัน 20 ชม.
+      = มันเคยตายแล้วเกิดใหม่ · แรมว่างเหลือ 218 MB จาก 7.8 GB (2.7%)
+      ตัวเฝ้ากลับบอกว่า "รอกดอนุญาตที่จอ" เจ้าของจึงไปดูจอแล้วไม่เจออะไรให้กด
+
+    | Windows เห็น | adb เห็น | แปลว่า |
+    |---|---|---|
+    | ✅ | ✅ | ปกติ |
+    | ✅ | ❌ | **adbd ตาย หรือโหมด USB ถอยไปโหมดที่ไม่มี ADB** |
+    | ❌ | ❌ | สายหลุด · เครื่องดับ · พอร์ตเสีย |
+    """
+    if os.name != "nt":
+        return None
+    script = (
+        "Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
+        f"Where-Object {{ $_.InstanceId -match '{serial}' }} | "
+        "Measure-Object | ForEach-Object { $_.Count }"
+    )
+    try:
+        done = subprocess.run(                          # noqa: S603
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, errors="replace", timeout=45,
+            creationflags=NO_WINDOW,
+        )
+    except Exception:                                   # noqa: BLE001
+        return None
+    out = (done.stdout or "").strip()
+    if not out.isdigit():
+        return None            # ตอบไม่ได้ ≠ ไม่เห็น — ห้ามเดาแทน
+    return int(out) > 0
+
+
+def _why_gone(serial: str, state: str) -> str:
+    """เหตุผลที่คนอ่านแล้วรู้ว่าต้องไปทำอะไร — ไม่ใช่ชื่อสถานะดิบ"""
+    if state == "unauthorized":
+        return ("มือถือขึ้นกล่องขออนุญาต — ปลดล็อกจอแล้วกด "
+                "'อนุญาตเสมอจากคอมเครื่องนี้'")
+    seen = usb_present(serial)
+    if seen is True:
+        return ("สายยังต่ออยู่ แต่ตัวรับคำสั่งในมือถือหยุดทำงาน "
+                "(มักเพราะแรมเต็ม) — ปิดแอปที่ไม่ใช้ หรือรีสตาร์ตมือถือ")
+    if seen is False:
+        return "คอมไม่เห็นสายเลย — ถอดสายเสียบใหม่ หรือลองเปลี่ยนพอร์ต/สาย"
+    return "ต่อคืนเองไม่ได้ — ตรวจสายกับจอมือถือ"
+
+
+def alarms() -> list[dict]:
+    """เครื่องที่หลุดนานพอจะต้องบอกคน — คืนเฉพาะตัวที่ถึงเวลาร้อง(ซ้ำ)แล้ว
+
+    **แยกจาก `heal_once()` โดยตั้งใจ** เพราะสองอย่างนี้คนละหน้าที่:
+    heal_once เล่าว่า "ทำอะไรไปบ้าง" ซึ่งอาจเป็นเรื่องที่ซ่อมเองได้แล้ว
+    ส่วนตัวนี้คือ "ยังพังอยู่ และต้องมีคนมาทำ"
+
+    ของเดิมมีแต่ heal_once แล้ว app.py เอาไปเขียน log อย่างเดียว ผลคือ
+    28 ส.ค. เครื่องหลุด 20:17 ระบบฟ้อง **83 ครั้ง**ลงไฟล์จนถึงบ่ายวันถัดไป
+    โดยไม่มีใครเห็น เจ้าของต้องมาถามเอง — เสียเวลาไป 17 ชั่วโมง
+    """
+    import devices as device_book                       # noqa: PLC0415
+
+    saved = _state()
+    now = states()
+    out: list[dict] = []
+    stamp = time.time()
+    changed = False
+    for device in device_book.listing():
+        if not device.get("enabled"):
+            continue
+        serial = device["serial"]
+        row = saved.setdefault(serial, {})
+        state = now.get(serial, "missing")
+        if state == "device":
+            if row.pop("alarm_at", None) is not None:
+                changed = True
+            continue
+        rounds = int(row.get("missing_rounds", 0))
+        if state == "unauthorized":
+            rounds = max(rounds, ALARM_AFTER)   # กดอนุญาตต้องใช้คน ร้องได้เลย
+        if rounds < ALARM_AFTER:
+            continue
+        last = float(row.get("alarm_at") or 0)
+        if last and stamp - last < ALARM_REPEAT:
+            continue
+        row["alarm_at"] = stamp
+        changed = True
+        out.append({
+            "serial": serial,
+            "name": device_book.label(serial),
+            "account": device.get("account", ""),
+            "state": state,
+            "minutes": round(rounds * GAP / 60),
+            "why": _why_gone(serial, state),
+            "again": bool(last),
+        })
+    if changed:
+        _save_state(saved)
+    return out
 
 # ---------------------------------------------------------------- ฮับ USB
 

@@ -3444,8 +3444,22 @@ def _phone_memory_round() -> None:
         wait = PHONE_CLEAN_COOLDOWN * _phone_clean_backoff.get(serial, 1)
         if time.time() - _phone_cleaned_at.get(serial, 0.0) < wait:
             continue
+        # **เครื่องที่ยุ่งอยู่ก็ต้องได้ล้าง — ห้ามข้าม** (แก้ 29 ส.ค. 2569)
+        #
+        # ของเดิมมี `and not health.get("busy")` ตรงนี้ ซึ่งขัดกับตัวที่มันเรียก:
+        # `_clean_phone_when_free` ถูกเขียนมาให้ **ต่อคิวแล้วรองานที่ทำอยู่ให้จบก่อน**
+        # (รอได้ถึง 30 นาที) มีกลไกรอคิวครบอยู่แล้ว แต่กลับมีด่านกันไม่ให้เข้าคิว
+        #
+        # ผลคือกลับหัวกลับหาง — **เครื่องที่ทำงานหนักที่สุดคือเครื่องที่ไม่เคยได้ล้าง**
+        # วัดจริง 28 ส.ค. ช่วง 19:00–20:30 น. ล้างเครื่องสายคลิป 3 ครั้ง
+        # ส่วนเครื่องโพสต์ที่โพสต์ต่อเนื่องอยู่ **0 ครั้ง** แล้ว 20:17 น. แรมเต็ม
+        # (ว่างเหลือ 218 MB จาก 7.8 GB) จน Android ฆ่า `adbd` ทิ้ง เครื่องหลุด
+        # จากคอมไป 17 ชั่วโมง
+        #
+        # ปลอดภัยเพราะคิวมือถือกันให้อยู่แล้ว — ตัวล้างจะได้จอก็ต่อเมื่องานที่ทำอยู่
+        # ปล่อยคิวแล้วเท่านั้น ไม่มีทางไปปิดแอปคาระหว่างที่กำลังโพสต์
         health = _read_phone_health(serial)
-        if health.get("ok") and health.get("need_clean") and not health.get("busy"):
+        if health.get("ok") and health.get("need_clean"):
             threading.Thread(target=_clean_phone_when_free, args=(serial,),
                              daemon=True).start()
 
@@ -3608,10 +3622,54 @@ def _phone_watch_keeper() -> None:
         try:
             for what in phone_watch.heal_once(verbose=False):
                 append_log("publish", f"สายมือถือ: {what}")
+            _phone_alarm_round(phone_watch)
         except Exception as error:                      # noqa: BLE001
             # **ห้ามเงียบ** ตัวเฝ้าที่ตายเงียบแย่กว่าไม่มีตัวเฝ้า เพราะเราจะนึกว่ามีคนดูอยู่
             append_log("publish", f"ตัวเฝ้าสายมือถือสะดุด: {error}")
         time.sleep(phone_watch.GAP)
+
+
+def _phone_alarm_round(phone_watch) -> None:
+    """มือถือหลุดจนต่อคืนเองไม่ได้ → **ส่งเข้า Telegram** ไม่ใช่เขียน log เฉยๆ
+
+    **เหตุการณ์ที่ทำให้ต้องมีตัวนี้ — 28 ส.ค. 2569 20:17 น.**
+    มือถือเครื่องโพสต์หลุด ตัวเฝ้าเห็นทันทีและบันทึกไว้ถูกต้องทุกอย่าง
+    จากนั้นระบบฟ้องซ้ำ **83 ครั้ง**ลงไฟล์บันทึกจนถึงบ่ายวันรุ่งขึ้น
+    **แต่ไม่มีใครเห็นสักครั้ง** เพราะไม่มีใครนั่งเปิดไฟล์บันทึกดู
+    เจ้าของมารู้ตอนถามเองว่า "ทำไมมือถือหลุด" — เสียเวลาไป 17 ชั่วโมง
+
+    กติกาข้อ 2.4 เขียนว่า "ความล้มเหลวต้องลง log เสมอ ไม่ใช่ส่งเข้าแชท
+    อย่างเดียว" — เคสนี้กลับด้านกันพอดี คือลง log อย่างเดียวจนไม่มีใครรู้
+    **ทั้งสองทางต้องมีคู่กัน** ไฟล์ไว้ย้อนดู แชทไว้ให้รู้ตอนนี้
+
+    ส่งเข้าช่องของบัญชีที่ผูกกับเครื่องนั้น เพราะเจ้าของแยกช่องต่อบัญชีไว้แล้ว
+    ไม่มีบัญชีผูก (เช่นเครื่องสำรองที่เพิ่งเสียบ) ก็ส่งเข้าช่องหลัก
+    """
+    escape = telegram_bot._escape
+    for alarm in phone_watch.alarms():
+        head = "🔌 มือถือหลุด" + (" (ยังไม่กลับมา)" if alarm["again"] else "")
+        lines = [
+            f"{head} — <b>{escape(alarm['name'])}</b>",
+            "",
+            f"หลุดมาแล้วราว {alarm['minutes']} นาที",
+            f"👉 {escape(alarm['why'])}",
+        ]
+        if alarm["account"]:
+            lines.append(f"บัญชี: {escape(alarm['account'])}")
+        lines.append("")
+        lines.append("งานที่ต้องใช้เครื่องนี้จะยังไม่เริ่มจนกว่าจะต่อกลับได้")
+        text = chr(10).join(lines)
+        append_log("publish", f"สายมือถือ: {alarm['name']} หลุด — {alarm['why']}")
+        token, chat = _account_channel(alarm["account"]) if alarm["account"] else ("", "")
+        if not token or not chat:
+            token, chat, _ = _bot_channel()
+        if not token or not chat:
+            continue                    # ยังไม่ได้ตั้งบอท — log ข้างบนไปแล้ว
+        try:
+            telegram_bot.send_message(token, chat, text)
+        except Exception as error:      # noqa: BLE001
+            # ส่งไม่ออกต้องดังกว่าเงียบ ไม่งั้นจะนึกว่าบอกไปแล้ว
+            append_log("publish", f"ส่งเตือนมือถือหลุดเข้าแชทไม่สำเร็จ: {error}")
 
 
 def _phone_memory_keeper() -> None:

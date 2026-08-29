@@ -2252,6 +2252,162 @@ async function runPublish(row, itemId, phone) {
  *  ซึ่งเป็นตัวเดียวกับด่านที่กั้นก่อนโพสต์จริง ถ้าเขียนแยกกันสองชุด วันหลังจะกลายเป็น
  *  หน้าเว็บบอกว่ากดได้ แต่พอกดจริงด่านปฏิเสธ แล้วไม่มีใครรู้ว่าฝั่งไหนถูก
  */
+
+// ================================================ กล่อง "กำลังทำอะไรอยู่"
+//
+// **สเปคจากสายคลิป 29 ส.ค. 2569** (กติกาข้อ 7.1.1 — เจ้าของคอนเฟิร์มแล้ว)
+//
+// เจ้าของสั่ง: *"ในแต่ละคลิปโชว์ log ที่ด้านข้างหน่อยว่ากำลังทำขั้นตอนไหน"*
+//
+// ทำไมจำเป็น — โพสต์หนึ่งใบใช้ 8–10 นาที มี 22 ขั้น ระหว่างนั้นหน้าเว็บเงียบสนิท
+// เจ้าของแยกไม่ออกว่า "กำลังทำ" กับ "ค้าง" ต่างกันตรงไหน **วันนี้ถามมา 4 ครั้ง
+// ว่าทำไมค้าง ทั้งที่ทุกครั้งระบบทำงานปกติ** (เป็นจังหวะที่มันอ่านหน้าจอมือถือ
+// ไม่ได้ ซึ่งกิน 36 วินาทีต่อครั้งเมื่อหน้ามีวิดีโอเล่นอยู่)
+
+const PROGRESS_GAP = 4000;        // ดึงทุก 4 วิ — ขั้นหนึ่งใช้ราว 15 วิ ถี่กว่านี้ไม่ได้อะไรเพิ่ม
+const PROGRESS_STUCK = 90;        // ขั้นเดิมนิ่งเกินกี่วินาทีถึงบอกว่ากำลังอ่านจอ
+// จำว่าแต่ละใบเปลี่ยนขั้นล่าสุดเมื่อไร — ใช้ตัดสินว่า "นิ่ง" หรือ "เดินอยู่"
+const progressSeen = new Map();   // itemId -> {step, at}
+
+/** แปลงเวลาแบบ "15:28:05" เป็นวินาทีที่ผ่านมาแล้ว
+ *
+ *  เซิร์ฟเวอร์ส่งมาเป็นเวลาอย่างเดียวไม่มีวันที่ — งานที่เริ่มก่อนเที่ยงคืนแล้ว
+ *  ดูตอนตีหนึ่งจะได้ค่าติดลบ ถ้าไม่ดักไว้จะขึ้นว่า "ผ่านไป -1400 นาที"
+ */
+function secondsSince(clock) {
+  if (!clock) return null;
+  const bits = String(clock).split(":").map(Number);
+  if (bits.length < 2 || bits.some(Number.isNaN)) return null;
+  const now = new Date();
+  const then = new Date(now);
+  then.setHours(bits[0], bits[1], bits[2] || 0, 0);
+  let gap = (now - then) / 1000;
+  if (gap < -60) gap += 86400;          // ข้ามเที่ยงคืนมาแล้ว
+  return Math.max(0, Math.round(gap));
+}
+
+function humanGap(seconds) {
+  if (seconds === null) return "";
+  if (seconds < 60) return `${seconds} วินาที`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s ? `${m}:${String(s).padStart(2, "0")} นาที` : `${m} นาที`;
+}
+
+function progressLine(row) {
+  const line = el("li", { className: `prog-line ${row.ok === false ? "bad" : ""}` });
+  line.append(
+    el("span", { className: "prog-at", textContent: row.at || "" }),
+    el("span", { className: "prog-no", textContent: row.no ? `${row.no}` : "" }),
+    // ขั้นที่ล้มคือสิ่งเดียวที่คนจะย้อนมาอ่าน — ต้องเห็นชัดด้วยไอคอน ไม่ใช่แค่สี
+    el("span", { className: "prog-tick", textContent: row.ok === false ? "✗" : "✓" }),
+    el("span", { className: "prog-name", textContent: row.name || "" }),
+  );
+  if (row.message) line.append(el("small", { className: "prog-msg", textContent: row.message }));
+  return line;
+}
+
+function paintProgress(box, clip) {
+  box.replaceChildren();
+  if (!clip) {
+    box.append(el("p", { className: "note", textContent: "ยังไม่ได้เริ่มลงคลิปนี้" }));
+    return;
+  }
+  const total = clip.total || 0;
+  const step = clip.step || 0;
+  const running = clip.status === "running";
+  const failed = clip.status === "failed";
+
+  const head = el("div", { className: "prog-head" });
+  const icon = failed ? "❌" : (running ? "🔄" : "✅");
+  head.append(
+    el("b", { className: "prog-now", textContent: `${icon} ${clip.now || "—"}` }),
+    el("span", { className: "prog-step", textContent: total ? `ขั้น ${step}/${total}` : "" }),
+  );
+  box.append(head);
+
+  if (total) {
+    const bar = el("div", { className: "prog-bar" });
+    bar.append(el("i", { style: `width:${Math.min(100, Math.round(step / total * 100))}%` }));
+    box.append(bar);
+  }
+  if (clip.device) {
+    box.append(el("small", { className: "prog-dev", textContent: `บนเครื่อง ${clip.device}` }));
+  }
+
+  // **"ผ่านไปกี่นาทีแล้ว" ตอบคำถาม "ค้างหรือเปล่า" ได้ตรงที่สุด** (สเปคข้อ 3)
+  const ran = secondsSince(clip.started);
+  const when = [];
+  if (clip.started) when.push(`เริ่ม ${clip.started}`);
+  if (running && ran !== null) when.push(`ผ่านไป ${humanGap(ran)}`);
+  if (clip.status === "done" && ran !== null) when.push(`ใช้เวลา ${humanGap(ran)}`);
+  if (when.length) box.append(el("small", { className: "prog-when", textContent: when.join(" · ") }));
+
+  if (failed) {
+    box.append(el("p", { className: "note warn",
+      textContent: `❌ หยุดที่ขั้น ${step}/${total} — ${clip.now || ""}` }));
+  }
+
+  // **หัวใจของงานนี้** — ขั้นเดิมนิ่งนานไม่ได้แปลว่าค้าง (สเปคข้อ 4)
+  // อาการ "ดูเหมือนค้าง" ทั้งหมดของวันนี้มาจากจังหวะอ่านหน้าจอที่มีวิดีโอเล่นอยู่
+  // ซึ่งกิน 36 วินาทีต่อครั้ง ไม่มีอะไรบนจอบอก เจ้าของเลยถามซ้ำ 4 รอบ
+  if (running) {
+    const key = clip.item_id;
+    const seen = progressSeen.get(key);
+    if (!seen || seen.step !== step) {
+      progressSeen.set(key, { step, at: Date.now() });
+    } else if ((Date.now() - seen.at) / 1000 > PROGRESS_STUCK) {
+      box.append(el("p", { className: "note",
+        textContent: "กำลังอ่านหน้าจอมือถือ — หน้าที่มีวิดีโอเล่นอยู่ใช้เวลานานกว่าปกติ" }));
+    }
+  }
+
+  const lines = [...(clip.lines || [])].reverse();   // ใหม่สุดอยู่บน (สเปคข้อ 1)
+  if (lines.length) {
+    const list = el("ul", { className: "prog-list" });
+    lines.forEach((row) => list.append(progressLine(row)));
+    box.append(list);
+  }
+}
+
+/** ดึงความคืบหน้าเป็นระยะ — หยุดเองเมื่อกล่องหลุดจากหน้า
+ *
+ *  ผูกการหยุดไว้กับ `isConnected` แทนที่จะไปแก้ทางที่ปิดการ์ด เพราะการ์ดถูกวาดใหม่
+ *  หลายทาง (เปลี่ยนงาน · refresh รอบ 6 วิ · กดพับ) ถ้าต้องไปไล่ปิดทีละทาง
+ *  จะมีทางที่ลืมแล้วเหลือตัวดึงค้างวิ่งเปล่าตลอดกาล
+ */
+async function watchProgress(itemId, box) {
+  let first = true;
+  while (true) {
+    await new Promise((done) => setTimeout(done, first ? 300 : PROGRESS_GAP));
+    first = false;
+    if (!box.isConnected) return;         // การ์ดปิดไปแล้ว — เลิกดึง
+    let clip = null;
+    try {
+      const payload = await api(`/api/publish/progress?item_id=${encodeURIComponent(itemId)}`);
+      clip = (payload.clips || [])[0] || null;
+    } catch {
+      // **ดึงไม่ได้ ≠ งานล้ม** (สเปคข้อ 5) งานโพสต์เดินอยู่คนละทางกับหน้าเว็บ
+      // ห้ามขึ้นข้อความที่ทำให้เข้าใจว่าคลิปพัง
+      if (!box.isConnected) return;
+      box.replaceChildren(el("p", { className: "note",
+        textContent: "ดูความคืบหน้าไม่ได้ตอนนี้ — งานยังทำอยู่ตามปกติ" }));
+      continue;
+    }
+    if (!box.isConnected) return;
+    paintProgress(box, clip);
+    // จบแล้วไม่ต้องดึงต่อ แต่ค้างผลไว้ให้อ่าน (สเปคข้อ 5 ของหัวข้อการวาด)
+    if (clip && clip.status !== "running") return;
+  }
+}
+
+function progressBox(itemId) {
+  const box = el("div", { className: "pub-progress" });
+  box.append(el("p", { className: "note", textContent: "กำลังอ่านความคืบหน้า…" }));
+  watchProgress(itemId, box);
+  return box;
+}
+
 function publishBlock(rows, itemId) {
   // งานที่ยังไม่มีข้อมูลสินค้า (เพิ่งเข้าคิว) ยังไม่มีอะไรให้ลง — โชว์ไปก็สับสนเปล่า
   if (!rows?.length || !itemId) return [];
@@ -2290,8 +2446,64 @@ function publishBlock(rows, itemId) {
     if (!row.can_post) line.append(el("small", { className: "note", textContent: row.why }));
     list.append(line);
   });
-  out.push(list);
+  // กล่อง "กำลังทำอะไรอยู่" อยู่ข้างลำดับการลง ตามที่เจ้าของสั่ง
+  const wrap = el("div", { className: "pub-split" }, list, progressBox(itemId));
+  out.push(wrap);
   return out;
+}
+
+/** ป้ายความละเอียดของคลิป — **สามสถานะ ไม่ใช่สอง**
+ *
+ *  สเปคจากสายคลิป 29 ส.ค. 2569 หลัง Google Flow อัปเป็น 1.1 แล้วแอบเจนคลิป
+ *  ออกมาเป็น 360p ติดกัน 8 ใบโดยไม่มีอะไรฟ้อง — งานเดินจนจบเหมือนปกติทุกอย่าง
+ *
+ *  **`video_is_1080p` เป็น null ได้ และ null ไม่ได้แปลว่าไม่ผ่าน** แปลว่า
+ *  *ยังวัดไม่ได้* — ไม่มี ffprobe บนเครื่อง หรือเป็นใบเก่าที่บันทึกไว้ก่อน
+ *  วันที่เริ่มวัด
+ *
+ *  วัดของจริงตอนเขียน: ผ่าน 7 ใบ · ต่ำกว่า 2 ใบ · **ยังไม่ได้วัด 109 จาก 118**
+ *  เอา null ไปวาดแดงเมื่อไร หน้าจะแดง 92% ทั้งที่ไม่มีอะไรเสีย แล้วเจ้าของจะสั่ง
+ *  เจนใหม่ทิ้งเครดิตเปล่าใบละ 15 หน่วย — กติกาข้อ 2.3.1 ข้อ 4 บอกไว้ตรงๆ ว่า
+ *  ต้องแยก "ยังไม่ได้ตรวจ" ออกจาก "ตรวจแล้วผ่าน" เสมอ
+ */
+function sizeChip(run) {
+  const pass = run?.video_is_1080p;
+  const low = run?.video_min_height;
+  const heights = run?.video_heights || [];
+  // หลายไฟล์ที่ความละเอียดไม่เท่ากัน ต้องบอกให้ครบ ไม่งั้นเห็นแค่ตัวเตี้ยสุด
+  const spread = heights.length > 1 && new Set(heights).size > 1
+    ? ` (${heights.map((h) => (h ? `${h}p` : "?")).join(" · ")})` : "";
+  if (pass === true) {
+    return el("span", { className: "check-chip ok", textContent: `✅ ชัด ${low}p${spread}` });
+  }
+  if (pass === false) {
+    return el("span", { className: "check-chip fail",
+      textContent: `❌ ได้แค่ ${low}p${spread} — ต่ำกว่า 1080p` });
+  }
+  return el("span", { className: "check-chip unknown", textContent: "⚪ ยังไม่ได้วัดความละเอียด" });
+}
+
+/** สั่งเจนคลิปใหม่ให้สินค้าที่ไม่มีใบงานในคิวแล้ว
+ *
+ *  **ลบคลิปเดิมทิ้งและเสียเครดิต Flow 15 หน่วยต่อครั้ง** จึงต้องถามก่อนเสมอ
+ *  (สายคลิปขอมาเองพร้อมสเปค 29 ส.ค. 2569)
+ *
+ *  ข้อความผิดพลาดของฝั่งเซิร์ฟเวอร์เป็นภาษาคนอยู่แล้ว ปล่อยให้ `act()` โชว์ตามจริง
+ *  ห้ามแปลงเป็นคำของตัวเอง — สองที่พูดคนละอย่างแล้วจะไม่รู้ว่าอันไหนจริง
+ */
+async function regenClip(run) {
+  const itemId = run?.item_id;
+  if (!itemId) return;
+  const now = run?.video_min_height;
+  const files = (run?.videos || []).length;
+  if (!window.confirm(
+    "เจนคลิปนี้ใหม่ไหม\n\n"
+    + (now ? `· คลิปตอนนี้ได้ ${now}p\n` : "")
+    + `· คลิปเดิม ${files} ไฟล์ จะถูกลบทิ้ง เอากลับไม่ได้\n`
+    + "· ใช้เครดิต Flow 15 หน่วย\n"
+    + "· ใช้คำสั่งเดิมที่เก็บไว้ ไม่ทำสตอรีบอร์ดใหม่ ไม่ถาม Shopee ซ้ำ")) return;
+  await act(() => api(`${CLIP_API}/api/clips/${encodeURIComponent(itemId)}/regen`,
+    { method: "POST", body: "{}" }));
 }
 
 /** เครื่องเล่นคลิปของงานนั้น — ใช้ทั้งตอนรอตรวจและตอนเปิดดูย้อนหลัง
@@ -2300,6 +2512,8 @@ function videoBlock(run, heading = "🎬 คลิปที่เจนได้
   const names = run?.videos || [];
   if (!names.length) return [];
   const out = [el("h4", { textContent: `${heading} (${names.length} ไฟล์)` })];
+  out.push(el("div", { className: "check-row" }, sizeChip(run),
+    textBtn("♻️ เจนใหม่", "mini-btn", () => regenClip(run))));
   names.forEach((name) => {
     const src = clipFile(run.item_id, name);
     out.push(el("video", {

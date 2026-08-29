@@ -1297,6 +1297,43 @@ def lane_owning_hour() -> str:
     return ""
 
 
+
+# ---------------------------------------- โหมด "เจ้าของสั่งเอง" (ข้ามโควตาชั่วคราว)
+
+# **เจ้าของสั่งไว้ 29 ส.ค. 2569** — *"คอมเมนต์เลยผมดูอยู่"* + *"ข้อจำกัดสำหรับ
+# รันออโต้"*
+#
+# เพดานคอมเมนต์ต่อชั่วโมงมีไว้กัน **ตัวรันอัตโนมัติ** ยิงรัวจนโดนบล็อก
+# ไม่ได้มีไว้กันตอนเจ้าของนั่งดูอยู่หน้าจอแล้วสั่งเอง — สองอย่างนี้ความเสี่ยง
+# ต่างกันสิ้นเชิง ตอนมีคนดูอยู่ เจอผิดปกติก็หยุดได้ทันที
+#
+# **หมดอายุเองเสมอ ไม่ต้องมีใครไปปิด** เพราะถ้าต้องพึ่งความจำว่าต้องปิด
+# สุดท้ายจะมีวันที่ลืม แล้วเพดานหายไปถาวรโดยไม่มีใครรู้ตัว — บทเรียนเดียวกับ
+# `claims: 0` ในข้อ 7.0 ของ CLAUDE.md
+_MANUAL_UNTIL = 0.0
+MANUAL_WINDOW_MINUTES = 30.0
+
+
+def allow_manual(minutes: float = MANUAL_WINDOW_MINUTES) -> float:
+    """เปิดโหมดเจ้าของสั่งเอง — คืนเวลาที่จะหมดอายุ (unix time)"""
+    global _MANUAL_UNTIL                                # noqa: PLW0603
+    _MANUAL_UNTIL = time.time() + max(1.0, minutes) * 60
+    return _MANUAL_UNTIL
+
+
+def manual_now() -> bool:
+    """ตอนนี้อยู่ในโหมดเจ้าของสั่งเองไหม"""
+    return time.time() < _MANUAL_UNTIL
+
+
+def manual_left_minutes() -> float:
+    return max(0.0, (_MANUAL_UNTIL - time.time()) / 60)
+
+
+def clear_manual() -> None:
+    global _MANUAL_UNTIL                                # noqa: PLW0603
+    _MANUAL_UNTIL = 0.0
+
 def comment_quota_left(lane: str = DEFAULT_COMMENT_LANE, account: str = "") -> int:
     """คอมเมนต์ได้อีกกี่ครั้งในชั่วโมงนี้ — **เลนเดียวต่อชั่วโมง**
 
@@ -1319,6 +1356,9 @@ def comment_quota_left(lane: str = DEFAULT_COMMENT_LANE, account: str = "") -> i
     เดียวกัน — ตอนนี้จึงเป็น "ใครเริ่มก่อนได้ชั่วโมงนั้นไป" ถ้าอยากให้เลนตอบ
     กันที่ไว้ล่วงหน้าจริงๆ ต้องให้ `fb_engage` บอกด่านนี้ว่ามีงานรออยู่
     """
+    # เจ้าของสั่งเองและนั่งดูอยู่ = เพดานไม่ใช้ (ดูคำอธิบายเหนือ allow_manual)
+    if manual_now():
+        return 99
     owner = lane_owning_hour()
     if owner and owner != lane:
         return 0

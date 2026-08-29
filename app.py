@@ -4994,19 +4994,77 @@ def _posts_collect_keeper() -> None:
 
 
 
+def _work_on_phone_now() -> str:
+    """ตอนนี้มีงานที่ **กดจอมือถือ** อยู่ไหม — คืนคำอธิบายสั้นๆ ("" = ว่าง)
+
+    ถามแบบเดียวกับด่านกันรีสตาร์ต: ดูสมุด `_busy_now` ที่ทุกงานกดจอมาลงชื่อ
+    บวกตัวรันงานโพสต์กลุ่ม — ไม่ไล่เช็คทีละชนิดงาน เพราะงานชนิดใหม่จะถูกลืม
+    """
+    rows = _busy_rows()
+    if rows:
+        row = rows[0]
+        return str(row.get("what") or row.get("key") or "งานกดจอมือถือ")
+    try:
+        if fb_runner.any_busy():
+            return "งานโพสต์กลุ่ม Facebook"
+    except Exception:                                   # noqa: BLE001
+        pass
+    return ""
+
+
+def _engagement_message(done: dict) -> str:
+    """ข้อความแจ้งผลตามยอด — คืน "" ถ้ารอบนี้ไม่มีอะไรน่าบอก
+
+    **เงียบไว้ถ้าไม่มีอะไรเปลี่ยน** ส่งทุกชั่วโมงไม่ว่าอะไรจะเกิดขึ้น = กลายเป็น
+    ข้อความที่ถูกเลื่อนผ่านภายในไม่กี่วัน แล้ววันที่มีเรื่องจริงก็จะถูกเลื่อนผ่านด้วย
+    """
+    rows = done.get("rows") or []
+    moved = [r for r in rows
+             if (r.get("d_reactions") or 0) > 0 or (r.get("d_comments") or 0) > 0]
+    fresh = done.get("new_comments") or 0
+    if not moved and not fresh:
+        return ""
+
+    lines = [f"📊 <b>ตามยอดโพสต์</b> — {datetime.now():%H:%M}"]
+    if fresh:
+        lines.append(f"💬 <b>คอมเมนต์ใหม่ {fresh} อัน</b> — ดูด้วย "
+                     f"<code>python fb_engagement.py pending</code>")
+    if moved:
+        lines.append("")
+        for row in moved:
+            bits = []
+            if (row.get("d_reactions") or 0) > 0:
+                bits.append(f"ไลก์ {row['reactions']} (+{row['d_reactions']})")
+            if (row.get("d_comments") or 0) > 0:
+                bits.append(f"คอมเมนต์ {row['comments']} (+{row['d_comments']})")
+            name = telegram_bot._escape(str(row.get("group", ""))[:26])
+            lines.append(f"• {name} — {' · '.join(bits)}")
+    quiet = done.get("quiet") or 0
+    if quiet:
+        lines.append(f"")
+        lines.append(f"💤 เลิกตามแล้ว {quiet} ใบ (ยอดไม่ขยับครบ 1 วัน)")
+    return chr(10).join(lines)
+
+
 def _engagement_keeper() -> None:
     """ตามยอดไลก์/คอมเมนต์ของโพสต์ที่ลงไปแล้ว — รอบละชั่วโมง
 
-    **เจ้าของสั่งไว้ 28 ส.ค. 2569** — *"เบื้องต้น set ไว้ ทุก 1 ชั่วโมงก่อน
-    แล้วดูว่ามีอะไรเปลี่ยนแปลงไหม"*
+    **เจ้าของสั่งไว้ 28 ส.ค. 2569** — *"เบื้องต้น set ไว้ ทุก 1 ชั่วโมงก่อน"*
+    และเพิ่ม 29 ส.ค. — *"เก็บครบแล้วให้ส่งมาแจ้งใน telegram ด้วย และถ้ามีงาน
+    ทำอยู่ห้ามแทรก ให้รองานทำให้เสร็จก่อนค่อยส่งตามมา"*
+
+    **รอเฉพาะตอนส่ง ไม่ใช่ตอนเก็บ** — เจ้าของทักเองว่า *"รอบเก็บให้เริ่มทำปกติ
+    เพราะมันใช้คนละ source"* ซึ่งถูกต้อง: ตัวเก็บใช้ Chrome บนคอม (โปรไฟล์
+    Bot11) ส่วนงานโพสต์กดจอมือถือ ไม่แย่งกัน — เก็บได้เลยไม่ต้องรอ
+    ที่ชนกันจริงคือ **ห้อง Telegram ห้องเดียวกัน** ข้อความแทรกกลางรายงาน
+    งานโพสต์แล้วอ่านสับสน จึงถือผลไว้จนกว่างานจะเสร็จค่อยส่งตามไป
+
+    (ตัวเก็บใช้โปรไฟล์เดียวกับตัวเก็บโพสต์ ถ้าชนกันจะรอคิวกันเองที่ `bot_lock`
+    ไม่พัง แค่ช้า — จึงไม่ต้องกันเพิ่มตรงนี้)
 
     ตอนทำครั้งแรกผมรันด้วยมือทีละครั้งแล้วรายงานว่า "ตั้งไว้ทุกชั่วโมงแล้ว"
-    ทั้งที่ **ไม่เคยต่อให้มันรันเองเลย** พอผมไม่ได้สั่ง มันก็ไม่ทำงาน
-    วัดเมื่อ 29 ส.ค. 20:40 น.: เก็บข้อมูลล่าสุดคือ 28 ส.ค. 17:22 = หยุดไป
-    26 ชั่วโมง ระหว่างนั้นโพสต์ไป 12 ใบโดยไม่มีใบไหนถูกตามเลย
-
-    รันในเธรดของ app.py เหมือน keeper ตัวอื่น เพราะตัวเก็บใช้ Chrome ของ
-    โปรไฟล์บอทซึ่งมีล็อกกันซ้อนอยู่แล้ว — ชนกับงานอื่นไม่ได้อยู่ดี
+    ทั้งที่ไม่เคยต่อให้รันเอง วัด 29 ส.ค. 20:40 น.: เก็บล่าสุด 28 ส.ค. 17:22
+    = เงียบไป 26 ชั่วโมง ระหว่างนั้นโพสต์ไป 12 ใบโดยไม่มีใบไหนถูกตาม
     """
     time.sleep(120)         # ให้เซิร์ฟเวอร์กับงานค้างตั้งตัวก่อน
     try:
@@ -5023,10 +5081,44 @@ def _engagement_keeper() -> None:
                            f"เข้าไม่ถึง {done.get('blocked', 0)} · "
                            f"เลิกตาม {done.get('quiet', 0)} · "
                            f"คอมเมนต์ใหม่ {done.get('new_comments', 0)} อัน")
+                _engagement_report(done)
         except Exception as error:                      # noqa: BLE001
             # **ห้ามเงียบ** ตัวที่ตายเงียบแย่กว่าไม่มีตัวเลย เพราะจะนึกว่ามีคนตามอยู่
             append_log("publish", f"ตัวตามยอด engagement สะดุด: {error}")
         time.sleep(fb_engagement.CHECK_EVERY_SECONDS)
+
+
+# รอได้นานสุดเท่าไรก่อนยอมส่งทับ — งานโพสต์หนึ่งใบใช้ 8-10 นาที
+# ตั้ง 40 นาทีให้เผื่องานยาวกับรอบตามเก็บที่ต่อท้าย เกินนี้แปลว่ามีอะไรค้าง
+# ซึ่งการเงียบต่อไปแย่กว่าการส่งทับ
+ENGAGEMENT_HOLD_MAX = 2400.0
+
+
+def _engagement_report(done: dict) -> None:
+    """ส่งผลตามยอดเข้า Telegram — **รอจนไม่มีงานโพสต์รายงานอยู่**"""
+    text = _engagement_message(done)
+    if not text:
+        return                      # ไม่มีอะไรเปลี่ยน — เงียบไว้ดีกว่ารบกวน
+    waited = 0.0
+    while waited < ENGAGEMENT_HOLD_MAX:
+        busy = _work_on_phone_now()
+        if not busy:
+            break
+        if waited == 0:
+            append_log("publish", f"ผลตามยอดพร้อมส่งแล้ว — รอ {busy} จบก่อน")
+        time.sleep(30.0)
+        waited += 30.0
+    else:
+        append_log("publish",
+                   f"รอส่งผลตามยอดเกิน {ENGAGEMENT_HOLD_MAX / 60:.0f} นาที "
+                   f"— ส่งเลยดีกว่าเงียบต่อ")
+    token, chat, _ = _bot_channel()
+    if not token or not chat:
+        return
+    try:
+        telegram_bot.send_message(token, chat, text)
+    except Exception as error:                          # noqa: BLE001
+        append_log("publish", f"ส่งผลตามยอดเข้าแชทไม่สำเร็จ: {error}")
 
 @app.on_event("startup")
 async def _start_watcher() -> None:

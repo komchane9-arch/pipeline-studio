@@ -558,6 +558,9 @@ def check_once() -> dict:
     entry = mf.find_bot(farm, COLLECTOR_PROFILE)
     conn = open_db()
     done = blocked = new_comments = quiet = 0
+    # เก็บรายละเอียดต่อใบไว้ให้คนเรียกเอาไปประกอบข้อความแจ้งเจ้าของ
+    # (ตัว keeper ใน app.py ใช้ตัดสินว่ารอบนี้มีอะไรน่าบอกไหม)
+    rows: list[dict] = []
     log(f"เริ่มรอบเช็ค — โพสต์ {len(posts)} ใบ ผ่านโปรไฟล์ {COLLECTOR_PROFILE}")
     with sync_playwright() as playwright:
         browser = mf.launch_bot_browser(playwright, farm, entry)
@@ -577,8 +580,29 @@ def check_once() -> dict:
                 except Exception as error:
                     log(f"  ❌ {label}: {type(error).__name__}: {str(error)[:90]}")
                     continue
+                # ยอดรอบก่อนหน้า — ต้องอ่าน **ก่อน** save ไม่งั้นได้ยอดรอบนี้เอง
+                was = conn.execute(
+                    """SELECT reactions, comments FROM my_post
+                       WHERE post_url = ? AND reachable = 1
+                       ORDER BY id DESC LIMIT 1""", (post["post_url"],)).fetchone()
                 fresh, total = save(conn, post, result)
                 new_comments += fresh
+                if result["reachable"]:
+                    rows.append({
+                        "group": post["group_name"],
+                        "url": post["post_url"],
+                        "reactions": result.get("reactions"),
+                        "comments": result.get("comments"),
+                        "shares": result.get("shares"),
+                        # None = ยังไม่เคยเก็บใบนี้ ต่างจาก 0 ที่แปลว่าไม่ขยับ
+                        "d_reactions": (None if was is None
+                                        else (result.get("reactions") or 0)
+                                        - (was["reactions"] or 0)),
+                        "d_comments": (None if was is None
+                                       else (result.get("comments") or 0)
+                                       - (was["comments"] or 0)),
+                        "fresh": fresh,
+                    })
                 if result["reachable"]:
                     done += 1
                     log(f"  ✅ {label}: ไลก์ {result['reactions']} · "
@@ -596,7 +620,7 @@ def check_once() -> dict:
     conn.close()
     log(f"จบรอบ — อ่านได้ {done} ใบ · เข้าไม่ถึง {blocked} ใบ "
         f"· เลิกตามแล้ว {quiet} ใบ · คอมเมนต์ใหม่ {new_comments} อัน")
-    return {"posts": len(posts), "ok": done, "blocked": blocked,
+    return {"posts": len(posts), "rows": rows, "ok": done, "blocked": blocked,
             "quiet": quiet, "new_comments": new_comments}
 
 

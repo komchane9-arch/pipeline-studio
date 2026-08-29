@@ -4993,6 +4993,41 @@ def _posts_collect_keeper() -> None:
         time.sleep(POSTS_COLLECT_GAP)
 
 
+
+def _engagement_keeper() -> None:
+    """ตามยอดไลก์/คอมเมนต์ของโพสต์ที่ลงไปแล้ว — รอบละชั่วโมง
+
+    **เจ้าของสั่งไว้ 28 ส.ค. 2569** — *"เบื้องต้น set ไว้ ทุก 1 ชั่วโมงก่อน
+    แล้วดูว่ามีอะไรเปลี่ยนแปลงไหม"*
+
+    ตอนทำครั้งแรกผมรันด้วยมือทีละครั้งแล้วรายงานว่า "ตั้งไว้ทุกชั่วโมงแล้ว"
+    ทั้งที่ **ไม่เคยต่อให้มันรันเองเลย** พอผมไม่ได้สั่ง มันก็ไม่ทำงาน
+    วัดเมื่อ 29 ส.ค. 20:40 น.: เก็บข้อมูลล่าสุดคือ 28 ส.ค. 17:22 = หยุดไป
+    26 ชั่วโมง ระหว่างนั้นโพสต์ไป 12 ใบโดยไม่มีใบไหนถูกตามเลย
+
+    รันในเธรดของ app.py เหมือน keeper ตัวอื่น เพราะตัวเก็บใช้ Chrome ของ
+    โปรไฟล์บอทซึ่งมีล็อกกันซ้อนอยู่แล้ว — ชนกับงานอื่นไม่ได้อยู่ดี
+    """
+    time.sleep(120)         # ให้เซิร์ฟเวอร์กับงานค้างตั้งตัวก่อน
+    try:
+        import fb_engagement                            # noqa: PLC0415
+    except Exception as error:                          # noqa: BLE001
+        append_log("publish", f"เปิดตัวตามยอด engagement ไม่ได้: {error}")
+        return
+    while True:
+        try:
+            done = fb_engagement.check_once()
+            if done.get("posts"):
+                append_log("publish",
+                           f"ตามยอดโพสต์ — อ่านได้ {done.get('ok', 0)} ใบ · "
+                           f"เข้าไม่ถึง {done.get('blocked', 0)} · "
+                           f"เลิกตาม {done.get('quiet', 0)} · "
+                           f"คอมเมนต์ใหม่ {done.get('new_comments', 0)} อัน")
+        except Exception as error:                      # noqa: BLE001
+            # **ห้ามเงียบ** ตัวที่ตายเงียบแย่กว่าไม่มีตัวเลย เพราะจะนึกว่ามีคนตามอยู่
+            append_log("publish", f"ตัวตามยอด engagement สะดุด: {error}")
+        time.sleep(fb_engagement.CHECK_EVERY_SECONDS)
+
 @app.on_event("startup")
 async def _start_watcher() -> None:
     _fb_seed_groups()
@@ -5025,6 +5060,10 @@ async def _start_watcher() -> None:
     # เฝ้าสายมือถือ — หลุดแล้วต่อคืนให้เอง และร้องดังเมื่อต่อคืนเองไม่ได้
     # (ก่อน 26 ส.ค. 2569 ไม่มีตัวต่อคืนเลยสักตัว หลุดแล้วค้างจนคนมาเห็นเอง)
     threading.Thread(target=_phone_watch_keeper, daemon=True).start()
+
+    # ตามยอดไลก์/คอมเมนต์ของโพสต์ที่ลงไปแล้ว ทุกชั่วโมง (เจ้าของสั่ง 28 ส.ค.)
+    # เดิมต้องสั่งเองทุกครั้ง จึงหยุดไป 26 ชั่วโมงโดยไม่มีใครรู้
+    threading.Thread(target=_engagement_keeper, daemon=True).start()
 
 
 # บอท 2 ตัว: main = โพสต์ Facebook · clip = สายเจนคลิป (อนุมัติจุดขาย/คลิป)

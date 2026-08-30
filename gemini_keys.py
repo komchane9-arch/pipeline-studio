@@ -29,7 +29,12 @@ sys.path.insert(0, str(BASE_DIR))
 import flow_worker as fw                                      # noqa: E402
 
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models"
-TEST_MODEL = "gemini-2.5-flash"
+# ไล่รุ่นตามลำดับ — **รุ่นเก่าถูกปิดสำหรับโปรเจกต์ใหม่แล้ว**
+#
+# เจอจริง 30 ส.ค. 2569: ยิงด้วย gemini-2.5-flash แล้วคีย์ใบใหม่ตอบ 404 ว่า
+# "no longer available to new users" ทำให้คีย์ที่ยังมีเครดิตดูเหมือนใช้ไม่ได้
+# ถ้าเจอ 404 ให้ลองรุ่นถัดไป ไม่ใช่สรุปว่าคีย์พัง
+TEST_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
 
 
 class _Blob(ctypes.Structure):
@@ -104,7 +109,11 @@ def remove(no: int) -> None:
 
 
 def test() -> None:
-    """ยิงจริงทีละใบ — คำถามสั้นที่สุดเท่าที่ทำได้ เพื่อไม่ให้เปลืองเครดิต"""
+    """ยิงจริงทีละใบ — คำถามสั้นที่สุดเท่าที่ทำได้ เพื่อไม่ให้เปลืองเครดิต
+
+    **หมดเวลาไม่ใช่คำตอบ** ยิงซ้ำก่อนสรุป — เจอจริง 30 ส.ค. 2569 คีย์ที่ยังมี
+    เครดิตหมดเวลารอบแรก ถ้าสรุปตรงนั้นจะเข้าใจว่าใช้ไม่ได้ทั้งที่ใช้ได้
+    """
     import json                                               # noqa: PLC0415
     import urllib.error                                       # noqa: PLC0415
     import urllib.request                                     # noqa: PLC0415
@@ -113,28 +122,46 @@ def test() -> None:
     if not keys:
         _say("ยังไม่มีคีย์ให้ทดสอบ")
         return
+    body = json.dumps({"contents": [{"parts": [{"text": "ok"}]}]}).encode()
     for index, key in enumerate(keys, 1):
-        url = f"{ENDPOINT}/{TEST_MODEL}:generateContent?key={key}"
-        body = json.dumps({"contents": [{"parts": [{"text": "ok"}]}]}).encode()
-        request = urllib.request.Request(
-            url, data=body, headers={"Content-Type": "application/json"})
-        try:
-            urllib.request.urlopen(request, timeout=30)
-            _say(f"  {index}. …{key[-6:]}  ✅ ใช้ได้ ยังมีเครดิต")
-        except urllib.error.HTTPError as error:
-            raw = error.read().decode("utf-8", "replace")
-            kind = fw.note_gemini_response(key, error.code, raw)
-            note = {"credits": "เครดิตที่เติมไว้หมด — ต้องเติมเงิน",
-                    "daily": "โควตารายวันหมด — คืนข้ามวัน",
-                    "rate": "ยิงถี่เกินไป — รอสักครู่"}.get(kind, "")
-            try:
-                why = json.loads(raw).get("error", {}).get("message", "")
-            except Exception:                                 # noqa: BLE001
-                why = raw[:120]
-            _say(f"  {index}. …{key[-6:]}  ❌ HTTP {error.code} {note}")
-            _say(f"     {why[:130]}")
-        except OSError as error:
-            _say(f"  {index}. …{key[-6:]}  ⚠️ ต่อไม่ได้: {error}")
+        verdict, detail = "", ""
+        for attempt in (1, 2):
+            for model in TEST_MODELS:
+                url = f"{ENDPOINT}/{model}:generateContent?key={key}"
+                request = urllib.request.Request(
+                    url, data=body, headers={"Content-Type": "application/json"})
+                try:
+                    urllib.request.urlopen(request, timeout=60)
+                    fw.clear_gemini_key(key)
+                    verdict, detail = "✅ ใช้ได้ ยังมีเครดิต", model
+                    break
+                except urllib.error.HTTPError as error:
+                    raw = error.read().decode("utf-8", "replace")
+                    kind = fw.note_gemini_response(key, error.code, raw)
+                    try:
+                        why = json.loads(raw)["error"]["message"]
+                    except Exception:                         # noqa: BLE001
+                        why = raw[:120]
+                    if error.code == 404:
+                        continue          # รุ่นนี้ไม่มี ลองรุ่นถัดไป
+                    verdict = {"credits": "❌ เครดิตที่เติมไว้หมด — ต้องเติมเงิน",
+                               "daily": "❌ โควตารายวันหมด — คืนข้ามวัน",
+                               "rate": "❌ ยิงถี่เกินไป — รอสักครู่"}.get(
+                                   kind, f"❌ HTTP {error.code}")
+                    detail = why[:120]
+                    break
+                except OSError as error:
+                    detail = f"ต่อไม่ได้: {error}"
+                    continue              # หมดเวลา/เน็ตสะดุด ลองใหม่
+            if verdict:
+                break
+            if attempt == 1:
+                _say(f"  {index}. …{key[-6:]}  ⏳ รอบแรกไม่ได้คำตอบ — ยิงซ้ำ")
+        if not verdict:
+            verdict, detail = "⚠️ ยิงสองรอบแล้วไม่ได้คำตอบ", detail or "ไม่ทราบสาเหตุ"
+        _say(f"  {index}. …{key[-6:]}  {verdict}")
+        if detail:
+            _say(f"     {detail}")
 
 
 def main(argv: list[str]) -> int:

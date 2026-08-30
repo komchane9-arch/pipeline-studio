@@ -307,7 +307,10 @@ def note_gemini_response(key: str, status: int, body: str) -> str:
         return ""
     kind = gemini_trouble_kind(body)
     if kind:
-        mark_gemini_key_bad(key, (body or "")[:200], kind)
+        # **ส่งข้อความเต็มไป ห้ามตัดก่อน** — ตัวรับต้องแปลง JSON เพื่อดึง
+        # ประโยคที่คนอ่านรู้เรื่องออกมา ตัดก่อนแปลงแล้ว JSON จะไม่ครบ
+        # แปลงไม่ได้ แล้วหน้าเว็บจะโชว์วงเล็บปีกกาดิบๆ (เจ้าของเห็นเอง 30 ส.ค.)
+        mark_gemini_key_bad(key, body or "", kind)
     return kind
 
 

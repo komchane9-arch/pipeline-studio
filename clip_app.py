@@ -7876,6 +7876,56 @@ async def jobs_storyboard_drop(job_id: str, request: Request) -> dict:
     }
 
 
+@app.post("/api/jobs/{job_id}/redo-storyboard")
+async def jobs_redo_storyboard(job_id: str) -> dict:
+    """ล้างคำสั่ง Flow เก่าแล้วให้ ChatGPT เขียนสตอรีบอร์ด+บทใหม่ทั้งชุด
+
+    **เจ้าของสั่ง 30 ส.ค. 2569** — *"เอาเริ่มแก้คลิปใหม่ทั้งหมด เจนมาให้เรียบร้อยเลย"*
+
+    ต่างจากปุ่ม `regen` ตรงที่ **regen ใช้คำสั่ง Flow ชุดเดิม** ซึ่งเขียนตามกติกาเก่า
+    เอามาเจนซ้ำก็ได้บทเก่ากลับมา ตัวนี้ล้างของเก่าทิ้งเพื่อให้เขียนใหม่ตามกติกา
+    ปัจจุบัน (4 จุดเด่น + 1 ประโยคปิด · ไม่เกิน 135 ตัวอักษร · เขียนเป็นคำอ่าน)
+
+    **ไม่ยิงถาม Shopee ใหม่** รูปสินค้ากับจุดเด่นที่ดึงมาแล้วยังใช้ของเดิม
+    เสียแค่เวลาคุยกับ ChatGPT หนึ่งรอบ กับเครดิต Flow ตอนเจน
+    """
+    job = _find_job(job_id)
+    item_id = job.get("item_id") or ""
+    if not item_id:
+        raise HTTPException(status_code=409, detail="งานนี้ยังไม่มีข้อมูลสินค้า")
+
+    def work() -> dict:
+        with _web_lock:
+            run = clip_store.load_run(DATA_DIR, item_id) or {}
+            if not run:
+                raise HTTPException(status_code=409, detail=f"ไม่พบข้อมูลงาน {item_id}")
+            if not run.get("images"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="ใบนี้ยังไม่มีรูปสินค้า — ต้องดึงสินค้าใหม่ก่อน")
+            gone = 0
+            for name in run.get("videos") or []:
+                path = Path(run.get("folder", "")) / name
+                if path.is_file():
+                    path.unlink()
+                    gone += 1
+            clip_store.clear_videos(DATA_DIR, item_id)
+            clip_store.clear_flow_prompts(DATA_DIR, item_id)
+            clip_store.set_auto_regen(DATA_DIR, item_id, 0)
+            return {"removed": gone}
+
+    result = await asyncio.to_thread(work)
+    clip_jobs.update(job_id, stage=clip_queue.STAGE_READY_STORYBOARD,
+                     error="", awaiting="",
+                     note="แก้ตามกติกาใหม่ — ให้ ChatGPT เขียนบทใหม่ทั้งชุด")
+    clip_runner.wake()
+    _clip_log(f"สั่งทำสตอรีบอร์ดใหม่ {item_id} — ลบคลิปเดิม {result['removed']} ไฟล์ "
+              "และล้างคำสั่ง Flow เก่าทิ้ง")
+    return {"ok": True, **result,
+            "message": f"ลบคลิปเดิม {result['removed']} ไฟล์ · "
+                       "ให้ ChatGPT เขียนสตอรีบอร์ดกับบทใหม่ตามกติกาปัจจุบัน"}
+
+
 @app.post("/api/jobs/{job_id}/regen")
 async def jobs_regen(job_id: str, request: Request) -> dict:
     """ลบคลิปเดิมแล้วเจนใหม่ — พร้อมคอมเมนต์บอกว่าต้องแก้อะไร

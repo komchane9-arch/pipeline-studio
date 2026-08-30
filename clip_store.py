@@ -619,6 +619,26 @@ def set_script(root: Path, item_id: str, lines: list[str]) -> dict:
     return run
 
 
+def clear_flow_prompts(root: Path, item_id: str) -> dict:
+    """ล้างคำสั่ง Flow กับบทพูดทิ้ง เพื่อให้ไปทำสตอรีบอร์ดใหม่
+
+    **ใช้ตอนกติกาการเขียนบทเปลี่ยน** — ของเก่าเขียนตามกติกาเดิม เอามาเจนซ้ำก็ได้
+    ของเดิมกลับมา ต้องให้ ChatGPT เขียนใหม่ทั้งชุดถึงจะได้ตามกติกาใหม่
+
+    **ไม่แตะรูปสินค้ากับจุดเด่น** ของสองอย่างนั้นยังใช้ได้ ไม่ต้องยิงถาม Shopee ใหม่
+    """
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+    for key in ("flow_prompts", "flow_prompts_at", "flow_prompt_count",
+                "script", "script_count", "script_at", "script_sync"):
+        run.pop(key, None)
+    _write_json(folder / RUN_FILE, run)
+    (folder / SCRIPT_FILE).unlink(missing_ok=True)
+    return run
+
+
 def set_auto_regen(root: Path, item_id: str, count: int) -> dict:
     """จำว่าใบนี้ถูกสั่งเจนใหม่อัตโนมัติไปแล้วกี่รอบ
 

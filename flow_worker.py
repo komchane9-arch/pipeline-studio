@@ -29,6 +29,7 @@ import json
 import re
 import secrets
 import sys
+import threading
 import time
 import traceback
 from ctypes import wintypes
@@ -67,6 +68,100 @@ PROFILE_DIR = DATA_DIR / "flow_browser_profile"
 # ใช้ผิดคู่ = Chrome สองตัวเปิดโปรไฟล์เดียวกัน งานตายกลางคัน
 FLOW_GEN_PROFILE = DATA_DIR / "flow_gen_profile"
 FLOW_LOCK = "flow-gen"
+
+# ---- ที่นั่งของช่องที่ 2 ขึ้นไป (เจ้าของสั่ง 30 ส.ค. 2569) -------------------
+#
+# *"chrome profile 2 ผมจะ log-in google flow ไว้ด้วย ให้สามารถเจนคลิปจาก
+# โปรไฟล์นั้นได้ด้วยนะ"* — โปรไฟล์ที่ 2 จึงล็อกอินไว้ **ทั้ง ChatGPT และ Flow**
+# ช่องที่ 2 เลยใช้โฟลเดอร์เดียวทำทั้งสองอย่าง (ต่างจากช่องที่ 1 ที่แยกสองโฟลเดอร์)
+#
+# ผลที่ตามมาซึ่งต้องรู้: ภายในช่องที่ 2 การทำสตอรีบอร์ดกับการเจนคลิป
+# **ผลัดกันใช้** ไม่เดินพร้อมกัน — ไม่เป็นไรเพราะตัวรันหนึ่งตัวทำได้ทีละงานอยู่แล้ว
+#
+# ⚠️ **ชื่อล็อกต้องมาคู่กับโฟลเดอร์เสมอ** (กติกาเดิมที่เขียนไว้ข้างบน) ตารางนี้
+# จึงบอกทั้งสองอย่างในบรรทัดเดียวกัน ห้ามแยกไปเขียนคนละที่
+FLOW_SEATS = [
+    # ช่อง 1 — ของเดิมทุกอย่าง profile=None แปลว่าให้ flow_gen_profile_dir() ตัดสิน
+    # (ซึ่งยังเคารพ flow_bot_profile ใน config.json เหมือนเดิม)
+    {"profile": None, "lock": FLOW_LOCK},
+    {"profile": "flow_browser_profile2", "lock": "flow_browser_profile2"},
+]
+
+
+# ---- โปรไฟล์เฉพาะของงานดึงลิงก์ Shopee (เจ้าของสั่ง 30 ส.ค. 2569) ----------
+#
+# *"profile 2 ใช้ เจน google flow ด้วยนิ ไม่ชนกันหรอ"* — ชนจริง เจ้าของจับได้เอง
+# แล้วสั่งว่า *"แยก profile เพิ่มอีกอันนึงไปเลย"*
+#
+# ตอนนี้จึงเป็น **หนึ่งงานหนึ่งโปรไฟล์** ไม่มีใครใช้ร่วมกัน
+#
+#   flow_browser_profile    ChatGPT (ทำสตอรีบอร์ด)
+#   flow_gen_profile        Google Flow ช่อง 1
+#   flow_browser_profile2   Google Flow ช่อง 2
+#   flow_browser_profile3   Shopee (ดึงลิงก์)          ← ตัวนี้
+#
+# ⚠️ โปรไฟล์นี้ **ต้องล็อกอิน Shopee ไว้ก่อน** ไม่งั้นเปิดหน้าสินค้าไม่ได้เลย
+SHOPEE_PROFILE = "flow_browser_profile3"
+
+
+def profile_named(name: str) -> Path:
+    """โฟลเดอร์โปรไฟล์จากชื่อสั้น เช่น `flow_browser_profile2`
+
+    ใส่พาธเต็มมาก็ได้ — จะคืนพาธนั้นเลย ไม่เอาไปต่อท้าย data/ ซ้ำ
+    """
+    name = str(name or "").strip()
+    if not name:
+        return PROFILE_DIR
+    path = Path(name)
+    return path if path.is_absolute() else DATA_DIR / name
+
+
+def flow_seat(number: int = 1) -> dict:
+    """โฟลเดอร์โปรไฟล์ + ชื่อล็อกของช่องที่ `number` (เริ่มที่ 1)
+
+    เกินจำนวนช่องที่มี = ถอยกลับช่องแรก ไม่โยน error เพราะการถอยไปช่องแรก
+    แค่ทำให้ช้าลง ส่วนการล้มทำให้งานทั้งใบหาย
+    """
+    index = max(1, int(number or 1)) - 1
+    seat = FLOW_SEATS[index] if index < len(FLOW_SEATS) else FLOW_SEATS[0]
+    return {
+        "no": index + 1,
+        "dir": profile_named(seat["profile"]) if seat["profile"] else flow_gen_profile_dir(),
+        "lock": seat["lock"],
+    }
+
+
+# ---- เว้นระยะระหว่างการยิง (เจ้าของสั่ง 30 ส.ค. 2569) -----------------------
+#
+# *"ให้ยิงต่างกัน เว้นอย่างน้อย 10 วิ หลังจากยิงตัวแรก"*
+#
+# **ทำไมต้องมี** สองช่องเริ่มงานพร้อมกันได้เป๊ะๆ แล้วจะเปิด Chrome สองตัวใน
+# วินาทีเดียวกัน + ยิงเข้าเว็บเดียวกันพร้อมกัน ซึ่งเป็นจังหวะที่เครื่องหนักที่สุด
+# และดูไม่เหมือนคนใช้งาน
+#
+# **จองคิวแล้วค่อยนอน** ไม่ใช่นอนทั้งที่ถือล็อก — ถ้าถือล็อกไว้ตอนนอน
+# คนที่มาทีหลังจะรอซ้อนกันเป็นทอดๆ แล้วได้ระยะห่างเกินจริง
+FIRE_GAP = 10.0
+_FIRE_LOCK = threading.Lock()
+_FIRE_AT: dict[str, float] = {}
+
+
+def space_out(service: str, gap: float = FIRE_GAP, log=None) -> float:
+    """รอจนกว่าจะห่างจากการยิงครั้งก่อนของบริการนี้อย่างน้อย `gap` วินาที
+
+    คืนจำนวนวินาทีที่รอไป (0 = ยิงได้เลย) แยกตามบริการ — ChatGPT กับ Flow
+    เป็นคนละเว็บ ไม่ต้องรอกัน
+    """
+    with _FIRE_LOCK:
+        now = time.monotonic()
+        when = max(now, _FIRE_AT.get(service, 0.0) + float(gap))
+        _FIRE_AT[service] = when
+        wait = when - now
+    if wait > 0.05:
+        if log:
+            log(f"เว้นระยะจากการยิงครั้งก่อน {wait:.0f} วินาที ({service})")
+        time.sleep(wait)
+    return wait
 
 
 def flow_gen_profile_dir():
@@ -155,8 +250,24 @@ class _DataBlob(ctypes.Structure):
 GEMINI_STATE_FILE = GEMINI_KEY_FILE.parent / "gemini_key_state.json"
 
 # พักใบที่มีปัญหานานแค่ไหน — แยกตามชนิดเพราะแก้คนละทาง
+#
+# **"credits" ลดจาก 12 ชั่วโมงเหลือ 45 นาที เมื่อ 31 ส.ค. 2569** หลังวัดของจริง
+# แล้วพบว่าข้อความ "prepayment credits are depleted" **ไม่ได้แปลว่ารอไม่คืน**
+#
+#   23:41  gemini-3.1-flash-lite-preview · 3.5-flash-lite · 3.6-flash → 429 ทั้งสามตัว
+#   01:00  ยิงจริงด้วยคีย์ใบเดิม → **สามตัวนั้นใช้ได้หมด** (5 จาก 9 โมเดลใช้ได้)
+#
+# คืนเองภายในราว 80 นาที แต่ระบบสั่งพักไว้ 12 ชั่วโมง = ปิดตัวเองทิ้งทั้งคืน
+# ทั้งที่ใช้งานได้ ช่วงนั้นตัวเลือกรูปถอยไปใช้ "เลือกแบบกระจาย" ซึ่งไม่ได้ดูรูปเลย
+# และตัวแต่งแฮชแท็กถอยไปใช้กฎเดา — กระทบงานทั้งคิว 198 ใบ
+#
+# **ยังมีจุดอ่อนที่ยังไม่ได้แก้: โทษถูกจดรายคีย์ แต่ปัญหาเกิดรายโมเดล**
+# โมเดลหนึ่งเต็มโควตาแล้วทั้งคีย์โดนพัก ทั้งที่โมเดลอื่นบนคีย์เดียวกันยังยิงผ่าน
+# (พิสูจน์แล้ว 31 ส.ค.) แก้ให้ถูกต้องคือจดเป็นคู่ (คีย์, โมเดล) ซึ่งต้องแก้
+# ทั้ง _key_mark · mark_gemini_key_bad · clear_gemini_key · load_gemini_api_key
+# และผู้เรียกทั้ง 3 ไฟล์ — ยังไม่ทำเพราะเสี่ยงทำ Gemini พังทั้งระบบ
 GEMINI_REST = {
-    "credits": 12 * 3600.0,    # เครดิตเติมล่วงหน้าหมด — รอไม่คืน ต้องเติมเงิน
+    "credits": 45 * 60.0,      # ข้อความบอกว่าเครดิตหมด แต่วัดแล้วคืนเองใน ~80 นาที
     "daily": 6 * 3600.0,       # โควตารายวันหมด — คืนข้ามวัน
     "rate": 120.0,             # ยิงถี่เกินไป — เดี๋ยวเดียวก็หาย
 }
@@ -688,6 +799,88 @@ def run_job(job_dir: Path, page, demo: bool) -> None:
     print(f"  ✅ เสร็จทั้งงาน → {job_dir}")
 
 
+# ---- ด่านตรวจแพ็กเกจบัญชี Flow (เจ้าของสั่ง 30 ส.ค. 2569) ------------------
+#
+# *"ก่อนใช้ google flow ให้เช็คว่า profile ต้องขึ้น ultra แบบนี้เสมอ
+# ถ้าไม่มีให้แจ้งเตือน ว่าต้องเปลี่ยนบัญชี"*
+#
+# **ทำไมต้องตรวจ** โปรไฟล์หนึ่งล็อกอินได้หลายบัญชี และ Chrome เลือกบัญชีล่าสุด
+# ให้เอง ถ้าเผลอไปอยู่บัญชีที่ไม่ใช่ Ultra งานจะเดินต่อจนถึงขั้นกดเจน แล้วค่อยล้ม
+# หรือแย่กว่านั้นคือ **เจนด้วยบัญชีผิด** ซึ่งถอนไม่ได้
+#
+# **ตรวจของที่มีเฉพาะตอนถูก ไม่ใช่ของที่แปลว่าผิด** (กติกาข้อ 2.3.1) —
+# มองหาป้ายคำว่า ULTRA บนแถบบนสุดจริงๆ ไม่ใช่ "ไม่เจอคำว่า Free"
+#
+# **ห้ามยึดชื่อคลาส** ของจริงเป็น `div.sc-355d1ae3-8.ktpcbJ` ซึ่งเป็นรหัสสุ่มที่
+# เปลี่ยนทุกครั้งที่ Google ปล่อยเวอร์ชันใหม่ — ยึดตำแหน่ง (แถบบนสุด) กับข้อความ
+# ที่ตรงเป๊ะทั้งคำแทน วัดของจริง 30 ส.ค.: ป้ายอยู่ที่ y=28 สูง 24 กว้าง 53
+_BADGE_JS = """() => {
+  const out = [];
+  for (const el of document.querySelectorAll('div, span, button, a, p')) {
+    if (el.children.length) continue;
+    const text = (el.textContent || '').trim();
+    if (!text || text.length > 12) continue;
+    const box = el.getBoundingClientRect();
+    // เฉพาะแถบบนสุด และต้องมองเห็นจริง (กว้าง/สูงมากกว่าศูนย์)
+    if (box.top < 0 || box.top > 140) continue;
+    if (box.width < 16 || box.width > 220 || box.height < 8) continue;
+    out.push(text);
+  }
+  return out;
+}"""
+
+# แพ็กเกจที่ยอมให้ใช้เจนคลิปได้ — เจ้าของสั่งไว้ว่าต้องเป็น Ultra เท่านั้น
+FLOW_PLAN_REQUIRED = "ULTRA"
+
+
+class WrongFlowPlan(RuntimeError):
+    """บัญชีที่ล็อกอินอยู่ไม่ใช่แพ็กเกจที่ต้องใช้ — ต้องเปลี่ยนบัญชีก่อน"""
+
+
+def flow_plan_badge(page, tries: int = 5, gap: float = 2.0) -> str:
+    """อ่านป้ายแพ็กเกจบนแถบบนของหน้า Flow — คืน "ULTRA" / "PRO" / "" ถ้าไม่เจอ
+
+    ลองซ้ำหลายรอบเพราะแถบบนโหลดช้ากว่าตัวหน้า — ตัดสินจากรอบเดียวจะได้ค่าว่าง
+    ทั้งที่ป้ายกำลังจะขึ้น แล้วไปฟ้องว่าบัญชีผิดทั้งที่ถูก
+    """
+    known = ("ULTRA", "PRO", "PREMIUM", "FREE", "BASIC")
+    for attempt in range(max(1, tries)):
+        try:
+            words = page.evaluate(_BADGE_JS) or []
+        except Exception:                                        # noqa: BLE001
+            words = []
+        for word in words:
+            up = str(word).strip().upper()
+            if up in known:
+                return up
+        if attempt < tries - 1:
+            time.sleep(gap)
+    return ""
+
+
+def require_flow_plan(page, seat_name: str = "", log=print) -> str:
+    """ตรวจว่าบัญชีที่ล็อกอินอยู่เป็น Ultra — ไม่ใช่ให้หยุดพร้อมบอกให้เปลี่ยนบัญชี
+
+    เรียก **ก่อนใช้เครดิตทุกครั้ง** ล้มตรงนี้เสียแค่เวลาเปิดหน้า ส่วนล้มทีหลัง
+    เสียเครดิตจริงหรือเจนด้วยบัญชีผิดซึ่งถอนไม่ได้
+    """
+    badge = flow_plan_badge(page)
+    where = f" ({seat_name})" if seat_name else ""
+    if badge == FLOW_PLAN_REQUIRED:
+        log(f"บัญชี Flow{where}: {badge} ✅")
+        return badge
+    if badge:
+        raise WrongFlowPlan(
+            f"บัญชี Google Flow{where} เป็นแพ็กเกจ {badge} ไม่ใช่ "
+            f"{FLOW_PLAN_REQUIRED} — ต้องเปลี่ยนบัญชีก่อนถึงจะเจนคลิปได้"
+        )
+    raise WrongFlowPlan(
+        f"หาป้าย {FLOW_PLAN_REQUIRED} บนหน้า Flow{where} ไม่เจอ — "
+        f"แปลว่าบัญชีที่ล็อกอินอยู่ไม่ใช่บัญชี {FLOW_PLAN_REQUIRED} "
+        f"ต้องเปลี่ยนบัญชีก่อนถึงจะเจนคลิปได้"
+    )
+
+
 def flow_profile_dir() -> Path:
     """โฟลเดอร์โปรไฟล์ที่สาย Flow จะใช้
 
@@ -1117,7 +1310,167 @@ def login_chatgpt(wait_minutes: int) -> int:
         return 1
 
 
-def login_shopee(wait_minutes: int) -> int:
+def clone_profile(source: str, target: str) -> int:
+    """ก๊อปโปรไฟล์ Chrome ทั้งก้อน — **ล็อกอินเดิมติดไปด้วย ไม่ต้องล็อกอินใหม่**
+
+    **เจ้าของถาม 30 ส.ค. 2569** — *"ดึงล้อคอินเดิมมาไม่ได้หรอ"* ได้ และเป็นวิธี
+    ที่โปรเจกต์นี้ใช้ตอนสร้าง `flow_gen_profile` มาแล้ว (ดูคำอธิบายหัวไฟล์)
+    แต่ตอนนั้นทำด้วยมือ ครั้งนี้ทำเป็นคำสั่งถาวรจะได้ทำซ้ำได้และไม่พลาดขั้นตอน
+
+    **ขั้นตอนที่ห้ามข้าม**
+      1. ต้องถือล็อกของ **ทั้งต้นทางและปลายทาง** — ก๊อปตอน Chrome ยังเปิดอยู่
+         จะได้ไฟล์ครึ่งๆ กลางๆ แล้วโปรไฟล์ใหม่เปิดไม่ขึ้นหรือคุกกี้ใช้ไม่ได้
+      2. ข้ามไฟล์ล็อกของ Chrome เอง (`Singleton*` · `*.lock` · `Crashpad`)
+         พวกนี้ผูกกับโปรเซสเดิม ก๊อปไปแล้วโปรไฟล์ใหม่จะนึกว่ามีคนใช้อยู่
+      3. ปลายทางที่มีของอยู่แล้วต้อง **ลบทิ้งก่อน** ไม่ใช่ทับทีละไฟล์ —
+         ของเก่าที่ค้างอยู่จะทำให้คุกกี้สองชุดปนกัน
+    """
+    import shutil                                               # noqa: PLC0415
+
+    import studio_shared                                        # noqa: PLC0415
+
+    src = profile_named(source)
+    dst = profile_named(target)
+    if not src.is_dir():
+        print(f"ไม่มีโปรไฟล์ต้นทาง {src}", flush=True)
+        return 1
+    if src == dst:
+        print("ต้นทางกับปลายทางเป็นตัวเดียวกัน", flush=True)
+        return 1
+    skip = shutil.ignore_patterns("Singleton*", "*.lock", "Crashpad",
+                                  "*.tmp", "GPUCache", "ShaderCache")
+    print(f"ก๊อป {src.name} → {dst.name}", flush=True)
+    with studio_shared.browser_lock(label=f"ก๊อปโปรไฟล์ {source}", profile=source):
+        with studio_shared.browser_lock(label=f"ก๊อปโปรไฟล์ {target}", profile=target):
+            if dst.exists():
+                print(f"  ลบของเดิมใน {dst.name} ก่อน", flush=True)
+                shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(src, dst, ignore=skip, dirs_exist_ok=True)
+    size = sum(f.stat().st_size for f in dst.rglob("*") if f.is_file())
+    print(f"เสร็จ — {dst.name} ขนาด {size / 1024 / 1024:,.0f} MB", flush=True)
+    print("ล็อกอินเดิมติดมาด้วยแล้ว ไม่ต้องล็อกอินใหม่", flush=True)
+    return 0
+
+
+def login_slot(wait_minutes: int, slot: int = 2) -> int:
+    """เปิดหน้าต่างโปรไฟล์ของช่องนั้นให้ล็อกอินเอง **ทั้ง ChatGPT และ Google Flow**
+
+    **เจ้าของสั่ง 30 ส.ค. 2569** — *"chrome profile 2 ผมจะ log-in google flow
+    ไว้ด้วย ให้สามารถเจนคลิปจากโปรไฟล์นั้นได้ด้วยนะ"*
+
+    ช่องที่ 2 ขึ้นไปใช้โฟลเดอร์เดียวทำทั้งสองเว็บ จึงเปิดทีเดียวล็อกอินได้ทั้งคู่
+    ส่วนช่องที่ 1 แยกเป็นสองโฟลเดอร์ ต้องใช้คำสั่ง `login` กับ `login-chatgpt`
+    ตามเดิม — ตัวนี้จึงปฏิเสธช่องที่ 1 แทนที่จะเปิดโปรไฟล์ผิดตัวให้
+
+    **ตัวตรวจดูของที่มีเฉพาะตอนสำเร็จ** (กติกาข้อ 2.3.1) — ChatGPT ต้องมีช่องพิมพ์
+    ให้ใช้จริง · Flow ต้องเข้าถึงหน้าแอปได้จริง ไม่ใช่แค่ไม่เจอปุ่มล็อกอิน
+    """
+    from playwright.sync_api import sync_playwright
+
+    import chatgpt_driver
+
+    if int(slot) < 2:
+        print("ช่องที่ 1 แยกสองโปรไฟล์ — ใช้ `login` (Flow) กับ `login-chatgpt` แทน",
+              flush=True)
+        return 1
+    folder = flow_seat(slot)["dir"]
+    folder.mkdir(parents=True, exist_ok=True)
+    print(f"ช่อง {slot} · โปรไฟล์ {folder}", flush=True)
+    with sync_playwright() as playwright:
+        browser = open_browser(playwright, hidden=False, profile_dir=folder)
+        gpt_page = browser.pages[0] if browser.pages else browser.new_page()
+        gpt_page.goto(chatgpt_driver.CHATGPT_HOME,
+                      wait_until="domcontentloaded", timeout=90_000)
+        flow_page = browser.new_page()
+        flow_page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=90_000)
+        try:
+            _enter_app(flow_page)
+        except Exception as error:                               # noqa: BLE001
+            print(f"  (กดเข้าแอป Flow ยังไม่ได้: {error} — ล็อกอินก่อนได้เลย)",
+                  flush=True)
+        # แท็บที่สาม: Shopee — ช่องที่ดึงลิงก์ต้องล็อกอิน Shopee ด้วย
+        # (Shopee ไทยปิดหน้าสินค้าไม่ให้คนที่ยังไม่ล็อกอินดู)
+        try:
+            shop_page = browser.new_page()
+            shop_page.goto("https://shopee.co.th/",
+                           wait_until="domcontentloaded", timeout=90_000)
+        except Exception as error:                               # noqa: BLE001
+            print(f"  (เปิดแท็บ Shopee ไม่ได้: {error})", flush=True)
+        print("เปิดหน้าต่างแล้ว 3 แท็บ — ChatGPT · Google Flow · Shopee",
+              flush=True)
+        print(f"(รอสูงสุด {wait_minutes} นาที · ล็อกอินครบทั้งคู่แล้วปิดให้เอง)",
+              flush=True)
+        session = chatgpt_driver.ChatGPTSession(
+            gpt_page, log=lambda m: print("   ", m, flush=True))
+        deadline = time.time() + wait_minutes * 60
+        said = ""
+        passes = 0                 # ผ่านติดกันกี่รอบแล้ว (ต้องครบ 3 ถึงจะเชื่อ)
+        announced = False
+        while time.time() < deadline:
+            # ระหว่างล็อกอินหน้าเปลี่ยนตลอด อ่านพลาดเป็นเรื่องปกติ ห้ามล้มทั้งคำสั่ง
+            gpt_ok = flow_ok = False
+            try:
+                state = session.state()
+                gpt_ok = bool(not state["signedOut"] and state["hasBox"])
+            except Exception as error:                           # noqa: BLE001
+                if "closed" in str(error).lower():
+                    print("หน้าต่างถูกปิด — ยังล็อกอินไม่ครบ", flush=True)
+                    return 1
+            try:
+                # ต้องเป็นแท็บที่อยู่บนเว็บ Flow จริงๆ — เดิมนับทุกแท็บที่ไม่ใช่
+                # ChatGPT ซึ่งรวมแท็บล็อกอิน Google ที่กำลังกรอกรหัสอยู่ด้วย
+                pages = [x for x in browser.pages
+                         if not x.is_closed() and "labs.google" in x.url]
+                flow_ok = any(_is_signed_in(x) for x in pages)
+            except Exception:                                    # noqa: BLE001
+                pass
+            now = f"ChatGPT {'✅' if gpt_ok else '⏳'} · Google Flow {'✅' if flow_ok else '⏳'}"
+            if now != said:
+                said = now
+                print(f"  {now}", flush=True)
+            # ---- ห้ามปิดหน้าต่างเองตอนคนยังใช้อยู่ (30 ส.ค. 2569) --------
+            #
+            # **เจอจริงในนาทีเดียวกับที่เขียนตัวนี้เสร็จ** ตัวตรวจตัดสินว่า
+            # "ล็อกอินครบแล้ว" ตอนเจ้าของยังกรอกรหัสค้างอยู่ แล้วปิดหน้าต่างทิ้ง
+            # กลางมือ — เจ้าของต้องทักมาว่า *"จอหายไปไหนผมกำลังล้อคอิน"*
+            #
+            # รากคือตัวตรวจตอบ "ใช่" ได้ทั้งตอนล็อกอินเสร็จและตอนหน้ากำลังเปลี่ยน
+            # (กติกาข้อ 2.3.1) แก้สองชั้น:
+            #   1. ต้องผ่านติดกัน 3 รอบ ไม่ใช่รอบเดียวจบ — จังหวะที่หน้าเปลี่ยน
+            #      ผ่านมาแวบเดียว ไม่มีทางผ่านติดกันสามรอบ
+            #   2. **ผ่านแล้วก็ยังไม่ปิด** ปล่อยให้เจ้าของปิดเอง เพราะ
+            #      "ปิดเร็วไป" เสียงานจริง ส่วน "ค้างไว้" เสียแค่หน้าต่างเปล่า
+            if gpt_ok and flow_ok:
+                passes += 1
+            else:
+                passes = 0
+            if passes == 3 and not announced:
+                announced = True
+                print(f"LOGIN OK ทั้งคู่ — ช่อง {slot} ใช้งานได้แล้ว", flush=True)
+                # บอกแพ็กเกจตั้งแต่ตอนนี้ จะได้สลับบัญชีทันทีถ้าเลือกผิด
+                # ไม่ใช่ไปรู้ตอนคิวเดินแล้วล้มทั้งแถว
+                try:
+                    badge = flow_plan_badge(pages[0] if pages else flow_page, tries=3)
+                except Exception:                                # noqa: BLE001
+                    badge = ""
+                if badge == FLOW_PLAN_REQUIRED:
+                    print(f"บัญชี Flow: {badge} ✅ ใช้เจนคลิปได้", flush=True)
+                else:
+                    print(f"⚠️ บัญชี Flow ขึ้นว่า {badge or 'ไม่มีป้ายแพ็กเกจ'} "
+                          f"ไม่ใช่ {FLOW_PLAN_REQUIRED} — ต้องสลับบัญชีก่อน",
+                          flush=True)
+                print("หน้าต่างยังเปิดค้างไว้ ปิดเองได้เลยเมื่อเสร็จ", flush=True)
+            time.sleep(5)
+        if announced:
+            print("จบเวลารอ — ล็อกอินไว้เรียบร้อยแล้ว", flush=True)
+            browser.close()
+            return 0
+        print(f"TIMEOUT — ยังล็อกอินไม่ครบ ({said})", flush=True)
+        browser.close()
+        return 1
+
+
+def login_shopee(wait_minutes: int, profile: str = "") -> int:
     """เปิดหน้าต่างให้ล็อกอิน Shopee เอง เก็บคุกกี้ไว้ในโปรไฟล์เดียวกับ Flow/TikTok
 
     Shopee ไทยปิดหน้าสินค้าไม่ให้คนที่ยังไม่ล็อกอินดู จึงต้องล็อกอินครั้งเดียว
@@ -1127,8 +1480,12 @@ def login_shopee(wait_minutes: int) -> int:
 
     import shopee_scrape
 
+    folder = profile_named(profile) if profile else None
+    if folder is not None:
+        folder.mkdir(parents=True, exist_ok=True)
+        print(f"โปรไฟล์ {folder.name}", flush=True)
     with sync_playwright() as playwright:
-        browser = open_browser(playwright, hidden=False)
+        browser = open_browser(playwright, hidden=False, profile_dir=folder)
         page = browser.pages[0] if browser.pages else browser.new_page()
         page.goto(shopee_scrape.SHOPEE_HOME, wait_until="domcontentloaded", timeout=90_000)
         print("เปิดหน้าต่างแล้ว — ล็อกอิน Shopee ในหน้าต่างนั้น", flush=True)
@@ -1384,9 +1741,22 @@ def main() -> int:
 
     shopee = sub.add_parser("login-shopee", help="เปิดหน้าต่างให้ล็อกอิน Shopee เอง")
     shopee.add_argument("--wait-minutes", type=int, default=15)
+    # โปรไฟล์เฉพาะของงานดึงลิงก์ — ใส่ --profile flow_browser_profile3
+    shopee.add_argument("--profile", default="",
+                        help="ชื่อโปรไฟล์ Chrome (ว่าง = โปรไฟล์เดิม)")
 
     gpt = sub.add_parser("login-chatgpt", help="เปิดหน้าต่างให้ล็อกอิน ChatGPT เอง")
     gpt.add_argument("--wait-minutes", type=int, default=15)
+
+    seat = sub.add_parser("login-slot",
+                          help="เปิดโปรไฟล์ของช่องที่ 2 ขึ้นไป ล็อกอิน ChatGPT + Flow ทีเดียว")
+    seat.add_argument("--slot", type=int, default=2)
+    seat.add_argument("--wait-minutes", type=int, default=20)
+
+    clone = sub.add_parser("clone-profile",
+                           help="ก๊อปโปรไฟล์ Chrome ทั้งก้อน (ล็อกอินเดิมติดไปด้วย)")
+    clone.add_argument("--from", dest="source", required=True)
+    clone.add_argument("--to", dest="target", required=True)
 
     inspect = sub.add_parser("inspect", help="ดูดโครงหน้าโปรเจกต์จริง ไว้เขียน selector")
     inspect.add_argument("--click", default="", help="กดปุ่มชื่อนี้ก่อนดูด")
@@ -1439,6 +1809,17 @@ def main() -> int:
     # คำสั่งล็อกอินทุกตัวเปิดโปรไฟล์ Chrome ตัวเดียวกับที่คิวงานใช้ ต้องถือล็อก
     # เดียวกัน ไม่งั้นงานในคิวจะเปิดซ้อนแล้ว **ไล่หน้าต่างล็อกอินทิ้งกลางคัน**
     # (เจอมาแล้วทั้งกับหน้าต่างล็อกอินและกับงานที่กำลังทำอยู่)
+    if args.command == "clone-profile":
+        return clone_profile(args.source, args.target)
+    if args.command == "login-slot":
+        import studio_shared
+
+        # ล็อกดอกเดียวกับที่ช่องนั้นใช้ตอนทำงานจริง ไม่งั้นคิวจะเปิดโปรไฟล์
+        # เดียวกันซ้อนแล้วไล่หน้าต่างล็อกอินทิ้งกลางคัน
+        with studio_shared.browser_lock(
+                label=f"ล็อกอินช่อง {args.slot}",
+                profile=flow_seat(args.slot)["lock"]):
+            return login_slot(args.wait_minutes, args.slot)
     logins = {
         "login": login_flow, "login-tiktok": login_tiktok,
         "login-shopee": login_shopee, "login-chatgpt": login_chatgpt,
@@ -1449,9 +1830,12 @@ def main() -> int:
         # **ล็อกต้องตรงกับโปรไฟล์ที่จะเปิด** — ล็อกอิน Flow เปิดโปรไฟล์ Flow
         # ที่เหลือ (TikTok · ChatGPT · Shopee) ยังอยู่โปรไฟล์เดิม
         # จับผิดดอก = Chrome สองตัวเปิดโปรไฟล์เดียวกัน งานตายกลางคัน
+        want = getattr(args, "profile", "") or ""
+        lock = want or (FLOW_LOCK if args.command == "login" else "")
         with studio_shared.browser_lock(
-                label=f"ล็อกอิน ({args.command})",
-                profile=FLOW_LOCK if args.command == "flow" else ""):
+                label=f"ล็อกอิน ({args.command})", profile=lock):
+            if args.command == "login-shopee":
+                return login_shopee(args.wait_minutes, want)
             return logins[args.command](args.wait_minutes)
     if args.command == "post-tiktok":
         return post_tiktok_folder(

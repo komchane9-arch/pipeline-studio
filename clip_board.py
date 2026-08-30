@@ -310,6 +310,34 @@ def bucket_of_run(run: dict) -> str:
     return ""
 
 
+def clip_info(run: dict) -> dict:
+    """ข้อมูลคลิปของใบงานนี้ ให้หน้าเว็บเห็นได้จากรายการ **โดยไม่ต้องเปิดการ์ด**
+
+    **เจ้าของสั่ง 30 ส.ค. 2569** — *"เจนเสร็จเอาคลิปทุกคลิปไปใส่ในใบงานด้วยนะ"*
+    ของเดิมแถวบนกระดานมีแค่ชื่อกับขั้น มองไม่ออกเลยว่าใบไหนมีคลิปแล้ว
+    ต้องเปิดทีละการ์ดถึงจะรู้ ซึ่งตอนมี 39 ใบคือไล่เปิดทั้งวัน
+
+    `checked` แยก **"ตรวจแล้วผ่าน" ออกจาก "ยังไม่ได้ตรวจ"** ด้วยค่า None
+    ตามกติกาข้อ 2.3.1 — ห้ามให้สองอย่างนี้หน้าตาเหมือนกัน ไม่งั้นวันที่ตรวจไม่ได้
+    ของเสียจะได้เครื่องหมายถูก (เกิดจริง 30 ส.ค.: เครดิต Gemini หมดตอนตรวจ
+    ผลออกมาว่างเปล่า ถ้าไม่แยกจะดูเหมือนคลิปไม่มีเสียง ทั้งที่แค่ตรวจไม่ได้)
+    """
+    from pathlib import Path as _Path                          # noqa: PLC0415
+
+    run = run or {}          # บางแถวยังไม่มีข้อมูลงาน (ใบที่เพิ่งเข้าคิว)
+    folder = _Path(run.get("folder") or "")
+    files = [n for n in (run.get("videos") or []) if (folder / n).is_file()]
+    check = run.get("video_check") or {}
+    ok = check.get("ok") if check else None
+    return {
+        "video_count": len(files),
+        "video_at": run.get("videos_at") or "",
+        "video_ok": ok,
+        "video_note": (check.get("problems") or [None])[0] if ok is False else "",
+        "resolution": check.get("resolution") or "",
+    }
+
+
 def publish_options(run: dict | None) -> list[dict]:
     """แถวนี้ **ลงอะไรได้เดี๋ยวนี้บ้าง** — ให้หน้าเว็บใช้ตัดสินว่าจะโชว์ปุ่ม 📤 ไหม
 
@@ -490,6 +518,7 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
             # ลงอะไรได้บ้างเดี๋ยวนี้ — หน้าเว็บห้ามคิดกติกาลำดับเอง
             "can_publish": publish_options(run),
             "updated_at": job.get("updated_at") or "",
+            **clip_info(run),
         })
 
     # ---- เติมงานที่ **จบจากคิวไปแล้ว** เข้ากองปลายทาง -----------------------
@@ -519,6 +548,7 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 "why": "",
                 "created_at": run.get("product_at") or "",
                 "can_publish": publish_options(run),
+                **clip_info(run),
                 "updated_at": run.get("video_at") or run.get("storyboard_at") or "",
             }
             park = run.get("parked") or {}

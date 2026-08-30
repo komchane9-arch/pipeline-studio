@@ -1220,12 +1220,18 @@ def curate_for_ad(
     raise RuntimeError("Gemini กรองชุดรูปไม่สำเร็จ — " + " · ".join(tried))
 
 
-def analyse_features(name: str, detail: str, api_key: str | None, log=print) -> dict:
-    """ไล่จุดขายออกมาให้ครบ แล้วเลือก 3 ข้อที่ว้าวสุด
+def analyse_features(name: str, detail: str, api_key: str | None, log=print,
+                     count: int = HIGHLIGHT_COUNT) -> dict:
+    """ไล่จุดขายออกมาให้ครบ แล้วเลือกข้อที่ว้าวสุดมา `count` ข้อ
 
-    คืน {"features": [...ทั้งหมด...], "highlights": [...3 ข้อ...], "why": [...]}
+    คืน {"features": [...ทั้งหมด...], "highlights": [...count ข้อ...], "why": [...]}
     ล้มเหลวคืน features ว่างและใช้กฎคัด highlights แทน
+
+    **`count` เพิ่มมา 30 ส.ค. 2569 · ค่าปริยายเท่าเดิม สายโพสต์จึงไม่กระทบ**
+    สายคลิปส่ง 4 เข้ามา เพราะคลิปมี 5 ฉาก โดย 4 ฉากเป็นจุดเด่นและฉากสุดท้าย
+    เป็นประโยคปิดการขาย (เจ้าของสั่ง)
     """
+    count = max(1, int(count))
     if not detail.strip():
         return {"features": [], "highlights": [], "why": []}
     if not api_key:
@@ -1235,7 +1241,7 @@ def analyse_features(name: str, detail: str, api_key: str | None, log=print) -> 
     import httpx
 
     instruction = ANALYSE_PROMPT.format(
-        name=name, detail=detail[:6000], count=HIGHLIGHT_COUNT,
+        name=name, detail=detail[:6000], count=count,
     )
     last = ""
     for model in HIGHLIGHT_MODELS:
@@ -1269,8 +1275,8 @@ def analyse_features(name: str, detail: str, api_key: str | None, log=print) -> 
             log(f"ไล่จุดขายได้ {len(features)} ข้อ → เลือกมา {len(highlights)} ข้อ")
             return {
                 "features": features,
-                "highlights": highlights[:HIGHLIGHT_COUNT],
-                "why": why[:HIGHLIGHT_COUNT],
+                "highlights": highlights[:count],
+                "why": why[:count],
             }
         except Exception as error:                           # noqa: BLE001
             last = str(error)

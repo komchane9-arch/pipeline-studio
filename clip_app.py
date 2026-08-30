@@ -1403,7 +1403,11 @@ def _clip_finish_collect(job: dict, data: dict) -> None:
             )
             picked = [paired[i] for i in indexes if 0 <= i < len(paired)]
         if not picked:
-            picked = shopee_scrape.spread_pick(paired)
+            # **คัดรูปให้เท่าจำนวนฉากที่เป็นจุดเด่นจริง** (30 ส.ค. 2569)
+            # หนึ่งรูปเท่ากับหนึ่งฉาก คัดมา 3 ใบแต่คลิปมี 5 ฉาก ฉากที่เหลือ
+            # จึงไม่มีของจริงให้พูด แล้วไปจบด้วยประโยคที่พูดไม่จบ
+            picked = shopee_scrape.spread_pick(
+                paired, count=chatgpt_driver.HIGHLIGHT_SCENES)
         picked = picked[:want]
         # **ต้องดัง** ใบที่เดินมาทางนี้ จุดเด่นเขียนจากรูปคนละชุดกับที่เลือกใหม่
         # ปล่อยเงียบแล้วไม่มีใครรู้ว่าใบไหนตรงใบไหนไม่ตรง
@@ -1484,7 +1488,7 @@ def _clip_make(job: dict) -> None:
 
                 fresh = shopee_scrape.analyse_features(
                     run.get("name", ""), detail, load_gemini_api_key(),
-                    log=_clip_log)
+                    log=_clip_log, count=chatgpt_driver.HIGHLIGHT_SCENES)
                 if fresh.get("highlights"):
                     clip_store.save_features(DATA_DIR, item_id, fresh)
                     highlights = data["highlights"] = list(fresh["highlights"])

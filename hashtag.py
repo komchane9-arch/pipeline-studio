@@ -97,6 +97,17 @@ def count_syllables(text: str) -> int:
     วิธีนับ: สระหน้า 1 ตัว = 1 พยางค์ · กลุ่มสระบน/ล่าง/หลัง = 1 พยางค์ ·
     พยัญชนะเรียงกันตั้งแต่ 3 ตัว = มีสระลดรูปซ่อนอยู่ (นอน · คน) นับเพิ่ม
     """
+    # ---- ใช้ตัวแบ่งพยางค์จริงก่อน (30 ส.ค. 2569) --------------------------
+    #
+    # ตัวประมาณข้างล่างนับ "รับประกันสามปี" ได้ 6 พยางค์ (ของจริง 5) จึงไปตัด
+    # ทิ้งทั้งที่ไม่ต้องตัด แล้วได้ "#รับประกันสามป" ออกไปจริง
+    # ส่วน "จอสว่างสองพันนิต" นับได้ 5 (ของจริง 6) คือหลุดเกณฑ์ในทางกลับกัน
+    #
+    # ตัวแบ่งจริงอยู่ใน `thai_speech` อยู่แล้ว ใช้ตัวนั้นก่อน แล้วค่อยถอยมาใช้
+    # ตัวประมาณถ้าเรียกไม่ได้ — ไม่ได้ลบตัวประมาณทิ้ง เพราะมันเป็นทางถอยที่ดี
+    parts = split_syllables(text)
+    if len(parts) > 1:
+        return len(parts)
     clean = _KARAN_RE.sub("", _TONE_RE.sub("", normalize(text)))
     if not clean:
         return 0
@@ -118,17 +129,82 @@ def detail_ok(text: str) -> bool:
     return DETAIL_MIN_SYLLABLES <= count_syllables(clean) <= DETAIL_MAX_SYLLABLES
 
 
+# พยางค์ที่เป็น "หัวคำ" เท่านั้น — ไม่มีคำไทยคำไหนลงท้ายด้วยพยางค์เหล่านี้
+# เจอเป็นตัวสุดท้ายเมื่อไร แปลว่าตัดกลางคำแน่นอน
+_HEAD_ONLY = {
+    "ประ", "กระ", "ปรา", "สะ", "ตะ", "จะ", "มะ", "ระ", "ละ", "วะ",
+    "อะ", "ผะ", "พะ", "คะ", "ขะ", "นะ", "ทะ", "ยะ", "บริ", "ธุ",
+    "อุป", "สัม", "สาธ", "อนุ", "ปฏิ", "วิ", "สุ", "นิ", "ภิ", "ทวี",
+}
+
+
+def split_syllables(text: str) -> list[str]:
+    """แบ่งข้อความไทยเป็นพยางค์ — ใช้ตัวแบ่งจริงจาก `thai_speech`
+
+    **เพิ่ม 30 ส.ค. 2569** — ของเดิมไล่ตัดทีละตัวอักษรจนจำนวนพยางค์เข้าเกณฑ์
+    ซึ่ง**ยังลงเอยกลางคำอยู่ดี** เพราะมันไม่รู้ว่าขอบพยางค์อยู่ตรงไหน
+    ผลที่ออกไปจริงวันนี้:
+
+        รับประกันสามปี      →  #รับประกันสามป      ("ปี" เหลือ "ป")
+        ดูทีวีอย่างสบายใจไร้ →  #ดูทีวีอย่างสบ
+        ถนอมดวงตาของทุกคนในบ →  #ถนอมดวงตาของทุกค
+
+    `thai_speech.split_syllables()` เป็นตัวแบ่งพยางค์ไทยจริงที่โปรเจกต์นี้มีอยู่แล้ว
+    (พิสูจน์กับคำที่คัดไว้ 64/64 คำ) ใช้ตัวนี้แล้วตัดที่ขอบพยางค์ = ไม่มีทางกลางคำ
+
+    ล้มเหลว = ถอยไปคืนทั้งก้อนเป็นพยางค์เดียว ไม่ทำให้ทั้งงานพัง
+    """
+    clean = normalize(text)
+    if not clean:
+        return []
+    try:
+        import thai_speech                                      # noqa: PLC0415
+
+        parts = [p for p in thai_speech.split_syllables(clean) if p]
+        if parts and "".join(parts) == clean:
+            return parts
+    except Exception:                                            # noqa: BLE001
+        pass
+    return [clean]
+
+
 def trim_to_syllables(text: str, limit: int = DETAIL_MAX_SYLLABLES) -> str:
     """ตัดข้อความให้เหลือไม่เกิน `limit` พยางค์ — **ตัดที่ขอบพยางค์ ไม่ใช่กลางคำ**
 
     ตัดด้วยจำนวนตัวอักษรตรงๆ ได้เศษคำที่ไม่มีใครค้นหา (วัดจริง: ตัดที่ 20 ตัว
-    ได้ "#ระบายอากาศได้ดีมากจร" — คำท้ายขาดครึ่ง) พอไล่ตัดทีละตัวจนพยางค์
-    เข้าเกณฑ์ จะได้ "#ระบายอากาศได้" ซึ่งยังอ่านรู้เรื่องและใช้ค้นหาได้จริง
+    ได้ "#ระบายอากาศได้ดีมากจร" — คำท้ายขาดครึ่ง)
+
+    **ตัดที่ขอบพยางค์จริง** (แก้ 30 ส.ค. 2569) ของเดิมไล่ตัดทีละตัวอักษร ซึ่ง
+    ยังจบกลางคำได้ เช่น "รับประกันสามปี" กลายเป็น "รับประกันสามป"
     """
-    clean = normalize(text)
-    while clean and count_syllables(clean) > limit:
-        clean = clean[:-1]
-    return clean
+    parts = split_syllables(text)
+    if not parts:
+        return ""
+    room = max(1, int(limit))
+    keep = parts[:room]
+    # **ไม่ได้ตัดอะไรเลย = ห้ามแตะ** (แก้ 30 ส.ค. 2569 หลังเจอของเสียหาย)
+    #
+    # กติกาตัดเศษหัวคำข้างล่างมีไว้ซ่อม**รอยตัด**เท่านั้น ข้อความที่พอดีอยู่แล้ว
+    # ไม่มีรอยตัดให้ซ่อม ไปแตะมันคือทำของดีให้พัง — เจอจริง:
+    #     รองรับสรีระ      →  รองรับสรี      ❌ "สรีระ" เป็นคำเต็มที่ถูกต้อง
+    #     เหมาะกับทุกสรีระ  →  เหมาะกับทุกสรี  ❌
+    # เพราะ "ระ" บังเอิญเป็นพยางค์เดียวกับที่ใช้ขึ้นต้นคำอื่น
+    if len(parts) <= room:
+        return "".join(keep)
+    # ---- ตัดพยางค์ท้ายที่เป็นเศษคำชัดๆ ทิ้งอีกชั้น (30 ส.ค. 2569) ----------
+    #
+    # **ขอบพยางค์ยังไม่ใช่ขอบคำ** ตัดที่ขอบพยางค์แล้วยังได้แบบนี้
+    #     ดูทีวีอย่างสบายใจ   →  ดูทีวีอย่าง-ส      ("ส" มาจาก ส-บาย)
+    #     อุ่นใจยาวนานกับประกัน →  อุ่นใจยาวนานกับ-ประ  ("ประ" มาจาก ประ-กัน)
+    #
+    # การรู้ขอบคำจริงต้องใช้พจนานุกรมตัดคำ ซึ่งโปรเจกต์นี้ไม่มี — จึงใช้กติกา
+    # ที่แน่ใจได้เท่านั้น: **พยางค์ที่ขึ้นต้นคำแล้วอยู่ท้ายสุด = เศษแน่นอน**
+    # เพราะไม่มีคำไทยคำไหนจบด้วยพยางค์พวกนี้
+    #
+    # ไม่ไล่เดามากกว่านี้ — เดาผิดแล้วตัดคำดีทิ้งเสียหายกว่าปล่อยแท็กยาวไปนิด
+    while len(keep) > 1 and (len(keep[-1]) <= 1 or keep[-1] in _HEAD_ONLY):
+        keep.pop()
+    return "".join(keep)
 
 
 # ------------------------------------------------------- แปลงข้อความเป็นแท็ก
@@ -180,9 +256,29 @@ def build_candidates(brand: str, kind: str, details: list[str], log=None) -> lis
             # บอกทุกครั้งที่ตัด — การตัดที่ขอบพยางค์ยังทิ้งเศษพยัญชนะท้ายได้
             # (แยก "แดด" ที่ถูกกับ "ได้ด" ที่เป็นเศษ ต้องใช้พจนานุกรมตัดคำ)
             # ผู้ใช้จึงต้องเห็นว่าตัวไหนถูกตัด แล้วแก้เองในแชทได้
-            if log and short != tag:
-                log(f"จุดเด่น \"{tag}\" ยาวเกิน {DETAIL_MAX_SYLLABLES} พยางค์ "
-                    f"— ตัดเหลือ \"{short}\" (แก้เองได้ถ้าอ่านแล้วขาดคำ)")
+            if log:
+                if short != tag:
+                    log(f"จุดเด่น \"{tag}\" ยาวเกิน {DETAIL_MAX_SYLLABLES} พยางค์ "
+                        f"— ตัดเหลือ \"{short}\" (แก้เองได้ถ้าอ่านแล้วขาดคำ)")
+                elif len(short) > DETAIL_MAX_CHARS:
+                    # ---- ตัดไม่ได้ ต้องดัง ไม่ใช่เงียบ (30 ส.ค. 2569) --------
+                    #
+                    # `split_syllables()` แบ่งบางคำไม่ออกแล้ว **คืนทั้งก้อนเป็น
+                    # พยางค์เดียว** ซึ่งหน้าตาเหมือน "มีพยางค์เดียวจริงๆ" เป๊ะ
+                    # ตัวตัดจึงคิดว่าไม่ต้องตัด แล้ว `short == tag` ทำให้ log
+                    # ข้างบนไม่ทำงานด้วย — แท็กยาวเกินเกณฑ์หลุดออกไปเงียบๆ
+                    #
+                    # วัดจริง: thai_speech แบ่ง "ตั้งออก" ไม่ออก ทำให้
+                    # "พับขาตั้งออกมากางได้เลย" (23 ตัว) ไม่ถูกตัดเลยสักนิด
+                    #
+                    # **จงใจไม่ตัดมั่วต่อ** — ปล่อยยาวเสียแค่ไม่มีคนค้นหา
+                    # ส่วนตัดกลางคำได้แท็กสะกดผิดออกสู่สาธารณะ ซึ่งแย่กว่ามาก
+                    # สิ่งที่ขาดคือความดัง ไม่ใช่การตัด (กติกาข้อ 2.3.1 ข้อ 4:
+                    # "ตัดไม่ได้" ต้องแยกออกจาก "ไม่ต้องตัด")
+                    log(f"จุดเด่น \"{tag}\" ยาว {len(tag)} ตัวอักษร เกินเกณฑ์ "
+                        f"{DETAIL_MAX_CHARS} แต่ตัดไม่ได้ เพราะตัวแบ่งพยางค์"
+                        f"แบ่งคำนี้ไม่ออก — ปล่อยยาวไว้ ดีกว่าตัดจนสะกดผิด "
+                        f"(แก้เองได้ในแชท)")
             tag = short
         raw.append(tag)
     seen: set[str] = set()
@@ -217,8 +313,57 @@ def _fallback_parts(name: str, highlights: list[str]) -> dict:
     for item in (highlights or [])[:3]:
         short = re.split(r"[\s,·]+", str(item).strip())[0]
         if short:
-            details.append(short[:DETAIL_MAX_CHARS])
+            # **ห้ามตัดด้วยจำนวนตัวอักษรดิบ** — ตัดที่ 20 ตัวได้เศษคำเสมอ
+            # เช่น "ดูทีวีอย่างสบายใจไร้กังวล" กลายเป็น "ดูทีวีอย่างสบายใจไร้"
+            # ตัดที่ขอบพยางค์แทน แล้วค่อยกันความยาวอีกชั้นเผื่อพยางค์ยาวผิดปกติ
+            tidy = trim_to_syllables(short)
+            details.append(tidy[:DETAIL_MAX_CHARS] if tidy else short[:DETAIL_MAX_CHARS])
     return {"brand": brand, "kind": kind, "details": details}
+
+
+# คำที่ Google ตอบกลับเมื่อปัญหาอยู่ที่ **ตัวคีย์** ไม่ใช่ที่โมเดลหรือคำสั่ง
+KEY_TROUBLE_WORDS = (
+    "api key not valid", "api_key_invalid", "invalid api key",
+    "unauthenticated", "permission denied", "caller does not have permission",
+)
+
+
+def _reply_reason(response, api_key: str | None = None) -> str:
+    """ประโยคที่ Google ตอบกลับมา — **ตัดคีย์ออกก่อนเสมอ** กัน log กลายเป็นที่คีย์รั่ว
+
+    ของเดิม log เขียนแค่ "ตอบ 401" ซึ่งบอกไม่ได้ว่าคีย์ผิด · คีย์หมดอายุ ·
+    หรือโปรเจกต์ถูกปิด — สามอย่างนี้แก้คนละทาง
+    """
+    text = ""
+    try:
+        text = str((response.json().get("error") or {}).get("message") or "")
+    except Exception:                                        # noqa: BLE001
+        text = ""
+    if not text:
+        text = str(getattr(response, "text", "") or "")
+    if api_key:
+        text = text.replace(api_key, "…")
+    return " ".join(text.split())[:160]
+
+
+def _rules_instead(name: str, highlights: list[str], why: str, log) -> dict:
+    """ถอยไปใช้กฎแทน AI — **ทุกทางออกต้องผ่านตัวนี้ เพื่อให้ดังเหมือนกันหมด**
+
+    **บทเรียนจริง 30 ส.ค. 2569** คีย์ Gemini ถูกส่งผิด (ส่งไป 4 ใบต่อกันเป็น
+    ก้อนเดียว) Google ตอบ 401 ทุกครั้ง แต่ log เขียนแค่ "ลองครบทุกโมเดลแล้ว
+    ไม่สำเร็จ — ใช้กฎแทน" ซึ่งอ่านแล้วแยกไม่ออกว่าคีย์พังหรือ Google ล่ม
+    ผลคือแท็กที่กฎตัดกลางคำ ("#พับขาตั้งออกมากล" · "#ขอบกันกระแทกคล")
+    ถูกเขียนลง hashtag_plan แล้วชนะตอนโพสต์จริง โดยไม่มีใครรู้ตัวเลย
+
+    จึงต้องบอกให้ครบ 3 อย่างในบรรทัดเดียว: **มาจากกฎไม่ใช่ AI** · เพราะอะไร ·
+    ได้อะไรออกมา — คนอ่าน log แล้วต้องตัดสินใจได้ทันทีว่าต้องไปแก้ตรงไหน
+    """
+    parts = _fallback_parts(name, highlights)
+    log(f"⚠️ แท็กชุดนี้มาจากกฎ ไม่ได้มาจาก AI — {why}")
+    log("⚠️ กฎตัดคำเองไม่เป็นภาษา ตรวจก่อนโพสต์: "
+        f"ยี่ห้อ \"{parts['brand']}\" · ชนิด \"{parts['kind']}\" · "
+        f"จุดเด่น {' / '.join(parts['details']) or '(ไม่มี)'}")
+    return parts
 
 
 PARTS_PROMPT = (
@@ -269,13 +414,12 @@ def extract_parts(
     ล้มเหลวเมื่อไรถอยไปใช้กฎ ไม่ทำให้ทั้งงานพัง
     """
     if not api_key:
-        log("ไม่มีคีย์ Gemini — แยกยี่ห้อ/ชนิดสินค้าด้วยกฎแทน")
-        return _fallback_parts(name, highlights)
+        return _rules_instead(
+            name, highlights, "ยังไม่ได้ตั้งคีย์ Gemini เลยสักใบ", log)
     try:
         gemini_quota.check_budget("ตั้งแฮชแท็ก")
     except Exception as error:                               # noqa: BLE001
-        log(f"{error} — ใช้กฎตั้งแฮชแท็กแทน")
-        return _fallback_parts(name, highlights)
+        return _rules_instead(name, highlights, f"งบ Gemini ไม่พอ: {error}", log)
 
     import httpx
 
@@ -284,6 +428,7 @@ def extract_parts(
         highlights=" · ".join(highlights or []) or "(ไม่มี)",
     )
     tried: list[str] = []
+    codes: list[int] = []          # เลขที่ Google ตอบกลับ ไว้แยกว่า "คีย์พัง" หรือ "งานพัง"
     for pick in MODELS:
         try:
             response = httpx.post(
@@ -295,8 +440,11 @@ def extract_parts(
             )
             gemini_quota.record(pick, ok=response.status_code == 200,
                                 response=response)
+            codes.append(int(response.status_code))
             if response.status_code != 200:
-                raise RuntimeError(f"{pick} ตอบ {response.status_code}")
+                raise RuntimeError(
+                    f"{pick} ตอบ {response.status_code} — "
+                    f"{_reply_reason(response, api_key) or 'ไม่มีคำอธิบายกลับมา'}")
             text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
             found = re.search(r"\{.*\}", text, re.S)
             if not found:
@@ -320,8 +468,22 @@ def extract_parts(
         except Exception as error:                           # noqa: BLE001
             tried.append(f"{pick}: {error}")
             log(f"  แยกยี่ห้อ/ชนิดสินค้าด้วย {pick} ไม่สำเร็จ ({error})")
-    log(f"ลองครบทุกโมเดลแล้วไม่สำเร็จ ({' · '.join(tried)}) — ใช้กฎแทน")
-    return _fallback_parts(name, highlights)
+    # **แยก "คีย์ใช้ไม่ได้" ออกจาก "งานล้มด้วยเหตุอื่น" ให้ชัด** — ปัญหาที่ตัวคีย์
+    # ลองอีกกี่โมเดลก็ได้ผลเดิม สองอย่างนี้ไปแก้คนละที่สิ้นเชิง
+    #
+    # ห้ามดูแค่เลข 401 อย่างเดียว — วัดจริง 30 ส.ค.: คีย์ที่ผิดรูปได้ **400**
+    # ส่วนคีย์ที่รูปถูกแต่ใช้ไม่ได้จริงได้ **401** ทั้งคู่คือเรื่องเดียวกัน
+    # จึงดูข้อความที่ Google ตอบกลับด้วย ไม่ใช่ดูเลขอย่างเดียว
+    blob = " ".join(tried).lower()
+    bad_key = (any(code in (401, 403) for code in codes)
+               or any(word in blob for word in KEY_TROUBLE_WORDS))
+    if bad_key:
+        seen = codes[0] if codes else "?"
+        why = (f"คีย์ Gemini ใช้ไม่ได้ (Google ตอบ {seen} = ไม่ผ่านการยืนยันตัวตน) "
+               "— เปิดหน้าตั้งค่าแล้วกด \"ทดสอบคีย์ทุกใบ\" ดูว่าใบไหนตาย")
+    else:
+        why = f"ลองครบทุกโมเดลแล้วไม่สำเร็จ ({' · '.join(tried)})"
+    return _rules_instead(name, highlights, why, log)
 
 
 def plan_for_run(run: dict, api_key: str | None, log=print) -> dict:

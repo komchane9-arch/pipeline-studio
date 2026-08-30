@@ -5289,8 +5289,52 @@ def _engagement_channel() -> tuple[str, str]:
     config = load_config()
     for bot in (config.get("extra_bots") or []):
         if str(bot.get("name", "")).casefold() == ENGAGEMENT_BOT.casefold():
-            return extra_bot_token(bot.get("id", "")), str(bot.get("chat_id") or "")
+            bot_id = bot.get("id", "")
+            token = extra_bot_token(bot_id)
+            chat = str(bot.get("chat_id") or "")
+            if token and not chat:
+                chat = _learn_engagement_chat(bot_id, token)
+            return token, chat
     return "", ""
+
+
+def _learn_engagement_chat(bot_id: str, token: str) -> str:
+    """หาเลขห้องแชทของบอทตามยอดเอง — คืน "" ถ้าหาไม่ได้
+
+    **ทำไมต้องมี (30 ส.ค. 2569)** ตัวเฝ้าข้อความข้ามบอทหน้าที่ `engage` ทิ้ง
+    โดยยกให้ `fb_engage_bot.py` ซึ่ง **จงใจไม่ปลุกอัตโนมัติ** (คอมเมนต์ที่
+    `sync_extra_watchers` อธิบายเหตุผลไว้ — ยังไม่เคยทดสอบกับมือถือจริง)
+    ผลคือ **ไม่มีใครอ่าน `/start` ของบอทตัวนี้เลย เลขห้องจึงว่างตลอดกาล**
+
+    วัดจริง 30 ส.ค.: เจ้าของทักบอทแล้วจริง (`getChat` ยืนยันว่าห้องมีอยู่)
+    แต่รายงานตามยอด **ส่งไม่ออกสักครั้งทั้งวัน** และ log กลับบอกให้เขาไป
+    พิมพ์ `/start` ซ้ำ ซึ่งทำไปกี่รอบก็ไม่มีใครฟัง — **คำแนะนำที่ทำตามแล้ว
+    ไม่มีวันได้ผล แย่กว่าไม่แนะนำอะไรเลย** เพราะโยนความผิดไปที่ผู้ใช้
+
+    **อ่านครั้งเดียวแบบไม่กิน** — ไม่ส่ง offset จึงไม่ยึดข้อความไปจาก
+    `fb_engage_bot.py` ถ้าวันหลังมันถูกปลุกขึ้นมาจริง และเรียกเฉพาะตอน
+    เลขห้องยังว่างเท่านั้น ไม่ได้ไล่ถามทุกชั่วโมง
+    """
+    try:
+        import urllib.request                                    # noqa: PLC0415
+
+        url = (f"https://api.telegram.org/bot{token}"
+               f"/getUpdates?timeout=0&limit=20&allowed_updates=%5B%22message%22%5D")
+        with urllib.request.urlopen(url, timeout=15) as answer:
+            data = json.loads(answer.read().decode("utf-8"))
+        for update in reversed(data.get("result") or []):
+            message = update.get("message") or update.get("edited_message") or {}
+            chat = str((message.get("chat") or {}).get("id") or "")
+            if chat:
+                _remember_extra_chat(bot_id, chat)
+                append_log("publish",
+                           f"รู้ห้องแชทของ @{ENGAGEMENT_BOT} แล้ว ({chat}) "
+                           f"— รายงานตามยอดส่งได้ตั้งแต่รอบนี้")
+                return chat
+    except Exception as error:                                   # noqa: BLE001
+        # ห้ามทำให้รอบรายงานล้มเพราะหาเลขห้องไม่ได้ — บันทึกไว้แล้วไปต่อ
+        append_log("publish", f"หาเลขห้องแชทของ @{ENGAGEMENT_BOT} ไม่ได้: {error}")
+    return ""
 
 def _engagement_message(done: dict) -> str:
     """ข้อความแจ้งผลตามยอด — คืน "" ถ้ารอบนี้ไม่มีอะไรน่าบอก
@@ -5463,10 +5507,13 @@ def _engagement_report(done: dict) -> None:
                    f"— ส่งเลยดีกว่าเงียบต่อ")
     token, chat = _engagement_channel()
     if not token or not chat:
-        # ยังไม่ได้ทัก /start กับบอทนั้น — บอกไว้ใน log ไม่ใช่เงียบหาย
-        append_log("publish",
-                   f"มีผลตามยอดจะส่ง แต่ยังส่งไม่ได้ — เปิด @{ENGAGEMENT_BOT} "
-                   f"ใน Telegram แล้วพิมพ์ /start ครั้งเดียว")
+        # **บอกให้ตรงว่าติดอะไร** ของเดิมบอกให้ไปพิมพ์ /start ทุกครั้ง ทั้งที่
+        # บางกรณีพิมพ์ไปก็ไม่มีใครฟัง (ดู _learn_engagement_chat) — คำแนะนำที่
+        # ทำตามแล้วไม่ได้ผลทำให้ผู้ใช้เสียเวลาแล้วนึกว่าตัวเองทำผิด
+        why = ("ยังไม่ได้ใส่โทเคนของบอท" if not token
+               else f"ทักหาไม่ได้ — เปิด @{ENGAGEMENT_BOT} ใน Telegram "
+                    f"แล้วพิมพ์อะไรก็ได้ 1 ครั้ง แล้วระบบจะจำห้องเอง")
+        append_log("publish", f"มีผลตามยอดจะส่ง แต่ยังส่งไม่ได้ — {why}")
         return
     try:
         telegram_bot.send_message(token, chat, text)

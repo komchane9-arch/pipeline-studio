@@ -203,12 +203,43 @@ def _load_key(path: Path) -> str | None:
         return None
 
 
+# ------------------------------------------------- คีย์ Gemini (หลายใบในไฟล์เดียว)
+#
+# ⚠️ **ห้ามถอดรหัส `gemini_api_key.bin` เองที่ไฟล์นี้** — บั๊กจริง 30 ส.ค. 2569
+#
+# ตั้งแต่ระบบรับคีย์หลายใบ (30 ส.ค.) ไฟล์นั้นเก็บคีย์ **คั่นด้วยขึ้นบรรทัด**
+# แต่ตัวอ่านที่นี่ยังเป็นของยุคคีย์ใบเดียว จึงคืนทั้งก้อนมาเป็นคีย์เดียว
+# (วัดจริง: ก้อนยาว 215 ตัวอักษร = 4 ใบ × 53 ต่อกัน) แล้วส่งไปให้ Google
+# → **ตอบ 401 ทุกครั้ง** ตัวเรียกถอยไปใช้กฎเงียบๆ แล้วได้แท็กที่ตัดกลางคำ
+# ("#พับขาตั้งออกมากล") เขียนลง hashtag_plan ซึ่งชนะตอนโพสต์จริง
+#
+# ตัวจ่ายคีย์ตัวจริงมีที่เดียวคือ `flow_worker.load_gemini_api_key()`
+# (ข้ามใบที่เพิ่งติดโควตาให้เอง) ที่นี่แค่เรียกต่อ ห้ามเขียนตัวอ่านซ้ำอีก
+
+
 def save_gemini_key(key: str) -> None:
-    _save_key(GEMINI_KEY_FILE, key)
+    """ทางเก่าของ `POST /api/gemini-key` — เดี๋ยวนี้ **ต่อท้าย ไม่ทับของเดิม**
+
+    ของเดิมเขียนทับทั้งไฟล์ด้วยคีย์ใบเดียว ซึ่งพอไฟล์เก็บได้หลายใบแล้ว
+    เรียกทางนี้ครั้งเดียว = คีย์อีก 3 ใบหายถาวร (ไฟล์เข้ารหัสไว้ ไม่มีสำเนา)
+    จึงเปลี่ยนให้ทำเหมือน `POST /api/gemini-keys` คือเพิ่มใบใหม่ต่อท้าย
+    ส่วนการล้างคีย์ยังทำได้ตามเดิมด้วย `{"clear": true}` ซึ่งลบทั้งไฟล์
+    """
+    import flow_worker                                        # noqa: PLC0415
+    import gemini_keys as key_store                           # noqa: PLC0415
+
+    fresh = (key or "").strip()
+    keys = flow_worker.load_gemini_keys()
+    if not fresh or fresh in keys:
+        return
+    key_store.save_keys([*keys, fresh])
 
 
 def load_gemini_key() -> str | None:
-    return _load_key(GEMINI_KEY_FILE)
+    """คีย์ Gemini ใบที่ **ใช้ได้ตอนนี้** — เรียกตัวจ่ายกลาง ไม่ถอดรหัสเอง"""
+    import flow_worker                                        # noqa: PLC0415
+
+    return flow_worker.load_gemini_api_key()
 
 
 # โทเคนบอทเก็บเข้ารหัสเหมือนคีย์ Gemini — ใครได้โทเคนไปคุมบอทเราได้ทันที
@@ -1967,6 +1998,21 @@ async def publish_flow_run(request: Request) -> dict:
     target = _clean_target(payload.get("target"))
     item_id = str(payload.get("item_id", "")).strip()
     only = payload.get("only")
+    # ---- รันต่อจากขั้นที่ค้าง (เจ้าของสั่ง 30 ส.ค. 2569) --------------------
+    #
+    # *"ตอนนี้ลง shopee หยุดกลางคัน เพิ่มปุ่ม resume หน่อยให้รันต่อ"*
+    #
+    # **ทำไมต้องมี** ผังมี 22 ขั้นและใช้เวลาราว 10 นาที ถ้าล้มที่ขั้น 15
+    # แล้วต้องเริ่มใหม่ตั้งแต่ขั้น 1 คือทิ้งงานที่ทำสำเร็จไปแล้ว 14 ขั้น
+    # และเสี่ยงกว่าเดิมด้วย เพราะขั้นต้นๆ อย่าง "เลือกคลิป" จะไปหยิบคลิปใหม่สุด
+    # ซึ่งอาจไม่ใช่ใบเดิม (เคยเกิดจริง 29 ส.ค. ลง TCL แต่ได้คลิปเก้าอี้)
+    #
+    # `run_flow` รองรับ `start_at` อยู่แล้ว ตรงนี้แค่เปิดทางให้สั่งจากหน้าเว็บ
+    start = payload.get("start")
+    try:
+        start = max(1, int(start)) if start not in (None, "") else 1
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="start ต้องเป็นเลขขั้น")
 
     # ด่านลำดับการลง — Shopee Video → Facebook Reels → TikTok ห่างกันอย่างน้อย 1 วัน
     #
@@ -2084,7 +2130,7 @@ async def publish_flow_run(request: Request) -> dict:
                     context.settle_jitter = 0.0
                     return publish_flow.run_flow(
                         context, start_at=number, stop_after=number)
-                return publish_flow.run_flow(context)
+                return publish_flow.run_flow(context, start_at=start)
         finally:
             # คืนคีย์บอร์ดเดิมเสมอ แม้ผังจะล้มกลางคัน — ทิ้งไว้ที่
             # ADBKeyboard เจ้าของหยิบมือถือขึ้นมาจะพิมพ์อะไรไม่ได้เลย
@@ -4845,6 +4891,46 @@ def clip_server_up(timeout: float = 1.5) -> bool:
         return probe.connect_ex(("127.0.0.1", CLIP_PORT)) == 0
 
 
+def _clip_server_death(lines: int = 400) -> str:
+    """สาเหตุที่สายคลิปตาย อ่านจากท้าย log — คืนข้อความสั้นที่พร้อมเอาไปโชว์
+
+    **ตอบคำถามว่า "ตายเพราะอะไร" ไม่ใช่ "ตายไหม"** (30 ส.ค. 2569)
+
+    **เหตุการณ์** 15:50–15:58 สายคลิปตายเพราะโค้ดพัง (`NameError`) ตัวเฝ้าไล่ปลุก
+    5 รอบและตายทุกรอบด้วยเหตุเดียวกัน แต่ log เขียนแค่ "สั่งเปิดแล้วแต่พอร์ต
+    ยังไม่ตอบใน 10 วินาที" ซึ่ง**บอกอาการอย่างเดียว** ผลคืออีกแชทเสียเวลาไล่หาว่า
+    "ทำไมตัวเฝ้าไม่ทำงาน" ทั้งที่ตัวเฝ้าทำงานถูกต้อง และคำตอบเขียนรออยู่ในไฟล์
+    ตั้งแต่วินาทีแรก
+
+    ดูสองไฟล์เพราะเปิดคนละทางเขียนคนละที่
+      · clip_server.log        ตอน `ensure_clip_server` เปิดให้เอง
+      · clip_app_restart.log   ตอนคนสั่งรีสตาร์ตเอง
+    """
+    best = ""
+    for name in ("clip_server.log", "clip_app_restart.log"):
+        path = DATA_DIR / name
+        if not path.is_file():
+            continue
+        try:
+            tail = path.read_text(encoding="utf-8",
+                                  errors="replace").splitlines()[-lines:]
+        except Exception:                                        # noqa: BLE001
+            continue
+        # ไล่จากท้ายขึ้นมาหาบรรทัดที่เป็นตัว error จริงๆ
+        # ข้ามบรรทัดย่อยของ traceback (ขึ้นต้นด้วยช่องว่างหรือ "File ")
+        for line in reversed(tail):
+            text = line.strip()
+            if not text or text.startswith(("File ", "Traceback")):
+                continue
+            if line[:1] in (" ", "	"):
+                continue
+            if any(mark in text for mark in ("Error", "Exception", "error:")):
+                return f"{name}: {text[:200]}"
+        if not best and tail:
+            best = f"{name}: {tail[-1].strip()[:200]}"
+    return best
+
+
 def ensure_clip_server() -> bool:
     """เปิดเซิร์ฟเวอร์สายคลิปให้ด้วย ถ้ายังไม่ได้เปิด
 
@@ -4894,7 +4980,12 @@ def ensure_clip_server() -> bool:
         if clip_server_up():
             append_log("input", f"เปิดเซิร์ฟเวอร์สายคลิป (พอร์ต {CLIP_PORT}) ให้อัตโนมัติแล้ว")
             return True
-    append_log("input", f"สั่งเปิดสายคลิปแล้วแต่พอร์ต {CLIP_PORT} ยังไม่ตอบใน 10 วินาที")
+    # ของที่รู้อยู่แล้วต้องพูดออกมา — การเงียบไม่ได้ทำให้ปัญหาเล็กลง
+    # มันแค่ย้ายภาระไปให้คนถัดไปที่ต้องมาเดาเอง
+    why = _clip_server_death()
+    append_log("input",
+               f"สั่งเปิดสายคลิปแล้วแต่พอร์ต {CLIP_PORT} ยังไม่ตอบใน 10 วินาที"
+               + (f" — สาเหตุ: {why}" if why else ""))
     return False
 
 
@@ -4986,10 +5077,16 @@ def _clip_server_keeper() -> None:
                     was_up = True
                 else:
                     if was_up:      # บอกครั้งเดียวตอนเพิ่งพัง ไม่ย้ำทุกนาที
+                        # **บอกสาเหตุไปเลย** ไม่ใช่ชี้ให้ไปเปิดไฟล์อ่านเอง —
+                        # คนที่ได้รับข้อความนี้มักอยู่นอกเครื่อง เปิดไฟล์ไม่ได้
+                        why = _clip_server_death()
                         _clip_alert(
                             "🚨 <b>สายคลิปดับ และปลุกไม่ขึ้น</b>\n"
-                            "บอทเจนคลิปจะไม่ตอบจนกว่าจะแก้ — "
-                            "ดู <code>data/clip_server.log</code>"
+                            "บอทเจนคลิปจะไม่ตอบจนกว่าจะแก้\n\n"
+                            + (f"<b>สาเหตุ</b>\n<pre>{telegram_bot._escape(why)}</pre>"
+                               if why else
+                               "หาสาเหตุจาก log ไม่ได้ — ดู "
+                               "<code>data/clip_server.log</code> เอง")
                         )
                     was_up = False
         except Exception as error:                              # noqa: BLE001
@@ -5173,37 +5270,68 @@ def _work_on_phone_now() -> str:
     return ""
 
 
+
+# บอทที่รับรายงานตามยอด — เจ้าของเลือกเอง 30 ส.ค. 2569
+#
+# แยกห้องจากบอทที่สั่งงานโพสต์ เพราะสองอย่างนี้อ่านคนละจังหวะ:
+# ห้องสั่งงานต้องอ่านทันที ส่วนรายงานยอดอ่านตอนไหนก็ได้ ปนกันแล้วของด่วนจม
+#
+# ยังไม่ได้ทัก /start = ส่งไม่ได้ ต้องบอกใน log ไม่ใช่เงียบหาย
+ENGAGEMENT_BOT = "FBEngagedBot"
+
+
+def _engagement_channel() -> tuple[str, str]:
+    """(โทเคน · ห้องแชท) ของบอทรับรายงานตามยอด — ไม่พร้อมคืนค่าว่าง
+
+    ถอยไปบอทหลักไม่ได้โดยตั้งใจ — เจ้าของเลือกแยกห้องไว้แล้ว ถอยกลับไปรวม
+    ก็เท่ากับไม่ได้แยก และเขาจะไม่รู้ว่าบอทที่ตั้งใจใช้ยังไม่พร้อม
+    """
+    config = load_config()
+    for bot in (config.get("extra_bots") or []):
+        if str(bot.get("name", "")).casefold() == ENGAGEMENT_BOT.casefold():
+            return extra_bot_token(bot.get("id", "")), str(bot.get("chat_id") or "")
+    return "", ""
+
 def _engagement_message(done: dict) -> str:
     """ข้อความแจ้งผลตามยอด — คืน "" ถ้ารอบนี้ไม่มีอะไรน่าบอก
 
     **เงียบไว้ถ้าไม่มีอะไรเปลี่ยน** ส่งทุกชั่วโมงไม่ว่าอะไรจะเกิดขึ้น = กลายเป็น
     ข้อความที่ถูกเลื่อนผ่านภายในไม่กี่วัน แล้ววันที่มีเรื่องจริงก็จะถูกเลื่อนผ่านด้วย
+
+    **รายงาน "ยังไม่ได้ตอบ" ไม่ใช่ "มาใหม่"** (เจ้าของสั่ง 30 ส.ค. 2569)
+    สิ่งที่เขาต้องรู้คือเหลืออะไรให้ทำ ไม่ใช่มีอะไรเข้ามา — คอมเมนต์ที่มาใหม่
+    แล้วตอบไปแล้วในรอบเดียวกัน ไม่ควรไปกวนให้เสียเวลาเปิดดู
+    และทุกใบต้องมี **ลิงก์โพสต์** ติดไปด้วย จะได้กดไปตอบได้เลยไม่ต้องไล่หาเอง
     """
+    import fb_engagement                                # noqa: PLC0415
+
     rows = done.get("rows") or []
     moved = [r for r in rows
              if (r.get("d_reactions") or 0) > 0 or (r.get("d_comments") or 0) > 0]
-    fresh = done.get("new_comments") or 0
-    if not moved and not fresh:
+    try:
+        todo = fb_engagement.unanswered()
+    except Exception:                                   # noqa: BLE001
+        todo = []
+    if not moved and not todo:
         return ""
 
     lines = [f"📊 <b>ตามยอดโพสต์</b> — {datetime.now():%H:%M}"]
-    if fresh:
-        # **โชว์ข้อความเลย** ไม่ใช่บอกแค่จำนวน — เจ้าของจะได้ตัดสินใจได้ทันที
-        # ว่าต้องไปตอบไหม โดยไม่ต้องเปิดคอมมาสั่งดูอีกที
-        lines.append(f"💬 <b>คอมเมนต์ใหม่จากคนอื่น {fresh} อัน</b>")
-        shown = 0
-        for row in rows:
-            for item in (row.get("new_from_others") or []):
-                if shown >= 5:      # เกินนี้ยาวเกินอ่านในแชท
-                    break
-                who = telegram_bot._escape(str(item.get("author", ""))[:22])
-                what = telegram_bot._escape(
-                    " ".join(str(item.get("body", "")).split())[:90])
-                lines.append(f"   ↳ <b>{who}</b>: {what}")
-                shown += 1
-        if fresh > shown:
-            lines.append(f"   (อีก {fresh - shown} อัน — "
-                         f"<code>python fb_engagement.py pending</code>)")
+
+    if todo:
+        lines.append("")
+        lines.append(f"💬 <b>ยังไม่ได้ตอบ {len(todo)} อัน</b>")
+        for item in todo[:5]:
+            who = telegram_bot._escape(str(item.get("author", ""))[:24])
+            what = telegram_bot._escape(
+                " ".join(str(item.get("body", "")).split())[:90])
+            where = telegram_bot._escape(str(item.get("group_name", ""))[:24])
+            lines.append(f"   ↳ <b>{who}</b> ({where})")
+            lines.append(f"      “{what}”")
+            if item.get("post_url"):
+                lines.append(f"      {item['post_url']}")
+        if len(todo) > 5:
+            lines.append(f"   (อีก {len(todo) - 5} อัน)")
+
     if moved:
         lines.append("")
         for row in moved:
@@ -5214,9 +5342,10 @@ def _engagement_message(done: dict) -> str:
                 bits.append(f"คอมเมนต์ {row['comments']} (+{row['d_comments']})")
             name = telegram_bot._escape(str(row.get("group", ""))[:26])
             lines.append(f"• {name} — {' · '.join(bits)}")
+
     quiet = done.get("quiet") or 0
     if quiet:
-        lines.append(f"")
+        lines.append("")
         lines.append(f"💤 เลิกตามแล้ว {quiet} ใบ (ยอดไม่ขยับครบ 1 วัน)")
     return chr(10).join(lines)
 
@@ -5332,8 +5461,12 @@ def _engagement_report(done: dict) -> None:
         append_log("publish",
                    f"รอส่งผลตามยอดเกิน {ENGAGEMENT_HOLD_MAX / 60:.0f} นาที "
                    f"— ส่งเลยดีกว่าเงียบต่อ")
-    token, chat, _ = _bot_channel()
+    token, chat = _engagement_channel()
     if not token or not chat:
+        # ยังไม่ได้ทัก /start กับบอทนั้น — บอกไว้ใน log ไม่ใช่เงียบหาย
+        append_log("publish",
+                   f"มีผลตามยอดจะส่ง แต่ยังส่งไม่ได้ — เปิด @{ENGAGEMENT_BOT} "
+                   f"ใน Telegram แล้วพิมพ์ /start ครั้งเดียว")
         return
     try:
         telegram_bot.send_message(token, chat, text)
@@ -8611,11 +8744,26 @@ def _screen_pump_one(serial: str, now: datetime) -> str:
         return ""
     shell = _screen_shell(serial)
 
+    # ---- ทุกบรรทัดต้องบอกว่าเครื่องไหน (30 ส.ค. 2569) ----------------------
+    #
+    # ของเดิมเขียนแค่ "ดับจอมือถือแล้ว" เฉยๆ ไม่บอกเครื่อง พอไปโผล่คั่นกลาง
+    # ผังโพสต์คลิปใน publish.log (ซึ่งทุกสายเขียนลงไฟล์เดียวกัน) เลยดูเหมือน
+    # ตัวดับจอไปแทรกงานที่กำลังทำอยู่ — **ไล่ผิดทางไปแล้ว 2 คน** ทั้งผมและ
+    # สายคลิป กว่าจะพิสูจน์ได้ว่าเป็นคนละเครื่องต้องไปวัด idle ทีละเครื่อง
+    #
+    # ของจริงตอนวัด: เครื่องคลิปที่กำลังถูกกด idle 11.7 วิ (เกณฑ์ดับ 180)
+    # ส่วนเครื่องที่โดนดับ idle 2,200 กับ 882 วิ — คนละเครื่องกันชัดเจน
+    #
+    # ข้อ 8 บอกว่าทุกอย่างต้องแยกรายเครื่อง **บันทึกก็ต้องแยกด้วย**
+    # ไม่งั้นแยกรายเครื่องถูกในโค้ด แต่คนอ่านแยกไม่ออกอยู่ดี
+    tag = device_book.label(serial)
+    screen_log = lambda x: append_log("publish", f"[{tag}]{x}")   # noqa: E731
+
     # 1) ใกล้ถึงเวลางาน = ปลุกล่วงหน้า ให้แอปมีเวลาตั้งตัวก่อนบอทเริ่มกด
     if _job_due_within(fb_screen.PREWAKE_SECONDS, now):
         if not fb_screen.is_awake(shell):
-            fb_screen.wake(shell, log=lambda x: append_log("publish", x))
-            append_log("publish", f"ปลุกจอ {device_book.label(serial)} ก่อนงานตั้งเวลา")
+            fb_screen.wake(shell, log=screen_log)
+            append_log("publish", f"ปลุกจอ {tag} ก่อนงานตั้งเวลา")
         return "ปลุกล่วงหน้า"
 
     # 2) จะดับได้ต้องว่างจริงทุกด้าน — งานของ app.py · บอทคนละโปรเซส · นิ้วผู้ใช้
@@ -8638,7 +8786,7 @@ def _screen_pump_one(serial: str, now: datetime) -> str:
             idle = fb_screen.idle_seconds(shell)
             if idle < 0 or idle < fb_screen.IDLE_SECONDS:
                 return ""
-            fb_screen.sleep_screen(shell, log=lambda x: append_log("publish", x))
+            fb_screen.sleep_screen(shell, log=screen_log)
             return "ดับจอ"
     except studio_shared.PhoneBusy:
         return ""                     # บอทตัวอื่นใช้อยู่ ไม่ใช่เรื่องของเรา

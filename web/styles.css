@@ -2459,3 +2459,21 @@ body.typing-through {
 .key-head > .mini-btn {
   font-size: 0.76rem; padding: 2px 8px; border-radius: 999px; flex: 0 0 auto;
 }
+
+/* ============ สถานะคลิปในแถวกระดาน (30 ส.ค. 2569) ============
+   สเปคสายคลิป — เดิมต้องเปิดทีละการ์ดจาก 247 ใบถึงจะรู้ว่าใบไหนมีคลิปแล้ว
+
+   ⚠️ สามสถานะต้องแยกออกจากกันด้วยตา — "ยังไม่ได้ตรวจ" ไม่ใช่ "ตรวจแล้วไม่ผ่าน"
+   (กติกาข้อ 2.3.1) วาดเหมือนกันเมื่อไร คลิปที่ยังไม่ได้ตรวจจะดูเหมือนคลิปเสีย */
+.row-video {
+  display: block;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.row-video.ok { color: var(--olive); }
+.row-video.bad { color: var(--danger); }
+/* ยังไม่ได้ตรวจ = เทา ไม่ใช่แดง — ไม่ได้แปลว่าเสีย แค่ยังไม่รู้ */
+.row-video.unknown { color: var(--ink-3); }
+.row-video-why { color: var(--danger); }

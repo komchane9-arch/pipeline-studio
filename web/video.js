@@ -643,6 +643,36 @@ const STAGE_TONE = {
   done: "ok", failed: "fail", cancelled: "off",
 };
 
+/** บรรทัดบอกสถานะคลิปในแถวกระดาน — คืน null ถ้าแถวนั้นยังไม่มีคลิป
+ *
+ *  **สเปคจากสายคลิป 30 ส.ค. 2569 · เจ้าของสั่งเอง** (กติกาข้อ 7.1.1)
+ *  *"เจนเสร็จเอาคลิปทุกคลิปไปใส่ในใบงานด้วยนะ"* — เดิมแถวบอกแค่ชื่อกับขั้น
+ *  มองไม่ออกว่าใบไหนมีคลิปแล้ว ต้องเปิดทีละการ์ดจาก **247 ใบ**
+ *
+ *  ⚠️ **`video_ok = null` ต้องแสดงต่างจาก `false`** (กติกาข้อ 2.3.1)
+ *  null = ยังไม่ได้ตรวจ · false = ตรวจแล้วไม่ผ่าน — วาดเหมือนกันเมื่อไร
+ *  คลิปที่ยังไม่ได้ตรวจจะดูเหมือนคลิปเสีย (เกิดจริงวันนี้ตอนเครดิต Gemini หมด
+ *  ผลตรวจออกมาว่างเปล่าทั้งชุด)
+ */
+function videoLine(job) {
+  const count = job.video_count || 0;
+  if (!count) return null;              // ไม่มีคลิป = ไม่ต้องขึ้นอะไรเลย
+  const ok = job.video_ok;
+  const mark = ok === true ? "✅" : (ok === false ? "❌" : "⏳");
+  const bits = [`🎬 ${count} ไฟล์`];
+  if (job.resolution) bits.push(job.resolution);
+  bits.push(ok === null || ok === undefined ? `${mark} ยังไม่ได้ตรวจ` : mark);
+  const line = el("small", {
+    className: `row-video ${ok === false ? "bad" : (ok === true ? "ok" : "unknown")}`,
+    textContent: bits.join(" · "),
+  });
+  // ข้อความจากเซิร์ฟเวอร์เป็นภาษาไทยพร้อมแสดงแล้ว วางได้เลยไม่ต้องแปลง
+  if (ok === false && job.video_note) {
+    line.append(el("span", { className: "row-video-why", textContent: ` ${job.video_note}` }));
+  }
+  return line;
+}
+
 function jobRow(job) {
   const row = el("li", { className: `story-queue-item ${STAGE_TONE[job.stage] || ""}` });
   if (job.id === openJobId) row.classList.add("active");
@@ -653,6 +683,8 @@ function jobRow(job) {
     el("b", { textContent: job.name || job.link || job.id }),
     el("small", { textContent: bits.join("") }),
   );
+  const clip = videoLine(job);
+  if (clip) row.append(clip);
 
   /* **แถวที่ไม่มีรหัสใบงาน — ห้ามโชว์ปุ่มจัดการคิวสักปุ่ม**
    *

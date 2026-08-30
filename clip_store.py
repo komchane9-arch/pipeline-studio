@@ -108,7 +108,28 @@ def _write_json(path: Path, payload: dict | list) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
-    temp.replace(path)
+    # ---- ลองสลับไฟล์ซ้ำถ้าโดนล็อกชั่วขณะ (30 ส.ค. 2569) --------------------
+    #
+    # **เกิดจริง** `PermissionError: Access is denied` ตอนสลับ run.json.tmp
+    # เป็น run.json — บน Windows ถ้ามีโปรแกรมอื่นเปิดไฟล์ค้างอยู่แม้เสี้ยววินาที
+    # การสลับจะล้มทันที ตัวที่ชนคือตัวยกไฟล์ขึ้น Google Drive ซึ่งกวาดทุก 10 นาที
+    #
+    # **ทำไมต้องแก้ ไม่ใช่ปล่อยให้ล้มแล้วสั่งใหม่** เพราะงานที่กำลังทำอยู่จะค้าง
+    # ครึ่งทาง — เจอจริงกับใบ 40825801074 ที่ลบไฟล์คลิปไปแล้วแต่เขียนคำสั่งใหม่
+    # ไม่สำเร็จ เหลือใบงานที่ไม่มีคลิปแต่ยังถือคำสั่งเก่าไว้ ซึ่งไม่มีใครรู้
+    #
+    # รอเพิ่มทีละนิด รวมไม่เกิน ~1.5 วินาที — การล็อกแบบนี้หลุดเองในเสี้ยววินาที
+    # ถ้ายังไม่หลุดแปลว่ามีของค้างจริง ต้องปล่อยให้ล้มดังๆ ไม่ใช่วนรอไม่รู้จบ
+    last = None
+    for wait in (0.05, 0.1, 0.2, 0.4, 0.8):
+        try:
+            temp.replace(path)
+            return
+        except PermissionError as error:                      # noqa: PERF203
+            last = error
+            time.sleep(wait)
+    raise ClipStoreError(
+        f"เขียนไฟล์ {path.name} ไม่ได้ มีโปรแกรมอื่นเปิดค้างอยู่ ({last})")
 
 
 def _write_text(path: Path, text: str) -> None:

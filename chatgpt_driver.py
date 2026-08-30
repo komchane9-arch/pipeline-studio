@@ -1211,23 +1211,44 @@ def shorten_audio_ask(problem: str, spoken: list[str]) -> str:
 
 
 def parse_numbered(reply: str, want: int) -> list[str]:
-    """แกะบรรทัดที่ขึ้นต้นด้วยเลข — ได้ไม่ครบตามที่ขอคืนลิสต์ว่าง
+    """แกะบทพูดที่ขอกลับมา — ได้ไม่ครบตามที่ขอคืนลิสต์ว่าง
+
+    **ห้ามพึ่งเลขนำหน้าอย่างเดียว** — วัดจริง 31 ส.ค. 2569 เวลา 02:36
+    ChatGPT ตอบกลับมาแบบนี้
+
+        โหลด-ไฟล์-ใหญ่ ไว-ถึง-พัน-เม็ก-เลย      <- **เลข 1. หายไป**
+                                                <- บรรทัดว่าง
+        2. เล่น-เกม-ลื่น แกน-แยก-ลด-สัญ-ญาณ
+        3. …
+
+    เลข `1.` ถูกกลืนเพราะหน้าเว็บจัดให้เป็นรายการอัตโนมัติแล้วซ่อนหัวข้อ ส่วน
+    บรรทัดถัดมามีบรรทัดว่างคั่นจนหลุดจากรายการ เลขจึงเหลืออยู่ **แกะด้วยเลข
+    อย่างเดียวจึงได้ 4 จาก 5 แล้วล้มทุกครั้ง** (3 ใน 3 ใบที่วัด)
+
+    จึงเปลี่ยนมาเก็บ **บรรทัดที่หน้าตาเป็นบทพูด** แล้วตัดเลขนำหน้าทิ้งถ้ามี
+    ได้เกินจำนวนที่ขอให้เอา **ท้ายสุด** เพราะรายการอยู่ท้ายคำตอบเสมอ
+    ส่วนคำเกริ่นอยู่ต้น
 
     **ได้ไม่ครบ = ล้มเหลว ไม่ใช่ได้บางส่วน** ฉากที่ขาดจะทำให้บทพูดเลื่อนฉาก
     ซึ่งแย่กว่าบทที่ยาวเกินเสียอีก
     """
-    got: dict[int, str] = {}
+    good: list[str] = []
     for line in (reply or "").splitlines():
-        m = re.match(r"\s*(\d+)\s*[.)]\s*(.+)$", line.strip())
-        if not m:
+        row = line.strip()
+        if not row:
             continue
-        n = int(m.group(1))
-        text = m.group(2).strip().strip('"“”')
-        if 1 <= n <= want and n not in got and text:
-            got[n] = text
-    if len(got) != want:
+        row = re.sub(r"^\s*\d{1,2}\s*[.)]\s*", "", row)          # ตัดเลขนำหน้าถ้ามี
+        row = row.strip().strip('"“”').strip()
+        if not row or len(row) > 140:
+            continue
+        if "audio" in row.lower() or ":" in row:                   # หัวข้อ/คำสั่ง ไม่ใช่บทพูด
+            continue
+        if not THAI_CHAR_RE.search(row):                           # ต้องมีตัวไทยจริง
+            continue
+        good.append(row)
+    if len(good) < want:
         return []
-    return [got[i] for i in range(1, want + 1)]
+    return good[-want:]
 
 
 def flow_visual_problem(prompts: list[str]) -> str:
@@ -1581,7 +1602,16 @@ def make_storyboard(
                                 log(f"  แก้เฉพาะบรรทัดเสียงสำเร็จ {len(fresh)} ฉาก "
                                     "— ไม่ต้องให้เขียนคำสั่งภาพใหม่")
                             else:
-                                log("  แก้เฉพาะบรรทัดเสียงไม่ผ่าน — ขอคำสั่งใหม่ทั้งชุดแทน")
+                                # **ต้องบอกว่าไม่ผ่านเพราะอะไร** ไม่งั้นแก้ไม่ถูกจุด
+                                if not fresh:
+                                    why = ("แกะบรรทัดที่ขึ้นต้นด้วยเลขไม่ได้ · "
+                                           f"คำตอบขึ้นต้นว่า {short.strip()[:70]!r}")
+                                elif not swapped:
+                                    why = "สลับใส่คำสั่งเดิมไม่ได้"
+                                else:
+                                    why = flow_audio_problem(swapped)
+                                log(f"  แก้เฉพาะบรรทัดเสียงไม่ผ่าน ({why}) "
+                                    "— ขอคำสั่งใหม่ทั้งชุดแทน")
                         except Exception as error:                      # noqa: BLE001
                             log(f"  ขอแก้บรรทัดเสียงไม่สำเร็จ ({error}) — ขอทั้งชุดแทน")
                     if not again:

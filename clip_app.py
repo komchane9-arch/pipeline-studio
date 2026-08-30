@@ -1414,9 +1414,43 @@ def _clip_make(job: dict) -> None:
     highlights = data["highlights"]
     images = [base / name for name in run.get("images", [])]
     images = [p for p in images if p.is_file()]
+
+    # ---- ไม่มีจุดเด่น แต่มีคำบรรยายสินค้า → **ลองเขียนใหม่ก่อนยอมแพ้** --------
+    #
+    # **แก้ 30 ส.ค. 2569** ตอน Gemini เครดิตหมด ใบที่ดึงสินค้ามาแล้วจะได้
+    # รูปครบแต่จุดเด่น 0 ข้อ พอเติมเครดิตแล้วสั่งทำต่อ ขั้นนี้อ่านของที่เก็บไว้
+    # เห็นว่าจุดเด่นว่างก็ **ล้มทันทีโดยไม่เคยลองเขียนใหม่เลย** ล้มซ้ำจนระบบ
+    # สั่งหยุดคิว แล้วคนก็ไปตามหาสาเหตุผิดทาง
+    #
+    # ตรงกับหลักในคู่มือ: **retry ต้องเปลี่ยนอะไรบางอย่าง ไม่ใช่ยิงของเดิมซ้ำ**
+    # ตรงนี้ของที่เปลี่ยนคือคีย์ Gemini ที่ใช้ได้แล้ว จึงต้องลองใหม่ ไม่ใช่ล้มซ้ำ
+    #
+    # ไม่มีคำบรรยายให้ไล่ก็ยอมแพ้ตามเดิม — นั่นคือของที่แก้ตรงนี้ไม่ได้จริงๆ
+    if images and not highlights:
+        detail = clip_store.read_detail(DATA_DIR, item_id)
+        if detail.strip():
+            _clip_log(f"{item_id} ไม่มีจุดเด่นที่เก็บไว้ — ลองไล่จุดขายใหม่จาก"
+                      f"คำบรรยาย {len(detail)} ตัวอักษร")
+            try:
+                from flow_worker import load_gemini_api_key  # noqa: PLC0415
+                import shopee_scrape                         # noqa: PLC0415
+
+                fresh = shopee_scrape.analyse_features(
+                    run.get("name", ""), detail, load_gemini_api_key(),
+                    log=_clip_log)
+                if fresh.get("highlights"):
+                    clip_store.save_features(DATA_DIR, item_id, fresh)
+                    highlights = data["highlights"] = list(fresh["highlights"])
+                    _clip_log(f"{item_id} เขียนจุดเด่นใหม่ได้ {len(highlights)} ข้อ "
+                              "— ทำต่อได้")
+            except Exception as error:                       # noqa: BLE001
+                _clip_log(f"{item_id} ลองเขียนจุดเด่นใหม่ไม่สำเร็จ: {error}")
+
     if not highlights or not images:
-        _clip_say(chat_id, "❌ ข้ามขั้นสตอรีบอร์ด — ยังไม่มีรูปหรือจุดเด่นครบ")
-        raise RuntimeError("ไม่มีรูปหรือจุดเด่นครบ")
+        why = ("ไม่มีรูปสินค้า" if not images
+               else "ไล่จุดขายจากคำบรรยายของ Shopee ไม่ได้")
+        _clip_say(chat_id, f"❌ ข้ามขั้นสตอรีบอร์ด — {why}")
+        raise RuntimeError(f"ไม่มีรูปหรือจุดเด่นครบ ({why})")
 
     # กติกาเพิ่มที่แนบไปกับคำขอสตอรีบอร์ด — ใส่ในช่องเดิมจุดเดิม (`extra_ask`)
     #   · ระบบเดาให้ : สินค้าปรับเปลี่ยนรูปทรงได้ → ให้ยึดรูปที่แนบไป

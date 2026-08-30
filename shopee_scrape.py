@@ -1226,6 +1226,81 @@ def curate_for_ad(
     raise RuntimeError("Gemini กรองชุดรูปไม่สำเร็จ — " + " · ".join(tried))
 
 
+# ---- AI ในเครื่อง ใช้เป็นทางถอยเมื่อ Gemini ใช้ไม่ได้ (30 ส.ค. 2569) ----
+#
+# Ollama + Qwen2.5-VL 7B ติดตั้งไว้ที่ ../\_ollama เปิดด้วย  ollama serve
+# ไม่มี Ollama เปิดอยู่ = ฟังก์ชันคืนค่าว่าง ผู้เรียกถอยไปใช้กฎเหมือนเดิม
+LOCAL_AI_URL = "http://127.0.0.1:11434"
+LOCAL_AI_MODEL = "qwen2.5vl:7b"
+
+
+LOCAL_HIGHLIGHT_ASK = (
+    "นี่คือคำบรรยายสินค้าจากหน้า Shopee\n\n{detail}\n\n"
+    "ไล่จุดขายที่ทำให้คนอยากซื้อออกมา {count} ข้อ "
+    "แต่ละข้อ **ไม่เกิน 30 ตัวอักษรไทย** "
+    "ห้ามมีคำภาษาอังกฤษหรือตัวเลขภาษาอังกฤษ ห้ามใช้ศัพท์เทคนิค "
+    "เขียนแบบเพื่อนแนะนำเพื่อน\n"
+    'ตอบเป็น JSON บรรทัดเดียว ห้ามมีข้อความอื่น: {{"highlights": ["...", "..."]}}'
+)
+
+
+def local_features(name: str, detail: str, count: int = 4, log=print) -> dict:
+    """ไล่จุดขายด้วย AI ในเครื่อง (Ollama) — ทางถอยเมื่อ Gemini ใช้ไม่ได้
+
+    **เจ้าของสั่ง 30 ส.ค. 2569** — *"gemini ที่เลือกรูปผมอยากเปลี่ยนมาใช้
+    local Ai แทน"* หลังเครดิตหมดทั้ง 4 ใบแล้วงานค้าง 18 ใบ
+
+    **ใช้เป็นทางถอย ไม่ใช่ตัวแทน** — Gemini ยังเป็นตัวหลักตอนมีเครดิต
+    ตัวนี้ทำงานเฉพาะตอนที่ไม่งั้นจะไม่ได้อะไรเลย ผลที่วัดได้:
+
+        งานข้อความ (ไล่จุดขาย)  1.8 วินาที · ได้ครบ 4 ข้อ · สั้นพอดีเกณฑ์
+        Gemini ตัวเดิม          ~10 วินาที · ได้ 4 ข้อ แต่ยาว 60+ ตัวจนถูกตัด
+
+    **เร็วกว่าและสั้นกว่าของเดิมด้วยซ้ำ** — แต่ยังไม่เอามาแทนถาวรเพราะ
+    ยังไม่ได้วัดกับสินค้าหลากหลายพอ และเคยเห็นคำอังกฤษหลุดมา 1 คำ
+
+    คืนรูปแบบเดียวกับ `analyse_features` เป๊ะ — ล้มเหลวคืน highlights ว่าง
+    เพื่อให้ผู้เรียกถอยไปใช้กฎต่อได้เหมือนเดิม
+    """
+    import json as _json
+
+    try:
+        import httpx
+    except Exception:                                            # noqa: BLE001
+        return {"features": [], "highlights": [], "why": []}
+
+    ask = LOCAL_HIGHLIGHT_ASK.format(detail=(detail or "")[:3000], count=count)
+    try:
+        reply = httpx.post(f"{LOCAL_AI_URL}/api/generate", timeout=180.0, json={
+            "model": LOCAL_AI_MODEL, "stream": False, "prompt": ask,
+            "options": {"num_predict": 320, "temperature": 0.3},
+        })
+        if reply.status_code != 200:
+            log(f"AI ในเครื่องตอบ {reply.status_code}")
+            return {"features": [], "highlights": [], "why": []}
+        text = (reply.json().get("response") or "").strip()
+    except Exception as error:                                   # noqa: BLE001
+        log(f"เรียก AI ในเครื่องไม่ได้: {error}")
+        return {"features": [], "highlights": [], "why": []}
+
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        log(f"AI ในเครื่องตอบมาแกะไม่ได้: {text[:60]}")
+        return {"features": [], "highlights": [], "why": []}
+    try:
+        got = _json.loads(text[start:end + 1])
+    except Exception:                                            # noqa: BLE001
+        log(f"AI ในเครื่องตอบ JSON เสีย: {text[start:start + 60]}")
+        return {"features": [], "highlights": [], "why": []}
+
+    rows = [str(x).strip() for x in (got.get("highlights") or []) if str(x).strip()]
+    if not rows:
+        log("AI ในเครื่องไม่ได้ให้จุดเด่นมา")
+        return {"features": [], "highlights": [], "why": []}
+    log(f"⚠️ จุดเด่นชุดนี้มาจาก AI ในเครื่อง ไม่ใช่ Gemini — ได้ {len(rows)} ข้อ")
+    return {"features": rows, "highlights": rows[:count], "why": []}
+
+
 def analyse_features(name: str, detail: str, api_key: str | None, log=print,
                      count: int = HIGHLIGHT_COUNT) -> dict:
     """ไล่จุดขายออกมาให้ครบ แล้วเลือกข้อที่ว้าวสุดมา `count` ข้อ
@@ -1239,9 +1314,36 @@ def analyse_features(name: str, detail: str, api_key: str | None, log=print,
     """
     count = max(1, int(count))
     if not detail.strip():
-        return {"features": [], "highlights": [], "why": []}
+        # **คำบรรยายว่างไม่ได้แปลว่าไม่มีข้อมูล** — ชื่อสินค้าบน Shopee ยัดจุดขายไว้เต็ม
+        #
+        # เจอจริง 31 ส.ค. 2569: งาน 5 ใบล้มด้วยข้อความ "ไล่จุดขายจากคำบรรยาย
+        # ของ Shopee ไม่ได้" ทั้งที่ **Shopee ส่ง "detail": "" มาเองตั้งแต่ต้น**
+        # (ตรวจใน raw.json แล้ว ไม่ใช่ตัวดึงของเราพลาด) สินค้าบางรายการมีแต่รูป
+        # ไม่มีข้อความบรรยายเลย แต่ชื่อยาว 96-153 ตัวอักษรและมีจุดขายจริงอยู่:
+        #
+        #   "UGREEN ... ปลั๊กไฟสากลออลอินวัน 1250W ..."
+        #   "【Qi2.2】UGREEN MagFlow Qi 2 25W 3-IN-1 เครื่องชาร์จไร้สาย..."
+        #
+        # วัดจริงกับ AI ในเครื่องโดยป้อนชื่ออย่างเดียว ได้ 4 ข้อใช้ได้ใน 1.0-1.7 วินาที
+        #   · รองรับปลั๊กสากล · พลังงานสูง 1250W · ชาร์จเร็ว 25W · 3-IN-1 ใช้ได้หลายอุปกรณ์
+        #
+        # **การถอยเงียบๆ ว่า "ไม่มีข้อมูล" คือทิ้งงานทั้งที่ยังทำต่อได้**
+        if not (name or "").strip():
+            return {"features": [], "highlights": [], "why": []}
+        log("หน้า Shopee ไม่มีคำบรรยาย — ไล่จุดขายจากชื่อสินค้าแทน")
+        detail = name.strip()
     if not api_key:
-        log("ไม่มีคีย์ Gemini — คัดรายละเอียดเด่นด้วยกฎแทน")
+        # **ไม่มีคีย์ ไม่ได้แปลว่าต้องถอยไปใช้กฎทันที** — AI ในเครื่องไม่ต้องใช้คีย์เลย
+        #
+        # เจอจริง 31 ส.ค. 2569: บรรทัดนี้กระโดดข้าม `local_features` ไปหากฎเดา
+        # ซึ่งตัดประโยคตามจำนวนตัวอักษรจนอ่านไม่รู้เรื่อง ทั้งที่ AI ในเครื่อง
+        # อ่านแล้วเขียนใหม่ให้ได้ใน 1-2 วินาที **โดยไม่มีค่าใช้จ่าย**
+        #
+        # ทางลัดชนิดเดียวกับที่ทำให้ทางถอยดีๆ ถูกกลบมาแล้วหลายรอบในโปรเจกต์นี้
+        local = local_features(name, detail, count=count, log=log)
+        if local["highlights"]:
+            return local
+        log("ไม่มีคีย์ Gemini และ AI ในเครื่องก็ไม่ได้ผล — คัดรายละเอียดเด่นด้วยกฎแทน")
         return {"features": [], "highlights": _fallback_highlights(detail), "why": []}
 
     import httpx
@@ -1287,6 +1389,17 @@ def analyse_features(name: str, detail: str, api_key: str | None, log=print,
         except Exception as error:                           # noqa: BLE001
             last = str(error)
             log(f"คัดจุดเด่นด้วย {model} ไม่สำเร็จ ({error})")
+    # ---- ลอง AI ในเครื่องก่อนถอยไปใช้กฎ (30 ส.ค. 2569) --------------------
+    #
+    # **กฎเดาเป็นทางถอยสุดท้ายจริงๆ** — มันตัดประโยคตามจำนวนตัวอักษร
+    # ได้จุดเด่นที่อ่านไม่รู้เรื่อง (เจอจริงวันนี้: "พับขาตั้งออกมากล")
+    # ส่วน AI ในเครื่องอ่านคำบรรยายจริงแล้วเขียนใหม่ให้ ซึ่งดีกว่ามาก
+    #
+    # ไม่ได้เปลี่ยนพฤติกรรมตอน Gemini ใช้ได้ — ตรงนี้ทำงานเฉพาะตอนที่
+    # ไม่งั้นจะได้ของเดาล้วนอยู่แล้ว
+    local = local_features(name, detail, count=count, log=log)
+    if local["highlights"]:
+        return local
     log(f"ใช้กฎคัดจุดเด่นแทน (ล่าสุด: {last})")
     return {"features": [], "highlights": _fallback_highlights(detail), "why": []}
 

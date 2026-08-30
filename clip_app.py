@@ -249,6 +249,12 @@ def _speech_prompt(prompt: str, level: int = 1) -> str:
     ตรงนี้จึงเป็น **ทางถอย** สำหรับบทที่มาแบบยังไม่มีขีด เช่นบทที่ผู้ใช้
     พิมพ์แก้เอง — ข้อความที่มีขีดอยู่แล้วผ่านตรงนี้ไปโดยไม่เปลี่ยนรูป
     """
+    # ---- ขีดคำอ่านห้ามหลุดไปอยู่บนจอ (เจ้าของเจอเอง 30 ส.ค. 2569) ----
+    #
+    # ล้างที่นี่ด้วย ไม่ใช่แค่ตอนบันทึก เพราะงานที่เก็บคำสั่งผิดไว้ก่อนหน้านี้
+    # **ยังรออยู่ในคิวอีก 150 กว่าใบ** ถ้าล้างแค่ตอนบันทึก ของเก่าต้องไปทำ
+    # สตอรีบอร์ดใหม่ทั้งหมดถึงจะหาย ซึ่งเสียทั้งเวลาและโควตา ChatGPT ฟรีๆ
+    prompt = clip_store.strip_reading_hyphens(prompt)
     ready = thai_speech.speech_ready(prompt, level)
 
     def one(found: "re.Match[str]") -> str:
@@ -1255,7 +1261,17 @@ def _clip_collect(job: dict) -> None:
         # ในแชท ถ้าโหลดแต่ที่คัดไว้ (บางสินค้าเหลือใบเดียว) จะไม่มีอะไรให้สลับเลย
         # ส่ง `link` ที่คลี่แล้ว ไม่ใช่ `job["link"]` — ตัวดึงจะได้ไม่คลี่ซ้ำ
         # (ลิงก์เต็มที่อ่านรหัสได้ `resolve_link` คืนทันทีโดยไม่ยิงคำขอ)
-        data = shopee_collect(link, want_all=True)
+        # ---- ดึง Shopee ด้วยโปรไฟล์ของตัวเอง (เจ้าของสั่ง 30 ส.ค. 2569) ----
+        #
+        # *"storyboard กับ ดึงลิ้ง แยกคนทำกันไม่ได้หรอ"* → แยกได้
+        # *"profile 2 ใช้ เจน google flow ด้วยนิ ไม่ชนกันหรอ"* → ชนจริง
+        # *"แยก profile เพิ่มอีกอันนึงไปเลย"* → ดึงลิงก์ไปอยู่โปรไฟล์ที่ 3
+        #
+        # **ไม่ผูกกับหมายเลขช่อง** เพราะงานดึงลิงก์มีคนทำคนเดียวเสมอ
+        # ผูกกับช่องแล้วจะพาไปชนกับงานอื่นที่ใช้ช่องเดียวกัน
+        import flow_worker as _fw                               # noqa: PLC0415
+        data = shopee_collect(link, want_all=True,
+                              profile=_fw.SHOPEE_PROFILE)
     except Exception as error:
         hint = ""
         if type(error).__name__ == "ShopeeNeedsLogin":
@@ -1533,11 +1549,29 @@ def _clip_make(job: dict) -> None:
         _clip_log("กติกาที่แนบไปกับคำขอสตอรีบอร์ด: "
                   + " · ".join(tag for tag, _ in rules))
     folder = base / "storyboard"
+    # ---- เลือกช่องทำสตอรีบอร์ด (เจ้าของสั่ง 30 ส.ค. 2569) --------------------
+    #
+    # แต่ละช่องมี **โปรไฟล์ Chrome ของตัวเอง** และ **custom GPT ของตัวเอง**
+    # จึงเปิดพร้อมกันได้ ล็อกก็แยกรายโปรไฟล์ ไม่ไปรอกัน
+    #
+    # ⚠️ โปรไฟล์ของช่องที่ 2 ต้องล็อกอิน ChatGPT ไว้ก่อน ไม่งั้นล้มทุกใบ
+    slot = chatgpt_driver.storyboard_slot(_current_slot())
+    seat = f"ช่อง {_current_slot()}"
+    profile = slot["profile"]
+    from flow_worker import profile_named, space_out
+    open_here = (open_browser if not profile else
+                 (lambda pw, hidden=False, _p=profile:
+                  open_browser(pw, hidden, profile_named(_p))))
+    # เว้นระยะจากการยิง ChatGPT ครั้งก่อน — ทำก่อนขอล็อก จะได้ไม่นอนทั้งที่ถือล็อก
+    space_out("chatgpt", log=_clip_log)
+    _clip_log(f"ทำสตอรีบอร์ดด้วย{seat}"
+              + (f" (โปรไฟล์ {profile})" if profile else " (โปรไฟล์เดิม)"))
     try:
-        with shared.browser_lock(label="ทำสตอรีบอร์ด"):
+        with shared.browser_lock(label=f"ทำสตอรีบอร์ด {seat}", profile=profile):
             result = chatgpt_driver.make_storyboard(
-                open_browser, data.get("name", ""), highlights, images, folder,
+                open_here, data.get("name", ""), highlights, images, folder,
                 log=_clip_log, extra_ask=extra_ask,
+                gpt_url=slot["gpt"],
                 avoid_openers=_clip_recent_openers(data.get("item_id", "")),
             )
     except Exception as error:
@@ -1561,7 +1595,21 @@ def _clip_make(job: dict) -> None:
 
     # ได้ของไม่ครบต้อง **บอกให้รู้ตัว** ไม่ใช่ส่งของที่ขาดไปเงียบๆ แล้วให้ไปเจอเอง
     # ตอนกดอนุมัติ — ผู้ใช้จะไม่รู้ว่าต้องสั่งแก้หรือรอ
-    warnings = result.get("warnings") or []
+    warnings = list(result.get("warnings") or [])
+    # ---- ไม่มีภาพเลย = ต้องดัง (30 ส.ค. 2569) ------------------------------
+    #
+    # **เจอจริง** ช่อง 2 ทำสตอรีบอร์ดแล้วได้ภาพ 0 ใบ แต่ใบงานเดินต่อไปขั้น
+    # "รออนุมัติ" เหมือนสำเร็จทุกประการ — ไม่มีใครรู้จนกว่าจะไปเปิดดูเอง
+    # นี่คือกติกาข้อ 2.3 เป๊ะๆ: ตัวตรวจบอกผ่านทั้งที่ยังไม่ผ่าน
+    #
+    # ภาพสตอรีบอร์ดคือ **เฟรมตั้งต้นที่ส่งให้ Veo** ไม่มีภาพ = ถอยไปใช้รูปสินค้า
+    # ซึ่งเป็นพฤติกรรมเก่าที่คุณภาพต่ำกว่า ระบบยังเดินต่อได้จริง (จึงไม่ทำให้ล้ม)
+    # แต่ **ต้องบอกให้รู้ตัว** ไม่ใช่ส่งของด้อยคุณภาพไปเงียบๆ
+    if not (result.get("frames") or []) and not result.get("refused"):
+        warnings.append(
+            "GPT ไม่ได้วาดภาพสตอรีบอร์ดมาให้เลยสักใบ — คลิปจะใช้รูปสินค้า"
+            "เป็นเฟรมตั้งต้นแทน ซึ่งได้ผลด้อยกว่า กด ✏️ สั่งแก้เพื่อขอภาพใหม่ได้")
+        _clip_log("⚠️ สตอรีบอร์ดได้ภาพ 0 ใบ — เก็บคำสั่งกับบทพูดไว้ แต่ไม่มีเฟรมตั้งต้น")
     if warnings:
         lines = "\n".join(f"• {telegram_bot._escape(w[:180])}" for w in warnings)
         _clip_say(
@@ -1937,7 +1985,7 @@ def _clip_auto_regen(job: dict, run: dict) -> bool:
 
     clip_jobs.update(job["id"], stage=clip_queue.STAGE_READY_FLOW,
                      note=f"เจนใหม่อัตโนมัติ (รอบ {done + 1}) — {why}")
-    clip_runner.wake()
+    _wake_runners()
     _clip_log(f"คลิป {item_id} เจอ: {why} — ลบคลิปเดิม {removed} ไฟล์ "
               f"แล้วสั่งเจนใหม่รอบที่ {done + 1}")
     _clip_say(job.get("chat_id"),
@@ -2077,10 +2125,15 @@ def _clip_generate(job: dict) -> None:
     import flow_driver
     from flow_worker import (
         FLOW_URL, open_browser, _app_page, _enter_app,
-        FLOW_LOCK, flow_gen_profile_dir,
+        flow_seat, space_out, require_flow_plan, WrongFlowPlan,
     )
     from playwright.sync_api import sync_playwright
 
+    # ---- ที่นั่งของช่องนี้ (เจ้าของสั่ง 30 ส.ค. 2569) ---------------------
+    #
+    # ช่อง 1 = โปรไฟล์ Flow เดิม · ช่อง 2 = โปรไฟล์ที่ 2 ที่เจ้าของล็อกอิน Flow ไว้
+    # โฟลเดอร์กับชื่อล็อกมาคู่กันจาก `flow_seat()` ที่เดียว จะได้ไม่จับผิดคู่
+    seat = flow_seat(_current_slot())
     chat_id = job["chat_id"]
     run = clip_store.load_run(DATA_DIR, job.get("item_id", ""))
     prompts = run.get("flow_prompts") or []
@@ -2133,7 +2186,7 @@ def _clip_generate(job: dict) -> None:
         """
         with sync_playwright() as playwright:
             browser = open_browser(playwright, hidden=False,
-                                   profile_dir=flow_gen_profile_dir())
+                                   profile_dir=seat["dir"])
             page = browser.pages[0] if browser.pages else browser.new_page()
             driver = None                 # อาจล้มก่อนสร้าง — finally ต้องเช็คได้
             credits_before = None
@@ -2151,6 +2204,11 @@ def _clip_generate(job: dict) -> None:
                     pass
                 # จดว่าลงเอยที่หน้าไหน — ตอนล้มจะได้รู้ว่าอยู่หน้าถูกหรือเปล่า
                 _clip_log(f"เปิดหน้า Flow แล้ว: {page.url[:80]}")
+                # ---- ต้องเป็นบัญชี ULTRA เท่านั้น (เจ้าของสั่ง 30 ส.ค. 2569) ----
+                #
+                # ตรวจ **ก่อนแตะเครดิต** ล้มตรงนี้เสียแค่เวลาเปิดหน้าราว 20 วินาที
+                # ส่วนล้มทีหลังเสียเครดิตจริง หรือเจนด้วยบัญชีผิดซึ่งถอนไม่ได้
+                require_flow_plan(page, f"ช่อง {seat['no']}", log=_clip_log)
                 driver = flow_driver.FlowDriver(page, log=_clip_log)
 
                 # อ่านเครดิตก่อนเริ่ม เพื่อบอกได้ว่ารอบนี้ใช้ไปเท่าไรและเหลือเท่าไร
@@ -2268,9 +2326,27 @@ def _clip_generate(job: dict) -> None:
 
     # โปรไฟล์ของ Flow แยกจาก ChatGPT แล้ว (28 ส.ค. 2569) จึงใช้ล็อกคนละดอก
     # ผลคือ **ทำสตอรีบอร์ดกับเจนคลิปเดินพร้อมกันได้** ไม่ต้องผลัดกันเหมือนเดิม
-    with shared.browser_lock(label="เจนคลิปใน Google Flow",
-                             profile=FLOW_LOCK):
-        if attempt():
+    _clip_log(f"เจนคลิปด้วยช่อง {seat['no']} (โปรไฟล์ {seat['dir'].name})")
+    space_out("flow", log=_clip_log)
+    with shared.browser_lock(label=f"เจนคลิปใน Google Flow ช่อง {seat['no']}",
+                             profile=seat["lock"]):
+        try:
+            wants_login = attempt()
+        except WrongFlowPlan as error:
+            # แจ้งให้เห็นชัดว่าต้อง**เปลี่ยนบัญชี** ไม่ใช่แค่บอกว่างานล้ม
+            # (เจ้าของสั่งไว้ 30 ส.ค. 2569 — ข้อความต้องบอกวิธีแก้ ไม่ใช่บอกแค่อาการ)
+            how = ("login-slot --slot %d" % seat["no"]) if seat["no"] > 1 else "login"
+            _clip_say(
+                chat_id,
+                "🚫 <b>บัญชี Google Flow ผิด — ต้องเปลี่ยนบัญชีก่อน</b>\n"
+                + telegram_bot._escape(str(error))
+                + "\n\nโปรไฟล์ที่ใช้อยู่: <code>%s</code>\n" % seat["dir"].name
+                + "เปิดหน้าต่างสลับบัญชีด้วย\n"
+                + "<code>python flow_worker.py %s</code>" % how,
+            )
+            _clip_log("🚫 %s" % error)
+            raise
+        if wants_login:
             # ผู้ใช้สั่งไว้: ถ้าต้องล็อกอิน ให้เด้งหน้าต่างขึ้นมาให้ล็อกอินเอง
             # ต้องเรียก **นอกบล็อก Playwright** — เปิดซ้อนกันไม่ได้
             # (เจอจริง: "Sync API inside the asyncio loop" ล้มทั้ง 3 งานรวด)
@@ -2596,7 +2672,19 @@ STAGE_WORK_NAME = {
 }
 
 
-def _clip_worker(job: dict) -> None:
+# ช่องที่เธรดนี้กำลังทำอยู่ — ใช้เลือกโปรไฟล์ Chrome กับ custom GPT
+#
+# **ทำไมต้องเป็น thread-local ไม่ใช่ตัวแปรธรรมดา** (30 ส.ค. 2569) ตอนนี้มีตัวรัน
+# สองตัวเดินพร้อมกัน ถ้าใช้ตัวแปรร่วม ช่องที่ 2 จะไปทับค่าของช่องที่ 1 กลางคัน
+# แล้วทั้งคู่จะไปเปิดโปรไฟล์เดียวกัน = Chrome ไล่กันเอง งานพังทั้งสองใบ
+_SLOT = threading.local()
+
+
+def _current_slot() -> int:
+    return int(getattr(_SLOT, "number", 1) or 1)
+
+
+def _clip_worker(job: dict, slot: int = 1) -> None:
     """ตัวรันคิวเรียกเข้ามาที่นี่ — แยกตามสถานะที่หยิบมา แล้วค่อยแยกตามสายงาน
 
     **งานพังต้องเด้งเข้าแชทเสมอ** ตัวรันจับ error แล้วมาร์ค failed ให้ก็จริง
@@ -2604,6 +2692,7 @@ def _clip_worker(job: dict) -> None:
     พังตอน 13:41 แต่ข้อความสุดท้ายในแชทคือ "กำลังสั่งแก้บทพูด…" ผู้ใช้รอเก้อ
     23 นาทีกว่าจะมาถามเอง
     """
+    _SLOT.number = int(slot or 1)
     came_from = job.get("claimed_from")
     tiktok = _job_kind(job) == "tiktok"
     try:
@@ -2745,8 +2834,126 @@ def _clip_blocked_alert(info: dict) -> None:
     _clip_say(chat_id, "\n".join(lines), keyboard, preview=False)
 
 
+# ช่อง 1 ต้อง **ไม่หยิบงานดึงลิงก์** (แก้ 30 ส.ค. 2569 15:40)
+#
+# **เจอจริงทันทีที่เปิดช่อง 3** — ขึ้น `collecting: 2` พร้อมกัน เพราะช่อง 1
+# ไม่ได้จำกัดขั้นไว้ จึงหยิบงานดึงลิงก์ได้ด้วย แล้วสองช่องไปแย่งโปรไฟล์ Shopee
+# ตัวเดียวกัน ตัวที่มาทีหลังต้องยืนรอล็อกนานเป็นนาที = **สตอรีบอร์ดหยุดเดินฟรีๆ**
+#
+# ระบุขั้นของช่อง 1 ให้ชัดแทนการปล่อยว่าง — เพิ่มขั้นใหม่เมื่อไรต้องมาเติมที่นี่
+# ซึ่งดีกว่าปล่อยให้มันไปหยิบของที่มีเจ้าของอยู่แล้วโดยไม่มีใครรู้
+# **ช่อง 1 ไม่เอางานเจนคลิปแล้ว** (แก้ 30 ส.ค. 2569 16:35)
+#
+# **วัดของจริงหลังรีสตาร์ต 15:58 → 16:38 (40 นาที)**
+#     ทำสตอรีบอร์ด   0 ครั้ง   ← ทั้งที่มี 198 ใบจอดรอ
+#     เจนคลิป       11 ครั้ง   (ช่อง 1 ทำ 4 · ช่อง 2 ทำ 7)
+#
+# `ready_flow` กับ `ready_storyboard` มีลำดับความสำคัญ **เท่ากัน** (STAGE_PRIORITY
+# ให้ 1 ทั้งคู่) เสมอกันแล้วตัดสินด้วยตำแหน่งในลิสต์ — งานเจนคลิปอยู่ต้นลิสต์
+# จึงชนะทุกครั้ง ช่อง 1 เลยไม่เคยเดินไปถึงงานสตอรีบอร์ดเลยสักรอบ
+#
+# เป็นอาการ **งานลำดับเท่ากันอดตาย** ชนิดเดียวกับที่ลิงก์ใหม่เคยเจอเมื่อ 15:20
+# ต่างกันแค่ครั้งนี้เสมอกันจึงแพ้ที่ตำแหน่ง ไม่ใช่แพ้ที่ลำดับ
+#
+# **แก้ด้วยการแบ่งงานให้ขาด** ไม่ใช่ไปยุ่งกับลำดับ — ช่อง 2 รับงานเจนคลิป
+# ไปทั้งหมดอยู่แล้ว ช่อง 1 จึงไม่ต้องแตะ เหลือทำสตอรีบอร์ดซึ่งเป็นคอขวดจริง
+# (ChatGPT จำกัดที่บัญชี เปิดสองแชทไม่ได้ ช่องเดียวคือเพดานที่แท้จริง)
+CLIP_SLOT1_STAGES = {
+    clip_queue.STAGE_READY_STORYBOARD,
+    clip_queue.STAGE_REVISING,
+    clip_queue.STAGE_POSTING,
+}
+
+
 clip_runner = clip_queue.ClipRunner(clip_jobs, _clip_worker, log=_clip_log,
-                                    on_hold=_clip_blocked_alert)
+                                    on_hold=_clip_blocked_alert,
+                                    stages=CLIP_SLOT1_STAGES, slot=1)
+
+# ---- ตัวรันช่องที่ 2 (เจ้าของสั่ง 30 ส.ค. 2569) ---------------------------
+#
+# หยิบ **เฉพาะสองขั้นที่เป็นงานเบราว์เซอร์ล้วน** — ทำสตอรีบอร์ด กับ เจนคลิป
+# ทั้งคู่มีโปรไฟล์ของตัวเองแล้ว จึงเดินคู่กับช่องที่ 1 ได้จริง
+#
+# **ทำไมไม่ให้หยิบทุกขั้น** ขั้นดึงข้อมูล Shopee ต้องเรียงทีละใบ (กติกาข้อ 2.7.1
+# วัดแล้ว: ยิงรวดโดนบล็อกที่ใบที่ 9) ถ้าปล่อยให้สองตัวดึงพร้อมกันคือย้อนกลับไป
+# ทำสิ่งที่เคยทำให้ล้มรวด 25 ใบ ส่วนขั้นที่รอคนตรวจไม่ใช่งานของตัวรันอยู่แล้ว
+#
+# **วัดก่อนแก้** 30 ส.ค.: จอดรอทำสตอรีบอร์ด 156 ใบ ใบละราว 2 นาที = ราว 5 ชั่วโมง
+# ---- ใครทำอะไร: หนึ่งงาน หนึ่งโปรไฟล์ หนึ่งคน (30 ส.ค. 2569) --------------
+#
+# เจ้าของไล่ถามจนได้โครงนี้:
+#   *"storyboard กับ ดึงลิ้ง แยกคนทำกันไม่ได้หรอ"*
+#   *"profile 2 ใช้ เจน google flow ด้วยนิ ไม่ชนกันหรอ"*
+#   *"แยก profile เพิ่มอีกอันนึงไปเลย"*
+#
+#   ช่อง 1  ทำสตอรีบอร์ด + งานอื่นทั้งหมด   flow_browser_profile  (ChatGPT)
+#   ช่อง 2  เจนคลิปอย่างเดียว                flow_browser_profile2 (Flow · ULTRA)
+#   ช่อง 3  ดึงลิงก์อย่างเดียว                flow_browser_profile3 (Shopee)
+#
+# **ไม่มีใครใช้โปรไฟล์ร่วมกัน** จึงไม่ต้องผลัดกันเลยสักคู่
+#
+# ⚠️ **ห้ามให้ช่องไหนทำสตอรีบอร์ดเพิ่ม** ChatGPT จำกัดที่ระดับบัญชี เปิดสองแชท
+# พร้อมกันแล้วโดน "Too many requests" ทันที (เจอจริง 14:54–14:57 · 4 ครั้ง)
+# จะเพิ่มได้ต้องมี **บัญชี ChatGPT ที่สอง** ก่อน ไม่ใช่แค่โปรไฟล์ที่สอง
+CLIP_SLOT2_STAGES = {clip_queue.STAGE_READY_FLOW}     # เจนคลิป
+CLIP_SLOT3_STAGES = {clip_queue.STAGE_QUEUED}         # ดึงลิงก์
+
+
+SLOT2_ON = True
+SLOT3_ON = True
+
+clip_runner2 = (clip_queue.ClipRunner(clip_jobs, _clip_worker, log=_clip_log,
+                                      on_hold=_clip_blocked_alert,
+                                      stages=CLIP_SLOT2_STAGES, slot=2)
+                if SLOT2_ON else None)
+clip_runner3 = (clip_queue.ClipRunner(clip_jobs, _clip_worker, log=_clip_log,
+                                      on_hold=_clip_blocked_alert,
+                                      stages=CLIP_SLOT3_STAGES, slot=3)
+                if SLOT3_ON else None)
+
+
+
+def _wake_runners() -> None:
+    """ปลุกทั้งสองช่อง — ของเดิมเรียก `_wake_runners()` กระจายอยู่หลายที่
+
+    ช่องอื่นตื่นเองทุก 30 วินาทีอยู่แล้ว ตัวนี้แค่ทำให้ตื่นทันทีเหมือนช่องแรก
+    """
+    for runner in (clip_runner, clip_runner2, clip_runner3):
+        if runner is not None:
+            runner.wake()
+
+
+# ---- อ่านสถานะให้ครบทั้งสองช่อง (30 ส.ค. 2569) ----------------------------
+#
+# ของเดิมถามช่องเดียว พอมีสองช่องแล้ว **ช่องที่ 2 จะกลายเป็นงานล่องหน** —
+# หน้าเว็บขึ้นว่าว่าง ทั้งที่กำลังทำอยู่ · กดยกเลิกงานที่ช่อง 2 ทำอยู่จะไม่มีผล
+# ซึ่งเป็นอาการเดียวกับ "ป้ายบอกสถานะไม่ตรงความจริง" ในกติกาข้อ 2.3.1
+
+
+def _clip_runners() -> tuple:
+    return tuple(r for r in (clip_runner, clip_runner2, clip_runner3)
+                 if r is not None)
+
+
+def _runner_busy() -> bool:
+    """มีช่องไหนทำงานอยู่บ้างไหม"""
+    return any(r.busy for r in _clip_runners())
+
+
+def _running_ids() -> list:
+    """รหัสงานที่กำลังทำอยู่ทุกช่อง"""
+    return [r.current for r in _clip_runners() if r.current]
+
+
+def _is_running(job_id) -> bool:
+    job_id = str(job_id or "")
+    return bool(job_id) and job_id in _running_ids()
+
+
+def _running_now() -> str:
+    """งานแรกที่กำลังทำอยู่ — ที่ที่ต้องโชว์ได้ค่าเดียวยังใช้ตัวนี้"""
+    ids = _running_ids()
+    return ids[0] if ids else ""
 
 
 # Telegram รับข้อความละไม่เกิน ~4096 ตัว — คำสั่งยาวๆ ต้องหั่นส่ง
@@ -2867,7 +3074,25 @@ AUTO_STEPS: dict[str, dict] = {
 # **ไม่ได้มีไว้กันโดนบล็อก** — การลงหนึ่งใบใช้เวลาราว 10 นาทีอยู่แล้ว
 # ระยะห่างตามธรรมชาติจึงมากพอ ตัวนี้มีไว้กัน **การลองซ้ำรัวๆ ตอนล้มเหลว**
 # ถ้าไม่มี พอชนด่าน (เช่นโควตาเต็ม) ตัวกวาดจะยิงใหม่ทุก 20 วินาทีไม่หยุด
-AUTO_PUBLISH_GAP_OK = 180.0
+#
+# ---- ลดค่าหลังสำเร็จจาก 180 เหลือ 30 (30 ส.ค. 2569) ----------------------
+#
+# **เจ้าของสั่งให้ลงคลิปที่ค้าง 48 ใบให้หมด** จึงไปวัดว่าเวลาหมดไปกับอะไร
+# วัดจากใบจริง 17:36:22 → 17:48:07 (11 นาที 45 วินาที ต่อใบ)
+#
+#     4 นาที 36 วิ   ก่อนเริ่มเดินผัง  ← ในนั้นเป็นการรอเปล่า 3 นาที 14 วิ
+#     7 นาที  9 วิ   เดินผัง 22 ขั้น   ← ขั้นละ 11-19 วิ เป็นค่าอ่านจอ เลี่ยงไม่ได้
+#
+# **ที่แย่กว่าการรอคือมันทำให้จอดับ** — เกณฑ์ดับจอคือไม่มีใครแตะ 180 วินาที
+# ซึ่งเท่ากับค่านี้พอดี ทุกใบจึงเป็น ลงเสร็จ → รอ → จอดับ → ปลุกจอ → เริ่มใหม่
+# เสียทั้งเวลารอและเวลาปลุก
+#
+# **เหตุผลเดิมของค่านี้ยังอยู่ครบ** — กันการลองซ้ำรัวๆ ตอนล้มเหลว ซึ่งเป็นหน้าที่
+# ของ `AUTO_PUBLISH_GAP_FAIL` (600 วินาที) ไม่ได้แตะ ส่วนหลัง**สำเร็จ**ไม่มีอะไร
+# ให้กัน — คอมเมนต์ข้างบนเขียนเองว่าระยะห่างตามธรรมชาติมากพอแล้ว
+#
+# ผลที่คาด: 48 ใบ ประหยัดได้ราว 2 ชั่วโมง และจอไม่ดับคาระหว่างชุด
+AUTO_PUBLISH_GAP_OK = 30.0
 AUTO_PUBLISH_GAP_FAIL = 600.0
 
 _auto_pub_next: dict[str, float] = {}
@@ -3253,7 +3478,7 @@ def _apply_edit_text(job: dict, text: str, target: str = "") -> str:
         job["id"], awaiting="", stage=clip_queue.STAGE_REVISING,
         pending_edit={"target": target, "instruction": text.strip()},
     )
-    clip_runner.wake()
+    _wake_runners()
     _clip_say(chat_id, f"📝 รับคำสั่งแก้{what}แล้ว — เข้าคิวสั่ง GPT ให้")
     return f"รับคำสั่งแก้{what}แล้ว — เข้าคิวสั่ง GPT ให้"
 
@@ -3377,7 +3602,7 @@ def _clip_telegram_text(chat_id: str, text: str) -> None:
         # ฟิลด์นี้จะยังอ่านเป็น "shopee" ตามค่าปริยายที่ฝั่งอ่านใช้ ไม่พังย้อนหลัง
         clip_jobs.update(job["id"], kind=kind)
         _clip_log(f"เข้าคิว {job['id']} [{kind}] — {link[:60]}")
-    clip_runner.wake()
+    _wake_runners()
 
     dup_note = (f"\n↩️ ข้ามลิงก์ซ้ำ <b>{len(skipped)}</b> อัน (มีใบงานอยู่แล้ว)"
                 if skipped else "")
@@ -3619,7 +3844,7 @@ def _clip_approve_one(job: dict) -> str:
             job_id, images_ok=True, highlights_ok=True, awaiting="",
             stage=clip_queue.STAGE_READY_STORYBOARD,
         )
-        clip_runner.wake()
+        _wake_runners()
         return "เข้าคิวทำสตอรีบอร์ด"
 
     # ขั้นปล่อยของออกนอก — **เรียกปุ่มตัวจริง** ไม่เขียนตรรกะซ้ำ เพราะขั้นนี้มี
@@ -4062,7 +4287,7 @@ def _clip_features_edit(item_id: str, chat_id: str, action: str, arg: str,
         note = _clip_start_storyboard(chat_id, item_id)
         if note:
             return note
-        clip_runner.wake()
+        _wake_runners()
         _clip_say(
             chat_id,
             "🎬 <b>เข้าคิวทำสตอรีบอร์ดใหม่แล้ว</b>\n"
@@ -4723,7 +4948,7 @@ def _clip_health(chat_id: str, argument: str) -> None:
         counts[str(job.get("stage"))] = counts.get(str(job.get("stage")), 0) + 1
     open_now = sum(n for s, n in counts.items() if s in clip_queue.OPEN_STAGES)
     failed = counts.get(clip_queue.STAGE_FAILED, 0)
-    working = clip_runner.busy          # เป็น property ไม่ใช่เมธอด
+    working = _runner_busy()          # เป็น property ไม่ใช่เมธอด
 
     main_ok = _main_server_up()
     credits, age = known_credits()
@@ -4785,9 +5010,96 @@ def _clip_retry_job(job_id: str, source: str = "แชท") -> str:
         stage, what = clip_queue.STAGE_QUEUED, "เริ่มใหม่ตั้งแต่ดึงสินค้า"
 
     clip_jobs.update(job_id, stage=stage, error="", note=f"สั่งใหม่จาก{source} — {what}")
-    clip_runner.wake()
+    _wake_runners()
     _clip_log(f"สั่งงาน {job_id} ใหม่จาก{source} — {what}")
     return what
+
+
+# ------------------------------------------------- กวาดงานที่ล้มกลับเข้าคิวเอง
+
+# **เจ้าของไม่ควรต้องมานั่งกดกู้งานล้มเอง** — 31 ส.ค. 2569 ต้องกู้ด้วยมือ 2 รอบ
+# ในคืนเดียว (12 ใบ แล้ว 16 ใบ) ทั้งที่เกือบทั้งหมดล้มเพราะเหตุชั่วคราวที่
+# หายไปเองแล้ว
+#
+#     Shopee บล็อก           คลายเองใน ~20 นาที
+#     Gemini เต็มโควตา       คืนเองใน ~45-80 นาที
+#     ChatGPT โควตารูปหมด    คืนตามเวลาที่ประกาศ
+#
+# ระหว่างที่ยังไม่มีใครกด งานพวกนี้จอดนิ่งและไม่มีอะไรบอกว่ามันจอด
+#
+# **ทำไมหน่วง 25 นาทีก่อนลองใหม่** ต้องนานกว่าเวลาที่ปลายทางใช้คลายบล็อก
+# ไม่งั้นยิงซ้ำตอนยังโดนบล็อกอยู่ = โดนตีนานขึ้นและเปลืองเปล่า
+#
+# **ทำไมจำกัด 2 ครั้ง** ล้มซ้ำหลังจากเว้นไปแล้วสองรอบแปลว่าไม่ใช่เรื่องชั่วคราว
+# ลองต่อไปก็ได้ผลเดิม ต้องให้คนมาดู — ตรงกับกติกาข้อ "retry ทุกชั้นต้องมีเพดาน
+# แล้วข้ามแทนที่จะค้าง" และ "retry ต้องเปลี่ยนอะไรบางอย่าง" (ตรงนี้เปลี่ยนเวลา)
+#
+# ใช้ `_clip_retry_job` ตัวเดิมที่คนกดในแชท/หน้าเว็บใช้ จึง **ไม่ทำซ้ำขั้นที่
+# สำเร็จไปแล้ว** — มีคำสั่ง Flow แล้วก็ไปเริ่มที่ขั้นเจน มีรูปแล้วก็ไปขั้นสตอรีบอร์ด
+RETRY_COOLDOWN = 25 * 60.0     # เว้นเท่านี้ก่อนลองใหม่
+RETRY_MAX = 2                  # ลองเองได้กี่ครั้งต่อใบ
+RETRY_EVERY = 300.0            # กวาดทุกกี่วินาที
+
+
+def _retry_age(job: dict) -> float:
+    """ใบนี้ล้มมานานกี่วินาทีแล้ว — อ่านไม่ได้คืน 0 (ถือว่าเพิ่งล้ม ยังไม่ลอง)"""
+    import datetime                                            # noqa: PLC0415
+
+    stamp = str(job.get("updated_at") or "")
+    if not stamp:
+        return 0.0
+    try:
+        when = datetime.datetime.fromisoformat(stamp)
+    except ValueError:
+        return 0.0
+    return max((datetime.datetime.now() - when).total_seconds(), 0.0)
+
+
+def _retry_sweep() -> dict:
+    """กู้งานที่ล้มซึ่งเว้นระยะพอแล้ว — คืนสรุปว่าทำอะไรไป"""
+    took, gave_up = [], []
+    for job in clip_jobs.all():
+        if job.get("stage") != clip_queue.STAGE_FAILED:
+            continue
+        if job.get("parked"):                  # ผู้ใช้พักไว้เอง ห้ามแตะ
+            continue
+        tries = int(job.get("auto_retry") or 0)
+        name = str(job.get("name") or job.get("item_id") or job.get("id"))[:38]
+        if tries >= RETRY_MAX:
+            # **บอกครั้งเดียวแล้วเงียบ** ไม่งั้น log ท่วมทุก 5 นาที
+            if not job.get("auto_retry_told"):
+                clip_jobs.update(str(job["id"]), auto_retry_told=True)
+                gave_up.append(f"{name} — {(job.get('error') or '')[:50]}")
+            continue
+        if _retry_age(job) < RETRY_COOLDOWN:
+            continue
+        try:
+            what = _clip_retry_job(str(job["id"]), "ตัวกวาดอัตโนมัติ")
+        except ValueError:
+            continue
+        clip_jobs.update(str(job["id"]), auto_retry=tries + 1)
+        took.append(f"{name} — {what} (ครั้งที่ {tries + 1}/{RETRY_MAX})")
+    if took:
+        _clip_log(f"กู้งานที่ล้มกลับเข้าคิวเอง {len(took)} ใบ")
+        for line in took[:6]:
+            _clip_log(f"   · {line}")
+    if gave_up:
+        _clip_log(f"⚠️ ล้มซ้ำครบ {RETRY_MAX} ครั้งแล้ว {len(gave_up)} ใบ "
+                  "— ไม่ลองต่อ ต้องให้คนดู")
+        for line in gave_up[:6]:
+            _clip_log(f"   · {line}")
+    return {"retried": len(took), "gave_up": len(gave_up)}
+
+
+def _retry_keeper() -> None:
+    """กวาดงานที่ล้มทุก 5 นาที — เหตุผลทั้งหมดอยู่เหนือ RETRY_COOLDOWN"""
+    while True:
+        time.sleep(RETRY_EVERY)      # นอนก่อน ให้ระบบตั้งตัวหลังรีสตาร์ตเสร็จ
+        try:
+            _retry_sweep()
+        except Exception as error:                             # noqa: BLE001
+            _clip_log(f"ตัวกวาดงานล้มสะดุด: {type(error).__name__}: {error}")
+
 
 
 def _failed_jobs() -> list[dict]:
@@ -4895,7 +5207,7 @@ def _clip_wait_list(chat_id: str, argument: str = "",
                 continue
             done.append(clip_queue.STAGE_LABEL.get(fresh.get("stage") or "",
                                                    fresh.get("stage") or ""))
-        clip_runner.wake()
+        _wake_runners()
         _clip_log(f"เอางานออกจากช่องรอแก้ {len(done)} ใบ")
         _clip_say(chat_id, f"↩️ เอากลับเข้าขั้นเดิมแล้ว <b>{len(done)}</b> ใบ "
                            f"— ระบบจะทำต่อให้เอง")
@@ -5628,7 +5940,7 @@ def _clip_gen_all_storyboards(chat_id: str, force: bool) -> None:
         (blocked if note else queued).append(f"{name} — {note}" if note else name)
 
     if queued:
-        clip_runner.wake()
+        _wake_runners()
         _clip_log(f"/genall เข้าคิวทำสตอรีบอร์ด {len(queued)} งาน"
                   + (" (บังคับทำใหม่ทั้งหมด)" if force else ""))
 
@@ -5743,7 +6055,7 @@ def _clip_start_flow(chat_id: str, item_id: str, announce: bool = True) -> str:
         storyboard_ok=True, script_ok=True, sent_script=True,
         stage=clip_queue.STAGE_READY_FLOW,
     )
-    clip_runner.wake()
+    _wake_runners()
     _clip_log(f"สั่งเจนต่อจากงานเดิม {item_id} — คำสั่ง {len(prompts)} ชุด")
     if announce:
         _clip_say(
@@ -5801,7 +6113,7 @@ def _clip_cancel(chat_id: str, argument: str) -> None:
         mine = [mine[int(target) - 1]]
 
     escape = telegram_bot._escape
-    running = clip_runner.current
+    running = _running_now()
     lines, warned = [], False
     for job in mine:
         try:
@@ -6065,7 +6377,7 @@ def _clip_after_approve(job_id: str, chat_id: str, note: str) -> str:
         return note
 
     clip_jobs.update(job_id, stage=clip_queue.STAGE_READY_FLOW)
-    clip_runner.wake()
+    _wake_runners()
     _clip_say(chat_id, "✅ อนุมัติครบทั้งคู่ — เข้าคิวเจนคลิปใน Google Flow")
     return note
 
@@ -6478,7 +6790,7 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
                 continue
             done.append(clip_queue.STAGE_LABEL.get(fresh.get("stage") or "",
                                                    fresh.get("stage") or ""))
-        clip_runner.wake()
+        _wake_runners()
         _clip_log(f"เอางานกลุ่ม {key} ออกจากช่องรอแก้ {len(done)} ใบ"
                   + (f" · ตกค้าง {len(stuck)} ใบ" if stuck else ""))
         if not stuck:
@@ -6652,7 +6964,7 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
         if not clip_jobs.held():
             return "คิวไม่ได้ถูกพักอยู่แล้ว — ทำงานต่อได้ตามปกติ"
         clip_jobs.release_hold()
-        clip_runner.wake()
+        _wake_runners()
         waiting = sum(1 for j in clip_jobs.all()
                       if j.get("stage") == clip_queue.STAGE_QUEUED)
         _clip_log(f"ผู้ใช้ยืนยันว่าแก้ CAPTCHA แล้ว — ทำงานต่อ (ค้าง {waiting} ใบ)")
@@ -6696,7 +7008,7 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
 
     # ปุ่ม 🅿️ / ↩️ ของช่องรอแก้ (ผู้ใช้สั่ง 27 ส.ค. 2026)
     if action == "park":
-        if clip_runner.current == job_id:
+        if _is_running(job_id):
             return "งานนี้กำลังทำอยู่ — พักกลางคันไม่ได้ รอให้จบขั้นนี้ก่อน"
         if job.get("parked"):
             return "งานนี้พักไว้อยู่แล้ว — ดูรายการทั้งหมดที่ /wait"
@@ -6716,7 +7028,7 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
             fresh = clip_jobs.unpark(job_id)
         except clip_queue.ClipQueueError as error:
             return str(error)
-        clip_runner.wake()
+        _wake_runners()
         came = clip_queue.STAGE_LABEL.get(fresh.get("stage") or "", fresh.get("stage") or "")
         _clip_log(f"เอางาน {job_id} ออกจากช่องรอแก้จากแชท → ขั้น {came}")
         return f"↩️ เอากลับเข้าขั้น “{came}” แล้ว"
@@ -6740,7 +7052,7 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
             job_id, images_ok=True, highlights_ok=True, awaiting="",
             stage=clip_queue.STAGE_READY_STORYBOARD,
         )
-        clip_runner.wake()
+        _wake_runners()
         _clip_say(
             chat_id,
             f"✅ <b>อนุมัติใบงานแล้ว</b> — ใช้รูป {len(run['images'])} ใบ · "
@@ -6767,7 +7079,7 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
             return "รับแล้ว ✅"
         run = clip_store.load_run(DATA_DIR, fresh.get("item_id", ""))
         clip_jobs.update(job_id, stage=clip_queue.STAGE_READY_STORYBOARD)
-        clip_runner.wake()
+        _wake_runners()
         _clip_say(
             chat_id,
             f"✅ ใช้รูป {len(run.get('images') or [])} ใบ · "
@@ -6846,14 +7158,14 @@ def _clip_telegram_button(chat_id: str, data: str, callback: dict) -> str:
             "ล้างรายการคลิปเดิม",
         )
         clip_jobs.update(job_id, stage=clip_queue.STAGE_READY_FLOW, awaiting="")
-        clip_runner.wake()
+        _wake_runners()
         _clip_say(chat_id, f"🔄 ลบคลิปเดิม {removed} ชิ้น แล้วเข้าคิวเจนใหม่")
         return "สั่งเจนใหม่แล้ว"
 
     # ---- ปุ่มของสาย TikTok repost (ขั้นยืนยันก่อนโพสต์)
     if action == "tt_post":
         clip_jobs.update(job_id, stage=clip_queue.STAGE_POSTING, awaiting="")
-        clip_runner.wake()
+        _wake_runners()
         _clip_say(chat_id, "🚀 เข้าคิวโพสต์ TikTok แล้ว — เดี๋ยวรายงานผลกลับมา")
         return "เข้าคิวโพสต์แล้ว"
 
@@ -6966,7 +7278,7 @@ async def health() -> dict:
         "version": APP_VERSION,
         "port": PORT,
         "queue": len(clip_jobs.waiting()),
-        "busy": clip_runner.busy,
+        "busy": _runner_busy(),
         "browser": shared.who_holds_browser(),
         # บอกตั้งแต่หน้า health ว่าบอทคลิปส่งได้จริงไหม จะได้ไม่ไปรู้ตอนงานจบ
         "clip_bot": clip_bot_status(),
@@ -7054,7 +7366,7 @@ async def clips_generate(item_id: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="ไม่พบงานของสินค้านี้")
     if not (run.get("flow_prompts") or []):
         raise HTTPException(status_code=400, detail="งานนี้ยังไม่มีคำสั่งสำหรับ Google Flow")
-    if clip_runner.busy:
+    if _runner_busy():
         raise HTTPException(status_code=409, detail="คิวกำลังทำงานอยู่ รอให้จบก่อน")
 
     payload = {}
@@ -7086,7 +7398,7 @@ async def queue_list() -> dict:
         job["stage_label"] = clip_queue.STAGE_LABEL.get(job.get("stage"), job.get("stage", ""))
     # ภาระคิว + เพดาน "ทำทีละ 8" — หน้าเว็บต้องโชว์ ไม่งั้นผู้ใช้ส่งลิงก์ 33 ใบ
     # แล้วเห็นขยับแค่ 8 ใบ จะนึกว่าระบบค้าง (กติกา CLAUDE.md ข้อ 2.7.1)
-    return {"ok": True, "jobs": jobs, "busy": clip_runner.busy,
+    return {"ok": True, "jobs": jobs, "busy": _runner_busy(),
             "load": clip_jobs.load_now(), "load_text": clip_jobs.load_text()}
 
 
@@ -7255,7 +7567,7 @@ def _job_card(job: dict, run: dict | None = None) -> dict:
         "script_count": run.get("script_count", 0),
         "video_count": len(run.get("videos") or []),
         "needs_review": job.get("stage") in REVIEW_STAGES,
-        "running": clip_runner.current == job.get("id"),
+        "running": _is_running(job.get("id")),
         "open": job.get("stage") in clip_queue.OPEN_STAGES,
     }
 
@@ -7290,7 +7602,7 @@ async def jobs_add(request: Request) -> dict:
                 clip_jobs.update(job["id"], kind=kind, source="web")
                 added.append(job["id"])
                 _clip_log(f"เข้าคิวจากหน้าเว็บ {job['id']} [{kind}] — {link[:60]}")
-        clip_runner.wake()
+        _wake_runners()
         # บอกในแชทด้วยว่ามีของเข้าคิวจากหน้าเว็บ ไม่งั้นคนที่เฝ้าอยู่ฝั่งแชท
         # จะเห็นงานโผล่มาเองโดยไม่รู้ว่ามาจากไหน
         _clip_say(
@@ -7322,8 +7634,8 @@ async def jobs_list() -> dict:
         return {
             "ok": True,
             "jobs": cards,
-            "busy": clip_runner.busy,
-            "current": clip_runner.current,
+            "busy": _runner_busy(),
+            "current": _running_now(),
             "waiting": len(clip_jobs.waiting()),
             "flow_enabled": flow_enabled(),
             # เพดาน "ทำทีละ 8" — หน้าเว็บดึงรายการคิวจากที่นี่ ไม่ใช่ /api/queue
@@ -7918,7 +8230,7 @@ async def jobs_redo_storyboard(job_id: str) -> dict:
     clip_jobs.update(job_id, stage=clip_queue.STAGE_READY_STORYBOARD,
                      error="", awaiting="",
                      note="แก้ตามกติกาใหม่ — ให้ ChatGPT เขียนบทใหม่ทั้งชุด")
-    clip_runner.wake()
+    _wake_runners()
     _clip_log(f"สั่งทำสตอรีบอร์ดใหม่ {item_id} — ลบคลิปเดิม {result['removed']} ไฟล์ "
               "และล้างคำสั่ง Flow เก่าทิ้ง")
     return {"ok": True, **result,
@@ -7999,7 +8311,7 @@ async def jobs_regen(job_id: str, request: Request) -> dict:
     with _web_lock:
         removed = await asyncio.to_thread(wipe)
     clip_jobs.update(job_id, stage=clip_queue.STAGE_READY_FLOW, awaiting="")
-    clip_runner.wake()
+    _wake_runners()
 
     bits = [f"ลบคลิปเดิม {removed} ชิ้น แล้วเข้าคิวเจนใหม่"]
     if fixed:
@@ -8320,7 +8632,7 @@ async def jobs_park(job_id: str, request: Request) -> dict:
 
     # ---- ยังอยู่ในคิว: พักที่ใบงาน ----------------------------------------
     if job:
-        if clip_runner.current == job["id"]:
+        if _is_running(job["id"]):
             raise HTTPException(
                 status_code=409,
                 detail="งานนี้กำลังทำอยู่ — พักกลางคันไม่ได้ รอให้จบขั้นนี้ก่อน",
@@ -8372,7 +8684,7 @@ async def jobs_unpark(job_id: str) -> dict:
         except clip_queue.ClipQueueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         came = clip_queue.STAGE_LABEL.get(fresh.get("stage") or "", fresh.get("stage") or "")
-        clip_runner.wake()      # อาจเป็นงานที่เครื่องหยิบไปทำต่อได้ทันที
+        _wake_runners()      # อาจเป็นงานที่เครื่องหยิบไปทำต่อได้ทันที
         _clip_log(f"เอางาน {job['id']} กลับเข้าขั้น {came} แล้ว")
         return {"ok": True, "job": fresh, "item_id": item_id,
                 "message": f"เอากลับเข้าขั้น “{_stage_words(came)}” แล้ว"}
@@ -8396,7 +8708,7 @@ async def jobs_cancel(job_id: str) -> dict:
     ที่ทำได้จริงคือปล่อยให้จบแล้วค่อยไม่เอาผล ไม่ใช่แกล้งเปลี่ยนสถานะให้ดูเหมือนหยุด
     """
     job = _find_job(job_id)
-    if clip_runner.current == job_id:
+    if _is_running(job_id):
         raise HTTPException(
             status_code=409,
             detail="งานนี้กำลังทำอยู่ — หยุดกลางคันไม่ได้ รอให้จบแล้วค่อยกดไม่เอาผล",
@@ -8454,7 +8766,7 @@ async def clip_regen(item_id: str) -> dict:
             stage=clip_queue.STAGE_READY_FLOW, source="เจนใหม่",
             note="สั่งเจนใหม่เพราะคลิปเดิมไม่ถึง 1080p",
         )
-        clip_runner.wake()
+        _wake_runners()
         _clip_log(f"สั่งเจนคลิปใหม่ {item_id} — ลบคลิปเดิม {removed} ไฟล์ "
                   f"· ใช้คำสั่ง Flow เดิม {len(run.get('flow_prompts') or [])} ชุด")
         return {"job_id": job["id"], "item_id": str(item_id), "removed": removed,
@@ -8624,6 +8936,20 @@ async def _startup() -> None:
     if revived:
         append_log("clip", f"เอางานค้าง {revived} งานกลับเข้าคิว")
     clip_runner.start()
+    # ช่องที่ 2 — ล้มตอนสตาร์ตต้องไม่ทำให้ทั้งเซิร์ฟเวอร์ไม่ขึ้น ช่องแรกยังทำงานได้
+    # ช่องเสริม — ล้มตอนสตาร์ตต้องไม่ทำให้ทั้งเซิร์ฟเวอร์ไม่ขึ้น ช่อง 1 ยังทำงานได้
+    for no, runner, jobs_of in ((2, clip_runner2, CLIP_SLOT2_STAGES),
+                                (3, clip_runner3, CLIP_SLOT3_STAGES)):
+        if runner is None:
+            append_log("clip", f"ช่องที่ {no} ปิดอยู่")
+            continue
+        try:
+            runner.start()
+            append_log("clip", f"เปิดช่องที่ {no} แล้ว — ทำ: "
+                       + " · ".join(sorted(jobs_of)))
+        except Exception as error:                              # noqa: BLE001
+            append_log("clip", f"เปิดช่องที่ {no} ไม่สำเร็จ: {error}")
+
     # บอทเพิ่มเติมที่ตั้งหน้าที่เป็นสายคลิป — อ่านที่นี่ที่เดียว กันชน 409 กับ 8866
     sync_clip_extra_watchers()
     threading.Thread(target=_extra_sync_loop, daemon=True).start()
@@ -8633,6 +8959,7 @@ async def _startup() -> None:
     threading.Thread(target=_drive_log_keeper, daemon=True).start()
     # อนุมัติอัตโนมัติตามขั้นที่เจ้าของติ๊กเปิดไว้ (28 ส.ค. 2569)
     threading.Thread(target=_auto_keeper, daemon=True).start()
+    threading.Thread(target=_retry_keeper, daemon=True).start()
     append_log("clip", f"เซิร์ฟเวอร์สายคลิปพร้อม — พอร์ต {PORT}")
 
 

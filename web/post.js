@@ -235,8 +235,38 @@ function setupPublishFlow() {
     pfRender();
   }
 
+  /** กล่องที่เลื่อนจริงของ element นี้ — ไล่ขึ้นไปหาตัวแรกที่เลื่อนได้
+   *
+   *  **ห้ามเดาชื่อไว้ล่วงหน้า** เพราะตัวที่เลื่อนไม่ตายตัว — `.process-panel`
+   *  มี `overflow-y: auto` เฉพาะในเงื่อนไขขนาดจอ จอกว้างจึงเลื่อนที่แผงนั้น
+   *  ส่วนจอแคบเลื่อนทั้งหน้า จำค่าจากตัวผิดแล้วคืนก็เหมือนไม่ได้แก้อะไรเลย
+   */
+  function scrollBoxOf(node) {
+    let box = node?.parentElement;
+    while (box && box !== document.body) {
+      const how = getComputedStyle(box).overflowY;
+      if (/(auto|scroll)/.test(how) && box.scrollHeight > box.clientHeight) return box;
+      box = box.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+
+  /** วาดผังใหม่ทั้งก้อน — **แต่ต้องไม่ทำให้หน้ากระโดด**
+   *
+   *  **เจ้าของสั่ง 30 ส.ค. 2569** — *"ตอนกดเทรนเสร็จ หน้าฝั่งขวามันชอบเด้ง
+   *  เลื่อนลง แก้ด้วย มันเวียนหัว ให้มันอยู่แบบเดิมเฉยๆ"*
+   *
+   *  `replaceChildren` ลบแถวเดิมทิ้งแล้วสร้างใหม่หมด เบราว์เซอร์จึงเสียตำแหน่ง
+   *  ที่เลื่อนค้างไว้ ผังยาว 23 ขั้นและต้องเทรนทีละจุดหลายจุดติดกัน จึงเจอทุกครั้ง
+   *
+   *  คืนตำแหน่งใน `requestAnimationFrame` เท่านั้น — คืนทันทีหลังวาดจะไม่ติด
+   *  เพราะตอนนั้นเบราว์เซอร์ยังไม่ได้จัดวางแถวใหม่ ความสูงยังเป็นของเก่าอยู่
+   */
   function pfRender() {
-    $("#pfList").replaceChildren(
+    const list = $("#pfList");
+    const box = scrollBoxOf(list);
+    const keep = box ? box.scrollTop : 0;
+    list.replaceChildren(
       ...pfSteps.map((step) => {
         const row = document.createElement("li");
         row.className = "publish-step" + (pfArmed === step.id ? " armed" : "");
@@ -315,6 +345,8 @@ function setupPublishFlow() {
         return row;
       }),
     );
+    // คืนตำแหน่งเลื่อนเดิม — ต้องรอให้เบราว์เซอร์วางแถวใหม่เสร็จก่อน
+    if (box && keep) requestAnimationFrame(() => { box.scrollTop = keep; });
   }
 
   async function pfLoad() {

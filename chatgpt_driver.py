@@ -929,6 +929,8 @@ FLOW_AUDIO_LINE_RE = re.compile(r"^\s*Audio\s*[:：]", re.I | re.M)
 # `Audio: Generate Thai voice-over narration, spoken at a brisk pace…: "…"`
 # ถ้าไม่เผื่อช่วง `[^:：]*` ไว้ ตัวแกะจะคืนคำสั่งจังหวะภาษาอังกฤษมาเป็นบทพูดด้วย
 # แล้วบทที่โชว์ให้เจ้าของอนุมัติจะมีภาษาอังกฤษปนเต็มไปหมด
+from clip_store import spoken_part as _spoken_part  # noqa: E402
+
 AUDIO_TEXT_RE = re.compile(
     r"^\s*Audio\s*[:：]\s*"
     r"(?:Generate\s+Thai\s+voice-?over\s+narration[^:：]*[:：])?\s*(.*)$",
@@ -953,7 +955,9 @@ def audio_lines(prompts: list[str]) -> list[str]:
     out = []
     for text in prompts or []:
         for found in AUDIO_TEXT_RE.finditer(text or ""):
-            line = (found.group(1) or "").strip().strip('"').strip("\u201c\u201d").strip()
+            # เอาเฉพาะข้อความในเครื่องหมายคำพูด — ChatGPT ชอบเขียนคำสั่ง
+            # โทนเสียงภาษาอังกฤษต่อท้ายในบรรทัดเดียวกัน (แก้ 30 ส.ค. 2569)
+            line = _spoken_part((found.group(1) or '').strip())
             if line:
                 out.append(line)
     return out

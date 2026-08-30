@@ -510,12 +510,31 @@ AUDIO_LINE_RE = re.compile(
     re.I | re.M)
 
 
+# ข้อความในเครื่องหมายคำพูด — **ตัวที่ Veo อ่านออกเสียงจริงมีแค่ในนี้**
+#
+# **แก้ 30 ส.ค. 2569** ChatGPT เขียนคำสั่งโทนเสียงภาษาอังกฤษต่อท้ายในบรรทัด
+# เดียวกันหลังเครื่องหมายคำพูดปิด เช่น
+#
+#     Audio: ... : "เก้า-อี้-ไวบ์ เบาะ-นุ่ม" Speak in a friendly Thai tone...
+#
+# ตัวแกะเดิมเก็บทั้งบรรทัด จึงได้ภาษาอังกฤษติดมาเป็นบทพูดด้วย ผลคือ
+# บทที่โชว์ให้เจ้าของอนุมัติมีภาษาอังกฤษปนเต็ม และตัวตรวจคลิปเทียบแล้ว
+# บอกว่า "ตรงบทแค่ 34%" ทั้งที่ Veo อ่านส่วนไทยถูกครบทุกฉาก
+QUOTED_RE = re.compile(r"^\s*[\"“]([^\"”]*)[\"”]?")
+
+
+def spoken_part(text: str) -> str:
+    """เอาเฉพาะข้อความที่จะถูกอ่านออกเสียง — ตัดคำสั่งโทนเสียงที่ต่อท้ายทิ้ง"""
+    found = QUOTED_RE.match(text or "")
+    return (found.group(1) if found else (text or "")).strip()
+
+
 def script_in_prompts(prompts: list) -> list[str]:
     """บทพูดที่ฝังอยู่ในคำสั่ง Flow เรียงตามฉาก — บทฉบับจริงที่ Veo จะอ่าน"""
     out = []
     for block in prompts or []:
         for found in AUDIO_LINE_RE.finditer(str(block or "")):
-            line = (found.group(2) or "").strip().strip('"').strip("\u201c\u201d").strip()
+            line = spoken_part(found.group(2))
             if line:
                 out.append(line)
     return out
@@ -545,10 +564,20 @@ def _write_script_into_prompts(prompts: list, lines: list[str]) -> tuple[list, s
     for order in range(len(spots) - 1, -1, -1):
         index, found = spots[order]
         block = blocks[index]
-        was = (found.group(2) or "").strip()
-        # คงเครื่องหมายคำพูดไว้ตามรูปแบบเดิม — ตัวแกะฝั่ง Flow มองหารูปแบบนี้
-        quoted = len(was) >= 2 and was[0] in '"“' and was[-1] in '"”'
-        fresh = f'"{lines[order]}"' if quoted else lines[order]
+        was = found.group(2) or ""
+        # **เปลี่ยนเฉพาะข้อความในเครื่องหมายคำพูด ห้ามทับทั้งบรรทัด**
+        #
+        # ChatGPT เขียนคำสั่งโทนเสียงต่อท้ายในบรรทัดเดียวกัน เช่น
+        #   Audio: ... : "เก้า-อี้ เบาะ-นุ่ม" Speak in a friendly Thai tone.
+        # ถ้าทับทั้งบรรทัด คำสั่งโทนเสียงจะหายไปด้วย ซึ่งเป็นของที่ตั้งใจใส่มา
+        spot = QUOTED_RE.match(was.lstrip())
+        if spot:
+            pad = len(was) - len(was.lstrip())
+            head = was[:pad + spot.start(1)]
+            tail = was[pad + spot.end(1):]
+            fresh = head + lines[order] + tail
+        else:
+            fresh = lines[order]
         blocks[index] = block[:found.start(2)] + fresh + block[found.end(2):]
     return blocks, ""
 

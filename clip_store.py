@@ -501,7 +501,11 @@ def set_highlights(root: Path, item_id: str, highlights: list[str]) -> dict:
 # ผลคือกดอนุมัติบทหรือพิมพ์แก้บท คลิปก็ยังพูดเหมือนเดิมทุกครั้ง)
 AUDIO_LINE_RE = re.compile(
     r"(^[ \t]*Audio[ \t]*[:：][ \t]*"
-    r"(?:Generate[ \t]+Thai[ \t]+voice-?over[ \t]+narration[ \t]*[:：]?[ \t]*)?)"
+    # **ต้องข้ามคำสั่งจังหวะที่แทรกอยู่ด้วย** (30 ส.ค. 2569) — รูปแบบใหม่คือ
+    # `Audio: Generate Thai voice-over narration, spoken at a brisk pace…: "…"`
+    # ไม่เผื่อช่วงตรงกลางไว้ ตัวแกะจะคืนคำสั่งจังหวะภาษาอังกฤษมาเป็นบทพูด
+    # แล้วตอนเขียนบทกลับลงคำสั่ง จะไปทับคำสั่งจังหวะหายไปทั้งบรรทัด
+    r"(?:Generate[ \t]+Thai[ \t]+voice-?over[ \t]+narration[^:：]*[:：][ \t]*)?)"
     r"(.*)$",
     re.I | re.M)
 

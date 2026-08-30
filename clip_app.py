@@ -1492,30 +1492,43 @@ def _clip_make(job: dict) -> None:
     # ตรงกับหลักในคู่มือ: **retry ต้องเปลี่ยนอะไรบางอย่าง ไม่ใช่ยิงของเดิมซ้ำ**
     # ตรงนี้ของที่เปลี่ยนคือคีย์ Gemini ที่ใช้ได้แล้ว จึงต้องลองใหม่ ไม่ใช่ล้มซ้ำ
     #
-    # ไม่มีคำบรรยายให้ไล่ก็ยอมแพ้ตามเดิม — นั่นคือของที่แก้ตรงนี้ไม่ได้จริงๆ
+    # **ไม่มีคำบรรยายก็ยังลอง** — ชื่อสินค้าบน Shopee ยัดจุดขายไว้เต็ม
+    #
+    # เดิมตรงนี้มีด่าน `if detail.strip()` คือคำบรรยายว่างแล้วไม่เรียกตัวไล่
+    # จุดขายเลย ทำให้ทางถอยที่ `shopee_scrape.analyse_features` เตรียมไว้
+    # (ใช้ชื่อสินค้าแทนเมื่อคำบรรยายว่าง) **ไม่เคยถูกใช้เลยสักครั้ง**
+    #
+    # เจอจริง 31 ส.ค. 2569: 5 ใบล้มซ้ำแม้ตัวกวาดจะกู้ให้แล้ว 2 รอบ ทั้งที่
+    # ทดสอบเรียก analyse_features ตรงๆ ได้จุดเด่นครบ 5/5 ใบ — ของที่แก้ไว้
+    # ถูกด่านชั้นบนกันไว้จนไม่มีทางทำงาน
+    #
+    # **นี่เป็นบั๊กชนิดเดียวกันครั้งที่ 3 ในคืนเดียว** อีกสองที่คือ
+    # `if not detail.strip(): return` และ `if not api_key: return` ใน
+    # shopee_scrape — ทั้งสามคือ **ด่านชั้นบนที่รีบยอมแพ้แทนชั้นล่าง**
+    # เจอรูปแบบนี้ที่ไหนอีกให้สงสัยไว้ก่อน
     if images and not highlights:
         detail = clip_store.read_detail(DATA_DIR, item_id)
-        if detail.strip():
-            _clip_log(f"{item_id} ไม่มีจุดเด่นที่เก็บไว้ — ลองไล่จุดขายใหม่จาก"
-                      f"คำบรรยาย {len(detail)} ตัวอักษร")
-            try:
-                from flow_worker import load_gemini_api_key  # noqa: PLC0415
-                import shopee_scrape                         # noqa: PLC0415
+        _clip_log(f"{item_id} ไม่มีจุดเด่นที่เก็บไว้ — ลองไล่จุดขายใหม่จาก"
+                  + (f"คำบรรยาย {len(detail)} ตัวอักษร" if detail.strip()
+                     else "ชื่อสินค้า (หน้า Shopee ไม่มีคำบรรยาย)"))
+        try:
+            from flow_worker import load_gemini_api_key      # noqa: PLC0415
+            import shopee_scrape                             # noqa: PLC0415
 
-                fresh = shopee_scrape.analyse_features(
-                    run.get("name", ""), detail, load_gemini_api_key(),
-                    log=_clip_log, count=chatgpt_driver.HIGHLIGHT_SCENES)
-                if fresh.get("highlights"):
-                    clip_store.save_features(DATA_DIR, item_id, fresh)
-                    highlights = data["highlights"] = list(fresh["highlights"])
-                    _clip_log(f"{item_id} เขียนจุดเด่นใหม่ได้ {len(highlights)} ข้อ "
-                              "— ทำต่อได้")
-            except Exception as error:                       # noqa: BLE001
-                _clip_log(f"{item_id} ลองเขียนจุดเด่นใหม่ไม่สำเร็จ: {error}")
+            fresh = shopee_scrape.analyse_features(
+                run.get("name", ""), detail, load_gemini_api_key(),
+                log=_clip_log, count=chatgpt_driver.HIGHLIGHT_SCENES)
+            if fresh.get("highlights"):
+                clip_store.save_features(DATA_DIR, item_id, fresh)
+                highlights = data["highlights"] = list(fresh["highlights"])
+                _clip_log(f"{item_id} เขียนจุดเด่นใหม่ได้ {len(highlights)} ข้อ "
+                          "— ทำต่อได้")
+        except Exception as error:                           # noqa: BLE001
+            _clip_log(f"{item_id} ลองเขียนจุดเด่นใหม่ไม่สำเร็จ: {error}")
 
     if not highlights or not images:
         why = ("ไม่มีรูปสินค้า" if not images
-               else "ไล่จุดขายจากคำบรรยายของ Shopee ไม่ได้")
+               else "ไล่จุดขายไม่ได้ ทั้งจากคำบรรยายและจากชื่อสินค้า")
         _clip_say(chat_id, f"❌ ข้ามขั้นสตอรีบอร์ด — {why}")
         raise RuntimeError(f"ไม่มีรูปหรือจุดเด่นครบ ({why})")
 

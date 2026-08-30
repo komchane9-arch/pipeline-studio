@@ -278,6 +278,53 @@ def split_audio_line(text: str) -> tuple[str, str]:
     return "\n".join(visual).strip(), "\n".join(audio).strip()
 
 
+# บรรทัดที่ **ห้ามตัดทิ้งตอนย่อคำบรรยายภาพ** (เจ้าของเจอเอง 30 ส.ค. 2569:
+# *"ทำไม 5 ฉากไม่มีตัวอักษรในคลิปเลย"*)
+#
+# **เหตุการณ์ที่ทำให้ต้องมี** สตอรีบอร์ดมีตัวหนังสือไทยครบทั้ง 5 ฉาก แต่คลิป
+# ที่ได้ไม่มีสักตัว ไล่แล้วพบว่าคำสั่ง 5 ฉากรวมกัน 7,171 ตัวอักษร แต่เพดานที่
+# ส่งเข้า Flow ได้คือ 4,000 จึงถูกตัดทิ้ง 3,477 ตัวอักษร (48%)
+#
+#     คำสั่งเรื่องตัวหนังสือ  ในคำสั่งเดิม 9 ครั้ง → เหลือในคำสั่งที่ส่งจริง 0 ครั้ง
+#
+# ของเดิมย่อด้วยการ **เอาแค่ส่วนต้นแล้วตัดท้ายทิ้ง** (`visual[:room]`) ซึ่ง
+# คำสั่งใส่ตัวหนังสืออยู่ท้ายบล็อกพอดี เลยโดนตัดทุกฉาก
+#
+# ตัวนี้เก็บบรรทัดสำคัญไว้ก่อนเสมอ แล้วค่อยเอาที่เหลือมาเติมจนเต็มโควตา
+# — เก็บ **บรรทัดที่มีอักษรไทย** (คือข้อความที่จะขึ้นจอ) และบรรทัดที่สั่งเรื่อง
+# ตัวหนังสือ ส่วนคำบรรยายฉาก/กล้อง/แสง ตัดได้เพราะ Veo เดาเองได้พอสมควร
+KEEP_LINE_RE = re.compile(
+    r"[\u0e00-\u0e7f]"                       # มีอักษรไทย = ข้อความที่จะขึ้นจอ
+    r"|(?:add|show|display).{0,40}\btext\b"   # บรรทัดสั่งให้ใส่ตัวหนังสือ
+    r"|\btext must\b",                        # ข้อกำกับเรื่องตัวหนังสือ
+    re.I)
+
+
+def trim_visual(visual: str, room: int) -> str:
+    """ย่อคำบรรยายภาพให้พอดีโควตา โดย **ไม่ทิ้งคำสั่งเรื่องตัวหนังสือ**
+
+    เก็บบรรทัดสำคัญไว้ก่อนทั้งหมด แล้วเติมบรรทัดที่เหลือตามลำดับเดิมจนเต็ม
+    ถ้าบรรทัดสำคัญอย่างเดียวก็เกินโควตาแล้ว ก็ยอมเกิน — ส่งคำสั่งที่มีตัวหนังสือ
+    แต่ยาวไปหน่อย ดีกว่าส่งคำสั่งที่พอดีเป๊ะแต่ไม่มีตัวหนังสือเลย
+    """
+    if len(visual) <= room:
+        return visual
+    lines = visual.splitlines()
+    keep = [i for i, line in enumerate(lines) if KEEP_LINE_RE.search(line)]
+    if not keep:
+        return visual[:room].rstrip()
+    picked = set(keep)
+    used = sum(len(lines[i]) + 1 for i in keep)
+    for i, line in enumerate(lines):
+        if i in picked:
+            continue
+        if used + len(line) + 1 > room:
+            continue
+        picked.add(i)
+        used += len(line) + 1
+    return "\n".join(lines[i] for i in sorted(picked)).strip()
+
+
 def build_one_clip_prompt(prompts: list[str], seconds: int = 8) -> str:
     """รวม prompt ทุกฉากเป็นก้อนเดียวสำหรับเจนคลิปเดียวจบ
 
@@ -329,7 +376,7 @@ def build_one_clip_prompt(prompts: list[str], seconds: int = 8) -> str:
     # อ่านไม่รู้เรื่อง แล้วให้บรรทัดตัดท้ายชั้นสุดท้ายจัดการ (ซึ่งยังไม่โดนเสียง
     # เพราะเสียงถูกกันที่ไว้แล้ว)
     room = max(150, room)
-    combined = join([(visual[:room].rstrip(), audio) for visual, audio in parts])
+    combined = join([(trim_visual(visual, room), audio) for visual, audio in parts])
     if len(combined) <= FLOW_PROMPT_LIMIT:
         return combined
     # ยังยาวอยู่ = บรรทัดเสียงเองยาวมากผิดปกติ ตัดท้ายเป็นทางสุดท้าย

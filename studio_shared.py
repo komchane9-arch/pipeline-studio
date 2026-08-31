@@ -21,6 +21,7 @@ import re
 import subprocess
 import threading
 import time
+import time as _time
 import unicodedata
 from contextlib import contextmanager
 from ctypes import wintypes
@@ -84,15 +85,66 @@ if _post_name:
                 else BASE_DIR / _post_name)
 else:
     POST_DIR = DATA_DIR              # อยู่ในสนามทดสอบ — เก็บไว้ในสนามเดียวกัน
+# ---- ลองหลายรอบก่อนยอมถอย และถอยแล้วต้องดัง (31 ส.ค. 2569) --------------
+#
+# **เหตุการณ์ที่ทำให้ต้องแก้** เปิดเซิร์ฟเวอร์ตอน 20:32:29 แล้วเขียนไฟล์ทดสอบ
+# ลง Google Drive พลาดครั้งเดียว โค้ดเดิมถอยไปใช้ `data/` ในเครื่องทันที
+# ซึ่ง **ไม่มีโฟลเดอร์ accounts อยู่เลย** ผลคือทั้งสายโพสต์ตาบอดสนิท
+#
+#     ทะเบียนกลุ่ม   6 กลุ่ม  →  อ่านได้ 0
+#     ใบงานโพสต์    23 ใบ   →  อ่านได้ 0
+#     ตัวตามยอด             →  "ยังไม่มีโพสต์ที่มีลิงก์เก็บไว้ ไม่มีอะไรให้เช็ค"
+#
+# ข้อมูลจริงบน Drive ไม่ได้หายสักไบต์ **แต่ระบบทำเหมือนไม่มีอะไรอยู่เลย**
+# และไม่มีอะไรฟ้องสักบรรทัด — `POST_DIR_READY` ถูกตั้งไว้แต่ **ไม่มีใครอ่าน
+# เลยสักที่ในทั้งโปรเจกต์** (grep แล้วเจอแค่บรรทัดที่ประกาศตัวมันเอง)
+#
+# นี่คือรูปแบบ "ไม่มีของ → ถอยไปใช้ของด้อยกว่าเงียบๆ" ซึ่งวันเดียวกันนี้
+# ทำให้สายคลิปเจนคลิป 141 ใบโดยไม่มีสตอรีบอร์ด เสียเครดิต Veo 1,800 หน่วย
+#
+# แก้สองชั้น:
+#   1. Drive สะดุดเป็นเรื่องปกติ (กำลัง sync อยู่) — ลองใหม่ก่อนยอมถอย
+#      วัดจริงหลังเกิดเหตุ: ลอง 10 รอบติดกัน สำเร็จ 10/10 ใช้เวลา 0.013-0.022
+#      วินาที แปลว่าที่ล้มตอนนั้นเป็นการสะดุดชั่วขณะ ไม่ใช่ Drive ใช้ไม่ได้จริง
+#   2. ถอยแล้วต้องบอกให้ดัง — เก็บเหตุผลไว้ใน POST_DIR_WHY ให้ที่อื่นเอาไป
+#      แสดงได้ และพิมพ์ออกหน้าจอทันที ไม่ใช่เงียบแล้วให้คนไปเจอเอาตอนงานพัง
+POST_DIR_TRIES = 3
+POST_DIR_GAP = 0.5
+
 POST_DIR_READY = True
-try:
-    POST_DIR.mkdir(parents=True, exist_ok=True)
-    _probe = POST_DIR / ".writable"
-    _probe.write_text("ok", encoding="utf-8")
-    _probe.unlink(missing_ok=True)
-except OSError:
-    POST_DIR = DATA_DIR
-    POST_DIR_READY = False
+POST_DIR_WHY = ""
+if POST_DIR != DATA_DIR:
+    _last_error: Exception | None = None
+    for _try in range(POST_DIR_TRIES):
+        try:
+            POST_DIR.mkdir(parents=True, exist_ok=True)
+            _probe = POST_DIR / ".writable"
+            _probe.write_text("ok", encoding="utf-8")
+            _probe.unlink(missing_ok=True)
+            _last_error = None
+            break
+        except OSError as _error:
+            _last_error = _error
+            if _try + 1 < POST_DIR_TRIES:
+                _time.sleep(POST_DIR_GAP)
+    if _last_error is not None:
+        POST_DIR_WHY = (
+            f"เขียนลง {POST_DIR} ไม่ได้ ({type(_last_error).__name__}: "
+            f"{_last_error}) หลังลอง {POST_DIR_TRIES} รอบ — ถอยไปใช้ {DATA_DIR} "
+            f"ซึ่ง **ไม่มีข้อมูลงานโพสต์อยู่เลย** ทะเบียนกลุ่มกับใบงานจะอ่านได้ 0 "
+            f"ทั้งที่ของจริงยังอยู่ครบบน Drive — ปิดเซิร์ฟเวอร์แล้วเปิดใหม่เมื่อ "
+            f"Drive พร้อม แล้วทุกอย่างจะกลับมาเอง"
+        )
+        POST_DIR = DATA_DIR
+        POST_DIR_READY = False
+        # ต้องเห็นตั้งแต่บรรทัดแรกของ log ไม่ใช่ไปเจอเอาตอนงานพัง
+        _bar = "=" * 70
+        print("", flush=True)
+        print(_bar, flush=True)
+        print("⚠️  ที่เก็บงานโพสต์ใช้ไม่ได้", flush=True)
+        print(f"    {POST_DIR_WHY}", flush=True)
+        print(_bar, flush=True)
+        print("", flush=True)
 
 # แยกโฟลเดอร์ย่อยให้หาของเจอด้วยตา ไม่ใช่กองรวมกันเป็นร้อยไฟล์
 POST_STATE = POST_DIR / "state"        # ไฟล์สถานะ (งาน · กลุ่ม · โควตา · ตาราง)

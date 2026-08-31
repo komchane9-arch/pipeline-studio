@@ -601,6 +601,17 @@ async def system_info() -> dict:
         "video_models": VIDEO_MODELS,
         "common_models": sorted(COMMON_MODELS),
         "image_models": IMAGE_MODELS,
+        # ---- ที่เก็บงานโพสต์ใช้ได้จริงไหม (31 ส.ค. 2569) ------------------
+        #
+        # ตอนเปิดเซิร์ฟเวอร์ ถ้าเขียนลง Google Drive ไม่ได้ ระบบจะถอยไปใช้
+        # โฟลเดอร์ในเครื่องซึ่ง **ว่างเปล่า** แล้วทั้งสายโพสต์จะอ่านได้ 0
+        # ทั้งที่ของจริงยังอยู่ครบ — เกิดจริงตอน 20:32 วันนี้
+        #
+        # `studio_shared.POST_DIR_READY` มีมาตั้งแต่แรก **แต่ไม่มีใครอ่านเลย
+        # สักที่ในทั้งโปรเจกต์** ระบบจึงรู้ตัวว่าตาบอดแต่ไม่บอกใคร
+        # ส่งขึ้นหน้าเว็บด้วย เพราะเจ้าของดูหน้าเว็บ ไม่ได้นั่งอ่าน log
+        "post_dir_ready": studio_shared.POST_DIR_READY,
+        "post_dir_why": studio_shared.POST_DIR_WHY,
     }
 
 

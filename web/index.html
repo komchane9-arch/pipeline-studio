@@ -239,7 +239,23 @@
           <button class="tab" data-tab="release" role="tab">③ Release</button>
           <button class="tab" data-tab="publish" role="tab">💰 Publish</button>
           <button class="tab" data-tab="story" role="tab">🎬 สตอรีบอร์ด</button>
+          <button class="tab" data-tab="groups" role="tab">👥 Group Facebook</button>
         </nav>
+
+        <!-- ========================================= 👥 Group Facebook -->
+        <div id="tab-groups" class="tab-area" hidden>
+          <div class="row">
+            <h2>สถานะกลุ่ม Facebook</h2>
+            <button id="ghReload" class="ghost" type="button">🔄 โหลดใหม่</button>
+          </div>
+          <p class="note">
+            แยกสองฝั่งเสมอ — <b>คนอื่นในกลุ่ม</b> บอกว่ากลุ่มยังมีชีวิตไหม
+            ส่วน <b>โพสต์ของเรา</b> บอกว่าเนื้อหาเราติดไหม
+            กลุ่มคึกคักแต่ของเราเงียบ แปลว่าต้องแก้เนื้อหา ไม่ใช่ทิ้งกลุ่ม
+          </p>
+          <p id="ghNote" class="note" aria-live="polite"></p>
+          <div id="ghList" class="gh-list"></div>
+        </div>
 
         <!-- ================================================== ① Input -->
         <div id="tab-input" class="tab-area">

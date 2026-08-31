@@ -2477,3 +2477,51 @@ body.typing-through {
 /* ยังไม่ได้ตรวจ = เทา ไม่ใช่แดง — ไม่ได้แปลว่าเสีย แค่ยังไม่รู้ */
 .row-video.unknown { color: var(--ink-3); }
 .row-video-why { color: var(--danger); }
+
+/* ============================================ 👥 แท็บสถานะกลุ่ม Facebook */
+/* กว้างยืดตามจอ ไม่ตั้งความกว้างตายตัว — จอ 4K เคยเหลือพื้นที่ใช้งานจริง
+   691 จาก 2,759 จุด เพราะมีคนใส่ขอบกับความกว้างคงที่ไว้ (27 ส.ค. 2569) */
+.gh-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.gh-card {
+  border: 1px solid var(--line, #2a2f3a);
+  border-left: 4px solid var(--line, #2a2f3a);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--card, #171a21);
+  min-width: 0;                  /* กันชื่อกลุ่มยาวดันการ์ดจนล้นแถว */
+}
+.gh-good { border-left-color: #4caf7d; }
+.gh-warn { border-left-color: #d8a13a; }
+.gh-slow { border-left-color: #cf7a68; }
+.gh-dead { border-left-color: #a2545c; }
+.gh-none { border-left-color: #5a6172; }
+
+.gh-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.gh-chip { font-size: 12px; white-space: nowrap; opacity: 0.95; }
+.gh-name {
+  margin: 0; font-size: 15px; font-weight: 600;
+  overflow-wrap: anywhere;       /* ชื่อกลุ่มไทยยาวๆ ตัดคำไม่ได้ ต้องบังคับ */
+}
+.gh-off {
+  font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--line, #2a2f3a); opacity: 0.75;
+}
+.gh-why { margin: 6px 0 2px; font-size: 13px; line-height: 1.5; }
+.gh-act { margin: 0 0 8px; font-size: 13px; font-weight: 600; opacity: 0.92; }
+
+.gh-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 520px) { .gh-grid { grid-template-columns: 1fr; } }
+.gh-col { min-width: 0; }
+.gh-col h4 {
+  margin: 0 0 4px; font-size: 11px; letter-spacing: 0.04em;
+  text-transform: uppercase; opacity: 0.65;
+}
+.gh-col p { margin: 2px 0; font-size: 13px; }
+.gh-sub { font-size: 11px; opacity: 0.6; }
+.gh-owed { color: #d8a13a; font-weight: 600; }
+.gh-link { display: inline-block; margin-top: 8px; font-size: 12px; }

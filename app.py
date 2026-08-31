@@ -10226,6 +10226,29 @@ async def fb_list_groups() -> dict:
     }
 
 
+@app.get("/api/fb/group-health")
+async def fb_group_health_view() -> dict:
+    """สถานะรายกลุ่ม — กลุ่มไหนคึกคัก กลุ่มไหนตายแล้ว (เจ้าของสั่ง 31 ส.ค. 2569)
+
+    **ส่งทะเบียนกลุ่มเข้าไปให้ ไม่ให้โมดูลไปเดาพาธเอง** ทะเบียนเก็บแยกราย
+    บัญชี ซึ่งจงใจล้มถ้าไม่บอกว่าบัญชีไหน (ข้อ 8) — ที่นี่รู้ว่าบัญชีไหน
+    โมดูลไม่รู้และไม่ควรรู้ ถ้าปล่อยให้มันเดา วันที่มีสองบัญชีจะอ่านผิดใบ
+
+    ล้มแล้ว **บอกว่าล้มเพราะอะไร** ไม่ใช่คืนรายการว่างซึ่งหน้าเว็บจะแสดงเป็น
+    "ไม่มีกลุ่ม" ทั้งที่จริงคืออ่านไม่ได้ (ข้อ 2.3.1 ข้อ 4)
+    """
+    try:
+        import fb_group_health                              # noqa: PLC0415
+
+        return fb_group_health.report(fb_groups.listing())
+    except Exception as error:                              # noqa: BLE001
+        append_log("publish", f"อ่านสถานะกลุ่มไม่สำเร็จ: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"อ่านสถานะกลุ่มไม่สำเร็จ: {type(error).__name__}: {error}",
+        ) from error
+
+
 @app.post("/api/fb/groups")
 async def fb_add_group(request: Request) -> dict:
     payload = await request.json()

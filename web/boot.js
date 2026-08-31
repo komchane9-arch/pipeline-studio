@@ -3,6 +3,7 @@
 import { api, config, hooks, pollHealth, pollLogs, setConfig, setSystem, system } from "./core.js";
 import { loadDevices, loadTargets } from "./phone.js";
 import { loadFbGroups, loadFbJobs, renderQueue, setQueue } from "./post.js";
+import { loadGroupHealth } from "./groups.js";
 import { fillGems, fillInput, fillRelease, loadClips, loadJobQueue, loadStoryRuns } from "./video.js";
 
 // เวอร์ชันที่หน้านี้ "ควรคู่กับ" เซิร์ฟเวอร์ = อ่านจาก ?v= ของตัวเองอัตโนมัติ
@@ -42,6 +43,11 @@ hooks.reloadConfig = () => reloadConfig();
     await loadJobQueue();
     await loadFbGroups();
     await loadFbJobs();
+    // แท็บสถานะกลุ่ม — อ่านฐานข้อมูลโพสต์ 1.7 GB จึงโหลดครั้งเดียวตอนเปิด
+    // แล้วให้กดปุ่มโหลดใหม่เอง ไม่ตั้งให้ดึงซ้ำอัตโนมัติ (เปลืองเปล่า
+    // เพราะบอทเก็บโพสต์รอบละหลายนาที ตัวเลขไม่ได้ขยับทุกวินาที)
+    await loadGroupHealth();
+    document.querySelector("#ghReload")?.addEventListener("click", loadGroupHealth);
     await pollLogs();
     // ไว้ท้ายสุด — อ่านจำนวนมือถือจาก dropdown ที่ loadDevices เติมไว้แล้ว
     await pollHealth();

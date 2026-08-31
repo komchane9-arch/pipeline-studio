@@ -56,6 +56,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -64,6 +65,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import evidence
 import studio_shared as shared
 
 HERE = Path(__file__).resolve().parent
@@ -236,7 +238,121 @@ def canonical_url(share_url: str) -> str:
     return full
 
 
-def read_post(page, url: str, expect: str = "") -> dict:
+# ------------------------------------ หลักฐานตอนเปิดโพสต์แล้วหากล่องไม่เจอ
+
+# **ทำไมต้องมี (31 ส.ค. 2569)** ช่วง 14:00–19:30 มีโพสต์เปิดไม่ได้ 9 ครั้ง
+# ทุกครั้งบันทึกเหตุผลเดียวกันเป๊ะว่า "เข้าถึงหน้าโพสต์แล้วแต่หากล่องโพสต์ไม่เจอ"
+# ซึ่ง **แยกไม่ออก** ว่าเป็นอะไรใน 4 อย่าง: โพสต์ถูกลบ · โดนหน้ากั้น/ให้ล็อกอินใหม่
+# · หน้ายังโหลดไม่เสร็จ · แคปชันบนหน้าไม่ตรงกับที่เก็บไว้
+#
+# ไฟล์นี้เดิม **ไม่มีการเก็บหลักฐานเลยสักจุด** ซึ่งผิดกติกาข้อ 2.6.1 ที่สั่งไว้
+# ตั้งแต่ 25 ส.ค. ว่าเจอปัญหาเมื่อไรต้องแคปหน้าจอเก็บทุกครั้ง — ข้อความบรรทัดเดียว
+# ในฐานข้อมูลไม่พอให้ตัดสินใจอะไรได้เลย เหมือนเคสชื่อสินค้า "Please Try Again Later"
+# ที่เดาได้ว่าโดนบล็อกแต่ตอบไม่ได้ว่าหน้านั้นเขียนว่าอะไร
+
+EVIDENCE_TAG = "engage"
+
+# โพสต์ที่เก็บหลักฐานไปแล้ววันนี้ — {(วันที่, รหัสโพสต์)}
+#
+# **ทำไมต้องกันเก็บซ้ำ** โพสต์ที่เปิดไม่ได้จะเปิดไม่ได้ทุกชั่วโมง และตัวตามเช็ค
+# ทุก 1 ชม. ปล่อยไว้ = 9 โพสต์ × 24 รอบ = 216 ใบต่อวัน ชนเพดาน 300 เหตุการณ์
+# ของ evidence.py ภายในวันเดียว แล้ว **ไปลบหลักฐานเรื่องอื่นที่นานๆ เกิดทีทิ้ง**
+# ซึ่งย้อนแย้งกับเหตุผลที่มีระบบเก็บหลักฐานตั้งแต่แรก
+#
+# **ทำไมกันสองชั้น (ความจำ + ชื่อไฟล์)** ขาดอย่างใดอย่างหนึ่งมีรูทันที
+#   ความจำ   เร็ว ไม่ต้องแตะดิสก์ทุกรอบ และยังกันได้แม้ตอนเขียนไฟล์ล้มเหลว
+#            แต่ว่างเปล่าทุกครั้งที่โปรเซสใหม่ขึ้นมา
+#   ชื่อไฟล์  อยู่ข้ามโปรเซส — `python fb_engagement.py once` ที่ถูกเรียกใหม่
+#            ทุกชั่วโมงเป็นคนละโปรเซส ความจำจึงกันอะไรไม่ได้เลย
+#
+# เลือกวันละครั้งเพราะเหตุผลที่ทำให้เปิดไม่ได้ (โพสต์ถูกลบ · ไม่ได้เป็นสมาชิกกลุ่ม
+# · แคปชันไม่ตรง) เป็นเรื่องที่ไม่เปลี่ยนรายชั่วโมง เก็บซ้ำจึงได้ภาพเดิม 24 ใบ
+_EVIDENCE_SEEN: set[tuple[str, str]] = set()
+
+
+def _evidence_key(url: str) -> str:
+    """รหัสสั้นของโพสต์ที่เอาไปใส่ใน **ชื่อไฟล์** หลักฐาน
+
+    ต้องอยู่ในชื่อไฟล์ ไม่ใช่แค่ในเนื้อไฟล์ เพราะตัวกันเก็บซ้ำข้ามโปรเซสดูจาก
+    ชื่อไฟล์อย่างเดียว จะได้ไม่ต้องเปิดอ่านหลักฐานทุกใบทุกรอบ
+    """
+    numbers = re.findall(r"\d{6,}", url or "")
+    if numbers:
+        return numbers[-1][-12:]          # เลขโพสต์ท้าย URL — อ่านแล้วรู้ว่าใบไหน
+    return hashlib.sha256((url or "").encode("utf-8")).hexdigest()[:10]
+
+
+def keep_no_body_evidence(page, url: str, landed: str, expect: str,
+                          boxes: int, texts: list, group_name: str = "",
+                          on_post: bool = False):
+    """เก็บภาพ + ผังหน้า + บริบท ตอนเปิดหน้าแล้วหากล่องโพสต์ไม่เจอ
+
+    คืนที่อยู่ไฟล์บริบท หรือ None เมื่อไม่ได้เก็บ (ซ้ำในวันเดียวกัน / เก็บไม่สำเร็จ)
+
+    **ห้ามทำให้งานล้มหนักขึ้น** (กติกาข้อ 2.6.1 ข้อ 2) — ครอบ try ทั้งก้อน
+    เก็บไม่ได้ก็แค่ลง log ว่าเก็บไม่ได้ แล้วปล่อยผลลัพธ์เดิม (reachable: False)
+    ไหลออกไปตามเดิม ห้ามให้ความล้มเหลวของการแคปบังสาเหตุจริง
+    """
+    try:
+        today = datetime.now().strftime("%Y%m%d")
+        key = _evidence_key(url)
+        for stale in [item for item in _EVIDENCE_SEEN if item[0] != today]:
+            _EVIDENCE_SEEN.discard(stale)         # ของเมื่อวานไม่ต้องจำแล้ว
+        if (today, key) in _EVIDENCE_SEEN:
+            return None
+        _EVIDENCE_SEEN.add((today, key))
+        # เก็บ**ก่อน**ลองเขียนจริง — ถ้าเขียนล้มก็ไม่ควรไปลองซ้ำทุกชั่วโมง
+        if any(evidence.EVIDENCE_DIR.glob(f"{today}-*#{key}*.txt")):
+            return None                           # โปรเซสก่อนหน้าเก็บไปแล้ววันนี้
+
+        wanted = (expect or "").strip()
+        head = wanted[:14]                        # ตัวหาใช้ 14 ตัวแรกไปเทียบ
+
+        # **แยกให้ออกว่าเป็นเรื่องอะไร** (กติกาข้อ 2.3.1) — "หาไม่เจอ" เฉยๆ
+        # ตอบได้ทั้งตอนหน้าไม่โหลดและตอนโพสต์ถูกลบ ซึ่งแก้คนละทางกันสิ้นเชิง
+        if boxes == 0:
+            verdict = ("ไม่เจอกล่องโพสต์เลยสักอัน → หน้ายังโหลดไม่เสร็จ "
+                       "หรือโดนหน้ากั้น/ให้ล็อกอินใหม่ — ดูภาพประกอบว่าหน้าเขียนว่าอะไร")
+        elif not head:
+            verdict = ("ไม่มีแคปชันเก็บไว้ให้เทียบ → หาไม่เจอเพราะไม่รู้จะหาอะไร "
+                       "ไม่ใช่เพราะหน้าพัง (ไปดู fb_jobs.json ของบัญชีนี้)")
+        else:
+            verdict = (f"เจอกล่อง {boxes} อัน แต่ไม่มีอันไหนมีข้อความที่ค้น → "
+                       "โพสต์อาจถูกลบ · บัญชีเก็บข้อมูลไม่ได้เป็นสมาชิกกลุ่ม "
+                       "· หรือแคปชันบนหน้าไม่ตรงกับที่เก็บไว้")
+
+        lines = [
+            f"ลิงก์โพสต์ที่สั่งเปิด : {url}",
+            f"URL ที่ไปจบจริง      : {landed}",
+            "อยู่หน้าโพสต์ไหม     : " + ("ใช่" if on_post else "ไม่ใช่ — โดนพาไปหน้าอื่น"),
+            f"กลุ่ม                : {group_name or '(ไม่รู้)'}",
+            f"ข้อความที่ใช้ค้นหา    : {head!r}  (แคปชันเต็ม {len(wanted)} ตัวอักษร)",
+            f"กล่องที่เจอบนหน้า     : {boxes} กล่อง "
+            f"(อ่านข้อความได้ {len(texts)} กล่อง)",
+            "",
+            f"อ่านยังไง: {verdict}",
+        ]
+        if texts:
+            lines += ["", "ข้อความต้นๆ ของแต่ละกล่อง (ตัวเต็มอยู่ในไฟล์ .txt2 / .html)"]
+        for order, one in enumerate(list(texts)[:3], 1):
+            flat = " / ".join(x.strip() for x in str(one).splitlines() if x.strip())
+            lines.append(f"  กล่อง {order}: {flat[:160] or '(ว่าง)'}")
+        if len(texts) > 3:
+            lines.append(f"  … อีก {len(texts) - 3} กล่อง")
+
+        why = (f"หากล่องโพสต์ไม่เจอ #{key}" if on_post
+               else f"โพสต์เด้งไปหน้าอื่น #{key}")
+        return evidence.shot(page, why, tag=EVIDENCE_TAG, note="\n".join(lines))
+    except Exception as error:                    # noqa: BLE001
+        try:
+            log(f"   เก็บหลักฐานไม่ได้: {type(error).__name__}: {str(error)[:80]}")
+        except Exception:                         # noqa: BLE001
+            pass                                  # log เองก็พังได้ ห้ามลามออกไป
+        return None
+
+
+def read_post(page, url: str, expect: str = "",
+              group_name: str = "") -> dict:
     """เปิดโพสต์แล้วอ่านยอด + คอมเมนต์
 
     **ไม่กดอะไรที่เปลี่ยนสถานะ** — ไม่ถูกใจ ไม่ตอบ ไม่แชร์ สิ่งเดียวที่กดคือ
@@ -264,17 +380,26 @@ def read_post(page, url: str, expect: str = "") -> dict:
     landed = page.url
     body = ""
     holder_node = None
-    for node in page.query_selector_all('div[role="dialog"], div[role="article"]'):
+    boxes = page.query_selector_all('div[role="dialog"], div[role="article"]')
+    # เก็บข้อความที่อ่านได้ไว้ด้วย — ตอนหาไม่เจอจะได้บอกได้ว่า "ไม่มีกล่องเลย"
+    # (หน้าไม่โหลด) หรือ "มีกล่องแต่เนื้อหาคนละเรื่อง" (โพสต์ถูกลบ/แคปชันไม่ตรง)
+    seen_texts: list[str] = []
+    for node in boxes:
         try:
             text = (node.inner_text() or "").strip()
         except Exception:
             continue
+        seen_texts.append(text)
         if expect and expect.strip()[:14] in text:
             body = text
             holder_node = node
             break
     if not body:
         on_post = "/posts/" in landed or "/permalink/" in landed
+        # แคปก่อน return เสมอ — ปิดเบราว์เซอร์ไปแล้วแคปไม่ได้อีก (ข้อ 2.6.1 ข้อ 1)
+        keep_no_body_evidence(page, url=url, landed=landed, expect=expect,
+                              boxes=len(boxes), texts=seen_texts,
+                              group_name=group_name, on_post=on_post)
         return {"reachable": False,
                 "note": ("เข้าถึงหน้าโพสต์แล้วแต่หากล่องโพสต์ไม่เจอ" if on_post
                          else f"ไม่ได้อยู่หน้าโพสต์ — {landed[:70]}"),
@@ -734,7 +859,9 @@ def check_once() -> dict:
                 # ใช้ที่อยู่เต็มถ้าแปลงได้ — ลิงก์แชร์เด้งกลับหน้าฟีด
                 target = canonical_url(post["post_url"]) or post["post_url"]
                 try:
-                    result = read_post(page, target, expect=post.get("caption", ""))
+                    result = read_post(page, target,
+                                       expect=post.get("caption", ""),
+                                       group_name=post.get("group_name", ""))
                 except Exception as error:
                     log(f"  ❌ {label}: {type(error).__name__}: {str(error)[:90]}")
                     continue

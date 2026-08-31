@@ -4,6 +4,7 @@ import { api, config, hooks, pollHealth, pollLogs, setConfig, setSystem, system 
 import { loadDevices, loadTargets } from "./phone.js";
 import { loadFbGroups, loadFbJobs, renderQueue, setQueue } from "./post.js";
 import { loadGroupHealth } from "./groups.js";
+import { loadPrompts, openPrompts } from "./prompts.js";
 import { fillGems, fillInput, fillRelease, loadClips, loadJobQueue, loadStoryRuns } from "./video.js";
 
 // เวอร์ชันที่หน้านี้ "ควรคู่กับ" เซิร์ฟเวอร์ = อ่านจาก ?v= ของตัวเองอัตโนมัติ
@@ -48,6 +49,10 @@ hooks.reloadConfig = () => reloadConfig();
     // เพราะบอทเก็บโพสต์รอบละหลายนาที ตัวเลขไม่ได้ขยับทุกวินาที)
     await loadGroupHealth();
     document.querySelector("#ghReload")?.addEventListener("click", loadGroupHealth);
+    // หน้าคำสั่ง AI — ยังไม่โหลดจนกว่าจะกดเฟือง (ข้อความยาวรวมหลายพันตัว
+    // และเปิดดูนานๆ ครั้ง ดึงตอนเปิดหน้าทุกครั้งคือเสียเปล่า)
+    document.querySelector("#ppOpen")?.addEventListener("click", openPrompts);
+    document.querySelector("#ppReload")?.addEventListener("click", loadPrompts);
     await pollLogs();
     // ไว้ท้ายสุด — อ่านจำนวนมือถือจาก dropdown ที่ loadDevices เติมไว้แล้ว
     await pollHealth();

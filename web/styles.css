@@ -2525,3 +2525,71 @@ body.typing-through {
 .gh-sub { font-size: 11px; opacity: 0.6; }
 .gh-owed { color: #d8a13a; font-weight: 600; }
 .gh-link { display: inline-block; margin-top: 8px; font-size: 12px; }
+
+/* ================================== ⚙ หน้าคำสั่งที่ส่งเข้า AI */
+/* ปุ่มเฟืองดันไปมุมขวาของแถบแท็บ ตามที่เจ้าของวงไว้ */
+.tab-gear {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  font-size: 15px;
+  padding: 2px 10px;
+  opacity: 0.75;
+}
+.tab-gear:hover { opacity: 1; }
+
+.pp-list { display: flex; flex-direction: column; gap: 14px; margin-top: 10px; }
+.pp-group {
+  border: 1px solid var(--line, #2a2f3a);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--card, #171a21);
+}
+.pp-group-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.pp-group-head h3 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.pp-step {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--line, #2a2f3a); opacity: 0.8; white-space: nowrap;
+}
+.pp-who { font-size: 12px; font-weight: 600; opacity: 0.85; }
+.pp-note { margin: 6px 0 0; font-size: 13px; line-height: 1.5; opacity: 0.9; }
+.pp-models, .pp-gpt { margin: 4px 0 0; font-size: 11px; opacity: 0.65; }
+.pp-gpt { display: inline-block; }
+
+.pp-part {
+  margin-top: 10px;
+  border-left: 3px solid var(--line, #2a2f3a);
+  padding-left: 10px;
+}
+/* ของที่เราแก้ไม่ได้ต้องเห็นชัดที่สุดในหน้า — เคยขัดกับกติกาเราแล้ว 3 จุด
+   โดยไม่มีใครรู้จนเจ้าของเอามาวางเทียบเอง */
+.pp-outside { border-left-color: #d8a13a; background: rgba(216, 161, 58, 0.06); }
+.pp-vary { border-left-color: #6f8fd0; }
+
+.pp-part-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pp-part-head h4 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.pp-flag {
+  font-size: 10px; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+}
+.pp-flag-out { background: rgba(216, 161, 58, 0.18); color: #e8bf72; }
+.pp-flag-vary { background: rgba(111, 143, 208, 0.18); color: #9db4e4; }
+.pp-copy { font-size: 11px; padding: 1px 8px; margin-left: auto; }
+
+/* ข้อความคำสั่งยาวถึง 2,452 ตัวอักษรและมีขึ้นบรรทัดใหม่ — ต้องคงบรรทัดเดิม
+   แต่ห้ามดันหน้ากว้างเกินจอ จึงตัดบรรทัดเองเมื่อยาวเกิน */
+.pp-text {
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.pp-source { margin: 0; font-size: 10px; opacity: 0.5; overflow-wrap: anywhere; }

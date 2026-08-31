@@ -240,7 +240,27 @@
           <button class="tab" data-tab="publish" role="tab">💰 Publish</button>
           <button class="tab" data-tab="story" role="tab">🎬 สตอรีบอร์ด</button>
           <button class="tab" data-tab="groups" role="tab">👥 Group Facebook</button>
+          <button id="ppOpen" class="tab-gear" type="button"
+                  title="ดูคำสั่งจริงที่ส่งเข้า Gemini และ ChatGPT">⚙</button>
         </nav>
+
+        <!-- ===================== ⚙ คำสั่งที่ส่งเข้า AI (เปิดจากปุ่มเฟือง) -->
+        <!-- ไม่มีปุ่มแท็บของตัวเอง เพราะเป็นหน้าที่เปิดดูนานๆ ครั้ง
+             แต่ใช้ class="tab-area" เพื่อให้กดแท็บอื่นแล้วมันปิดเอง -->
+        <div id="tab-prompts" class="tab-area" hidden>
+          <div class="row">
+            <h2>คำสั่งที่ส่งเข้า AI</h2>
+            <button id="ppReload" class="ghost" type="button">🔄 โหลดใหม่</button>
+          </div>
+          <p class="note">
+            ข้อความจริงที่ระบบส่งเข้า Gemini และ ChatGPT ทุกครั้งที่ทำคลิป
+            <b>ดูอย่างเดียว แก้ไม่ได้จากหน้านี้</b> — แก้ที่โค้ดแล้วหน้านี้เปลี่ยนตาม
+            <br>ส่วนที่ขึ้นว่า <b>อยู่ฝั่ง OpenAI</b> คือพร้อมประจำตัวของ custom GPT
+            ซึ่งเราอ่านไม่ได้ — เคยขัดกับกติกาที่เราส่งไปทับมาแล้ว 3 จุด
+          </p>
+          <p id="ppNote" class="note" aria-live="polite"></p>
+          <div id="ppList" class="pp-list"></div>
+        </div>
 
         <!-- ========================================= 👥 Group Facebook -->
         <div id="tab-groups" class="tab-area" hidden>

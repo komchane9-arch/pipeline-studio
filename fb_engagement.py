@@ -237,7 +237,11 @@ def canonical_url(share_url: str) -> str:
 
 
 def read_post(page, url: str, expect: str = "") -> dict:
-    """เปิดโพสต์แล้วอ่านยอด + คอมเมนต์ — ไม่กดอะไรที่เปลี่ยนสถานะเลย
+    """เปิดโพสต์แล้วอ่านยอด + คอมเมนต์
+
+    **ไม่กดอะไรที่เปลี่ยนสถานะ** — ไม่ถูกใจ ไม่ตอบ ไม่แชร์ สิ่งเดียวที่กดคือ
+    ปุ่ม "ดูการตอบกลับอีก N รายการ" เพื่อกางของที่ Facebook พับไว้ ซึ่งเป็น
+    การเปิดดูเฉยๆ คนอื่นไม่เห็นและไม่มีอะไรถูกบันทึกฝั่งเขา (ดู expand_hidden)
 
     คืน {"reachable": bool, "reactions"|"comments"|"shares": int|None,
          "comments_list": [...], "note": str}
@@ -333,6 +337,9 @@ def read_post(page, url: str, expect: str = "") -> dict:
         seen_comments = sum(1 for x in labels if x.startswith("ความคิดเห็นจาก"))
         counts["comments"] = seen_comments
 
+    # **กางคำตอบที่ถูกพับก่อนอ่านเสมอ** ไม่งั้นอ่านได้แค่ที่หน้าจอกางอยู่
+    expand_hidden(holder_node, page, log)
+
     # อ่านคอมเมนต์จากในกล่องโพสต์เท่านั้น — ทั้งหน้ามี `div[role="article"]`
     # หลายกล่องที่เป็นโพสต์คนอื่นในฟีดข้างหลังหน้าต่างซ้อน
     comments = []
@@ -357,6 +364,73 @@ def read_post(page, url: str, expect: str = "") -> dict:
         log(f"   อ่านคอมเมนต์ไม่ได้: {type(error).__name__}: {error}")
 
     return {"reachable": True, "note": "", **counts, "comments_list": comments}
+
+
+# ------------------------------------------------------- กางของที่ถูกพับ
+
+# ป้ายปุ่ม "กางเพิ่ม" — **เฉพาะปุ่มที่กางเท่านั้น ห้ามรวมปุ่มที่ยุบ**
+# กด "ซ่อนการตอบกลับ" เข้าไปจะยิ่งทำให้มองไม่เห็นของที่เคยเห็น
+_SHOW_MORE = re.compile(
+    r"^\s*(?:"
+    r"ดู(?:การ)?ตอบกลับ"                    # ดูการตอบกลับอีก 1 รายการ · ดูตอบกลับทั้งหมด
+    r"|ดู\s*\d+\s*การตอบกลับ"               # ดู 2 การตอบกลับก่อนหน้า
+    r"|ดูความคิดเห็น(?:เพิ่มเติม|ก่อนหน้า)"    # ดูความคิดเห็นเพิ่มเติม
+    r"|ดูการตอบกลับก่อนหน้า"
+    r"|View\s+(?:all\s+)?(?:\d+\s+)?(?:more\s+|previous\s+)?repl(?:y|ies)"
+    r"|View\s+(?:\d+\s+)?(?:more|previous)\s+comments?"
+    r")", re.IGNORECASE)
+
+MAX_EXPAND_CLICKS = 12      # เพดานกันวนไม่จบบนโพสต์ที่มีคอมเมนต์เป็นร้อย
+EXPAND_ROUNDS = 3           # กางชั้นหนึ่งแล้วอาจโผล่ปุ่มชั้นถัดไป
+
+
+def expand_hidden(holder_node, page, log=None) -> int:
+    """กดปุ่มกางคำตอบ/คอมเมนต์ที่ถูกพับ — คืนจำนวนครั้งที่กดได้จริง
+
+    **ทำไมต้องมี (31 ส.ค. 2569)** ตัวเก็บอ่านเฉพาะสิ่งที่ถูกวาดบนหน้าจอ
+    Facebook พับคำตอบไว้หลังปุ่ม "ดูการตอบกลับอีก N รายการ" คำตอบที่พับอยู่
+    จึง **ไม่มีอยู่ในสายตาระบบเลย**
+
+    เกิดจริง: เจ้าของตอบคอมเมนต์ "สนใจครับ" ของ "ไอ เสือ ชัช" ไปแล้ว
+    (เห็นชัดในภาพหน้าจอ) แต่คำตอบถูกพับ ระบบจึงหาป้าย "ข้อความตอบกลับจาก…"
+    ไม่เจอ แล้วรายงานเข้า Telegram ว่า **ยังไม่ได้ตอบ** ซ้ำๆ
+    — เจ้าของต้องมาบอกเองว่า "คอมเมนต์นี้ตอบไปแล้วแต่ยังส่งมาแจ้งเตือนอยู่"
+
+    เข้าข่ายข้อ 2.3.1 ตรงๆ: **"ไม่เห็นคำตอบ" ถูกนับเป็น "ยังไม่ได้ตอบ"**
+    ทั้งที่สองอย่างนี้ต่างกัน — อันหนึ่งคือยังไม่ได้ทำ อีกอันคือทำแล้วแต่มองไม่เห็น
+
+    **จับปุ่มจากข้อความของตัวปุ่มเอง ไม่ใช่ค้นทั้งหน้า** เพราะคอมเมนต์ของ
+    คนอื่นอาจมีคำว่า "ดูการตอบกลับ" อยู่ในเนื้อความได้ (กติกาหน้า 3 ข้อ 2:
+    ห้าม selector แบบ *="คำ" ในหน้าที่มีเนื้อหาผู้ใช้ปน)
+    """
+    say = log or (lambda _: None)
+    clicked = 0
+    for _ in range(EXPAND_ROUNDS):
+        found_this_round = 0
+        try:
+            buttons = holder_node.query_selector_all(
+                'div[role="button"], span[role="button"]')
+        except Exception:                                   # noqa: BLE001
+            break
+        for button in buttons:
+            if clicked >= MAX_EXPAND_CLICKS:
+                break
+            try:
+                label = (button.inner_text() or "").strip()
+                # ป้ายปุ่มจริงสั้นเสมอ — ยาวกว่านี้คือไปโดนกล่องที่ครอบอยู่
+                if len(label) > 60 or not _SHOW_MORE.match(label):
+                    continue
+                button.click(timeout=3000)
+                clicked += 1
+                found_this_round += 1
+                page.wait_for_timeout(700)
+            except Exception:                               # noqa: BLE001
+                continue          # ปุ่มหายไปกลางทางเป็นเรื่องปกติ ข้ามไปตัวถัดไป
+        if not found_this_round:
+            break
+    if clicked:
+        say(f"   กางของที่ถูกพับ {clicked} จุด ก่อนอ่านคอมเมนต์")
+    return clicked
 
 
 # ------------------------------------------------------- แยกคอมเมนต์จากป้ายกำกับ
@@ -549,6 +623,33 @@ def still_worth_watching(conn: sqlite3.Connection, post_url: str) -> tuple[bool,
                        f"(ไลก์ {newest['reactions']} · คอมเมนต์ {newest['comments']})")
     return True, ""
 
+
+
+def unanswered(limit: int = 20) -> list[dict]:
+    """คอมเมนต์ของคนอื่นที่ **ยังไม่ได้ตอบ** พร้อมลิงก์โพสต์ที่มันอยู่
+
+    **เจ้าของสั่ง 30 ส.ค. 2569** — *"คอมเมนต์ไหนที่ยังไม่ได้ตอบให้ส่งลิงก์โพสต์นั้น
+    รายงานเข้า telegram"*
+
+    ต่างจาก "คอมเมนต์ใหม่" ตรงที่ **ใบที่ตอบไปแล้วจะไม่โผล่ซ้ำ** — สิ่งที่เจ้าของ
+    ต้องรู้คือ "เหลืออะไรให้ทำ" ไม่ใช่ "มีอะไรเข้ามาใหม่" คอมเมนต์ที่มาใหม่แล้ว
+    ตอบไปแล้วในรอบเดียวกัน ไม่ควรไปกวนให้เสียเวลาเปิดดู
+
+    ธง answered ตั้งจากป้ายบนหน้าจริง ("ข้อความตอบกลับจาก <เรา> ต่อความคิดเห็น
+    ของ <เขา>") ไม่ได้เดา
+    """
+    conn = open_db()
+    try:
+        rows = conn.execute(
+            """SELECT c.author, c.body, c.when_text, c.post_url,
+                      (SELECT group_name FROM my_post p WHERE p.post_url = c.post_url
+                       ORDER BY p.id DESC LIMIT 1) AS group_name
+               FROM my_comment c
+               WHERE c.is_ours = 0 AND c.answered = 0 AND TRIM(c.body) <> ''
+               ORDER BY c.first_seen DESC LIMIT ?""", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 def check_once() -> dict:
     """เช็คทุกโพสต์หนึ่งรอบ — คืนสรุปเป็น dict"""

@@ -246,8 +246,48 @@ def _gen_set(on: bool) -> None:
     r.stages = ({clip_queue.STAGE_READY_FLOW} if on else {GEN_PAUSED_MARK})
 
 
+# หยุดทั้งสายพาน — เจ้าของสั่ง "หยุดทั้งหมดก่อน" 31 ส.ค. 2569
+#
+# ต่างจาก `GEN_PAUSED_KEY` ที่ปิดเฉพาะช่องเจนคลิป ตัวนี้ปิด **ทุกช่อง**
+# (สตอรีบอร์ด · เจนคลิป · ดึงลิงก์) งานในคิวยังอยู่ครบ ไม่มีอะไรหาย
+ALL_PAUSED_KEY = "clip_all_paused"
+
+_LANE_STAGES = {
+    "clip_runner": lambda: CLIP_SLOT1_STAGES,
+    "clip_runner2": lambda: CLIP_SLOT2_STAGES,
+    "clip_runner3": lambda: CLIP_SLOT3_STAGES,
+}
+
+
+def _all_lanes_set(on: bool) -> list[str]:
+    """เปิด/ปิดสายพานทุกช่องตอนรัน — คืนชื่อช่องที่เปลี่ยนได้จริง"""
+    set_config(ALL_PAUSED_KEY, not on)
+    done = []
+    for name, want in _LANE_STAGES.items():
+        r = globals().get(name)
+        if not r:
+            continue
+        r.stages = want() if on else {GEN_PAUSED_MARK}
+        done.append(name)
+    if on:                      # เปิดกลับแล้วให้ช่องเจนเคารพธงของตัวเองด้วย
+        _gen_restore()
+    return done
+
+
 def _gen_restore() -> None:
-    """คืนสถานะช่องเจนตามที่จำไว้ก่อนรีสตาร์ต — เรียกตอนเซิร์ฟเวอร์เริ่ม"""
+    """คืนสถานะช่องที่ถูกปิดไว้ก่อนรีสตาร์ต — เรียกตอนเซิร์ฟเวอร์เริ่ม
+
+    **ต้องเรียกก่อน `runner.start()` ทุกตัว** ไม่งั้นตัวรันคว้างานไปทำตั้งแต่
+    วินาทีแรกก่อนถูกสั่งปิด (เจอจริง 31 ส.ค. 16:40 เผาเครดิตไป 15 หน่วย)
+    """
+    if load_config().get(ALL_PAUSED_KEY):
+        for name in _LANE_STAGES:
+            r = globals().get(name)
+            if r:
+                r.stages = {GEN_PAUSED_MARK}
+        _clip_log("⛔ สายพานทั้งหมดยังหยุดอยู่ตามที่เจ้าของสั่ง "
+                  "— งานในคิวยังอยู่ครบ")
+        return
     if not load_config().get(GEN_PAUSED_KEY):
         return
     r = globals().get("clip_runner2")
@@ -312,6 +352,8 @@ def _veo_prober() -> None:
     while True:
         time.sleep(VEO_PROBE_MINUTES * 60)
         try:
+            if load_config().get(ALL_PAUSED_KEY):
+                continue                 # เจ้าของสั่งหยุดทั้งหมด อย่าปลุก
             if _gen_running():
                 continue
             waiting = sum(1 for j in clip_jobs.all()

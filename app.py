@@ -10237,6 +10237,49 @@ async def fb_list_groups() -> dict:
     }
 
 
+@app.get("/api/fb/group-board")
+async def fb_group_board_view(want: str = "") -> dict:
+    """กระดานกลุ่ม — ช่วงสมาชิก × ดี/ก้ำกึ่ง/ไม่ดี (เจ้าของสั่ง 1 ก.ย. 2569)
+
+    `want` = "<ช่วง>:<สถานะ>" ขอกองเดียว เช่น `big:bad` — กองไม่ดีมี 1,173 ใบ
+    ส่งไปด้วยทุกครั้งคือทำหน้าช้าฟรีๆ ทั้งที่ยังไม่ได้กดดู
+    """
+    try:
+        import fb_group_board                                # noqa: PLC0415
+
+        return fb_group_board.board(want)
+    except Exception as error:                              # noqa: BLE001
+        append_log("publish", f"อ่านกระดานกลุ่มไม่สำเร็จ: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"อ่านกระดานกลุ่มไม่สำเร็จ: {type(error).__name__}: {error}",
+        ) from error
+
+
+@app.post("/api/fb/group-decide")
+async def fb_group_decide(request: Request) -> dict:
+    """กด Approve / Reject กลุ่มก้ำกึ่งจากหน้าเว็บ
+
+    **ไม่แตะไฟล์ของบอทเด็ดขาด** — `fb_mass_finder.save_kw_state()` เขียนทับ
+    ทั้งไฟล์โดยไม่มีล็อก และบอทถือค่าไว้ในมือนานเป็นนาทีระหว่างไล่โพสต์
+    เขียนแทรกเมื่อไรคำตัดสินหายเมื่อนั้น (ดูเหตุผลเต็มใน fb_group_board.py)
+    """
+    payload = await request.json()
+    gid = str(payload.get("gid") or "").strip()
+    decision = str(payload.get("decision") or "").strip()
+    try:
+        import fb_group_board                                # noqa: PLC0415
+
+        fb_group_board.decide(gid, decision, payload.get("note") or "")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:                              # noqa: BLE001
+        raise HTTPException(
+            status_code=500, detail=f"บันทึกคำตัดสินไม่สำเร็จ: {error}") from error
+    append_log("publish", f"ตัดสินกลุ่ม {gid} จากหน้าเว็บ: {decision}")
+    return {"ok": True, "gid": gid, "decision": decision}
+
+
 @app.get("/api/fb/group-health")
 async def fb_group_health_view() -> dict:
     """สถานะรายกลุ่ม — กลุ่มไหนคึกคัก กลุ่มไหนตายแล้ว (เจ้าของสั่ง 31 ส.ค. 2569)

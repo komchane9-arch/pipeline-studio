@@ -5,6 +5,7 @@ import { loadDevices, loadTargets } from "./phone.js";
 import { loadFbGroups, loadFbJobs, renderQueue, setQueue } from "./post.js";
 import { loadGroupHealth } from "./groups.js";
 import { loadPrompts, openPrompts } from "./prompts.js";
+import { loadBoard } from "./board.js";
 import { fillGems, fillInput, fillRelease, loadClips, loadJobQueue, loadStoryRuns } from "./video.js";
 
 // เวอร์ชันที่หน้านี้ "ควรคู่กับ" เซิร์ฟเวอร์ = อ่านจาก ?v= ของตัวเองอัตโนมัติ
@@ -64,6 +65,10 @@ hooks.reloadConfig = () => reloadConfig();
     // และเปิดดูนานๆ ครั้ง ดึงตอนเปิดหน้าทุกครั้งคือเสียเปล่า)
     document.querySelector("#ppOpen")?.addEventListener("click", openPrompts);
     document.querySelector("#ppReload")?.addEventListener("click", loadPrompts);
+    // กระดานกลุ่มที่บอทสำรวจ — 1,588 กลุ่ม จึงโหลดทีเดียวตอนเปิดแล้วจบ
+    // ส่วนกอง "ไม่ดี" ขอเป็นรายกองตอนกดเปิด (ดู board.js)
+    await loadBoard();
+    document.querySelector("#bdReload")?.addEventListener("click", loadBoard);
     await pollLogs();
     // ไว้ท้ายสุด — อ่านจำนวนมือถือจาก dropdown ที่ loadDevices เติมไว้แล้ว
     await pollHealth();

@@ -2598,3 +2598,72 @@ body.typing-through {
   overflow-y: auto;
 }
 .pp-source { margin: 0; font-size: 10px; color: var(--ink-3); overflow-wrap: anywhere; }
+
+/* ======================= 👥 กระดานกลุ่มที่บอทสำรวจ (1 ก.ย. 2569) */
+/* ใช้ตัวแปรจริงของแอปเท่านั้น — --panel · --panel-deep · --ink · --ink-3
+   · --line  (เคยพลาดมาแล้วจากการเดาชื่อ --card ที่ไม่มีอยู่จริง) */
+.bd-split { border: 0; border-top: 1px solid var(--line); margin: 20px 0 12px; }
+.bd-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+
+.bd-band {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 8px 12px;
+}
+.bd-band > summary {
+  cursor: pointer; font-size: 14px; padding: 2px 0; list-style: none;
+}
+.bd-band > summary::-webkit-details-marker { display: none; }
+.bd-band > summary::before { content: "B8 "; opacity: 0.55; }
+.bd-band[open] > summary::before { content: "BE "; }
+
+.bd-cell { margin: 6px 0 0 14px; }
+.bd-cell > summary {
+  cursor: pointer; font-size: 13px; padding: 3px 0; list-style: none;
+  color: var(--ink);
+}
+.bd-cell > summary::-webkit-details-marker { display: none; }
+.bd-cell > summary::before { content: "B8 "; opacity: 0.55; }
+.bd-cell[open] > summary::before { content: "BE "; }
+
+/* รายชื่อกลุ่มยาวได้เป็นร้อย — จำกัดความสูงแล้วเลื่อนในกล่อง
+   ไม่งั้นกดเปิดกองเดียวแล้วต้องเลื่อนหน้ายาวเป็นสิบจอกว่าจะถึงกองถัดไป */
+.bd-rows {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 6px 0 4px 14px; max-height: 560px; overflow-y: auto;
+}
+.bd-row {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel-deep);
+  min-width: 0;
+}
+.bd-good { border-left-color: #2e8b57; }
+.bd-edge { border-left-color: #c8860d; }
+.bd-bad { border-left-color: #c0392b; }
+
+.bd-top { display: flex; align-items: baseline; gap: 8px; }
+.bd-name {
+  font-weight: 600; font-size: 13px; overflow-wrap: anywhere; flex: 1 1 auto;
+}
+.bd-open { font-size: 12px; white-space: nowrap; color: #0b6bcb; }
+.bd-facts { margin: 3px 0 0; font-size: 12px; color: var(--ink-3); }
+/* ผลเกณฑ์ทีละข้อ — ต้องอ่านเรียงกันได้ จึงใช้ฟอนต์ความกว้างเท่ากัน */
+.bd-tests {
+  margin: 3px 0 0; font-size: 11px; line-height: 1.7;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.bd-said { margin: 4px 0 0; font-size: 11px; color: #8a5c05; font-weight: 600; }
+
+.bd-buttons { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+.bd-btn {
+  font-size: 12px; padding: 3px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+.bd-btn:disabled { opacity: 0.5; cursor: default; }
+.bd-yes { border-color: #2e8b57; color: #1f6b41; }
+.bd-no { border-color: #c0392b; color: #a02f22; }
+.bd-undo { color: var(--ink-3); }

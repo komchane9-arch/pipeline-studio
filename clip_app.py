@@ -187,12 +187,52 @@ def flow_enabled() -> bool:
     return bool(shared.read_config().get(FLOW_ENABLED_KEY, False))
 
 
+# เตือนเมื่อเครดิต Veo เหลือน้อย — **ต้องรู้ก่อนหมด ไม่ใช่รู้ตอนงานค้าง**
+#
+# **ที่มา 31 ส.ค. 2569** วัดทั้งวันได้ 623 รอบ สำเร็จ 545 เสียเปล่า 78 = 13%
+# แต่แกว่งตามช่วงเวลามาก (05:00-09:00 สูงถึง 26% · 15:00-23:00 ต่ำ 0-8%)
+# ตอนวัดเหลือ 2,238 หน่วยกับงานที่ต้องเจนอีก 122 ใบ = กันชนแค่ราว 133 หน่วย
+# ถ้าไปเจอช่วงแย่แบบเช้าจะขาดราว 260 หน่วยแล้วงานค้างกลางคัน
+#
+# 300 หน่วย = เจนได้อีกราว 20 คลิป ซึ่งพอให้คนตัดสินใจทันก่อนของหมดจริง
+CREDIT_LOW = 300
+CREDIT_WARNED_KEY = "flow_credit_warned"
+
+
 def _remember_credits(value: int | None) -> None:
-    """จดยอดเครดิตที่เพิ่งอ่านได้ — None แปลว่าอ่านไม่ได้ ไม่ต้องเขียนทับของเดิม"""
+    """จดยอดเครดิตที่เพิ่งอ่านได้ — None แปลว่าอ่านไม่ได้ ไม่ต้องเขียนทับของเดิม
+
+    เหลือน้อยกว่า `CREDIT_LOW` แล้ว **เตือนครั้งเดียว** ไม่ย้ำทุกรอบ
+    เติมเครดิตแล้วธงจะถูกล้างเอง เตือนใหม่ได้เมื่อลดลงมาอีก
+    """
     if value is None:
         return
     set_config(FLOW_CREDITS_KEY, int(value))
     set_config(FLOW_CREDITS_AT_KEY, time.time())
+
+    warned = bool(load_config().get(CREDIT_WARNED_KEY))
+    if value >= CREDIT_LOW:
+        if warned:                       # เติมแล้ว — ล้างธงให้เตือนได้อีกรอบหน้า
+            set_config(CREDIT_WARNED_KEY, False)
+        return
+    if warned:
+        return
+    set_config(CREDIT_WARNED_KEY, True)
+    left = value // 15
+    try:
+        waiting = sum(1 for j in clip_jobs.all()
+                      if j.get("stage") in (clip_queue.STAGE_READY_FLOW,
+                                            clip_queue.STAGE_READY_STORYBOARD))
+    except Exception:                                        # noqa: BLE001
+        waiting = -1
+    _clip_log(f"⚠️ เครดิต Veo เหลือ {value:,} หน่วย (เจนได้อีกราว {left} คลิป) "
+              f"· งานที่ยังต้องเจน {waiting} ใบ")
+    _clip_say("", (
+        f"⚠️ <b>เครดิต Veo เหลือน้อย</b>\n"
+        f"เหลือ <b>{value:,}</b> หน่วย = เจนได้อีกราว <b>{left}</b> คลิป\n"
+        + (f"งานที่ยังต้องเจนอีก <b>{waiting}</b> ใบ\n" if waiting >= 0 else "")
+        + "เติมเครดิตหรือสั่งหยุดเจนก่อนของหมดกลางคัน"
+    ))
 
 
 def known_credits() -> tuple[int | None, float]:

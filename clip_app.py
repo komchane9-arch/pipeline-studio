@@ -1909,6 +1909,26 @@ def _clip_make(job: dict) -> None:
         )
 
     run = clip_store.load_run(DATA_DIR, item_id)
+
+    # ⛔ **ไม่ได้ภาพสตอรีบอร์ด = ขั้นที่ 3 ยังไม่เสร็จ ห้ามส่งไปขั้นรออนุมัติ**
+    #
+    # เจ้าของสั่ง 31 ส.ค. 2569 (กติกาข้อ 2.9) — ของเดิมได้ภาพ 0 ใบก็ยังส่งใบ
+    # ไปขั้น "รออนุมัติสตอรีบอร์ด" เหมือนทำสำเร็จ พอคนกดผ่านก็ไหลไปขั้นเจน
+    # **นี่คือทางที่ทำให้ 141 ใบถูกเจนโดยไม่มีสตอรีบอร์ดโดยไม่มีใครรู้**
+    #
+    # ล้มตรงนี้แทน ใบจะถูกตัวกวาดพากลับมาทำขั้นที่ 3 ใหม่เองเมื่อโควตารูป
+    # ของ ChatGPT คืน (คืนทุกวัน) ไม่ต้องให้คนมานั่งกด
+    frames_on_disk = []
+    sb_dir = Path(run.get("folder", "")) / clip_store.STORYBOARD_DIR
+    if sb_dir.is_dir():
+        frames_on_disk = sorted(sb_dir.glob("*.png")) + sorted(sb_dir.glob("*.jpg"))
+    if not frames_on_disk and not result.get("refused"):
+        raise _step_block(
+            3, "ChatGPT ให้มาแต่คำสั่ง Flow กับบทพูด **ไม่ได้วาดภาพสตอรีบอร์ด**",
+            item_id=item_id, chat_id=chat_id,
+            fix="มักเป็นเพราะโควตารูปของ ChatGPT หมด (คืนทุกวัน) "
+                "ระบบจะพากลับมาทำใหม่เองเมื่อถึงเวลา")
+
     # ส่งสตอรีบอร์ดกับบทพูด **ติดกันในรอบเดียว** แต่ปุ่มแยกกันคนละชุด
     # ผู้ใช้จะได้เห็นภาพคู่กับคำพูดแล้วตัดสินทีเดียว ไม่ต้องกดผ่านทีละขั้น
     # ส่วนการอนุมัติยังแยกกันจริง — จะกดผ่านอันหนึ่งแล้วสั่งแก้อีกอันก็ได้
@@ -5363,7 +5383,14 @@ def _clip_retry_job(job_id: str, source: str = "แชท") -> str:
         raise ValueError("งานนี้ยังไม่จบ ไม่ต้องสั่งใหม่")
 
     run = clip_store.load_run(DATA_DIR, job.get("item_id", "")) or {}
-    if run.get("flow_prompts"):
+    # **มีคำสั่ง Flow แต่ไม่มีภาพสตอรีบอร์ด = ยังผ่านขั้นที่ 3 ไม่ได้**
+    #
+    # ถ้าส่งไปขั้นเจนตามเดิม จะไปโดนด่านขั้นที่ 4 ตีกลับทุกครั้งจนครบเพดาน
+    # แล้วค้างถาวร — ต้องพากลับไปทำสตอรีบอร์ดให้เสร็จก่อน (กติกาข้อ 2.9)
+    sb_dir = Path(run.get("folder", "")) / clip_store.STORYBOARD_DIR
+    has_frames = bool(sb_dir.is_dir() and
+                      (list(sb_dir.glob("*.png")) + list(sb_dir.glob("*.jpg"))))
+    if run.get("flow_prompts") and has_frames:
         stage, what = clip_queue.STAGE_READY_FLOW, "เริ่มที่ขั้นเจนคลิป"
     elif run.get("images"):
         stage, what = clip_queue.STAGE_READY_STORYBOARD, "เริ่มที่ขั้นทำสตอรีบอร์ด"

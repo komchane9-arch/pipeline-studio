@@ -586,6 +586,10 @@ def save(conn: sqlite3.Connection, post: dict, result: dict) -> tuple[int, int]:
 #    แต่ถ้าโพสต์ไหนภายใน 1 วัน ยอดไม่มีขึ้นแล้ว ให้ยกเลิกเก็บได้เลย"
 QUIET_HOURS = 24.0
 
+# เพดานสูงสุดที่ยอมตามโพสต์ที่ยังค้างตอบ — กันตามไม่จบเมื่อเป็นคอมเมนต์ที่
+# เราไม่มีวันตอบ (เช่นคนมาบ่นด่า) นับจากครั้งแรกที่เห็นโพสต์นั้น
+OWED_MAX_DAYS = 7.0
+
 
 def still_worth_watching(conn: sqlite3.Connection, post_url: str) -> tuple[bool, str]:
     """ยังควรตามเก็บโพสต์ใบนี้อยู่ไหม — คืน (เก็บต่อ, เหตุผลถ้าเลิก)
@@ -619,9 +623,52 @@ def still_worth_watching(conn: sqlite3.Connection, post_url: str) -> tuple[bool,
     same = (newest["reactions"] == older["reactions"]
             and newest["comments"] == older["comments"])
     if same:
+        # ---- ยังค้างตอบ = ห้ามเลิกตาม (31 ส.ค. 2569) ----------------------
+        #
+        # **"ยอดไม่ขยับ" กับ "ไม่มีอะไรค้าง" เป็นคนละเรื่องกัน** ของเดิมเลิกตาม
+        # โพสต์ที่เงียบครบ 24 ชม. โดยไม่ดูว่ายังมีคอมเมนต์ค้างตอบอยู่ไหม
+        #
+        # ผลคือระบบขัดกันเอง: ตัวตามบอก "เลิกดูโพสต์นี้แล้ว" แต่ unanswered()
+        # ยังทวงคอมเมนต์ของโพสต์นั้นทุกชั่วโมง **พอไม่มีใครไปเปิดดูอีก ธง
+        # answered ก็ไม่มีวันถูกตั้ง = ทวงไปตลอดกาล**
+        #
+        # เกิดจริง: เจ้าของตอบ "สนใจครับ" ของ ไอ เสือ ชัช ไปแล้ว แต่โพสต์นั้น
+        # ถูกเลิกตามตั้งแต่ยอดนิ่ง ระบบจึงไม่เคยเห็นคำตอบ แล้วแจ้งเตือนซ้ำ
+        # จนเจ้าของต้องมาบอกเอง — และการแก้ให้กางคำตอบที่ถูกพับอย่างเดียว
+        # **ไม่พอ** เพราะโพสต์ไม่ถูกเปิดอีกเลย ตัวกางจึงไม่มีโอกาสทำงาน
+        owed = conn.execute(
+            """SELECT COUNT(*) FROM my_comment
+               WHERE post_url = ? AND is_ours = 0 AND answered = 0
+                 AND TRIM(body) <> ''""", (post_url,)).fetchone()[0]
+        if owed and not _watched_too_long(rows):
+            return True, ""
+        if owed:
+            # เลิกตามทั้งที่ยังค้าง — ต้องดัง ไม่ใช่หายเงียบ
+            return False, (f"ตามมาครบ {OWED_MAX_DAYS:.0f} วันแล้ว "
+                           f"ยังมีคอมเมนต์ค้างตอบ {owed} อัน — เลิกตาม "
+                           f"ต้องเข้าไปตอบเองถ้ายังอยากตอบ")
         return False, (f"ยอดไม่ขยับมา {QUIET_HOURS:.0f} ชั่วโมง "
                        f"(ไลก์ {newest['reactions']} · คอมเมนต์ {newest['comments']})")
     return True, ""
+
+
+def _watched_too_long(rows) -> bool:
+    """ตามโพสต์ใบนี้มานานเกินเพดานแล้วหรือยัง — นับจากครั้งแรกที่เห็น
+
+    **อ่านไม่ได้ = ยังไม่เกิน** เพราะถ้าเดาว่าเกินแล้วเลิกตาม จะทิ้งคอมเมนต์
+    ที่ยังค้างตอบไปเงียบๆ ซึ่งเสียหายกว่าตามต่ออีกรอบ
+    """
+    oldest = None
+    for row in rows:
+        try:
+            when = datetime.fromisoformat(row["checked_at"])
+        except (ValueError, TypeError):
+            continue
+        if oldest is None or when < oldest:
+            oldest = when
+    if oldest is None:
+        return False
+    return (datetime.now() - oldest) > timedelta(days=OWED_MAX_DAYS)
 
 
 

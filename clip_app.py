@@ -413,6 +413,63 @@ def _step_block(step: int, why: str, item_id: str = "", chat_id: str = "",
     return StepBlocked(f"{head}: {why}")
 
 
+
+# ---------------------------------------------- ตัวเฝ้าบริการภายนอกทั้ง 3 เจ้า
+
+# **เจ้าของสั่ง 31 ส.ค. 2569** — *"ได้ทำตัวเฝ้าดูทุกจุดเลย 1.chatgpt 2.gemini
+# 3.google flow ว่าได้คำตอบตามที่เราต้องการส่งออกมาจริงไหม ถ้าไม่ได้ให้ retry
+# ได้ 1 ครั้ง ถ้ายังไม่หายให้หยุดแล้วแจ้ง"*
+#
+# **ทำไมต้องมี** ทั้งวันที่ 31 ส.ค. เจอทั้งสามเจ้าคืนของไม่ครบโดยไม่มีใครรู้
+#
+#     ChatGPT      ให้คำสั่ง Flow มาแต่ไม่วาดภาพสตอรีบอร์ด  -> 141 คลิปเสียของ
+#     Gemini       429 ทุกโมเดล แล้วถอยไปใช้กฎเดา            -> จุดเด่นอ่านไม่รู้เรื่อง
+#     Google Flow  หักเครดิตแล้วคืน Failed ไม่มีคลิป          -> 120 รอบ 1,800 หน่วย
+#
+# **จุดร่วมของทั้งสาม: เรียกแล้วได้คำตอบกลับมา แต่ไม่ใช่ของที่ต้องการ**
+# ตัวตรวจเดิมดูแค่ "เรียกสำเร็จไหม" ซึ่งตอบว่าใช่ทั้งตอนได้ของและตอนไม่ได้ของ
+# (กติกาข้อ 2.3.1 — ต้องดูของที่ **มีเฉพาะตอนสำเร็จ**)
+#
+# ตัวนี้บังคับให้ทุกจุดที่เรียกบริการภายนอกต้องบอกว่า **"ของที่ต้องการหน้าตายังไง"**
+# แล้วตรวจให้จริงก่อนปล่อยผ่าน
+SERVICE_STEP = {"chatgpt": 3, "gemini": 2, "flow": 4}
+
+
+def _ask_service(service: str, do, want, item_id: str = "", chat_id: str = "",
+                 fix: str = "", retry: int = 1):
+    """เรียกบริการภายนอกแล้ว **ตรวจว่าได้ของที่ต้องการจริง**
+
+    `do()`   เรียกบริการ คืนผลอะไรก็ได้
+    `want(r)` ตรวจผล — คืน `""` ถ้าใช้ได้ · คืนเหตุผลภาษาคนถ้าไม่ได้
+
+    ไม่ได้ของ → ลองใหม่ `retry` ครั้ง → ยังไม่ได้ → **หยุดแล้วแจ้ง** ไม่เดินต่อ
+
+    ⚠️ `retry=1` เป็นค่าปริยายตามที่เจ้าของสั่ง **แต่ Google Flow ต้องใช้ 0**
+    เพราะการลองใหม่หนึ่งครั้งเสียเครดิตจริง 15 หน่วย และมีตัวนับล้มติดกัน
+    (`_note_veo_result`) ดูแลเรื่องลองซ้ำอยู่แล้วในระดับที่สูงกว่า
+    """
+    step = SERVICE_STEP.get(service, 0)
+    last = "ไม่ทราบสาเหตุ"
+    for attempt in range(retry + 1):
+        try:
+            got = do()
+        except Exception as error:                           # noqa: BLE001
+            last = f"เรียกไม่สำเร็จ: {type(error).__name__}: {error}"
+            got = None
+        else:
+            last = want(got) or ""
+            if not last:
+                if attempt:
+                    _clip_log(f"  ✅ {service} ลองใหม่แล้วได้ของครบ")
+                return got
+        if attempt < retry:
+            _clip_log(f"  ⚠️ {service} ยังไม่ได้ของที่ต้องการ ({last}) "
+                      f"— ลองใหม่ครั้งที่ {attempt + 2}")
+    raise _step_block(
+        step, f"{service} ไม่คืนของที่ต้องการแม้ลองใหม่แล้ว — {last}",
+        item_id=item_id, chat_id=chat_id, fix=fix)
+
+
 CREDIT_LOW = 300
 CREDIT_WARNED_KEY = "flow_credit_warned"
 
@@ -1779,9 +1836,22 @@ def _clip_make(job: dict) -> None:
             from flow_worker import load_gemini_api_key      # noqa: PLC0415
             import shopee_scrape                             # noqa: PLC0415
 
-            fresh = shopee_scrape.analyse_features(
-                run.get("name", ""), detail, load_gemini_api_key(),
-                log=_clip_log, count=chatgpt_driver.HIGHLIGHT_SCENES)
+            # **ตรวจว่า Gemini คืนจุดเด่นที่มาจาก AI จริง** ไม่ใช่กฎเดา
+            #
+            # `analyse_features` คืน features ว่างเมื่อถอยไปใช้กฎตัดคำ ซึ่งได้
+            # ของแบบ "พับขาตั้งออกมากล" ที่อ่านไม่รู้เรื่อง
+            # ไม่ได้ → ลองใหม่ 1 ครั้ง (เผื่อโควตาโมเดลใดโมเดลหนึ่งเพิ่งคืน)
+            # → ยังไม่ได้ → หยุดแล้วแจ้ง
+            fresh = _ask_service(
+                "gemini",
+                lambda: shopee_scrape.analyse_features(
+                    run.get("name", ""), detail, load_gemini_api_key(),
+                    log=_clip_log, count=chatgpt_driver.HIGHLIGHT_SCENES),
+                lambda g: ("" if (g or {}).get("features")
+                           else "ได้จุดเด่นจากกฎตัดคำ ไม่ใช่จาก AI"),
+                item_id=item_id, chat_id=chat_id,
+                fix="รอโควตา Gemini คืนแล้วสั่งใบนี้ใหม่ "
+                    "หรือกด ✏️ พิมพ์จุดเด่นเอง")
             # ⛔ **จุดเด่นที่มาจากกฎเดา ไม่นับว่าผ่านขั้นที่ 2**
             #
             # `analyse_features` คืน features ว่างเมื่อถอยไปใช้กฎตัดคำ ซึ่งได้
@@ -1857,12 +1927,37 @@ def _clip_make(job: dict) -> None:
               + (f" (โปรไฟล์ {profile})" if profile else " (โปรไฟล์เดิม)"))
     try:
         with shared.browser_lock(label=f"ทำสตอรีบอร์ด {seat}", profile=profile):
-            result = chatgpt_driver.make_storyboard(
-                open_here, data.get("name", ""), highlights, images, folder,
-                log=_clip_log, extra_ask=extra_ask,
-                gpt_url=slot["gpt"],
-                avoid_openers=_clip_recent_openers(data.get("item_id", "")),
-            )
+            # **ตรวจว่า ChatGPT คืนของครบจริง** ไม่ใช่แค่ตอบกลับมา
+            #
+            # ทั้งวัน 31 ส.ค. ChatGPT คืนคำสั่ง Flow กับบทพูดครบ แต่ไม่วาด
+            # ภาพสตอรีบอร์ด (โควตารูปหมด) แล้วระบบเดินหน้าต่อ = 141 คลิปเสียของ
+            # ไม่ได้ครบ → ลองใหม่ 1 ครั้ง → ยังไม่ได้ → หยุดแล้วแจ้ง
+            def _ask_gpt():
+                return chatgpt_driver.make_storyboard(
+                    open_here, data.get("name", ""), highlights, images, folder,
+                    log=_clip_log, extra_ask=extra_ask,
+                    gpt_url=slot["gpt"],
+                    avoid_openers=_clip_recent_openers(data.get("item_id", "")),
+                )
+
+            def _gpt_ok(got: dict) -> str:
+                if not got:
+                    return "ไม่ได้อะไรกลับมาเลย"
+                if got.get("refused"):
+                    return ""            # ปฏิเสธเพราะเนื้อหา — คนละเรื่อง ไม่ต้องลองซ้ำ
+                if not (got.get("frames") or []):
+                    return "ไม่ได้ภาพสตอรีบอร์ดสักใบ"
+                if not (got.get("flow_prompts") or []):
+                    return "ไม่ได้คำสั่งสำหรับ Google Flow"
+                if not (got.get("script") or []):
+                    return "ไม่ได้บทพูด"
+                return ""
+
+            result = _ask_service(
+                "chatgpt", _ask_gpt, _gpt_ok,
+                item_id=str(data.get("item_id") or ""), chat_id=chat_id,
+                fix="มักเป็นเพราะโควตารูปของ ChatGPT หมด (คืนทุกวัน) "
+                    "ระบบจะพากลับมาทำใหม่เองเมื่อถึงเวลา")
     except Exception as error:
         hint = ""
         if type(error).__name__ == "ChatGPTNeedsLogin":
@@ -2736,10 +2831,20 @@ def _clip_generate(job: dict) -> None:
     if failed:
         _clip_say(chat_id, "⚠️ บางฉากเจนไม่ผ่าน\n" +
                   telegram_bot._escape("\n".join(failed))[:800])
+    # **ตรวจว่า Google Flow คืนไฟล์คลิปจริง** ไม่ใช่แค่กด Create ไปแล้ว
+    #
+    # ⚠️ **ไม่ลองซ้ำตรงนี้** เพราะการเจนหนึ่งรอบเสียเครดิตจริง 15 หน่วย
+    # การลองซ้ำถูกดูแลที่ระดับสูงกว่าแล้ว 2 ชั้น
+    #   `_note_veo_result`  ล้มติดกัน 5 รอบ -> ปิดช่องเจน + ลองเองทุก 20 นาที
+    #   `_retry_sweep`      กู้ใบที่ล้มกลับเข้าคิวได้ถึง 4 ครั้ง
+    # ใส่การลองซ้ำอีกชั้นตรงนี้จะกลายเป็นจ่ายซ้อนโดยไม่ได้อะไรเพิ่ม
     _note_veo_result(bool(made))
     if not made:
-        _clip_say(chat_id, "❌ ไม่ได้คลิปสักฉาก")
-        raise RuntimeError("เจนคลิปไม่สำเร็จสักฉาก")
+        raise _step_block(
+            4, "Google Flow หักเครดิตแล้วแต่ไม่คืนคลิปสักฉาก",
+            item_id=str(job.get("item_id") or ""), chat_id=chat_id,
+            fix="ระบบจะลองใหม่ให้เองตามรอบ ถ้าล้มติดกัน 5 รอบจะหยุดเจน"
+                "แล้วเช็ค Google ให้ทุก 20 นาที")
 
     # ผู้ใช้สั่ง 22 ส.ค. 2026: เจนคลิปเสร็จให้ทำแฮชแท็ก 5 ตัวเก็บไว้เลย
     # (ยี่ห้อ · ชนิดสินค้า · จุดเด่น 3 ตัว ตัวละ 2-5 พยางค์)

@@ -5063,7 +5063,24 @@ def _clip_retry_job(job_id: str, source: str = "แชท") -> str:
 # ใช้ `_clip_retry_job` ตัวเดิมที่คนกดในแชท/หน้าเว็บใช้ จึง **ไม่ทำซ้ำขั้นที่
 # สำเร็จไปแล้ว** — มีคำสั่ง Flow แล้วก็ไปเริ่มที่ขั้นเจน มีรูปแล้วก็ไปขั้นสตอรีบอร์ด
 RETRY_COOLDOWN = 25 * 60.0     # เว้นเท่านี้ก่อนลองใหม่
-RETRY_MAX = 2                  # ลองเองได้กี่ครั้งต่อใบ
+RETRY_MAX = 2                  # ลองเองได้กี่ครั้งต่อใบ (ค่าปกติ)
+
+# **ล้มตอนเจนคลิปได้เพดานสูงกว่า เพราะวัดแล้วลองซ้ำได้ผลจริง**
+#
+# วัดจาก 73 ครั้งที่กด Create แล้วเสียเปล่า (31 ส.ค. 2569)
+#
+#     รอบถัดไปสำเร็จ      51 ครั้ง = 70%
+#     รอบถัดไปเสียอีก     22 ครั้ง = 30%
+#     ล้มครั้งเดียวแล้วผ่าน 35 จาก 52 ช่วง = 67% · ล้มติดกันยาวสุด 4 รอบ
+#
+# เป็นความไม่เสถียรฝั่ง Google ที่หายเอง ไม่ใช่ปัญหาของตัวสินค้า เพดาน 2
+# (ซึ่งตั้งมาสำหรับ Shopee บล็อก/Gemini เต็มโควตา ที่ลองซ้ำเร็วๆ ไม่ช่วย)
+# จึงกลายเป็นตัวทิ้งงานที่มีโอกาสผ่าน 70% — เจอจริง 26 ใบค้างเพราะเหตุนี้
+#
+# **ตั้ง 4 เพราะล้มติดกันยาวสุดที่วัดได้คือ 4 รอบ** ไม่ได้เดาเอา
+# และแต่ละรอบเสียเครดิตจริง 15 หน่วย จึงต้องมีเพดาน ไม่ใช่ลองไม่รู้จบ
+RETRY_MAX_VEO = 4
+VEO_FAIL_MARK = "เจนคลิปไม่สำเร็จ"
 RETRY_EVERY = 300.0            # กวาดทุกกี่วินาที
 
 
@@ -5091,7 +5108,9 @@ def _retry_sweep() -> dict:
             continue
         tries = int(job.get("auto_retry") or 0)
         name = str(job.get("name") or job.get("item_id") or job.get("id"))[:38]
-        if tries >= RETRY_MAX:
+        cap = (RETRY_MAX_VEO if VEO_FAIL_MARK in (job.get("error") or "")
+               else RETRY_MAX)
+        if tries >= cap:
             # **บอกครั้งเดียวแล้วเงียบ** ไม่งั้น log ท่วมทุก 5 นาที
             if not job.get("auto_retry_told"):
                 clip_jobs.update(str(job["id"]), auto_retry_told=True)
@@ -5104,14 +5123,13 @@ def _retry_sweep() -> dict:
         except ValueError:
             continue
         clip_jobs.update(str(job["id"]), auto_retry=tries + 1)
-        took.append(f"{name} — {what} (ครั้งที่ {tries + 1}/{RETRY_MAX})")
+        took.append(f"{name} — {what} (ครั้งที่ {tries + 1}/{cap})")
     if took:
         _clip_log(f"กู้งานที่ล้มกลับเข้าคิวเอง {len(took)} ใบ")
         for line in took[:6]:
             _clip_log(f"   · {line}")
     if gave_up:
-        _clip_log(f"⚠️ ล้มซ้ำครบ {RETRY_MAX} ครั้งแล้ว {len(gave_up)} ใบ "
-                  "— ไม่ลองต่อ ต้องให้คนดู")
+        _clip_log(f"⚠️ ล้มซ้ำครบเพดานแล้ว {len(gave_up)} ใบ — ไม่ลองต่อ ต้องให้คนดู")
         for line in gave_up[:6]:
             _clip_log(f"   · {line}")
     return {"retried": len(took), "gave_up": len(gave_up)}

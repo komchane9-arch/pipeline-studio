@@ -209,38 +209,125 @@ def flow_enabled() -> bool:
 #
 # ⚠️ ตัวนับถูกล้างทันทีที่เจนสำเร็จสักรอบ จึงไม่สะสมข้ามช่วงที่ปกติ
 VEO_FAIL_STREAK_MAX = 5
-VEO_HOLD_MINUTES = 30
+VEO_PROBE_MINUTES = 20
+# ขั้นที่ไม่มีวันตรงกับงานจริง — ใช้ "ปิดช่อง" ตอนรัน
+#
+# ⚠️ **ห้ามใช้ set() ว่าง** เพราะ `claim_next` ตีความรายการว่างว่า
+# "หยิบได้ทุกขั้น" (บรรทัด `if not stages:` ใน clip_queue.py) ตั้งว่างแล้ว
+# ช่องนั้นจะรับงานทุกชนิดแทนที่จะหยุด — เจอจริง 31 ส.ค. 16:13 ตั้งใจปิดเจน
+# แต่กลับเจนต่ออีก 3 รอบ
+GEN_PAUSED_MARK = "__หยุดเจนชั่วคราว__"
+
 _veo_fail_streak = 0
+_veo_probing = False
+
+
+def _gen_running() -> bool:
+    """ช่องเจนคลิปกำลังรับงานอยู่ไหม"""
+    r = globals().get("clip_runner2")
+    return bool(r and clip_queue.STAGE_READY_FLOW in (r.stages or set()))
+
+
+GEN_PAUSED_KEY = "clip_gen_paused"
+
+
+def _gen_set(on: bool) -> None:
+    """เปิด/ปิดช่องเจนคลิป **ตอนรัน ไม่ต้องรีสตาร์ต**
+
+    `ClipRunner._loop` อ่าน `self.stages` ใหม่ทุกรอบ การแก้ตรงนี้จึงมีผลทันที
+
+    **จำสถานะลง config ด้วย** ไม่งั้นรีสตาร์ตทีไรจะกลับมาเปิดเองแล้วเผา
+    เครดิต 75 หน่วย (5 รอบ x 15) กว่าจะรู้ว่า Flow ยังพังอยู่
+    """
+    set_config(GEN_PAUSED_KEY, not on)
+    r = globals().get("clip_runner2")
+    if not r:
+        return
+    r.stages = ({clip_queue.STAGE_READY_FLOW} if on else {GEN_PAUSED_MARK})
+
+
+def _gen_restore() -> None:
+    """คืนสถานะช่องเจนตามที่จำไว้ก่อนรีสตาร์ต — เรียกตอนเซิร์ฟเวอร์เริ่ม"""
+    if not load_config().get(GEN_PAUSED_KEY):
+        return
+    r = globals().get("clip_runner2")
+    if r:
+        r.stages = {GEN_PAUSED_MARK}
+    _clip_log("⛔ ช่องเจนคลิปยังปิดอยู่ตามที่จำไว้ก่อนรีสตาร์ต "
+              f"— ตัวลองจะเช็ค Google Flow ให้ทุก {VEO_PROBE_MINUTES} นาที")
 
 
 def _note_veo_result(ok: bool) -> None:
-    """จดผลการเจนแต่ละรอบ — ล้มติดกันครบเพดานแล้วพักคิวให้เอง"""
-    global _veo_fail_streak
+    """จดผลการเจนแต่ละรอบ — พังติดกันแล้วปิดช่องเจนเอง
+
+    **ที่มา 31 ส.ค. 2569** Flow ล้ม 100% ติดกัน 46 รอบตั้งแต่ 14:28 ถึง 16:22
+    ได้คลิป 0 ใบ เครดิตหาย 690 หน่วย และไม่มีอะไรหยุดให้
+
+    สถิติปกติจาก 52 ช่วง: ล้มติดกันยาวสุด 4 รอบ · 67% ล้มครั้งเดียวแล้วผ่าน
+    **เกิน 5 รอบติดจึงไม่ใช่ความไม่เสถียรปกติ**
+
+    ตอนอยู่ในโหมดลอง (`_veo_probing`) **ล้มครั้งเดียวก็ปิดทันที** เพื่อให้
+    การลองแต่ละรอบเสียแค่ 15 หน่วย ไม่ใช่ 75
+    """
+    global _veo_fail_streak, _veo_probing
     if ok:
+        if _veo_probing:
+            _veo_probing = False
+            _clip_log("✅ Google Flow กลับมาเจนได้แล้ว — เปิดช่องเจนคลิปต่อ")
+            _clip_say("", "✅ <b>Google Flow กลับมาแล้ว</b>@NL@เปิดเจนคลิปต่อเอง"
+                          " งานในคิวเดินต่อทันที".replace("@NL@", "\n"))
         _veo_fail_streak = 0
         return
+
     _veo_fail_streak += 1
-    if _veo_fail_streak < VEO_FAIL_STREAK_MAX:
+    probing = _veo_probing
+    if not probing and _veo_fail_streak < VEO_FAIL_STREAK_MAX:
         return
     lost = _veo_fail_streak * 15
-    _veo_fail_streak = 0                 # ล้างทันที ไม่งั้นพักซ้ำทุกรอบถัดไป
-    why = (f"Google Flow เจนล้มติดกัน {VEO_FAIL_STREAK_MAX} รอบ "
-           f"(เสียเครดิตไป {lost} หน่วยโดยไม่ได้คลิป) — พัก "
-           f"{VEO_HOLD_MINUTES} นาทีแล้วลองใหม่เอง")
-    try:
-        clip_jobs.hold(why, seconds=VEO_HOLD_MINUTES * 60, scope="new")
-    except Exception as error:                               # noqa: BLE001
-        _clip_log(f"พักคิวไม่สำเร็จ: {error}")
-        return
+    _veo_fail_streak = 0
+    _veo_probing = False
+    _gen_set(False)
     have, _ = known_credits()
-    _clip_log(f"⛔ {why}")
-    _clip_say("", (
-        f"⛔ <b>หยุดเจนคลิปชั่วคราว</b>\n"
-        f"Google Flow ล้มติดกัน {VEO_FAIL_STREAK_MAX} รอบ "
-        f"เสียเครดิตไป {lost} หน่วยโดยไม่ได้คลิปเลย\n"
-        + (f"เครดิตที่เหลือ <b>{have:,}</b> หน่วย\n" if have else "")
-        + f"พัก {VEO_HOLD_MINUTES} นาทีแล้วทำต่อเอง งานในคิวยังอยู่ครบ"
-    ))
+    _clip_log(f"⛔ ปิดช่องเจนคลิป — Flow "
+              + ("ลองแล้วยังไม่ได้" if probing
+                 else f"ล้มติดกัน {VEO_FAIL_STREAK_MAX} รอบ (เสีย {lost} หน่วย)")
+              + f" · จะลองใหม่ในอีก {VEO_PROBE_MINUTES} นาที")
+    if not probing:                       # แจ้งเฉพาะตอนเพิ่งพัง ไม่ย้ำทุกรอบลอง
+        _clip_say("", (
+            f"⛔ <b>หยุดเจนคลิปชั่วคราว</b>\n"
+            f"Google Flow ล้มติดกัน {VEO_FAIL_STREAK_MAX} รอบ "
+            f"เสียเครดิต {lost} หน่วยโดยไม่ได้คลิป\n"
+            + (f"เครดิตเหลือ <b>{have:,}</b> หน่วย\n" if have else "")
+            + f"จะลองใหม่เองทุก {VEO_PROBE_MINUTES} นาที งานในคิวยังอยู่ครบ"
+        ))
+
+
+def _veo_prober() -> None:
+    """ช่องเจนถูกปิดอยู่ → ลองเปิดให้ทำหนึ่งใบทุก 20 นาที
+
+    ล้มก็ปิดกลับทันที (เสีย 15 หน่วยต่อรอบลอง) ผ่านก็เปิดค้างไว้เลย
+    **ไม่ต้องรอคนมากด** ซึ่งเป็นเรื่องสำคัญเพราะของพังตอนไหนก็ได้
+    """
+    global _veo_probing
+    while True:
+        time.sleep(VEO_PROBE_MINUTES * 60)
+        try:
+            if _gen_running():
+                continue
+            waiting = sum(1 for j in clip_jobs.all()
+                          if j.get("stage") == clip_queue.STAGE_READY_FLOW)
+            if not waiting:
+                continue
+            _veo_probing = True
+            _gen_set(True)
+            _clip_log(f"🔍 ลองเจนคลิปดูว่า Google Flow กลับมาหรือยัง "
+                      f"(งานรออยู่ {waiting} ใบ · เสียสูงสุด 15 หน่วย)")
+            try:
+                clip_runner2.wake()
+            except Exception:                                # noqa: BLE001
+                pass
+        except Exception as error:                           # noqa: BLE001
+            _clip_log(f"ตัวลองเจนสะดุด: {type(error).__name__}: {error}")
 
 
 CREDIT_LOW = 300
@@ -3050,7 +3137,7 @@ CLIP_SLOT2_STAGES = {clip_queue.STAGE_READY_FLOW}     # เจนคลิป
 CLIP_SLOT3_STAGES = {clip_queue.STAGE_QUEUED}         # ดึงลิงก์
 
 
-SLOT2_ON = False   # ⛔ ปิดเจนคลิปชั่วคราว 31 ส.ค. 16:20 — Google Flow ล้ม 100% ตั้งแต่ 14:28
+SLOT2_ON = True
 SLOT3_ON = True
 
 clip_runner2 = (clip_queue.ClipRunner(clip_jobs, _clip_worker, log=_clip_log,
@@ -9104,6 +9191,9 @@ async def _startup() -> None:
     revived = clip_jobs.recover()
     if revived:
         append_log("clip", f"เอางานค้าง {revived} งานกลับเข้าคิว")
+    # **ต้องคืนสถานะช่องเจนก่อนสตาร์ตตัวรัน** ไม่งั้นตัวรันคว้างานไปเจน
+    # ตั้งแต่วินาทีแรกแล้วเผาเครดิตก่อนจะถูกสั่งปิด (เจอจริง 31 ส.ค. 16:40)
+    _gen_restore()
     clip_runner.start()
     # ช่องที่ 2 — ล้มตอนสตาร์ตต้องไม่ทำให้ทั้งเซิร์ฟเวอร์ไม่ขึ้น ช่องแรกยังทำงานได้
     # ช่องเสริม — ล้มตอนสตาร์ตต้องไม่ทำให้ทั้งเซิร์ฟเวอร์ไม่ขึ้น ช่อง 1 ยังทำงานได้
@@ -9129,6 +9219,7 @@ async def _startup() -> None:
     # อนุมัติอัตโนมัติตามขั้นที่เจ้าของติ๊กเปิดไว้ (28 ส.ค. 2569)
     threading.Thread(target=_auto_keeper, daemon=True).start()
     threading.Thread(target=_retry_keeper, daemon=True).start()
+    threading.Thread(target=_veo_prober, daemon=True).start()
     append_log("clip", f"เซิร์ฟเวอร์สายคลิปพร้อม — พอร์ต {PORT}")
 
 

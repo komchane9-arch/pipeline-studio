@@ -39,10 +39,12 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
 import random
+import html
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -290,8 +292,13 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         # สองสวิตช์นี้ต้องตั้งทุกครั้ง ค่าไม่ติดข้ามโพสต์
         _step("duet_off", "กดปิด duet (อนุญาตให้นำเนื้อหาไปใช้ซ้ำ)"),
         _step("ai_label_on", "กดระบุว่าเป็น AI"),
+        # **ห้ามเปลี่ยนกลับไปเป็น text_appears** (แก้ 31 ส.ค. 2569)
+        # บทเรียน 28 ส.ค. ถูกนำไปแก้เฉพาะผังที่เทรนไว้บนเครื่องที่ใช้อยู่
+        # แต่ **ผังตั้งต้นตัวนี้ถูกลืม** เครื่องใหม่ที่เสียบเข้ามาจึงจะได้
+        # ตัวตรวจตัวที่พังไปใช้ แล้วเจอบทเรียนเดิมซ้ำ (คลิปขึ้นสองรอบ ลบไม่ได้)
+        # เหตุผลเต็มอยู่ที่ verify_step() หัวข้อ left_screen
         _step("post", "กดโพสต์", settle=4.0,
-              verify="text_appears", verify_text="สำเร็จ|โพสต์แล้ว|เผยแพร่|กำลังอัป"),
+              verify="left_screen", verify_text="PublishVideoActivity"),
     ],
     "facebook_reels": [
         _step("open_app", "เข้าแอป Facebook", kind="open_app",
@@ -328,8 +335,11 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         _step("save_2", "กดบันทึก (หน้าเพิ่มสินค้า)", find="บันทึก", settle=2.5),
         _step("scroll_to_ai", "เลื่อนลงมาด้านล่าง", kind="swipe", value="down"),
         _step("ai_label_on", "กดเพิ่มป้าย AI"),
+        # ห้ามเปลี่ยนกลับไปเป็น text_appears — เหตุผลเดียวกับขั้นกดโพสต์ของ
+        # Shopee ข้างบน (ผังที่ใช้จริงบนเครื่องเป็น left_screen อยู่แล้ว
+        # ตัวตั้งต้นตัวนี้ตามไม่ทัน)
         _step("share", "กดแชร์เลย", find="แชร์เลย", settle=4.0,
-              verify="text_appears", verify_text="กำลังอัปโหลด|โพสต์แล้ว|เผยแพร่"),
+              verify="left_screen"),
     ],
 }
 
@@ -603,9 +613,53 @@ UI_DUMP_RETRY_GAP = 0.6
 #
 # ยังคงมีเพดานเวลากันเหนียวไว้ด้วย เผื่อกรณีที่ชื่อหน้าจอเดิมแต่เนื้อในเปลี่ยน
 # (ป็อปอัปปิดไปเองแต่ยังอยู่หน้าเดิม) — จะได้ไม่ตาบอดค้างถาวร
-UI_DUMP_BLIND_MEMO = 90.0        # วินาที (เพดานกันเหนียว)
+#
+# ---- แก้ 30 ส.ค. 2569: ความจำค้างข้ามขั้นจนตาบอด **19 ครั้งในวันเดียว** -------
+#
+# **อาการ** Facebook Reels ล้มที่ขั้น 12 ("ตรวจว่าแท็กอยู่ในช่องแล้ว") ทั้งที่ภาพ
+# หลักฐานที่ระบบเก็บไว้เอง 13:40:29 ยืนยันว่าแท็กครบ 5 ตัวอยู่ในช่องจริง
+#
+# **ทำไม 1** ขั้น 12 ได้ผังจอเป็นค่าว่าง ตัวตรวจจึงแปลว่า "ไม่เห็นแท็ก"
+# **ทำไม 2** ค่าว่างไม่ได้มาจากการอ่านจอ แต่มาจากความจำที่ติดไว้ตั้งแต่ 13:39:31
+# **ทำไม 3** ความจำติดตอนอยู่หน้า "เลือกหน้าปก" ซึ่งวิดีโอเล่นตลอด อ่านไม่ได้จริง
+# **ทำไม 4** เงื่อนไขล้างความจำคือ "ชื่อหน้าจอเปลี่ยน" แต่ Facebook ใช้ชื่อเดียวกัน
+#            (`ImmersiveActivity`) ทั้งหน้าเลือกหน้าปกและหน้าใส่คำอธิบาย
+#            ชื่อจึงไม่เคยเปลี่ยน ความจำค้างข้ามไป **4 ขั้น** จนครบเพดาน 90 วินาที
+#
+# **ราก — ถามผิดคำถาม** (กติกาข้อ 2.3.1) "ยังเป็นหน้าจอเดิมอยู่ไหม" ตอบว่า "ใช่"
+# ได้ทั้งตอนที่ยังอ่านไม่ได้จริง และตอนที่กดอะไรไปแล้วจนเนื้อในจอเปลี่ยนไปหมด
+# **สิ่งที่ทำให้เนื้อในจอเปลี่ยนคือการกด ไม่ใช่การเปลี่ยนหน้า**
+#
+# **แก้สองทาง**
+#  1. ล้างความจำทุกครั้งที่ **แตะ/พิมพ์/วาง/ลาก/กดปุ่มระบบ/เปิดแอป** และทุกครั้ง
+#     ที่ขึ้นขั้นใหม่ — `RunContext` ห่อช่องทางแตะจอทุกช่องให้เรียก
+#     `forget_blind_screen()` เองอัตโนมัติ ไม่ต้องให้ใครจำว่าต้องเรียก
+#  2. ลดเพดานกันเหนียวจาก 90 เหลือ 15 วินาที — **แต่ละขั้นห่างกัน 13-20 วินาที**
+#     90 วินาทีจึงครอบข้ามไปได้ถึง 4 ขั้น ส่วน 15 วินาทีครอบได้แค่รอบตรวจของ
+#     ขั้นที่กำลังทำอยู่ ซึ่งเป็นที่เดียวที่ความจำนี้ควรมีผล (ตัวตรวจวนอ่านซ้ำ
+#     หลายรอบในขั้นเดียว โดยไม่มีการกดคั่น — ตรงนั้นคือที่ที่มันช่วยจริง)
+UI_DUMP_BLIND_MEMO = 15.0        # วินาที (เพดานกันเหนียว — ครอบแค่รอบตรวจขั้นเดียว)
 _ui_dump_blind_until = 0.0
 _ui_dump_blind_where = ""
+
+
+# คำสั่ง adb ที่ "ไปเปลี่ยนหน้าจอ" — เจอตัวไหนต้องลืมความจำตาบอดทันที
+#
+# ⚠️ **ห้ามเติม `uiautomator` · `dumpsys` · `cat` · `rm` · `screencap` เข้ามา**
+# พวกนั้นคือการ *อ่าน* จอ ไม่ใช่การเปลี่ยนจอ ถ้าใส่เข้าไปความจำจะถูกล้าง
+# ทุกครั้งที่อ่าน = เท่ากับไม่มีความจำเลย แล้วจะกลับไปเสีย 36 วินาทีทุกรอบตรวจ
+SCREEN_TOUCH_CMDS = frozenset({"input", "am", "monkey"})
+
+
+def forget_blind_screen() -> None:
+    """ลืมความจำ "จอนี้อ่านไม่ได้" — เรียกทุกครั้งที่มีอะไรไปเปลี่ยนหน้าจอ
+
+    ปลอดภัยเสมอที่จะเรียกเกิน: ผลแย่ที่สุดคือเสียเวลาลองอ่านจออีกรอบ
+    ส่วนผลของการ **ลืมเรียก** คือตาบอดค้างแล้วตัดสินผิดว่างานล้ม ซึ่งแพงกว่ามาก
+    """
+    global _ui_dump_blind_until, _ui_dump_blind_where
+    _ui_dump_blind_until = 0.0
+    _ui_dump_blind_where = ""
 
 
 def dump_ui_blind_for() -> float:
@@ -623,11 +677,14 @@ def dump_ui(run_adb: Callable[..., bytes], log: Callable[[str], None] | None = N
     """
     global _ui_dump_blind_until, _ui_dump_blind_where
     # เพิ่งรู้ว่าหน้าจอนี้อ่านไม่ได้ → ถ้ายังเป็นหน้าเดิม อย่าไปจ่าย 36 วินาทีซ้ำ
+    #
+    # **ความจำนี้ถูกล้างไปแล้วทุกครั้งที่มีการกด** (`forget_blind_screen()`)
+    # ที่เหลือรอดมาถึงตรงนี้จึงมีแต่กรณี "ยังไม่ได้กดอะไรเลยตั้งแต่อ่านไม่ได้"
+    # ซึ่งเป็นกรณีเดียวที่พูดได้จริงว่าจอยังอ่านไม่ได้เหมือนเดิม
     if dump_ui_blind_for() > 0 and _ui_dump_blind_where:
         if foreground(run_adb) == _ui_dump_blind_where:
             return ""                       # หน้าเดิม = ยังอ่านไม่ได้แน่นอน
-        _ui_dump_blind_until = 0.0          # เปลี่ยนหน้าแล้ว ลองใหม่
-        _ui_dump_blind_where = ""
+        forget_blind_screen()               # เปลี่ยนหน้าแล้ว ลองใหม่
 
     for attempt in range(1, UI_DUMP_TRIES + 1):
         run_adb("shell", "rm", "-f", UI_DUMP_PATH)
@@ -636,8 +693,7 @@ def dump_ui(run_adb: Callable[..., bytes], log: Callable[[str], None] | None = N
         xml = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
         if "<node" in xml:
             # อ่านได้แล้ว = หน้าจอนิ่งแล้ว ล้างความจำทิ้งทันที
-            _ui_dump_blind_until = 0.0
-            _ui_dump_blind_where = ""
+            forget_blind_screen()
             if attempt > 1 and log:
                 log(f"   อ่านผังจอได้ในรอบที่ {attempt}")
             return xml
@@ -648,7 +704,8 @@ def dump_ui(run_adb: Callable[..., bytes], log: Callable[[str], None] | None = N
     if log:
         log(f"   ⚠️ อ่านผังจอไม่ได้เลยทั้ง {UI_DUMP_TRIES} รอบ "
             "— หน้าจอนี้มีอะไรขยับตลอด (วิดีโอเล่นอยู่) · "
-            "จะข้ามการอ่านจอไปจนกว่าจะเปลี่ยนหน้า แล้วใช้ชื่อหน้าจอแทน")
+            f"จะข้ามการอ่านจอไปไม่เกิน {UI_DUMP_BLIND_MEMO:g} วินาที "
+            "หรือจนกว่าจะมีการกด/พิมพ์/เปลี่ยนหน้า แล้วใช้ชื่อหน้าจอแทน")
     return ""
 
 
@@ -742,11 +799,27 @@ def find_target(xml: str, needle: str) -> tuple[int, int] | None:
 
 
 def has_text(xml: str, needle: str) -> bool:
-    """มีข้อความนี้อยู่บนจอไหม — เทียบแบบตัดเว้นวรรค กันแอปจัดบรรทัดใหม่"""
+    """มีข้อความนี้อยู่บนจอไหม — เทียบแบบตัดเว้นวรรค กันแอปจัดบรรทัดใหม่
+
+    **ต้องแปลรหัส HTML กลับก่อนเทียบ** (แก้ 30 ส.ค. 2569)
+
+    `uiautomator dump` เขียนตัวอักษรนอกช่วงพื้นฐานออกมาเป็นรหัสตัวเลข
+    อิโมจิ 🎁 จึงกลายเป็น `&#127873;` ในผังจอ ส่วนแท็กที่เราถืออยู่เป็นตัวอิโมจิจริง
+    เทียบกันตรงๆ จึง **ไม่มีทางเจอ** ไม่ว่าจะวางลงไปสำเร็จแค่ไหน
+
+        ผังจอ  #buy①get⑤&#127873;สำหรับ
+        ที่ค้น #buy①get⑤🎁สำหรับ          ← คนละสายอักขระ
+
+    ผลจริง: ใบ 43313575583 ล้มขั้น 12 ซ้ำ 3 รอบติด (16:43 · 16:48 · 16:52)
+    ทั้งที่ผังจอที่ระบบเก็บไว้เองมีแท็กครบทุกตัว — **แท็กไหนมีอิโมจิ = ล้ม 100%**
+
+    แปลฝั่ง **ผังจอ** เท่านั้น ห้ามไปแปลฝั่งข้อความที่ค้น (จะกลายเป็นผลตรงข้าม)
+    """
     target = re.sub(r"\s+", "", needle or "")
     if not target:
         return False
-    joined = re.sub(r"\s+", "", " ".join(text for text, *_ in iter_nodes(xml)))
+    plain = html.unescape(xml or "")
+    joined = re.sub(r"\s+", "", " ".join(text for text, *_ in iter_nodes(plain)))
     return target in joined
 
 
@@ -1108,6 +1181,40 @@ def dismiss_ads(
 # ------------------------------------------------------------- บริบทการรัน
 
 
+def _forgets_blind(fn: Callable) -> Callable:
+    """ห่อคำสั่งที่ **แตะจอแน่ๆ** ให้ลืมความจำ "จอนี้อ่านไม่ได้" ทุกครั้งที่ถูกเรียก"""
+    if fn is None or getattr(fn, "_blind_wrapped", False):
+        return fn
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        forget_blind_screen()
+        return fn(*args, **kwargs)
+
+    wrapped._blind_wrapped = True                        # type: ignore[attr-defined]
+    return wrapped
+
+
+def _forgets_blind_adb(fn: Callable) -> Callable:
+    """ห่อ `run_adb` — ลืมความจำเฉพาะคำสั่งที่ไปเปลี่ยนหน้าจอ ไม่ใช่ทุกคำสั่ง
+
+    คำสั่งที่ *อ่าน* จอ (`uiautomator` · `dumpsys` · `cat` · `screencap`) ต้องไม่ล้าง
+    ไม่งั้นความจำจะถูกล้างโดยตัวมันเองทุกครั้ง แล้วกลายเป็นไม่มีความจำเลย
+    """
+    if fn is None or getattr(fn, "_blind_wrapped", False):
+        return fn
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        if len(args) >= 2 and str(args[0]) == "shell" and \
+                str(args[1]) in SCREEN_TOUCH_CMDS:
+            forget_blind_screen()
+        return fn(*args, **kwargs)
+
+    wrapped._blind_wrapped = True                        # type: ignore[attr-defined]
+    return wrapped
+
+
 @dataclass
 class RunContext:
     """สิ่งที่ตัวรันต้องใช้ — ฉีดจากภายนอกเพื่อให้เทสได้โดยไม่ต้องมีมือถือจริง"""
@@ -1173,6 +1280,25 @@ class RunContext:
     # (เจอจริง 26 ส.ค. 2026: ขั้น 1 ผ่านทั้งที่ mWakefulness=Asleep)
     wake_screen: Callable[[], str] | None = None
 
+    def __post_init__(self) -> None:
+        """ห่อทุกช่องทางที่ "แตะจอ" ให้ล้างความจำ "จอนี้อ่านไม่ได้" ให้เองอัตโนมัติ
+
+        **ทำไมห่อที่นี่ ไม่ไปเรียกทีละจุด** (30 ส.ค. 2569) ช่องทางแตะจอมีอยู่
+        4 ช่อง (`tap` · `type_text` · `set_clipboard` · `run_adb`) และถูกเรียกจาก
+        อย่างน้อย 9 จุดในไฟล์นี้ (แตะ · พิมพ์ · วางแท็ก · ล้างช่อง · ลบตัวอักษร ·
+        ปุ่มระบบ · ปัดจอ · ลาก · เปิดแอป) — อะไรที่ต้องพึ่งความจำของคนเขียนว่า
+        "อย่าลืมเรียก" สุดท้ายจะมีคนลืม แล้วรูนั้นจะเงียบจนกว่าจะโพสต์พลาด
+        ห่อที่ทางเข้าทางเดียว = จุดใหม่ที่ใครเพิ่มทีหลังได้ผลนี้ฟรีโดยไม่ต้องรู้
+
+        `set_clipboard` ต้องห่อด้วยเพราะ **มันไม่ผ่าน `run_adb`** — มันคุยกับ
+        scrcpy ตรงๆ แต่ผลของมันคือข้อความโผล่ในช่องบนจอ ซึ่งคือการเปลี่ยนจอเต็มๆ
+        """
+        self.tap = _forgets_blind(self.tap)
+        self.type_text = _forgets_blind(self.type_text)
+        if self.set_clipboard is not None:
+            self.set_clipboard = _forgets_blind(self.set_clipboard)
+        self.run_adb = _forgets_blind_adb(self.run_adb)
+
     def tap_at(self, x: int, y: int) -> tuple[int, int]:
         """แตะแบบเยื้องสุ่มเล็กน้อย — **ทางเดียวที่โค้ดในไฟล์นี้ใช้แตะจอ**
 
@@ -1223,7 +1349,15 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
     """
     kind = step.verify_kind()
     if kind == "none":
-        return "ไม่ได้ตั้งตัวตรวจ"
+        # **"ยังไม่ได้ตรวจ" ต้องหน้าตาไม่เหมือน "ตรวจแล้วผ่าน"** (กติกาข้อ 2.3.1 ข้อ 4)
+        #
+        # **เหตุการณ์ 30 ส.ค. 2569** ขั้น 2 ของ Shopee Video ตั้ง verify=none ไว้
+        # บันทึกจึงขึ้นว่า `2. กด Live & Video — ✓ … ตรวจแล้ว: ไม่ได้ตั้งตัวตรวจ`
+        # ซึ่งอ่านแล้วเหมือนผ่าน พอขั้น 3 ล้ม ทั้งสองแชทไปไล่หาสาเหตุที่ขั้น 3
+        # ทั้งที่ความล้มจริงเกิดตั้งแต่ขั้น 2 — เสียเวลาไล่ผิดจุดไปหลายรอบ
+        #
+        # ขึ้นต้นด้วย ⚠️ และคำว่า "ยังไม่ได้ตรวจ" ให้ตาสะดุดตั้งแต่กวาดผ่าน
+        return "⚠️ ยังไม่ได้ตรวจ (ขั้นนี้ไม่ได้ตั้งตัวตรวจไว้ — ผ่านหรือไม่ยังไม่รู้)"
 
     deadline = time.time() + max(1.0, step.verify_timeout)
     last = ""
@@ -1300,9 +1434,24 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
 
         elif kind == "text_gone":
             pattern = step.verify_text or "."
-            if not find_node(xml, pattern):
+            # **ตัวนี้อันตรายที่สุดในไฟล์ ถ้าปล่อยให้ตาบอดแล้วผ่าน** (30 ส.ค. 2569)
+            #
+            # ตัวตรวจตัวอื่นตาบอดแล้ว **ล้ม** ซึ่งเสียแค่เวลา แต่ตัวนี้ตาบอดแล้ว
+            # **ผ่าน** เพราะมันถามว่า "ไม่เจอข้อความใช่ไหม" ซึ่งจอว่างเปล่า
+            # ตอบว่า "ใช่" ได้เต็มปาก ทั้งที่ความจริงคือยังไม่ได้ดูอะไรเลย
+            # → ฝั่ง Facebook Reels ขั้นถัดจากนี้คือกดโพสต์ ผ่านผิดตรงนี้
+            # = โพสต์ขึ้นจากหน้าจอที่ไม่มีใครรู้ว่าเป็นหน้าอะไร ซึ่งถอนไม่ได้
+            #
+            # กติกาข้อ 2.3.1 ข้อ 1: หาของที่ **มีเฉพาะตอนสำเร็จ** — ในที่นี้คือ
+            # "อ่านผังจอได้จริง **และ** ในผังนั้นไม่มีข้อความที่ว่า" ไม่ใช่แค่ไม่เจอ
+            if not xml:
+                last = (f"อ่านผังจอไม่ได้เลย จึงยัง**ยืนยันไม่ได้**ว่า “{pattern}” "
+                        "หายไปแล้ว — หน้านี้มีวิดีโอเล่นอยู่ ตัวอ่านจอของ Android "
+                        "เลยถ่ายผังไม่ได้ (ยังไม่ได้ตรวจ ไม่ใช่ตรวจแล้วผ่าน)")
+            elif not find_node(xml, pattern):
                 return f"ข้อความ {pattern} หายไปแล้ว"
-            last = f"ข้อความ {pattern} ยังอยู่"
+            else:
+                last = f"ข้อความ {pattern} ยังอยู่"
 
         elif kind == "app_frontmost":
             package = step.value or ""
@@ -1386,10 +1535,25 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
                 if step.optional:
                     return "ไม่มีแท็กให้ตรวจ — ขั้นนี้ข้ามได้"
                 raise StepError("ไม่มีแท็กถูกใส่ลงไปเลย — ไม่ผ่าน")
-            missing = [tag for tag in wanted if not has_text(xml, tag)]
-            if not missing:
-                return f"เห็นแท็กครบ {len(wanted)} ตัว"
-            last = f"ยังไม่เห็นแท็ก {', '.join(missing[:3])}"
+            # **"อ่านจอไม่ได้" ไม่ใช่ "อ่านแล้วไม่เจอ"** (กติกาข้อ 2.3.1 ข้อ 4)
+            # — ทำให้เหมือน `text_appears` ที่แก้ถูกไปแล้วเมื่อ 28 ส.ค. 2569
+            #
+            # เจอจริง 30 ส.ค. 13:40:29 — ขั้น 12 ของ Facebook Reels รายงานว่า
+            # "ยังไม่เห็นแท็ก #tcl, #tclthailand, #ทีวี" ซึ่งอ่านแล้วเหมือน
+            # **วางแท็กไม่ติด** ทั้งที่ภาพหลักฐานยืนยันว่าแท็กครบ 5 ตัวอยู่ในช่อง
+            # ความจริงคือผังจอเป็นค่าว่างเพราะความจำตาบอดค้างมาจากขั้นที่ 8
+            #
+            # สองอย่างนี้แก้คนละทาง — วางไม่ติดต้องไปดูคลิปบอร์ด/ช่องพิมพ์
+            # ส่วนอ่านจอไม่ได้ต้องไปดูว่ามีอะไรเล่นอยู่บนจอ **แยกผิด = ไล่ผิดทาง**
+            if not xml:
+                last = (f"อ่านผังจอไม่ได้เลย จึงยังไม่รู้ว่าแท็ก {len(wanted)} ตัว "
+                        "ลงไปในช่องหรือยัง — หน้านี้มีวิดีโอเล่นอยู่ ตัวอ่านจอของ "
+                        "Android เลยถ่ายผังไม่ได้ (ยังไม่ได้ตรวจ ไม่ใช่ตรวจแล้วไม่เจอ)")
+            else:
+                missing = [tag for tag in wanted if not has_text(xml, tag)]
+                if not missing:
+                    return f"เห็นแท็กครบ {len(wanted)} ตัว"
+                last = f"ยังไม่เห็นแท็ก {', '.join(missing[:3])}"
 
         else:
             return f"ไม่รู้จักวิธีตรวจ {kind} — ข้ามการตรวจ"
@@ -1718,6 +1882,11 @@ def _put_text(context: RunContext, step: Step, text: str) -> str:
 def run_step(context: RunContext, step: Step) -> str:
     """ทำหนึ่งขั้นแล้ว **ตรวจผล** คืนข้อความสรุป"""
     width, height = context.screen
+    # ขึ้นขั้นใหม่ = ขั้นที่แล้วเพิ่งกดอะไรไปและหน้าจอมีเวลาตั้งตัวแล้ว
+    # ห้ามเอาความจำ "จอนี้อ่านไม่ได้" ของขั้นที่แล้วมาใช้ต่อเด็ดขาด —
+    # นี่คือรอยที่ทำให้ Facebook Reels ล้มที่ขั้น 12 เมื่อ 30 ส.ค. 2569
+    # (ความจำติดตอนขั้น 8 แล้วค้างข้ามมา 4 ขั้นเพราะชื่อหน้าจอไม่เปลี่ยน)
+    forget_blind_screen()
     xml, before = context.read()
     typed = ""
 
@@ -1854,7 +2023,9 @@ def run_step(context: RunContext, step: Step) -> str:
     context.pause(step.settle)
     proof = verify_step(context, step, before, typed=typed)
     head = f"ปิดโฆษณา {len(ad_notes)} ชั้นก่อน · " if ad_notes else ""
-    return f"{head}{summary} · ตรวจแล้ว: {proof}"
+    # ขั้นที่ไม่มีตัวตรวจ **ห้ามขึ้นคำว่า "ตรวจแล้ว"** — คำนั้นคือคำโกหก
+    label = "ตรวจแล้ว" if not proof.startswith("⚠️") else "ผล"
+    return f"{head}{summary} · {label}: {proof}"
 
 
 def run_flow(
@@ -1908,6 +2079,27 @@ def run_flow(
         if context.stop():
             results.append({"step": step.id, "ok": False, "message": "ถูกสั่งหยุด"})
             break
+        # ---- จอต้องสว่างทุกขั้น ไม่ใช่แค่ตอนเริ่มผัง (30 ส.ค. 2569) ----------
+        #
+        # **เหตุการณ์จริง 18:34** ตัวดูแลจอดับจอตอน 18:34:01 แล้วผังเริ่มกดตอน
+        # 18:34:04 — ทุกการกดหลังจากนั้นลงบนจอที่ดับอยู่
+        #     1. เข้าแอป Shopee — ✓        (เช็คแอปหน้าสุดได้แม้จอดับ จึงผ่าน)
+        #     2. กด Live & Video — ⚠️ ยังไม่ได้ตรวจ
+        #     3. กดตรงรูปคน — ✗ หน้าจอยังเหมือนเดิม   ← ล้มตรงนี้
+        #
+        # ปลุกตอนเริ่มผังอย่างเดียวไม่พอ เพราะช่วงเตรียมของ (ส่งคลิป · อ่านจอ
+        # ครั้งแรก) กินเวลาเป็นนาที ตัวดูแลจอมีเวลาเหลือเฟือที่จะดับจอคั่นเข้ามา
+        #
+        # **ราคาถูกมาก** — `wake_screen` เช็คสถานะจอก่อน จอสว่างอยู่แล้วคืน
+        # ค่าว่างโดยไม่ทำอะไร เสียแค่การถาม `dumpsys` ครั้งเดียวต่อขั้น
+        # เทียบกับการเดินผังพังทั้งใบแล้วต้องเริ่มใหม่ 7 นาที
+        if context.wake_screen is not None:
+            try:
+                woke = context.wake_screen()
+                if woke:
+                    context.log(f"  ปลุกจอกลับก่อนขั้น {number} — {woke}")
+            except Exception as error:                   # noqa: BLE001
+                context.log(f"  ปลุกจอก่อนขั้น {number} ไม่สำเร็จ: {error}")
         try:
             message = run_step(context, step)
             ok = True

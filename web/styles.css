@@ -3205,3 +3205,20 @@ body.typing-through {
 .fc-stop { border-color: var(--slow); color: var(--slow); }
 .fc-resume { border-color: var(--ok); color: var(--ok-ink); }
 .fc-cancel { border-color: var(--bad); color: var(--bad-ink); }
+
+/* ============ 🗣 ประโยคปกติเหนือช่องแก้บทพูด (9 ก.ย. 2569) */
+/* เจ้าของตรวจบทจากบรรทัดนี้ จึงต้องเด่นกว่าช่องพิมพ์ที่อยู่ข้างล่าง
+   ส่วนช่องพิมพ์เป็นแบบคำอ่าน (มีขีด) ซึ่งเป็นตัวที่ส่งเข้า Flow จริง */
+.script-plain {
+  margin: 0 0 3px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.script-hint { margin: 0 0 8px; }
+/* ช่องคำอ่านลดความเด่นลง — เป็นของที่เครื่องใช้ ไม่ใช่ของที่คนอ่าน */
+.script-list .script-plain + .script-line {
+  font-size: 12px;
+  color: var(--ink-3);
+}

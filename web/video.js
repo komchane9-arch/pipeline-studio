@@ -656,7 +656,13 @@ const STAGE_TONE = {
  */
 function videoLine(job) {
   const count = job.video_count || 0;
-  if (!count) return null;              // ไม่มีคลิป = ไม่ต้องขึ้นอะไรเลย
+  if (!count && job.clip_state === "generation") {
+    return el("small", {
+      className: "row-video unknown",
+      textContent: "⏳ ของพร้อมแล้ว · รอเจนคลิป",
+    });
+  }
+  if (!count) return null;
   const ok = job.video_ok;
   const mark = ok === true ? "✅" : (ok === false ? "❌" : "⏳");
   const bits = [`🎬 ${count} ไฟล์`];
@@ -685,6 +691,30 @@ function jobRow(job) {
   );
   const clip = videoLine(job);
   if (clip) row.append(clip);
+  if (job.tiktok_link_status) {
+    const pending = job.tiktok_link_status === "pending_review";
+    const failed = job.tiktok_link_status === "error";
+    const running = job.tiktok_link_status === "running";
+    const added = job.tiktok_link_status === "showcase_added";
+    const mark = pending ? "⏳" : failed ? "❌" : running ? "🔄" : "✅";
+    const label = pending ? "สินค้า TikTok · รอตรวจ (ยังไม่เพิ่มโชว์เคส)"
+      : failed ? "เพิ่มสินค้าเข้าโชว์เคส TikTok ไม่สำเร็จ"
+      : running ? "กำลังตรวจสินค้า TikTok"
+      : added ? `เพิ่มเข้าโชว์เคสแล้ว · อันดับ ${job.tiktok_link_rank || "?"}`
+      : `ผลสินค้า TikTok เดิม · อันดับ ${job.tiktok_link_rank || "?"}`;
+    row.append(el("small", {
+      className: `row-video ${failed ? "bad" : pending || running ? "unknown" : "ok"}`,
+      textContent: `${mark} ${label}`,
+      title: [job.tiktok_product_name, job.tiktok_link_reason].filter(Boolean).join(" · ") || label,
+    }));
+  }
+  if (job.publish_auto_skip && job.publish_note) {
+    row.append(el("small", {
+      className: "row-video unknown",
+      textContent: `⏭ ${job.publish_note}`,
+      title: "ใบงานยังอยู่ในกองนี้ แต่ระบบอัตโนมัติจะข้ามไปทำใบถัดไป",
+    }));
+  }
 
   /* **แถวที่ไม่มีรหัสใบงาน — ห้ามโชว์ปุ่มจัดการคิวสักปุ่ม**
    *
@@ -819,6 +849,201 @@ function queueLoadNote() {
 const BOARD_KEY = "clipBoardPick";
 let boardPick = localStorage.getItem(BOARD_KEY) || "";
 let boardData = null;
+const PUBLISH_BOARD_KEYS = new Set(["shopee_video", "facebook_reels", "tiktok"]);
+let boardPublishProgress = [];
+let boardPublishProgressOnline = true;
+
+/** หาชื่อใบงานจาก progress ก่อน แล้วค่อยถอยไปหาในกองทั้งหก
+ *
+ * งานที่เพิ่งจบอาจถูกย้ายไปกองถัดไปแล้ว จึงห้ามหาเฉพาะกองของปลายทางเดิม.
+ */
+function publishProgressName(clip) {
+  if (clip?.name) return clip.name;
+  const id = String(clip?.item_id || "");
+  for (const bucket of boardData?.buckets || []) {
+    const found = (bucket.jobs || []).find((job) => String(job.item_id || job.id || "") === id);
+    if (found?.name) return found.name;
+  }
+  return "";
+}
+
+async function runPublishResume(clip, buttons) {
+  const warning = `ให้ใบงาน ${clip.item_id} ทำต่อจากขั้นที่ค้างใช่ไหม?`
+    + "\n\nระบบจะตรวจสถานะเดิมก่อน และอาจโพสต์ขึ้นจริงเมื่อเดินถึงขั้นสุดท้าย";
+  if (!window.confirm(warning)) return;
+
+  buttons.forEach((button) => { button.disabled = true; });
+  $("#storyNote").textContent = `Resume ใบงาน ${clip.item_id} — ห้ามแตะมือถือระหว่างนี้`;
+  try {
+    const result = await api("/api/publish/flow/run", {
+      method: "POST",
+      body: JSON.stringify({
+        serial: clip.serial,
+        target: clip.target,
+        item_id: clip.item_id,
+        resume: true,
+      }),
+    });
+    $("#storyNote").textContent = result.awaiting_post_approval
+      ? `✅ กู้ใบงาน ${clip.item_id} แล้ว — หยุดรอก่อนโพสต์ตามที่ตั้งไว้`
+      : (result.ok
+        ? `✅ Resume ใบงาน ${clip.item_id} สำเร็จ`
+        : `❌ ใบงาน ${clip.item_id} หยุดอีกครั้งที่ ${result.done}/${result.total}`);
+  } catch (error) {
+    $("#storyNote").textContent = `Resume ใบงาน ${clip.item_id} ไม่ได้: ${error.message}`;
+  } finally {
+    await loadJobQueue();
+    if (openJobId) await showJob(openJobId, true);
+  }
+}
+
+
+async function resetPublishStatus(clip, target, buttons) {
+  if (!window.confirm(
+    `ล้างสถานะ ${target} ให้กลับเป็น “ตอนนี้ว่าง” ใช่ไหม?\n\n`
+    + "คำสั่งนี้ไม่เริ่มใบงาน ไม่แตะมือถือ และไม่เปลี่ยนคิวจริง",
+  )) return;
+
+  buttons.forEach((button) => { button.disabled = true; });
+  $("#storyNote").textContent = `กำลังล้างสถานะ ${target}…`;
+  try {
+    const result = await api("/api/publish/progress/reset", {
+      method: "POST",
+      body: JSON.stringify({ target, item_id: clip?.item_id || "" }),
+    });
+    $("#storyNote").textContent = `✅ ${result.message}`;
+  } catch (error) {
+    $("#storyNote").textContent = `Reset สถานะไม่ได้: ${error.message}`;
+  } finally {
+    await loadJobQueue();
+    if (openJobId) await showJob(openJobId, true);
+  }
+}
+
+
+async function runPublishStop(target, clip, button) {
+  // Stop เป็นคำสั่งปลอดภัยและ idempotent: กดตอนว่างก็ต้องปิด auto ได้ จึงไม่ถามซ้ำ
+  // และไม่ disable ปุ่มระหว่าง request — ผู้ใช้ต้องกดได้ตลอดตามข้อกำหนด.
+  button.setAttribute("aria-busy", "true");
+  const item = clip?.item_id ? ` ใบงาน ${clip.item_id}` : "";
+  $("#storyNote").textContent = `กำลังสั่ง Stop ${target}${item}…`;
+  try {
+    const result = await api("/api/publish/stop", {
+      method: "POST",
+      body: JSON.stringify({ target }),
+    });
+    $("#storyNote").textContent = `${result.ok ? "⏹" : "⚠️"} ${result.message}`;
+  } catch (error) {
+    $("#storyNote").textContent = `Stop ไม่สำเร็จ: ${error.message}`;
+  } finally {
+    button.removeAttribute("aria-busy");
+    await loadJobQueue();
+    if (openJobId) await showJob(openJobId, true);
+  }
+}
+
+
+/** ปุ่มควบคุมอยู่ทุกกล่อง แต่เปิดให้กดเฉพาะงานล่าสุดที่ล้มจริง
+ *  ด่านฝั่งเซิร์ฟเวอร์เป็นผู้ตัดสินซ้ำอีกชั้น โดยเฉพาะกรณีแตะ Post ไปแล้ว. */
+function appendPublishControls(box, clip, target) {
+  const controls = clip?.controls || {};
+  const resume = el("button", {
+    type: "button", className: "board-live-control is-resume",
+    textContent: "▶ Resume", disabled: !controls.can_resume,
+    title: controls.can_resume ? "ทำต่อจากขั้นที่หยุด" : (controls.reason || "ยังไม่มีงานที่ทำต่อได้"),
+  });
+  const reset = el("button", {
+    type: "button", className: "board-live-control is-reset",
+    textContent: "↺ Reset", disabled: !controls.can_reset,
+    title: controls.can_reset
+      ? "ล้างสถานะกล่องนี้ให้กลับเป็น ตอนนี้ว่าง — ไม่เริ่มงานและไม่แตะมือถือ"
+      : (controls.reason || "ยังไม่มีสถานะที่ล้างได้"),
+  });
+  const stop = el("button", {
+    type: "button", className: "board-live-control is-stop",
+    textContent: "■ Stop", disabled: false,
+    title: "หยุดการทำงาน ปิดอัตโนมัติ และคืนใบที่ค้างเป็นคิวที่ 1",
+  });
+  const buttons = [resume, reset];
+  resume.addEventListener("click", (event) => {
+    event.stopPropagation();
+    runPublishResume(clip, buttons);
+  });
+  reset.addEventListener("click", (event) => {
+    event.stopPropagation();
+    resetPublishStatus(clip, target, buttons);
+  });
+  stop.addEventListener("click", (event) => {
+    event.stopPropagation();
+    runPublishStop(target, clip, stop);
+  });
+  if (clip?.status === "failed" && (!controls.can_resume || !controls.can_reset)) {
+    box.append(el("small", {
+      className: "board-live-control-reason",
+      textContent: controls.reason || "จุดนี้ยังทำต่ออัตโนมัติไม่ได้",
+    }));
+  }
+  box.append(el("div", { className: "board-live-actions" }, resume, reset, stop));
+}
+
+/** กล่องสดใต้กองโพสต์ — แยก running ออกจากผลล่าสุดให้ชัดเจน
+ *
+ * แถวแรกของ API คือรายการใหม่สุด แต่ให้ running มาก่อนเสมอ เผื่อรายการที่
+ * เพิ่งจบอีกปลายทางมี timestamp ใหม่กว่า จะได้ไม่บังงานที่กำลังแตะมือถือจริง.
+ */
+function publishLiveBox(bucket) {
+  const rows = boardPublishProgress.filter((clip) => clip.target === bucket.key);
+  const clip = rows.find((row) => row.status === "running") || rows[0] || null;
+  const box = el("div", { className: "board-live" });
+  box.dataset.target = bucket.key;
+  box.setAttribute("aria-live", "polite");
+
+  if (!boardPublishProgressOnline) {
+    box.classList.add("is-error");
+    box.append(
+      el("b", { className: "board-live-state", textContent: "⚠️ อ่านสถานะไม่ได้" }),
+      el("small", { textContent: "งานโพสต์ยังทำต่อได้ตามปกติ" }),
+    );
+    appendPublishControls(box, null, bucket.key);
+    return box;
+  }
+
+  if (!clip) {
+    box.classList.add("is-idle");
+    box.append(
+      el("b", { className: "board-live-state", textContent: "⏸ ตอนนี้ว่าง" }),
+      el("small", { textContent: "ไม่มีใบงานกำลังทำ" }),
+    );
+    appendPublishControls(box, null, bucket.key);
+    return box;
+  }
+
+  const total = Number(clip.total || 0);
+  const step = Number(clip.step || 0);
+  const running = clip.status === "running";
+  const failed = clip.status === "failed";
+  const stopped = clip.status === "stopped";
+  box.classList.add(running ? "is-running" : ((failed || stopped) ? "is-failed" : "is-done"));
+  const state = running ? "🔄 กำลังทำ"
+    : (stopped ? "⏹ หยุดแล้ว" : (failed ? "❌ ล่าสุดหยุด" : "✅ ล่าสุดเสร็จ"));
+  box.append(
+    el("b", { className: "board-live-state",
+      textContent: `${state}${total ? ` · ขั้น ${step}/${total}` : ""}` }),
+    el("span", { className: "board-live-now", textContent: clip.now || "กำลังเริ่ม…" }),
+    el("small", { className: "board-live-id", textContent: `ใบงาน ${clip.item_id || "—"}` }),
+  );
+  const name = publishProgressName(clip);
+  if (name) {
+    const item = el("small", { className: "board-live-name", textContent: name });
+    item.title = name;
+    box.append(item);
+  }
+  const clock = running ? clip.started : clip.ended;
+  if (clock) box.append(el("small", { className: "board-live-time",
+    textContent: running ? `เริ่ม ${clock}` : `จบ ${clock}` }));
+  appendPublishControls(box, clip, bucket.key);
+  return box;
+}
 
 /** กล่องแถบ 6 ขั้น — **วางพาดเต็มความกว้างเหนือสองคอลัมน์** (ผู้ใช้สั่ง 26 ส.ค.)
  *
@@ -989,6 +1214,32 @@ function autoToggle(bucket) {
   return button;
 }
 
+/** ยก Chrome ของ worker ขั้นนี้ขึ้นหน้าจอ — server เป็นผู้จับคู่ profile จริง. */
+function browserViewButton(browser) {
+  const button = el("button", {
+    type: "button",
+    className: "board-browser",
+    textContent: "👁 ดู Chrome",
+    title: `เปิดหรือเรียกดู ${browser.label}`,
+  });
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    button.disabled = true;
+    try {
+      const out = await api(`${CLIP_API}/api/browser/show`, {
+        method: "POST",
+        body: JSON.stringify({ stage: browser.stage }),
+      });
+      $("#storyNote").textContent = out.message;
+    } catch (error) {
+      $("#storyNote").textContent = `เรียกดู Chrome ไม่สำเร็จ — ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
 /** โควตาโพสต์ใต้กล่อง — "โพสต์วันนี้ 1/70"
  *
  *  ⚠️ **ต้องมีคำว่า "โพสต์วันนี้" กำกับเสมอ** เพราะตัวเลขในวงเล็บบนกล่อง
@@ -1037,9 +1288,11 @@ function paintBoard() {
       // จะขึ้นว่า "(3/0)" ซึ่งอ่านแล้วเหมือน "3 จาก 0" — ไม่มีความหมาย
       // และขัดกับข้อความข้างล่างที่บอกว่ากองนี้ไม่มีเส้นวัด
       el("span", { className: "board-count",
-                   textContent: (bucket.target ?? 10)
-                     ? `(${bucket.count}/${bucket.target ?? 10})`
-                     : `(${bucket.count})` }),
+                   textContent: bucket.key === "clip"
+                     ? `(${bucket.waiting_generation || 0} เจน/${bucket.waiting_approval || 0} ตรวจ)`
+                     : (bucket.target ?? 10)
+                       ? `(${bucket.count}/${bucket.target ?? 10})`
+                       : `(${bucket.count})` }),
     );
     if (bucket.short) button.classList.add("is-short");
     // ห่อเป็นช่องเดียวกัน: สวิตช์อยู่บน · กล่องอยู่กลาง · โควตาอยู่ล่าง
@@ -1055,7 +1308,9 @@ function paintBoard() {
     const cell = el("div", { className: "board-cell" });
     if (bucket.auto) cell.append(autoToggle(bucket));
     cell.append(button);
+    if (bucket.browser) cell.append(browserViewButton(bucket.browser));
     if (bucket.quota) cell.append(quotaLine(bucket));
+    if (PUBLISH_BOARD_KEYS.has(bucket.key)) cell.append(publishLiveBox(bucket));
     button.addEventListener("click", () => {
       boardPick = bucket.key;
       try { localStorage.setItem(BOARD_KEY, boardPick); } catch { /* โหมดส่วนตัว */ }
@@ -1083,7 +1338,13 @@ function paintBoard() {
    * — หน้าเว็บกับแชทต้องเห็นรายการเดียวกัน ไม่ใช่คนละชุด
    *   ตอนนี้ลิงก์ไป /wait ย้ายไปอยู่ที่หัวเรื่อง "รอแก้ในขั้นนี้" ใต้แต่ละกองแทน
    *   เพราะกองรวม "รอแก้" ถูกยกเลิกไปแล้ว (ผู้ใช้สั่งใหม่ 27 ส.ค. เย็น) */
-  if (picked?.short) {
+  if (picked?.key === "clip") {
+    const generation = picked.waiting_generation || 0;
+    const approval = picked.waiting_approval || 0;
+    short.textContent = `🎬 รอเจนคลิป ${generation} ใบ · มีคลิปแล้วรออนุมัติ ${approval} ใบ`
+      + (picked.short ? ` — เส้นวัด ${picked.target} ใบ ขาดอีก ${picked.short} · ${picked.refill || ""}` : "");
+    short.hidden = false;
+  } else if (picked?.short) {
     short.textContent = `⚠️ ขั้นนี้ค้างอยู่ ${picked.count} ใบ `
       + `— เส้นวัดคือ ${picked.target} ใบ ขาดอีก ${picked.short} · ${picked.refill || ""}`;
     short.hidden = false;
@@ -1188,9 +1449,12 @@ export async function loadJobQueue() {
 
   // อ่านกระดานแยกอีกคำขอ — **ล้มแล้วต้องไม่ลากคิวตายตาม**
   // ถ้ากระดานอ่านไม่ได้ ยังต้องเห็นรายการงานแบบเดิมได้อยู่
-  try {
-    boardData = await api(`${CLIP_API}/api/board`);
-  } catch (error) {
+  const [boardResult, progressResult] = await Promise.allSettled([
+    api(`${CLIP_API}/api/board`),
+    api("/api/publish/progress"),
+  ]);
+  if (boardResult.status === "rejected") {
+    const error = boardResult.reason;
     boardData = null;
     // **ต้องบอกทางออกด้วย** ข้อความที่บอกแค่ว่าพังทำให้ผู้ใช้ได้แต่นั่งดู
     boardBox().replaceChildren(el("p", { className: "note",
@@ -1198,6 +1462,14 @@ export async function loadJobQueue() {
         + " — กด 🔄 โหลดใหม่ หรือดูใน Telegram ด้วย /wait" }));
     list.replaceChildren(...open.map(jobRow));
     return;
+  }
+  boardData = boardResult.value;
+  if (progressResult.status === "fulfilled") {
+    boardPublishProgress = progressResult.value.clips || [];
+    boardPublishProgressOnline = true;
+  } else {
+    boardPublishProgress = [];
+    boardPublishProgressOnline = false;
   }
   paintBoard();
 }
@@ -2034,6 +2306,28 @@ function storyboardReview(job, run, meta = {}) {
   return out;
 }
 
+/** สตอรีบอร์ดที่เก็บไว้ของงานซึ่งออกจากขั้นตรวจแล้ว — แสดงอย่างเดียว
+ *
+ * งานที่ Flow ปิดจะจบคิวเป็น `done` ทั้งที่ยังรอเจนคลิปอยู่ หน้าเดิมวาดภาพ
+ * เฉพาะ `storyboard_review`/`script_review` จึงดูเหมือนไม่มี Storyboard ทั้งที่
+ * ไฟล์อยู่ครบ ห้ามใช้ `storyboardReview()` ตรงนี้เพราะจะพาปุ่มอนุมัติ/ลบภาพ
+ * กลับมาในงานที่ผ่านขั้นนั้นแล้ว.
+ */
+function storedStoryboard(job, run) {
+  const frames = run.storyboard || [];
+  if (!frames.length) return null;
+  const shots = frames.map((name, index) => el("figure", { className: "story-shot" },
+    el("img", {
+      className: "story-frame", loading: "lazy",
+      alt: `สตอรีบอร์ดใบที่ ${index + 1}`,
+      src: clipFile(run.item_id, name),
+    }),
+    el("span", { className: "story-cell-tools" },
+      zoomBtn(clipFile(run.item_id, name), `สตอรีบอร์ดใบที่ ${index + 1}`)),
+  ));
+  return fold(job, "stored-storyboard", `🖼 สตอรีบอร์ดที่ใช้เจน (${frames.length} ภาพ)`, shots);
+}
+
 /** พิมพ์แก้บทพูดได้ทีละฉาก แล้วกดบันทึกทีเดียว (ผู้ใช้สั่ง 26 ส.ค. 2026)
  *
  *  **ไม่บันทึกทุกครั้งที่พิมพ์** ตามที่ผู้ใช้วางไว้ตั้งแต่ฝั่งแชท — แก้ให้ครบก่อน
@@ -2047,6 +2341,27 @@ function scriptEditor(job, original, meta = {}) {
   const box = el("div", { className: "script-edit" });
   const bar = el("div", { className: "inline-row script-bar" });
   let draft = [...original];
+
+  /* ---- ประโยคปกติสำหรับให้คนอ่าน (สเปคสายคลิป 9 ก.ย. 2569) --------------
+   *
+   * เจ้าของสั่ง: "หน้าที่โชว์ผมให้เขียนมาเป็นประโยคปกติ" — ขีดคั่นพยางค์
+   * มีไว้ให้ตัวอ่านเสียงของ Veo อ่านคำไทยถูก **ไม่ได้มีไว้ให้คนอ่าน**
+   *
+   *     ส่ง Flow  ฝน-หนัก ก็-เปิด-ไฟ-ได้-นะ
+   *     โชว์      ฝนหนัก ก็เปิดไฟได้นะ
+   *
+   * **ช่องพิมพ์ยังเป็นแบบมีขีดเหมือนเดิม ห้ามเปลี่ยน** เพราะที่อยู่บันทึก
+   * ยังรับเฉพาะแบบมีขีด ถ้าส่งประโยคปกติเข้าไป เสียงจะอ่านคำไทยผิด
+   * (เคยเจอ 11 ใบ — "ทำงาน" อ่านเป็น "ทวาร") สายคลิปกำลังทำฝั่งรับค่า
+   * ประโยคปกติแล้วให้ ChatGPT ใส่ขีดกลับให้ เสร็จแล้วค่อยสลับช่องพิมพ์
+   *
+   * `script_show` อยู่ **ชั้นบนสุด** ของคำตอบ ไม่ได้อยู่ใน `run`
+   */
+  const plainAll = Array.isArray(meta.script_show) ? meta.script_show : [];
+  // จำนวนฉากต้องเท่ากันเป๊ะ ไม่งั้นบรรทัดจะเลื่อนกันแล้วอ่านผิดฉาก
+  // — ไม่เท่ากันให้ทิ้งไปเลย ดีกว่าโชว์ของที่จับคู่ผิด (กติกาข้อ 2.3.1)
+  const plainOk = plainAll.length === original.length;
+  const plainMismatch = plainAll.length > 0 && !plainOk;
 
   const countChanged = () =>
     draft.reduce((n, text, i) => n + (text !== original[i] ? 1 : 0), 0);
@@ -2144,10 +2459,33 @@ function scriptEditor(job, original, meta = {}) {
       area.addEventListener("keydown", (event) => {
         if (event.key === "Escape") window.requestAnimationFrame(showPer);
       });
-      rows.append(el("li", {}, area, per));
+      // ประโยคปกติวางไว้ **บนช่องพิมพ์** เพราะเป็นตัวที่คนอ่านตรวจ
+      // ส่วนช่องพิมพ์แบบมีขีดคือของที่ส่งเข้า Flow — ให้เห็นคู่กันไปเลย
+      // จะได้รู้ว่าแก้ตรงไหนแล้วมีผลกับอะไร
+      const cell = [];
+      if (plainOk && plainAll[index] && plainAll[index] !== text) {
+        cell.push(el("p", {
+          className: "script-plain",
+          textContent: plainAll[index],
+          title: "ประโยคปกติ — ไว้อ่านตรวจ ไม่ใช่ตัวที่ส่งเข้า Flow",
+        }));
+      }
+      cell.push(area, per);
+      rows.append(el("li", {}, ...cell));
       window.requestAnimationFrame(fit);
     });
-    box.replaceChildren(rows, bar);
+    const head = [];
+    if (plainOk) {
+      head.push(el("p", { className: "note script-hint", textContent:
+        "บรรทัดบน = ประโยคปกติไว้อ่านตรวจ · ช่องล่าง = แบบคำอ่านที่ส่งเข้า Flow "
+        + "(ขีดคั่นมีไว้ให้เสียงอ่านคำไทยถูก) — แก้ที่ช่องล่างเท่านั้น" }));
+    } else if (plainMismatch) {
+      // เกิดไม่ได้ในทางปฏิบัติ แต่ถ้าเกิดต้องดัง ไม่ใช่เงียบแล้วโชว์ผิดฉาก
+      head.push(el("p", { className: "note warn-note", textContent:
+        `⚠️ บทพูดสองแบบไม่ตรงกัน (ประโยคปกติ ${plainAll.length} ฉาก · `
+        + `แบบคำอ่าน ${original.length} ฉาก) — แจ้งสายคลิป` }));
+    }
+    box.replaceChildren(...head, rows, bar);
     paintBar();
   }
 
@@ -2457,22 +2795,13 @@ function publishBlock(rows, itemId) {
       }));
     }
     if (row.status !== "posted") {
-      // TikTok ยังลงด้วยการเปิดหน้าเว็บบนคอม ไม่ได้กดบนจอมือถือ (ขัดกติกาข้อ 2.7
-      // ที่ยังแก้ไม่เสร็จ) จึงยังสั่งจากปุ่มนี้ไม่ได้ — บอกตรงๆ ดีกว่าซ่อนปุ่มไว้
-      const noPhone = row.target === "tiktok";
       const button = textBtn(
-        "⬆️ ลงเลย", row.can_post && !noPhone ? "primary" : "ghost",
+        "⬆️ ลงเลย", row.can_post ? "primary" : "ghost",
         () => askPhoneThenPost(row, itemId),
       );
-      button.disabled = !row.can_post || noPhone;
-      button.title = noPhone
-        ? "TikTok ยังลงผ่านเบราว์เซอร์บนคอม สั่งจากแชทแทน"
-        : (row.can_post ? `ลง ${row.name} เดี๋ยวนี้` : row.why);
+      button.disabled = !row.can_post;
+      button.title = row.can_post ? `ลง ${row.name} เดี๋ยวนี้` : row.why;
       line.append(button);
-      if (noPhone) {
-        line.append(el("small", { className: "note",
-          textContent: "TikTok ยังลงผ่านเบราว์เซอร์บนคอม — สั่งจากแชท" }));
-      }
     }
     // **ห้ามซ่อนเหตุผล** ปุ่มจางที่ไม่บอกว่าทำไม แยกไม่ออกจากระบบพัง
     if (!row.can_post) line.append(el("small", { className: "note", textContent: row.why }));
@@ -2666,7 +2995,8 @@ async function showJob(jobId, force = false) {
   // ต้องมี `publish_next` กับผลตรวจอยู่ในกุญแจด้วย เพราะสองอย่างนี้เขียนลง run.json
   // ไม่ได้แตะ `updated_at` ของงาน — ลงโพสต์เสร็จแล้วแถวลำดับจะค้างของเก่าถ้าไม่นับ
   const key = [job.id, job.stage, job.updated_at, job.storyboard_ok, job.script_ok,
-               payload.publish_next || "", view?.checked, view?.ok, view?.stale].join("|");
+               payload.publish_next || "", view?.checked, view?.ok, view?.stale,
+               run?.tiktok_product_link?.updated_at || ""].join("|");
   if (!force && key === detailKey) return;
   detailKey = key;
 
@@ -2684,6 +3014,13 @@ async function showJob(jobId, force = false) {
     parts.push(el("p", { className: "note", textContent: "ขั้นยืนยันก่อนโพสต์ TikTok ยังต้องกดในแชท" }));
   } else if (job.open) {
     parts.push(el("p", { className: "note", textContent: "ยังไม่ถึงจุดที่ต้องตัดสินใจ — รอระบบทำต่อ" }));
+  }
+
+  // ใบ `done` ในกอง Clip คือของที่อนุมัติ Storyboard/บทพูดแล้ว แต่ตอนนั้น Flow
+  // ปิดอยู่ จึงยังไม่มีวิดีโอ ต้องเห็นภาพต้นทางก่อนตัดสินใจว่าจะส่งไปเจนหรือไม่.
+  if (job.stage === "done") {
+    const savedStoryboard = storedStoryboard(job, run);
+    if (savedStoryboard) parts.push(savedStoryboard);
   }
 
   parts.push(...runExtras(run, job.stage === "video_review", view, job));
@@ -2828,6 +3165,38 @@ function runExtras(run, skipVideos = false, view = null, job = null) {
       href: run.affiliate_url, target: "_blank", rel: "noreferrer",
       textContent: `🔗 ${run.affiliate_url}`,
     }));
+  }
+  const tiktokLink = run.tiktok_product_link || {};
+  if (tiktokLink.status || tiktokLink.url) {
+    const pending = tiktokLink.status === "pending_review";
+    const added = tiktokLink.status === "showcase_added";
+    const failed = tiktokLink.status === "error";
+    const running = tiktokLink.status === "running";
+    const heading = added ? "✅ เพิ่มสินค้าเข้าโชว์เคส TikTok แล้ว"
+      : pending ? "⏳ สินค้า TikTok — รอตรวจ"
+      : failed ? "❌ เพิ่มสินค้าเข้าโชว์เคส TikTok ไม่สำเร็จ"
+      : running ? "🔄 กำลังตรวจสินค้า TikTok"
+      : "✅ ผลสินค้า TikTok เดิม";
+    parts.push(el("p", { className: `note ${pending ? "warn" : ""}` },
+      el("b", { textContent: heading }),
+      document.createTextNode(tiktokLink.selected_rank
+        ? ` · อันดับ ${tiktokLink.selected_rank}` : ""),
+      tiktokLink.url ? document.createTextNode(" · ลิงก์เดิม: ") : document.createTextNode(""),
+      tiktokLink.url ? el("a", {
+        href: tiktokLink.url, target: "_blank", rel: "noreferrer",
+        textContent: tiktokLink.url,
+      }) : document.createTextNode(""),
+      tiktokLink.tiktok_product_name
+        ? document.createTextNode(` · ชื่อที่คัดลอก: ${tiktokLink.tiktok_product_name}`)
+        : document.createTextNode(""),
+      tiktokLink.reason
+        ? document.createTextNode(` · ${tiktokLink.reason}`) : document.createTextNode("")));
+  }
+  const skippedPublish = Object.values(run.publish || {}).find(
+    (state) => state && state.auto_skip);
+  if (skippedPublish?.error) {
+    parts.push(el("p", { className: "note warn",
+      textContent: `⏭ ${skippedPublish.error}` }));
   }
   if (run.chat_url) {
     parts.push(el("a", {

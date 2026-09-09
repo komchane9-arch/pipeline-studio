@@ -54,6 +54,21 @@
   --r-pill: 980px;          /* ปุ่มแคปซูล */
 
   --soft-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+  /* ---- สีสถานะ (ใช้ร่วมทุกหน้า) — เดิมฝังตายกระจายอยู่ 24 จุด -------------
+     ทำเป็นตัวแปรเพราะโหมดมืดต้องใช้คนละเฉด สีที่อ่านชัดบนพื้นขาว
+     จะจมหายบนพื้นดำ (เช่น #1f6b41 เขียวเข้ม อ่านไม่ออกเลยบนพื้นมืด) */
+  --ok: #2e8b57;            --ok-ink: #1f6b41;
+  --warn: #c8860d;          --warn-ink: #8a5c05;
+  --bad: #c0392b;           --bad-ink: #a02f22;
+  --slow: #d2691e;          --none: #8e8e93;
+  --link: #0b6bcb;
+  --info: #4a7fc1;          --info-ink: #2f5f96;
+  --warn-bg: rgba(200, 134, 13, 0.07);
+  --warn-chip: rgba(200, 134, 13, 0.16);
+  --info-chip: rgba(74, 127, 193, 0.16);
+  /* พื้นจางตอนเอาเมาส์ชี้ — ในโหมดสว่างเป็นดำโปร่ง ในโหมดมืดต้องเป็นขาวโปร่ง
+     ไม่งั้นดำทับดำ = มองไม่เห็นว่ากำลังชี้อะไรอยู่ */
+  --tint: rgba(0, 0, 0, 0.04);
 }
 
 body {
@@ -462,7 +477,7 @@ button.tiny {
   width: 120px;
   height: 120px;
   image-rendering: pixelated;   /* QR ต้องคมเป็นบล็อก ห้ามเบลอ ไม่งั้นสแกนไม่ติด */
-  background: #fff;
+  background: var(--panel);
   padding: 6px;
   border-radius: 12px;
 }
@@ -794,6 +809,213 @@ dialog .block[open] > summary { border-bottom: 0.5px solid var(--line); }
 .fb-caption { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .fb-group a, .fb-job a { color: var(--accent-text); text-decoration: none; }
 .fb-group a:hover, .fb-job a:hover { text-decoration: underline; }
+
+/* ---------------- Group Facebook: ช่องทางสร้างงานจากหน้าเว็บ */
+.gfp-studio {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px;
+  background: var(--shade);
+  box-shadow: 0 2px 12px rgba(90, 45, 120, 0.06);
+}
+.gfp-studio h2 { margin: 0; }
+.gfp-channel {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--accent);
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.gfp-steps {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  padding: 0;
+  margin: 12px 0;
+}
+.gfp-steps li {
+  padding: 7px 8px;
+  border: 1px dashed var(--line);
+  border-radius: var(--r-pill);
+  color: var(--ink-3);
+  text-align: center;
+  font-size: 12px;
+}
+.gfp-steps li.done {
+  border-style: solid;
+  border-color: var(--olive);
+  color: var(--olive);
+  background: var(--panel);
+}
+.gfp-steps li.optional { opacity: 0.65; }
+.gfp-compose-grid,
+.gfp-comments {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(240px, 0.75fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+.gfp-field,
+.gfp-comment-card,
+.gfp-group-pick {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  padding: 10px;
+  background: var(--panel);
+}
+.gfp-field > span,
+.gfp-field > label,
+.gfp-comment-card > strong { display: block; margin-bottom: 6px; }
+.gfp-field b,
+.gfp-group-pick b { color: var(--danger); }
+.gfp-field textarea,
+.gfp-comment-card textarea { width: 100%; box-sizing: border-box; resize: vertical; }
+.gfp-field small { display: block; color: var(--ink-3); margin-top: 4px; }
+.gfp-comment-card { display: flex; flex-direction: column; gap: 7px; }
+.gfp-comment-card label { font-size: 13px; color: var(--ink-2); }
+.gfp-comment-card input[type="file"] { display: block; width: 100%; margin-top: 4px; }
+.gfp-preview { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+.gfp-preview:empty { display: none; }
+.gfp-preview img {
+  width: 82px;
+  height: 82px;
+  object-fit: cover;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+}
+.gfp-preview.compact img { width: 64px; height: 64px; }
+.gfp-group-pick { margin-top: 10px; }
+.gfp-group-pick legend { padding: 0 6px; font-weight: 600; }
+.gfp-group-pick legend span { color: var(--ink-3); font-weight: 400; }
+.gfp-group-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+.gfp-group-choices label {
+  display: flex;
+  gap: 7px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: var(--r-field);
+}
+.gfp-group-choices label:has(input:checked) { background: var(--shade); }
+.gfp-group-choices span { overflow-wrap: anywhere; }
+.gfp-actions { margin-top: 12px; align-items: center; flex-wrap: wrap; }
+.gfp-actions > label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.gfp-actions select { min-width: 260px; max-width: 100%; }
+.gfp-actions #gfpDevice { margin-left: auto; }
+.gfp-job-source {
+  display: inline-block;
+  margin-left: 7px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.gfp-content-block {
+  border-left: 3px solid var(--line);
+  padding: 5px 9px;
+  margin: 4px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.gfp-content-block strong { display: block; font-size: 12px; color: var(--ink-3); }
+.gfp-media { display: flex; flex-wrap: wrap; gap: 6px; margin: 5px 0; }
+.gfp-media img { width: 76px; height: 76px; cursor: zoom-in; }
+.gfp-timeline {
+  margin-top: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-field);
+  background: var(--panel);
+}
+.gfp-timeline summary { cursor: pointer; padding: 7px 9px; font-size: 13px; }
+.gfp-timeline ol {
+  margin: 0;
+  padding: 0 10px 9px 30px;
+  max-height: 230px;
+  overflow-y: auto;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.gfp-timeline li { margin: 3px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.gfp-flow {
+  margin: 10px 0 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--r-card);
+  background: var(--panel);
+}
+.gfp-flow-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+}
+.gfp-flow-head p { margin: 4px 0 0; }
+.gfp-flow-status {
+  flex: none;
+  padding: 4px 9px;
+  border-radius: var(--r-pill);
+  background: var(--shade);
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+.gfp-flow-status[data-status="running"] { background: #fff1cc; color: #865a00; }
+.gfp-flow-status[data-status="done"] { background: #e6f6e9; color: #28713a; }
+.gfp-flow-status[data-status="failed"],
+.gfp-flow-status[data-status="stopped"],
+.gfp-flow-status[data-status="cancelled"] { background: #ffe9e5; color: var(--danger); }
+.gfp-flow-progress {
+  height: 7px;
+  margin: 10px 0 8px;
+  overflow: hidden;
+  border-radius: var(--r-pill);
+  background: var(--shade);
+}
+.gfp-flow-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+.gfp-flow-now {
+  margin: 5px 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.gfp-flow-steps {
+  max-height: 220px;
+  margin: 8px 0;
+  padding: 8px 10px 8px 32px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-field);
+  background: var(--shade);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+.gfp-flow-steps li { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.gfp-flow-controls { gap: 7px; flex-wrap: wrap; }
+.gfp-flow-help { margin: 7px 0 0; }
+
+@media (max-width: 700px) {
+  .gfp-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .gfp-compose-grid, .gfp-comments, .gfp-group-choices { grid-template-columns: 1fr; }
+  .gfp-actions #gfpDevice { margin-left: 0; flex-basis: 100%; }
+}
 
 /* ---------------- ป้ายบอกว่าช่องนี้เป็นบอทตัวไหน */
 .bot-who { font-size: 12px; margin: 2px 0 6px; opacity: 0.7; }
@@ -1171,7 +1393,7 @@ body {
 }
 .tab:hover:not(.active) { background: rgba(120, 120, 128, 0.10); }
 .tab.active {
-  background: #fff;
+  background: var(--panel);
   /* กฎเดิมตั้ง color:#ffffff ไว้ (ตัวขาวบนพื้นสีเข้ม) พอเปลี่ยนพื้นเป็นขาว
      ต้องทับสีตัวอักษรด้วย ไม่งั้นได้ขาวบนขาว = ป้ายแท็บหายไปเลย (เจอจริง) */
   color: var(--ink);
@@ -1322,7 +1544,7 @@ input[type="checkbox"]::after {
   top: 2px; left: 2px;
   width: 22px; height: 22px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--panel);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.18), 0 0 1px rgba(0, 0, 0, 0.12);
   transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -2291,7 +2513,8 @@ body.typing-through {
    ใต้กล่อง จึงห่อเป็น `.board-cell` — สวิตช์เป็น **พี่น้อง** ของกล่อง ไม่ใช่ลูก
    เพราะปุ่มซ้อนในปุ่มคลิกจะทะลุไปโดนกล่อง แล้วกองที่เลือกอยู่เปลี่ยนตาม */
 .clip-board > .board-cell {
-  /* **ตาราง 3 แถวตายตัว: สวิตช์ · กล่อง · โควตา** (จัดใหม่ 28 ส.ค. 2569)
+  /* **ตาราง 4 แถว: สวิตช์ · กล่อง · โควตา · สถานะสด**
+     สามแถวแรกจัดใหม่ 28 ส.ค. 2569; แถวที่สี่เพิ่ม 3 ก.ย. 2569 เฉพาะกองโพสต์
      เจ้าของส่งภาพมาแล้วสั่งว่า "ทำให้ช่องแบบเดียวกันขนาดเท่ากันหน่อย
      เรียงให้มันดูสวยงาม"
 
@@ -2303,7 +2526,7 @@ body.typing-through {
      ช่องไหนไม่มีสวิตช์ แถวที่ 1 ก็ว่างไว้เฉยๆ ไม่มีอะไรเลื่อนขึ้นมาแทน
      ข้อดีอีกอย่างคือไม่ต้องใส่ช่องเปล่าหลอกๆ ในโค้ดฝั่ง JS */
   display: grid;
-  grid-template-rows: 1.85rem minmax(0, 1fr) 1.05rem;
+  grid-template-rows: 1.85rem minmax(0, 1fr) 1.05rem auto;
   gap: 4px;
   flex: 1 1 0;              /* ยืดเท่ากันเมื่อที่พอ — ท่าเดียวกับ .board-tab เดิม */
   /* **ต้องแคบพอให้ 6 ช่องอยู่แถวเดียวกันได้** — วัดจริง 28 ส.ค. 2569 บนพื้นที่
@@ -2320,7 +2543,86 @@ body.typing-through {
    ตัดบรรทัด ช่องที่ตกไปอยู่ลำพังจะไม่มีเพื่อนให้ยืดตาม แล้วเตี้ยกว่าเพื่อน
    (วัดจริงที่จอ 700px: สูง 44 ขณะที่แถวบนสูง 82) — ใส่ความสูงขั้นต่ำกันไว้ */
 .board-cell > .board-tab   { grid-row: 2; width: 100%; height: 100%; min-height: 5rem; }
+.board-cell > .board-browser { grid-row: 3; }
 .board-cell > .board-quota { grid-row: 3; }
+.board-cell > .board-live  { grid-row: 4; }
+
+/* สถานะงานโพสต์สดใต้ Shopee/Facebook/TikTok — กล่องเล็กแต่ต้องอ่านได้ครบว่า
+   ปลายทางกำลังทำใบไหนและถึงขั้นใด ชื่อยาวตัดสองบรรทัดแต่ title ยังดูเต็มได้ */
+.board-live {
+  --live-stage: var(--ink-3);
+  min-height: 9.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--live-stage);
+  border-radius: 9px;
+  background: var(--shade);
+  min-width: 0;
+  text-align: left;
+}
+.board-live[data-target="shopee_video"]   { --live-stage: #f97362; }
+.board-live[data-target="facebook_reels"] { --live-stage: #60a5fa; }
+.board-live[data-target="tiktok"]         { --live-stage: #2dd4bf; }
+.board-live-state { font-size: 11px; line-height: 1.3; color: var(--ink-2); }
+.board-live.is-running .board-live-state { color: var(--live-stage); }
+.board-live.is-failed .board-live-state,
+.board-live.is-error .board-live-state { color: var(--danger); }
+.board-live-now {
+  font-size: 12px;
+  line-height: 1.3;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.board-live small { font-size: 10px; line-height: 1.25; color: var(--ink-3); }
+.board-live-id { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.board-live-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.board-live-time { margin-top: auto; font-variant-numeric: tabular-nums; }
+.board-live-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 5px;
+  margin-top: auto;
+  padding-top: 3px;
+}
+.board-live-control {
+  min-width: 0;
+  padding: 5px 4px;
+  border: 1px solid color-mix(in srgb, var(--live-stage) 50%, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--live-stage) 10%, var(--panel));
+  color: var(--ink-1);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.1;
+  cursor: pointer;
+}
+.board-live-control.is-reset { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+.board-live-control.is-stop {
+  border-color: color-mix(in srgb, var(--danger) 80%, var(--line));
+  background: color-mix(in srgb, var(--danger) 15%, var(--panel));
+  color: var(--danger);
+}
+.board-live-control.is-stop[aria-busy="true"] { filter: brightness(.85); }
+.board-live-control:hover:not(:disabled) { filter: brightness(1.08); }
+.board-live-control:disabled {
+  opacity: .38;
+  cursor: not-allowed;
+}
+.board-live .board-live-control-reason {
+  color: var(--danger);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
 
 /* สวิตช์อนุมัติอัตโนมัติ
    **แยกออกด้วยตาโดยไม่ต้องอ่าน** — ใช้ ☑/☐ คู่กับสีและกรอบ ไม่ใช่สีอย่างเดียว
@@ -2346,6 +2648,23 @@ body.typing-through {
   background: var(--auto-on-bg);
   font-weight: 600;
 }
+
+.board-browser {
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--shade);
+  color: var(--ink-2);
+  font-size: 11px;
+  line-height: 1.25;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-browser:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.board-browser:disabled { opacity: .5; cursor: progress; }
 
 /* โควตาโพสต์วันนี้ — ต้องมีคำกำกับเสมอ ไม่ใช่เลขลอยๆ
    เพราะตัวเลขในวงเล็บบนกล่องคือ "งานค้าง/สต๊อกที่อยากมี" ซึ่งคนละเรื่องกัน */
@@ -2494,22 +2813,52 @@ body.typing-through {
   border: 1px solid var(--line);
   border-left: 4px solid var(--line);
   border-radius: 10px;
-  padding: 12px 14px;
   background: var(--panel);
   color: var(--ink);
   min-width: 0;                  /* กันชื่อกลุ่มยาวดันการ์ดจนล้นแถว */
+  overflow: hidden;
 }
 /* สีสถานะเลือกให้ตัดกับพื้นขาว ไม่ใช่พื้นดำ */
-.gh-good { border-left-color: #2e8b57; }
-.gh-warn { border-left-color: #c8860d; }
-.gh-slow { border-left-color: #d2691e; }
-.gh-dead { border-left-color: #c0392b; }
-.gh-none { border-left-color: #8e8e93; }
+.gh-good { border-left-color: var(--ok); }
+.gh-warn { border-left-color: var(--warn); }
+.gh-slow { border-left-color: var(--slow); }
+.gh-dead { border-left-color: var(--bad); }
+.gh-none { border-left-color: var(--none); }
+
+/* summary = chip + ชื่อกลุ่ม */
+.gh-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  transition: background 0.15s;
+}
+.gh-summary::-webkit-details-marker { display: none; }
+.gh-summary::before {
+  content: "▶";
+  font-size: 8px;
+  color: var(--ink-3);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+.gh-card[open] > .gh-summary::before { transform: rotate(90deg); }
+.gh-summary:hover { background: var(--tint); }
+.gh-card[open] > .gh-summary {
+  background: var(--tint);
+  border-bottom: 1px solid var(--line);
+}
+
+/* body */
+.gh-body { padding: 10px 14px 12px; }
 
 .gh-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .gh-chip { font-size: 12px; white-space: nowrap; font-weight: 600; }
 .gh-name {
-  margin: 0; font-size: 15px; font-weight: 700;
+  font-size: 15px; font-weight: 700;
   overflow-wrap: anywhere;       /* ชื่อกลุ่มไทยยาวๆ ตัดคำไม่ได้ ต้องบังคับ */
 }
 .gh-off {
@@ -2528,10 +2877,11 @@ body.typing-through {
 }
 .gh-col p { margin: 2px 0; font-size: 13px; }
 .gh-sub { font-size: 11px; color: var(--ink-3); }
-.gh-owed { color: #c8860d; font-weight: 700; }
+.gh-owed { color: var(--warn); font-weight: 700; }
 /* ลิงก์ต้องตั้งสีเอง — ทั้งไฟล์ไม่มีกฎ a{} เลย ปล่อยไว้จะได้สีเริ่มต้นของ
    เบราว์เซอร์ซึ่งเป็นน้ำเงินเข้ม อ่านยากทั้งบนพื้นขาวและพื้นดำ */
-.gh-link { display: inline-block; margin-top: 8px; font-size: 12px; color: #0b6bcb; }
+.gh-link { display: inline-block; margin-top: 8px; font-size: 12px; color: var(--link); }
+
 
 /* ================================== ⚙ หน้าคำสั่งที่ส่งเข้า AI */
 .tab-gear {
@@ -2563,7 +2913,7 @@ body.typing-through {
 .pp-who { font-size: 12px; font-weight: 700; }
 .pp-note { margin: 6px 0 0; font-size: 13px; line-height: 1.5; }
 .pp-models { margin: 4px 0 0; font-size: 11px; color: var(--ink-3); }
-.pp-gpt { display: inline-block; margin: 4px 0 0; font-size: 11px; color: #0b6bcb; }
+.pp-gpt { display: inline-block; margin: 4px 0 0; font-size: 11px; color: var(--link); }
 
 .pp-part {
   margin-top: 10px;
@@ -2572,14 +2922,14 @@ body.typing-through {
 }
 /* ของที่เราแก้ไม่ได้ต้องเห็นชัดที่สุดในหน้า — เคยขัดกับกติกาเราแล้ว 3 จุด
    โดยไม่มีใครรู้จนเจ้าของเอามาวางเทียบเอง */
-.pp-outside { border-left-color: #c8860d; background: rgba(200, 134, 13, 0.07); }
-.pp-vary { border-left-color: #4a7fc1; }
+.pp-outside { border-left-color: var(--warn); background: var(--warn-bg); }
+.pp-vary { border-left-color: var(--info); }
 
 .pp-part-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pp-part-head h4 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .pp-flag { font-size: 10px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
-.pp-flag-out { background: rgba(200, 134, 13, 0.16); color: #8a5c05; }
-.pp-flag-vary { background: rgba(74, 127, 193, 0.16); color: #2f5f96; }
+.pp-flag-out { background: var(--warn-chip); color: var(--warn-ink); }
+.pp-flag-vary { background: var(--info-chip); color: var(--info-ink); }
 .pp-copy { font-size: 11px; padding: 1px 8px; margin-left: auto; }
 
 /* ข้อความคำสั่งยาวถึง 2,452 ตัวอักษรและมีขึ้นบรรทัดใหม่ — ต้องคงบรรทัดเดิม
@@ -2609,54 +2959,148 @@ body.typing-through {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel);
-  padding: 8px 12px;
+  padding: 0;
+  overflow: hidden;
 }
 .bd-band > summary {
-  cursor: pointer; font-size: 14px; padding: 2px 0; list-style: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 10px 14px;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+  transition: background 0.15s;
+  border-radius: 10px;
+}
+.bd-band > summary:hover { background: var(--tint); }
+.bd-band[open] > summary {
+  background: var(--tint);
+  border-radius: 10px 10px 0 0;
+  border-bottom: 1px solid var(--line);
 }
 .bd-band > summary::-webkit-details-marker { display: none; }
-.bd-band > summary::before { content: "B8 "; opacity: 0.55; }
-.bd-band[open] > summary::before { content: "BE "; }
+.bd-band > summary::before {
+  content: "▶";
+  font-size: 10px;
+  color: var(--ink-3);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+.bd-band[open] > summary::before { transform: rotate(90deg); }
+.bd-band > .bd-cell { margin: 4px 10px; }
+.bd-band > .bd-cell:last-child { margin-bottom: 10px; }
 
-.bd-cell { margin: 6px 0 0 14px; }
+.bd-analysis-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #1f6feb;
+  color: #ffffff !important;
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 12px;
+  border-radius: 12px;
+  margin-left: 12px;
+  vertical-align: middle;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  transition: background 0.15s, transform 0.15s;
+}
+.bd-analysis-btn:hover {
+  background: #388bfd;
+  transform: translateY(-1px);
+}
+
+.bd-cell { margin: 6px 0 0 2px; border-radius: 6px; overflow: hidden; }
 .bd-cell > summary {
-  cursor: pointer; font-size: 13px; padding: 3px 0; list-style: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 7px 12px;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+  transition: background 0.15s;
+  border-radius: 6px;
   color: var(--ink);
 }
+.bd-cell > summary:hover { background: var(--tint); }
+.bd-cell[open] > summary {
+  background: var(--tint);
+  border-radius: 6px 6px 0 0;
+}
 .bd-cell > summary::-webkit-details-marker { display: none; }
-.bd-cell > summary::before { content: "B8 "; opacity: 0.55; }
-.bd-cell[open] > summary::before { content: "BE "; }
+.bd-cell > summary::before {
+  content: "▶";
+  font-size: 9px;
+  color: var(--ink-3);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+.bd-cell[open] > summary::before { transform: rotate(90deg); }
 
 /* รายชื่อกลุ่มยาวได้เป็นร้อย — จำกัดความสูงแล้วเลื่อนในกล่อง
    ไม่งั้นกดเปิดกองเดียวแล้วต้องเลื่อนหน้ายาวเป็นสิบจอกว่าจะถึงกองถัดไป */
 .bd-rows {
   display: flex; flex-direction: column; gap: 6px;
-  margin: 6px 0 4px 14px; max-height: 560px; overflow-y: auto;
+  margin: 6px 0 4px 16px; max-height: 560px; overflow-y: auto;
 }
 .bd-row {
   border: 1px solid var(--line);
   border-left: 3px solid var(--line);
   border-radius: 8px;
-  padding: 8px 10px;
   background: var(--panel-deep);
   min-width: 0;
+  overflow: hidden;
 }
-.bd-good { border-left-color: #2e8b57; }
-.bd-edge { border-left-color: #c8860d; }
-.bd-bad { border-left-color: #c0392b; }
+.bd-good { border-left-color: var(--ok); }
+.bd-edge { border-left-color: var(--warn); }
+.bd-bad  { border-left-color: var(--bad); }
+
+/* summary = ชื่อกลุ่ม + ลิงก์ */
+.bd-row-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  transition: background 0.15s;
+}
+.bd-row-summary::-webkit-details-marker { display: none; }
+.bd-row-summary::before {
+  content: "▶";
+  font-size: 8px;
+  color: var(--ink-3);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+.bd-row[open] > .bd-row-summary::before { transform: rotate(90deg); }
+.bd-row-summary:hover { background: var(--tint); }
+.bd-row[open] > .bd-row-summary {
+  background: var(--tint);
+  border-bottom: 1px solid var(--line);
+}
+
+/* body — โชว์เมื่อ open */
+.bd-row-body { padding: 8px 10px 8px 26px; }
 
 .bd-top { display: flex; align-items: baseline; gap: 8px; }
 .bd-name {
   font-weight: 600; font-size: 13px; overflow-wrap: anywhere; flex: 1 1 auto;
 }
-.bd-open { font-size: 12px; white-space: nowrap; color: #0b6bcb; }
+.bd-open { font-size: 12px; white-space: nowrap; color: var(--link); }
 .bd-facts { margin: 3px 0 0; font-size: 12px; color: var(--ink-3); }
 /* ผลเกณฑ์ทีละข้อ — ต้องอ่านเรียงกันได้ จึงใช้ฟอนต์ความกว้างเท่ากัน */
 .bd-tests {
   margin: 3px 0 0; font-size: 11px; line-height: 1.7;
   font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
 }
-.bd-said { margin: 4px 0 0; font-size: 11px; color: #8a5c05; font-weight: 600; }
+.bd-said { margin: 4px 0 0; font-size: 11px; color: var(--warn-ink); font-weight: 600; }
 
 .bd-buttons { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
 .bd-btn {
@@ -2664,6 +3108,100 @@ body.typing-through {
   border: 1px solid var(--line); background: var(--panel); color: var(--ink);
 }
 .bd-btn:disabled { opacity: 0.5; cursor: default; }
-.bd-yes { border-color: #2e8b57; color: #1f6b41; }
-.bd-no { border-color: #c0392b; color: #a02f22; }
+.bd-yes { border-color: var(--ok); color: var(--ok-ink); }
+.bd-no { border-color: var(--bad); color: var(--bad-ink); }
 .bd-undo { color: var(--ink-3); }
+
+
+/* =================================================================
+   🌙 โหมดมืด — เจ้าของสั่งไว้ 8 ก.ย. 2569 "ทำหน้าเว็บเพิ่ม dark mode
+   ให้หน่อย เปิดปิดได้"
+
+   **นิยามสีใหม่ที่ตัวแปรอย่างเดียว ห้ามไปเขียนกฎซ้ำรายชิ้น**
+   ทั้งหน้าอ้างตัวแปรอยู่แล้ว เปลี่ยนที่นี่ที่เดียวจึงเปลี่ยนครบทั้งระบบ
+   ถ้าไปเขียนกฎซ้ำแยกโหมด จะกลายเป็นสองชุดที่ต้องแก้คู่กันตลอดไป
+   แล้ววันหนึ่งจะลืมแก้ข้างใดข้างหนึ่ง
+
+   เลือกเป็นเทาเข้มไม่ใช่ดำสนิท (#16171a ไม่ใช่ #000) เพราะหน้านี้เป็น
+   หน้าทำงานที่เปิดค้างทั้งวัน ดำสนิทกับตัวหนังสือขาวทำให้ตาล้าเร็ว
+
+   สีสถานะต้องสว่างขึ้นทุกตัว — เขียว #2e8b57 ที่อ่านชัดบนพื้นขาว
+   กลายเป็นเขียวจมบนพื้นมืด ต้องขยับเป็น #4ade80
+   ================================================================= */
+:root[data-theme="dark"] {
+  --bg: #16171a;
+  --panel: #1f2024;
+  --panel-deep: #27282d;
+  --ink: #f2f2f5;
+  --ink-2: #f2f2f5;
+  --ink-3: #a1a1a8;
+  --line: rgba(255, 255, 255, 0.14);
+  --separator: rgba(255, 255, 255, 0.20);
+  --accent: #4a4a50;
+  --accent-deep: #5c5c63;
+  --accent-ink: #f2f2f5;
+  --accent-text: #f2f2f5;
+  --olive: #30d158;
+  --danger: #ff453a;
+  --shade: rgba(255, 255, 255, 0.06);
+  --glass: rgba(31, 32, 36, 0.78);
+  /* เงาบนพื้นมืดแทบมองไม่เห็น — ใช้เงาที่เข้มขึ้นเพื่อให้การ์ดยังลอยอยู่ */
+  --soft-shadow: 0 1px 2px rgba(0, 0, 0, 0.40), 0 8px 24px rgba(0, 0, 0, 0.30);
+
+  --ok: #4ade80;            --ok-ink: #6ee7a0;
+  --warn: #e0a53a;          --warn-ink: #f0c674;
+  --bad: #f0685c;           --bad-ink: #ff8b80;
+  --slow: #e8934a;          --none: #8e8e93;
+  --link: #6ea8fe;
+  --info: #7aa2f7;          --info-ink: #a6c1fb;
+  --warn-bg: rgba(224, 165, 58, 0.10);
+  --warn-chip: rgba(224, 165, 58, 0.20);
+  --info-chip: rgba(122, 162, 247, 0.20);
+  --tint: rgba(255, 255, 255, 0.07);
+}
+
+/* ปุ่มสลับโหมด — วางข้างปุ่มตั้งค่าบนแถบหัว */
+#themeToggle { font-size: 15px; }
+
+/* รูปกับกรอบมือถือในโหมดมืด อย่าให้ขาวโพลนตัดกับพื้น */
+:root[data-theme="dark"] img { filter: brightness(0.94); }
+
+/* ==================== 🤖 แผงคุมบอทสายโพสต์ (9 ก.ย. 2569) */
+/* ใช้ตัวแปรสีทั้งหมด จึงตามโหมดมืด/สว่างเองโดยไม่ต้องเขียนสองชุด */
+.fc-list { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 4px; }
+.fc-job {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--none);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--panel);
+  color: var(--ink);
+}
+.fc-running { border-left-color: var(--ok); }
+.fc-ready { border-left-color: var(--warn); }
+.fc-stopped { border-left-color: var(--slow); }
+.fc-failed { border-left-color: var(--bad); }
+.fc-done { border-left-color: var(--none); }
+
+.fc-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.fc-badge { font-size: 12px; font-weight: 700; white-space: nowrap; }
+.fc-title { font-size: 13px; overflow-wrap: anywhere; flex: 1 1 auto; }
+.fc-prog { margin: 4px 0 0; font-size: 12px; color: var(--ink-3); }
+/* บรรทัดขั้นตอน — ตัวหลักที่เจ้าของเปิดหน้ามาดู ต้องเด่นกว่าบรรทัดอื่น */
+.fc-step {
+  margin: 5px 0 0; padding: 6px 9px; border-radius: 6px;
+  background: var(--panel-deep); font-size: 12px; line-height: 1.6;
+  overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+}
+.fc-dev { margin: 4px 0 0; font-size: 11px; color: var(--ink-3); }
+.fc-why { margin: 5px 0 0; font-size: 11px; color: var(--ink-3); }
+
+.fc-buttons { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.fc-btn {
+  font-size: 12px; padding: 4px 13px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+.fc-btn:disabled { opacity: 0.5; cursor: default; }
+.fc-stop { border-color: var(--slow); color: var(--slow); }
+.fc-resume { border-color: var(--ok); color: var(--ok-ink); }
+.fc-cancel { border-color: var(--bad); color: var(--bad-ink); }

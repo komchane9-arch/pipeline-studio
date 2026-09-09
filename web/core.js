@@ -8,11 +8,11 @@ export const $ = (selector) => document.querySelector(selector);
 // หน้าเว็บยังเป็นหน้าเดียว แค่แท็บสตอรีบอร์ดยิงถามข้ามพอร์ตไป
 // ถ้าเซิร์ฟเวอร์ตัวนั้นไม่ได้เปิด แท็บนั้นจะบอกให้เปิด ส่วนแท็บอื่นทำงานปกติ
 //
-// **ต้องอิงโฮสต์ของหน้าที่เปิดอยู่ ห้าม hardcode 127.0.0.1**
-// เดิมเขียนตายไว้ พอเปิดหน้านี้จากเครื่องอื่น (ผ่าน Tailscale) คำว่า 127.0.0.1
-// จะหมายถึง "เครื่องที่เปิดดู" ไม่ใช่เครื่องที่รันเซิร์ฟเวอร์ — แท็บสตอรีบอร์ด
-// จึงพังทั้งแท็บทั้งที่แท็บอื่นใช้ได้ปกติ
-export const CLIP_API = `${location.protocol}//${location.hostname}:8877`;
+// ส่งผ่านเว็บหลักแบบ same-origin แทนการให้ Browser ต่อ 8877 โดยตรง
+// เพราะหน้า Server ที่เปิดจาก Notebook ใช้ http://<tailscale-host>:8866 แต่
+// Tailscale Serve ของพอร์ต 8877 รับเฉพาะ HTTPS — การประกอบ protocol ตามหน้าเดิม
+// จึงได้ HTTP 400 และกอง Clip ดูว่างทั้งที่ clip_app ยังทำงานอยู่
+export const CLIP_API = `${location.origin}/clip-api`;
 
 export async function api(url, options = {}) {
   const response = await fetch(url, {
@@ -40,6 +40,32 @@ export const hooks = {};
 
 // ============================================================= แท็บ (B)
 // เปิดทีละแท็บ พื้นที่ใครพื้นที่มัน — ตามผัง (C)
+// ---------------------------------------------- 🌙 สลับโหมดมืด/สว่าง
+// ตัวเลือกถูกใส่ไปแล้วตั้งแต่ <head> (ดู index.html) ตรงนี้แค่ทำให้ปุ่มกดได้
+// และจำค่าที่เลือก — เก็บในเครื่องผู้ใช้ ไม่ต้องยิงไปเซิร์ฟเวอร์
+function paintThemeButton() {
+  const button = document.querySelector("#themeToggle");
+  if (!button) return;
+  const dark = document.documentElement.dataset.theme === "dark";
+  // ไอคอนบอก **สิ่งที่จะได้ถ้ากด** ไม่ใช่สถานะตอนนี้ — กดพระจันทร์แล้วได้มืด
+  button.textContent = dark ? "☀️" : "🌙";
+  button.title = dark ? "สลับเป็นโหมดสว่าง" : "สลับเป็นโหมดมืด";
+}
+
+document.querySelector("#themeToggle")?.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try {
+    localStorage.setItem("theme", next);
+  } catch {
+    // จำไม่ได้ก็ยังสลับได้ในรอบนี้ — บอกไว้ในปุ่มว่าจะไม่ถูกจำ
+    const button = document.querySelector("#themeToggle");
+    if (button) button.title = "สลับได้ แต่เบราว์เซอร์ไม่ยอมให้จำค่า";
+  }
+  paintThemeButton();
+});
+paintThemeButton();
+
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));

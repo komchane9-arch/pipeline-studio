@@ -6,6 +6,7 @@ import { loadFbGroups, loadFbJobs, renderQueue, setQueue } from "./post.js";
 import { loadGroupHealth } from "./groups.js";
 import { loadPrompts, openPrompts } from "./prompts.js";
 import { loadBoard } from "./board.js";
+import { loadFbControl, watchFbControl } from "./fbcontrol.js";
 import { fillGems, fillInput, fillRelease, loadClips, loadJobQueue, loadStoryRuns } from "./video.js";
 
 // เวอร์ชันที่หน้านี้ "ควรคู่กับ" เซิร์ฟเวอร์ = อ่านจาก ?v= ของตัวเองอัตโนมัติ
@@ -69,6 +70,10 @@ hooks.reloadConfig = () => reloadConfig();
     // ส่วนกอง "ไม่ดี" ขอเป็นรายกองตอนกดเปิด (ดู board.js)
     await loadBoard();
     document.querySelector("#bdReload")?.addEventListener("click", loadBoard);
+    // แผงคุมบอทสายโพสต์ — ดูสดทุก 5 วิเฉพาะตอนแท็บเปิดอยู่ (ดู fbcontrol.js)
+    await loadFbControl();
+    watchFbControl();
+    document.querySelector("#fcReload")?.addEventListener("click", loadFbControl);
     await pollLogs();
     // ไว้ท้ายสุด — อ่านจำนวนมือถือจาก dropdown ที่ loadDevices เติมไว้แล้ว
     await pollHealth();

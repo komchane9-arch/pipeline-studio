@@ -4714,14 +4714,31 @@ def _auto_view() -> dict:
     steps = []
     for key, meta in AUTO_STEPS.items():
         waiting = _auto_eligible(key)
-        parked = [j for j in clip_jobs.all()
-                  if j.get("stage") in set(meta["stages"]) and j.get("parked")]
+        if meta.get("kind") == "publish":
+            # งานโพสต์ส่วนใหญ่จบออกจาก clip_queue ไปแล้วและพักอยู่ใน run.json
+            # ถ้านับเฉพาะคิว จะขึ้น "พัก 0" ทั้งที่กองจริงถูกพักทั้งหมด
+            # (เกิดจริง 10 ก.ย. 2569: Facebook แสดง 68 ใบ แต่พร้อมรัน 0 ใบ)
+            target = str(meta.get("target") or "")
+            parked_ids = {
+                str(run.get("item_id") or "")
+                for run in (clip_store.list_runs(DATA_DIR)
+                            + clip_store.list_done(DATA_DIR))
+                if run.get("parked")
+                and str(((run.get("parked") or {}).get("from") or "")) == target
+                and str(run.get("item_id") or "")
+            }
+            parked_count = len(parked_ids)
+        else:
+            parked_count = sum(
+                1 for job in clip_jobs.all()
+                if job.get("stage") in set(meta["stages"]) and job.get("parked")
+            )
         steps.append({
             "key": key,
             "label": meta["label"],
             "on": bool(on.get(key)),
             "waiting": len(waiting),
-            "parked_skipped": len(parked),
+            "parked_skipped": parked_count,
             "risk": meta["risk"],
         })
     return {"steps": steps,

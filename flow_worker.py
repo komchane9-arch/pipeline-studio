@@ -128,28 +128,39 @@ def flow_seat(number: int = 1) -> dict:
               else flow_gen_profile_dir())
     lock = seat["lock"]
 
-    # ---- ช่องที่ 1 ใช้โฟลเดอร์ของบัญชีที่กำลังใช้อยู่ (เจ้าของสั่ง 10 ก.ย. 2569)
+    # ---- ทุกช่องใช้โฟลเดอร์ของบัญชีที่กำลังใช้อยู่ (เจ้าของสั่ง 10 ก.ย. 2569)
     #
     # **สลับบัญชี = สลับโฟลเดอร์** ไม่ต้องล็อกอินใหม่ ไม่เจอ reCAPTCHA
     # (ลองของจริง 10 ก.ย. แล้ว Google เด้ง reCAPTCHA ทุกครั้งที่ล็อกอิน 3/3 รอบ)
     #
+    # ⚠️ **ต้องใช้กับทุกช่อง ไม่ใช่แค่ช่อง 1** — ของเดิมผูกไว้กับช่อง 1
+    # แต่ **การเจนคลิปวิ่งช่อง 2 เท่านั้น** (`CLIP_SLOT2_STAGES = {ready_flow}`)
+    # ตัวสลับบัญชีจึงไม่มีผลกับเส้นทางจริงเลย เจอจริง 10 ก.ย. 14:26: ไปเปิด
+    # `flow_browser_profile2` ที่หลุดล็อกอินไปแล้ว ทั้งที่เพิ่งตั้งค่าบัญชีไว้ 7 ใบ
+    # และเจ้าของสั่งห้ามใช้ใบหลัก — ถูกข้ามทั้งคู่
+    #
+    # ℹ️ **ทุกช่องได้โฟลเดอร์เดียวกัน = ได้ชื่อล็อกเดียวกัน** จึงผลัดกันใช้
+    # อย่างถูกต้อง ไม่ใช่เปิด Chrome ทับกันบนโปรไฟล์เดียว แลกกับการที่
+    # สองช่องเจนพร้อมกันไม่ได้ — ยอมแลก เพราะเจนผิดบัญชีเสียเครดิตจริง
+    # ส่วนเจนช้าลงแค่เสียเวลา
+    #
     # ⚠️ **ใช้เฉพาะโฟลเดอร์ที่ล็อกอินค้างไว้จริงแล้ว** ยังไม่พร้อม = ถอยไปของเดิม
     # ไม่งั้นจะไปเปิด Chrome เปล่าๆ แล้วเจนไม่ได้ทั้งกองโดยไม่มีอะไรฟ้อง
-    if index == 0 and seat["profile"] is None:
-        try:
-            import flow_accounts                             # noqa: PLC0415
-            email = flow_accounts.current()
-            if email and flow_accounts.is_ready(email):
-                folder = flow_accounts.profile_dir_of(email)
-        except Exception:                                    # noqa: BLE001
-            pass                    # อ่านทะเบียนไม่ได้ = ใช้ของเดิม งานไม่ล้ม
+    try:
+        import flow_accounts                                 # noqa: PLC0415
+        email = flow_accounts.current()
+        if email and flow_accounts.is_ready(email):
+            folder = flow_accounts.profile_dir_of(email)
+    except Exception:                                        # noqa: BLE001
+        pass                        # อ่านทะเบียนไม่ได้ = ใช้ของเดิม งานไม่ล้ม
 
     # ⚠️ **ชื่อล็อกต้องมาคู่กับโฟลเดอร์เสมอ** โฟลเดอร์คนละอันแต่ใช้ล็อกดอก
     # เดียวกัน = สองงานเปิด Chrome คนละตัวโดยคิดว่าตัวเองกันกันอยู่
     # ส่วนโฟลเดอร์เดียวกันแต่คนละชื่อล็อก = แย่งโปรไฟล์เดียวกันจน Chrome พัง
     # โฟลเดอร์เดิมจึงต้องได้ชื่อล็อกเดิมเป๊ะๆ ไม่ใช่ชื่อใหม่ที่แปลว่าที่เดียวกัน
-    if folder != (profile_named(seat["profile"]) if seat["profile"]
-                  else flow_gen_profile_dir()):
+    base = (profile_named(seat["profile"]) if seat["profile"]
+            else flow_gen_profile_dir())
+    if folder != base:
         lock = f"flow-acct-{folder.name}"
 
     return {"no": index + 1, "dir": folder, "lock": lock}
@@ -209,7 +220,17 @@ FLOW_URL = "https://labs.google/fx/tools/flow"
 # (ลอง /fx/en/tools/flow แล้วเด้งกลับ /fx/th/ ทุกครั้ง) จึงต้องจับสองภาษา
 # และพาธโปรเจกต์ต้องเผื่อรหัสภาษาคั่น: /fx/th/tools/flow/project/...
 NEW_PROJECT_RE = re.compile(r"New project|Create new|โปรเจ็?กต์ใหม่", re.I)
-PROJECT_PATH_RE = re.compile(r"/fx/(?:[a-z]{2}/)?tools/flow/project/")
+# ⚠️ **Flow มีที่อยู่สองแบบ** (Google ย้ายโดเมนช่วง ก.ย. 2569)
+#
+#     เก่า  https://labs.google/fx/th/tools/flow/project/<รหัส 36 ตัว>
+#     ใหม่  https://flow.google.com/project/<รหัส 36 ตัว>
+#
+# **ต้องรับทั้งคู่** ยึดแบบเดียวแล้วอีกแบบพังเงียบๆ — เจอจริง 10 ก.ย. 14:30
+# เจนคลิปล้มด้วย TimeoutError 45 วินาที ทั้งที่เข้าหน้าโปรเจกต์ถูกต้องแล้ว
+# แล้วขึ้นข้อความว่า "หักเครดิตแล้วแต่ไม่คืนคลิป" ซึ่งบอกผิด (เครดิต 50 → 50
+# ไม่ได้หักสักหน่วย) ทำให้ไล่ผิดทางไปหาเรื่องแพ็กเกจบัญชีอยู่นาน
+PROJECT_PATH_RE = re.compile(
+    r"(?:/fx/(?:[a-z]{2}/)?tools/flow|flow\.google\.com)/project/")
 GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models"
 POLL_SECONDS = 2.0
@@ -883,26 +904,34 @@ def flow_plan_badge(page, tries: int = 5, gap: float = 2.0) -> str:
 
 
 def require_flow_plan(page, seat_name: str = "", log=print) -> str:
-    """ตรวจว่าบัญชีที่ล็อกอินอยู่เป็น Ultra — ไม่ใช่ให้หยุดพร้อมบอกให้เปลี่ยนบัญชี
+    """บอกว่าบัญชีที่ล็อกอินอยู่เป็นแพ็กเกจอะไร — **ไม่หยุดงานแล้ว**
 
-    เรียก **ก่อนใช้เครดิตทุกครั้ง** ล้มตรงนี้เสียแค่เวลาเปิดหน้า ส่วนล้มทีหลัง
-    เสียเครดิตจริงหรือเจนด้วยบัญชีผิดซึ่งถอนไม่ได้
+    **เจ้าของสั่งปลดด่านนี้ 10 ก.ย. 2569** — *"ลบเงื่อนไข ultra ออก"*
+
+    ที่มาของด่านเดิม: ใส่ไว้ 30 ส.ค. ตอนมีบัญชี ULTRA ใบเดียว การเจนด้วย
+    บัญชีอื่นจึงเป็นความผิดพลาดเสมอ **ตอนนี้คนละสถานการณ์** — มีบัญชีสำรอง
+    6 ใบที่ตั้งใจเอามาใช้จริง และเจ้าของสั่งห้ามใช้ใบ ULTRA ด่านเดิมจึงกลาย
+    เป็นตัวขวางคำสั่งแทนที่จะกันความผิดพลาด
+
+    ตรวจของจริง 10 ก.ย. ก่อนปลด
+        ko…e9  ULTRA          1,103 เครดิต   ← ใบเดียวที่เป็น ULTRA
+        ko…c9  (ไม่เจอป้าย)      50 เครดิต   ← แพ็กเกจฟรี
+
+    ⚠️ **ยังอ่านป้ายแล้วเขียน log อยู่ แค่ไม่หยุดงาน** (กติกาข้อ 2.4 ห้ามเงียบ)
+    คลิปออกมาไม่ดีเมื่อไร จะได้ย้อนดูได้ว่ารอบนั้นใช้แพ็กเกจอะไร ส่วนด่านตรวจ
+    ความละเอียดไฟล์ที่ได้จริงยังทำงานตามเดิม — คลิป 360p ยังถูกจับได้อยู่
     """
     badge = flow_plan_badge(page)
     where = f" ({seat_name})" if seat_name else ""
     if badge == FLOW_PLAN_REQUIRED:
         log(f"บัญชี Flow{where}: {badge} ✅")
-        return badge
-    if badge:
-        raise WrongFlowPlan(
-            f"บัญชี Google Flow{where} เป็นแพ็กเกจ {badge} ไม่ใช่ "
-            f"{FLOW_PLAN_REQUIRED} — ต้องเปลี่ยนบัญชีก่อนถึงจะเจนคลิปได้"
-        )
-    raise WrongFlowPlan(
-        f"หาป้าย {FLOW_PLAN_REQUIRED} บนหน้า Flow{where} ไม่เจอ — "
-        f"แปลว่าบัญชีที่ล็อกอินอยู่ไม่ใช่บัญชี {FLOW_PLAN_REQUIRED} "
-        f"ต้องเปลี่ยนบัญชีก่อนถึงจะเจนคลิปได้"
-    )
+    elif badge:
+        log(f"บัญชี Flow{where}: แพ็กเกจ {badge} (ไม่ใช่ {FLOW_PLAN_REQUIRED}) "
+            f"— เจ้าของสั่งให้เจนต่อได้ ไม่หยุด")
+    else:
+        log(f"บัญชี Flow{where}: อ่านป้ายแพ็กเกจไม่ได้ "
+            f"— เจ้าของสั่งให้เจนต่อได้ ไม่หยุด")
+    return badge
 
 
 def flow_profile_dir() -> Path:

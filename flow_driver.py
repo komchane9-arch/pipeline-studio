@@ -47,6 +47,9 @@ FAILED_RECHECK_SECONDS = 8
 # วัดจากของจริง 11 ส.ค. สองรอบ: สัญญาณ Failed โผล่ที่วินาทีที่ 8 ทั้งที่ไทล์
 # กำลังเรนเดอร์อยู่จริง (เห็นกับตาว่าขึ้น 16% และ 48%) ส่วนตัวเลข % ของจริง
 # เพิ่งอ่านได้ราววินาทีที่ 30-50 — ถ้าตัดสินก่อนหน้านั้นคือทิ้งงานที่จ่ายเงินไปแล้ว
+# ลองกดเปิดผลลัพธ์ทุกกี่รอบ — ถี่เกินไปจะไปรบกวนหน้าที่กำลังทำงาน
+REVEAL_EVERY = 3
+
 FAILED_GRACE_SECONDS = 90
 # กด Create แล้วรอสัญญาณกี่วินาทีก่อนเปลี่ยนไปใช้วิธีกดแบบถัดไป
 # สั้นไปจะเปลี่ยนวิธีทั้งที่วิธีแรกติดแล้ว (กดซ้ำ = เจนซ้ำ = เปลืองเครดิต)
@@ -60,9 +63,24 @@ SETTINGS_ATTEMPTS = 3
 UPLOAD_WAIT = 120
 
 FLOW_URL = "https://labs.google/fx/tools/flow"
-PROJECT_URL_RE = re.compile(r"/fx/(?:[a-z]{2}/)?tools/flow/project/[0-9a-f-]{36}")
-# เครดิตคงเหลือในเมนูบัญชี — ยืนยันจากหน้าจริง: link "10020 Google Flow credits"
-CREDITS_RE = re.compile(r"([\d,]+)\s*Google Flow credits", re.I)
+# ⚠️ **Flow มีที่อยู่สองแบบ** (Google ย้ายโดเมนช่วง ก.ย. 2569)
+#
+#     เก่า  https://labs.google/fx/th/tools/flow/project/<รหัส 36 ตัว>
+#     ใหม่  https://flow.google.com/project/<รหัส 36 ตัว>
+#
+# **ต้องรับทั้งคู่** ยึดแบบเดียวแล้วอีกแบบพังเงียบๆ — เจอจริง 10 ก.ย. 14:30
+# เจนคลิปล้มด้วย TimeoutError 45 วินาที ทั้งที่เข้าหน้าโปรเจกต์ถูกต้องแล้ว
+# แล้วขึ้นข้อความว่า "หักเครดิตแล้วแต่ไม่คืนคลิป" ซึ่งบอกผิด (เครดิต 50 → 50
+# ไม่ได้หักสักหน่วย) ทำให้ไล่ผิดทางไปหาเรื่องแพ็กเกจบัญชีอยู่นาน
+PROJECT_URL_RE = re.compile(
+    r"(?:/fx/(?:[a-z]{2}/)?tools/flow|flow\.google\.com)/project/[0-9a-f-]{36}")
+# เครดิตคงเหลือในเมนูบัญชี — รองรับ UI อังกฤษเดิมและ UI ไทยปัจจุบัน
+#   อังกฤษ: "10020 Google Flow credits"
+#   ไทย (5 ก.ย. 2569): "เครดิต Google Flow 50 เครดิต"
+CREDITS_RE = re.compile(
+    r"(?:([\d,]+)\s*Google Flow credits|เครดิต\s*Google Flow\s*([\d,]+)\s*เครดิต)",
+    re.I,
+)
 
 # ป้ายปุ่มเป็น **ภาษาตามบัญชี Google** ไม่ใช่ตาม URL
 #
@@ -71,6 +89,21 @@ CREDITS_RE = re.compile(r"([\d,]+)\s*Google Flow credits", re.I)
 # (ดำหน้าจริงแล้วได้: ปุ่มสร้าง = "arrow_forward สร้าง", โปรเจกต์ใหม่ = "โปรเจ็กต์ใหม่")
 NEW_PROJECT_RE = re.compile(r"New project|Create new|โปรเจ็?กต์ใหม่", re.I)
 CREATE_BUTTON_RE = re.compile(r"arrow_forward\s*(?:Create|สร้าง)", re.I)
+
+# ชื่อปุ่มสั่งเจน เรียงจากเจาะจงที่สุดไปหลวมที่สุด
+#
+# ⚠️ **Google ย้ายชื่อไปไว้ใน aria-label แล้ว** (10 ก.ย. 2569)
+# ของจริง: `<button aria-label="Start generation">` ข้อความข้างในเหลือแค่
+# `arrow_forward` ซึ่งเป็นชื่อไอคอน — ตัวหาเดิมที่บังคับว่าต้องมีคำว่า
+# "Create" ต่อท้ายจึงหาไม่เจอ แล้วล้มด้วย "ปุ่ม Create ไม่พร้อมใช้งาน"
+#
+# **ห้ามยุบเป็น regex ก้อนเดียว** — `arrow_forward` เปล่าๆ อาจไปโดนปุ่ม
+# ไอคอนอื่นบนหน้า ต้องให้ชื่อที่เจาะจงชนะก่อนเสมอ
+CREATE_BUTTON_NAMES = (
+    re.compile(r"arrow_forward\s*(?:Create|สร้าง)", re.I),
+    re.compile(r"Start generation|เริ่มสร้าง|เริ่มการสร้าง", re.I),
+    re.compile(r"^\s*arrow_forward\s*$", re.I),
+)
 
 
 class FlowError(RuntimeError):
@@ -104,10 +137,17 @@ DETECT_JS = r"""
     const s = el.style || {};
     return s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0';
   };
+  // โดเมนที่ Flow เสิร์ฟไฟล์สื่อ — **ต้องเติมทุกครั้งที่ Google ย้ายบ้าน**
+  //
+  // ⚠️ เพิ่ม flow.google.com/asb (ภาพตัวอย่าง) กับ flow-content.google
+  // (ไฟล์คลิปจริง) เมื่อ 10 ก.ย. 2569 — ไม่มีสองอันนี้ ระบบมองไม่เห็นคลิป
+  // ที่เจนเสร็จแล้ว รอจนหมดเวลา 600 วิ แล้วทิ้งงานทั้งที่จ่ายเครดิตไปแล้ว
   const isMediaHost = (s) =>
     s.indexOf('media.getMediaUrlRedirect') !== -1 ||
     s.indexOf('storage.googleapis.com') !== -1 ||
-    s.indexOf('googleusercontent.com') !== -1;
+    s.indexOf('googleusercontent.com') !== -1 ||
+    s.indexOf('flow-content.google') !== -1 ||
+    s.indexOf('flow.google.com/asb') !== -1;
   // ตัดรูปจิ๋ว (avatar/icon) — media จริงต้อง render ใหญ่หรือ natural size ใหญ่
   const bigEnough = (el) => {
     try {
@@ -327,6 +367,60 @@ class FlowDriver:
 
     def snapshot(self) -> dict:
         return self.page.evaluate(DETECT_JS)
+
+    # ---- กดเปิดผลลัพธ์ให้ <video> โผล่ (10 ก.ย. 2569) --------------------
+    #
+    # Flow เปลี่ยนมาแสดงผลเป็น **ภาพนิ่ง** จนกว่าคนจะกดเล่น ตอนเป็นภาพนิ่ง
+    # ไม่มี element `<video>` ให้เก็บ src เลย — วัดของจริง: `<video> 0 ตัว
+    # · รูป 3 · tile 5` ทั้งที่คลิปเสร็จแล้ว พอกดที่ tile จึงมี `<video>` โผล่
+    #
+    # นี่คือเหตุที่รอผล 600 วินาทีแล้วทิ้งงาน **ทั้งที่จ่ายเครดิตไปแล้ว 15 หน่วย**
+    # ไล่กดไทล์ได้มากสุดกี่อัน — กันวนไม่รู้จบถ้าโปรเจกต์มีของเยอะ
+    REVEAL_MAX_TILES = 6
+
+    TILE_OPENERS = (
+        '[class*="project-tile"]',
+        '[class*="tile-row"] [class*="tile"]',
+        '[data-tile-id]',
+    )
+
+    def _reveal_videos(self) -> bool:
+        """กดเปิดผลลัพธ์ให้ `<video>` โผล่ — คืน True ถ้ามี `<video>` แล้ว
+
+        **ไม่โยน error** ถ้ากดไม่ได้ ผู้เรียกยังรอรอบถัดไปได้ตามปกติ
+        """
+        try:
+            if self.page.locator("video").count():
+                return True
+        except Exception:                                        # noqa: BLE001
+            pass
+        # ⚠️ **ต้องไล่ทุกไทล์ ไม่ใช่แค่ไทล์แรก** — ในโปรเจกต์มีทั้ง
+        # รูปสตอรีบอร์ดที่อัปโหลดเป็นเฟรมตั้งต้น และคลิปที่เจนออกมา
+        # ถ้าไทล์แรกเป็นรูป กดแล้วไม่มี `<video>` แล้วยอมแพ้ = ทิ้งคลิปที่
+        # จ่ายเครดิตไปแล้ว (เกิดจริง 10 ก.ย. 15:39 กับใบ 55153199366)
+        tried = 0
+        for how in self.TILE_OPENERS:
+            try:
+                found = self.page.locator(how)
+                total = found.count()
+            except Exception:                                    # noqa: BLE001
+                continue
+            for index in range(min(total, self.REVEAL_MAX_TILES)):
+                try:
+                    found.nth(index).click(timeout=6_000)
+                    tried += 1
+                    time.sleep(3)
+                    if self.page.locator("video").count():
+                        self.log(f"  กดเปิดผลลัพธ์แล้ว — เจอคลิป "
+                                 f"(ไทล์ที่ {index + 1})")
+                        return True
+                    self.page.keyboard.press("Escape")
+                    time.sleep(0.6)
+                except Exception:                                # noqa: BLE001
+                    continue
+        if tried:
+            self.log(f"  กดเปิดไทล์ไปแล้ว {tried} อัน ยังไม่เจอคลิป")
+        return False
 
     def _dump_failure(self, snapshot: dict, failure: dict) -> None:
         """เก็บสภาพหน้าตอนพังไว้ไฟล์เดียว ไล่สาเหตุได้โดยไม่ต้องเจนซ้ำให้เปลืองเครดิต"""
@@ -550,13 +644,48 @@ class FlowDriver:
     # ------------------------------------------------------- settings panel
 
     def _settings_trigger(self):
-        """ปุ่มเปิดเมนูตั้งค่า ชื่อเปลี่ยนตามโมเดลที่เลือกอยู่ จึงต้องหาหลายทาง
-        (ยกวิธีมาจาก findSettingsTrigger ของเดิม)"""
+        """ปุ่มเปิดแผงตั้งค่า — หาหลายทางเพราะ Google เปลี่ยนหน้าเว็บบ่อย
+
+        **ยึดป้าย `aria-label` ก่อน** (10 ก.ย. 2569) ป้ายที่มีความหมายแบบนี้
+        เปลี่ยนยากกว่าโครง DOM เพราะเครื่องอ่านหน้าจอต้องใช้
+
+        ⚠️ **ทางเดิมพังแล้ว** เคยหาจาก `button[aria-haspopup="menu"]` แล้วดู
+        ข้อความว่ามีชื่อโมเดลไหม — วัดของจริง 10 ก.ย.: ปุ่มตั้งค่ากลายเป็น
+        `<button aria-label="Settings trigger">` ที่ **ไม่มี aria-haspopup**
+        ส่วนปุ่มที่ยังมี aria-haspopup ทั้ง 4 ตัวเป็น more_vert กับ add
+        ผลคือเจนคลิปล้มทุกใบด้วยข้อความ "ไม่พบปุ่มเปิด settings panel"
+        **ทุกบัญชี ไม่ใช่แค่บัญชีฟรี**
+
+        เก็บทางเดิมไว้เป็นทางถอย ไม่ทิ้ง — บางบัญชีอาจยังเห็นหน้าเว็บรุ่นเก่า
+        """
+        # ทางที่ 1 — ป้ายกำกับตรงๆ (หน้าเว็บรุ่นปัจจุบัน)
+        for how in ('button[aria-label="Settings trigger"]',
+                    '[role="button"][aria-label="Settings trigger"]',
+                    'button[aria-label*="ettings"]'):
+            found = self.page.locator(how)
+            try:
+                if found.count() and found.first.is_visible():
+                    return found.first
+            except Exception:                                    # noqa: BLE001
+                continue
+
+        # ทางที่ 2 — ของเดิม: เมนูที่ข้อความบอกชื่อโมเดลที่เลือกอยู่
         menus = self.page.locator('button[aria-haspopup="menu"]')
         for index in range(menus.count()):
             item = menus.nth(index)
             text = (item.inner_text() or "")
             if re.search(r"Banana|Imagen|🍌|Veo\s*\d|crop_", text, re.I):
+                return item
+
+        # ทางที่ 3 — ปุ่มไหนก็ได้ที่ข้อความบอกชื่อโมเดล (เผื่อ aria หายไปอีก)
+        every = self.page.locator("button")
+        for index in range(min(every.count(), 60)):
+            item = every.nth(index)
+            try:
+                text = (item.inner_text() or "")
+            except Exception:                                    # noqa: BLE001
+                continue
+            if re.search(r"Banana|Imagen|🍌|Veo\s*\d|crop_\d", text, re.I):
                 return item
         return None
 
@@ -565,8 +694,21 @@ class FlowDriver:
     # element ของแท็บอยู่ใน DOM ตลอดแม้แผงจะปิดอยู่ ถ้านับด้วย count() เฉยๆ
     # open_settings จะรีเทิร์นทันทีโดยไม่ได้เปิดอะไรเลย แล้ว select_tab ไปอ่าน
     # ข้อความจากแท็บที่ซ่อนอยู่ไม่ได้ → "หาแท็บ 'Video' ในเมนูตั้งค่าไม่เจอ"
-    TAB_SELECTOR = '.flow_tab_slider_trigger, button[role="tab"]'
-    TAB_VISIBLE_SELECTOR = '.flow_tab_slider_trigger:visible, button[role="tab"]:visible'
+    #
+    # ⚠️ **Google เปลี่ยนแท็บเป็นปุ่ม radio แบบ Material แล้ว** (10 ก.ย. 2569)
+    # ของเดิม `.flow_tab_slider_trigger, button[role="tab"]` **นับได้ 0 ทั้งคู่**
+    # ผลคือเจนคลิปล้มทุกใบด้วย "เปิด settings panel ไม่สำเร็จหลังลอง 3 ครั้ง"
+    # ทั้งที่แผงเปิดออกมาจริง — ยืนยันด้วยภาพหน้าจอ
+    #
+    # ของจริงคือ `<button role="radio" class="mat-button-toggle-button">`
+    # และ **วัดแล้วว่าใช้เป็นตัวตรวจได้จริง** (กติกาข้อ 2.3.1)
+    #     แผงปิดอยู่   radio ที่มองเห็น = 0
+    #     แผงเปิดแล้ว  radio ที่มองเห็น = 11 (Image · Video · สัดส่วน 5 แบบ · x1-x4)
+    TAB_SELECTOR = ('.flow_tab_slider_trigger, button[role="tab"], '
+                    'button[role="radio"]')
+    TAB_VISIBLE_SELECTOR = ('.flow_tab_slider_trigger:visible, '
+                            'button[role="tab"]:visible, '
+                            'button[role="radio"]:visible')
 
     def _tabs_open(self) -> bool:
         return self.page.locator(self.TAB_VISIBLE_SELECTOR).count() > 0
@@ -602,7 +744,9 @@ class FlowDriver:
         if match:
             wanted.append(f"{match.group(1)}x")
 
-        tabs = self.page.locator('.flow_tab_slider_trigger, button[role="tab"]')
+        # ใช้ค่าเดียวกับ `_tabs_open` จากที่เดียว — เขียนซ้ำแล้ววันหนึ่งจะแก้
+        # ที่เดียวลืมอีกที่ แล้ว "เปิดแผงได้แต่หาแท็บไม่เจอ" (เกิดจริง 10 ก.ย.)
+        tabs = self.page.locator(self.TAB_SELECTOR)
         for index in range(tabs.count()):
             tab = tabs.nth(index)
             try:
@@ -1009,6 +1153,13 @@ class FlowDriver:
                 'img[alt="รูปโปรไฟล์ผู้ใช้"], img[alt="User profile image"]'
             ).first
             if not button.count():
+                # UI ใหม่ไม่ได้วาดเป็น img แล้ว แต่มี div role=button อยู่เหนือ
+                # ลิงก์บัญชี Google เดิม จึงต้องกดตัวที่รับ pointer จริง
+                button = self.page.locator(
+                    '[role="button"][aria-label*="รายละเอียดบัญชี"], '
+                    '[role="button"][aria-label*="Account details"]'
+                ).first
+            if not button.count():
                 return None
             button.click()
             deadline = time.time() + 6
@@ -1020,7 +1171,8 @@ class FlowDriver:
                     found = CREDITS_RE.search(label)
                     if found:
                         self.page.keyboard.press("Escape")
-                        return int(found.group(1).replace(",", ""))
+                        value = next((part for part in found.groups() if part), "")
+                        return int(value.replace(",", ""))
                 time.sleep(0.4)
             self.page.keyboard.press("Escape")
         except Exception:                                        # noqa: BLE001
@@ -1071,6 +1223,33 @@ class FlowDriver:
         ปุ่ม + มี 2 ตัวคนละหน้าที่ — แถบบนเปิดเมนูเพิ่มสื่อระดับโปรเจกต์ (ไม่แนบเข้า prompt)
         แถว composer ล่างสุดถึงจะเปิด picker จริง จึงต้องกรองด้วยตำแหน่งแนวตั้ง
         """
+        # ---- ทางที่ 1: ป้ายกำกับตรงๆ (10 ก.ย. 2569) ------------------------
+        #
+        # ของเดิมเดาจากตำแหน่งแนวตั้งบนจอ ซึ่งพังทุกครั้งที่ Google ขยับหน้าเว็บ
+        # — วัดจริง 10 ก.ย.: `add_ingredient` กับ `start_slot` หาไม่เจอทั้งคู่
+        # แต่ปุ่มมีอยู่จริงและกดแล้ว picker เปิดปกติ
+        #
+        # ⚠️ **ต้องเป็นปุ่มของแถว composer ล่าง** ปุ่ม "Add media menu"
+        # ที่แถบบน (y=10) เป็นการเพิ่มสื่อระดับโปรเจกต์ ไม่แนบเข้า prompt
+        for label in ("Add ingredients to the prompt box",
+                      "เพิ่มส่วนประกอบลงในช่องพรอมต์"):
+            found = self.page.locator(f'[aria-label="{label}"]')
+            try:
+                if not found.count():
+                    continue
+                found.first.click()
+            except Exception:                                    # noqa: BLE001
+                continue
+            deadline = time.time() + 8
+            while time.time() < deadline:
+                if self._picker_open():
+                    self.log("  เปิด media picker ด้วยปุ่มเพิ่มส่วนประกอบ")
+                    return True
+                time.sleep(0.4)
+            self.page.keyboard.press("Escape")
+            time.sleep(0.4)
+
+        # ---- ทางที่ 2: ของเดิม เดาจากตำแหน่งบนจอ (เผื่อหน้าเว็บรุ่นเก่า) ----
         for name, kind in (("ปุ่ม + ของ composer", "add_ingredient"),
                            ("ช่อง 'เริ่ม' (Frames)", "start_slot")):
             if not self._mark_and_click(kind):
@@ -1084,6 +1263,45 @@ class FlowDriver:
             self.page.keyboard.press("Escape")
             time.sleep(0.4)
         return False
+
+    def _close_media_picker(self) -> bool:
+        """ปิดกล่อง media picker ให้สนิท — **ต้องปิด ไม่งั้นช่อง prompt กดไม่ได้**
+
+        **เจอจริง 10 ก.ย. 2569** เดิม UI ปิดกล่องให้เองหลังเลือกรูป Google
+        เปลี่ยนพฤติกรรมแล้ว กล่องค้างอยู่แล้วรายการสื่อ
+        (`cdk-virtual-scroll-viewport`) ทับช่อง prompt ไว้ ผลคือขั้นถัดไป
+        ล้มด้วย `Locator.click: Timeout 30000ms` ทั้งที่ทุกอย่างก่อนหน้าสำเร็จ
+
+        วัดของจริง
+            หลังแนบรูป   ของที่ทับตรงกลางช่อง = cdk-virtual-scroll-viewport
+            หลัง Escape  ของที่ทับ = <p> (ตัวช่องเอง) → กดได้
+
+        ⚠️ **ตรวจว่าปิดจริง ไม่ใช่กดแล้วเชื่อ** (กติกาข้อ 2.3.1 ข้อ 2)
+        """
+        for attempt in range(3):
+            if not self.page.locator('[role="dialog"]:visible').count():
+                return True
+            if attempt == 0:
+                self.page.keyboard.press("Escape")
+            else:
+                # บางรุ่นไม่รับ Escape — หาปุ่มปิดในกล่องแทน
+                try:
+                    box = self.page.locator('[role="dialog"]:visible').last
+                    shut = box.get_by_role(
+                        "button", name=re.compile(r"^\s*close|ปิด", re.I))
+                    if shut.count():
+                        shut.first.click()
+                    else:
+                        self.page.keyboard.press("Escape")
+                except Exception:                                # noqa: BLE001
+                    self.page.keyboard.press("Escape")
+            time.sleep(1.2)
+        left = self.page.locator('[role="dialog"]:visible').count()
+        if left:
+            self.log(f"  ⚠️ ปิดกล่องเลือกสื่อไม่ลง (ยังเหลือ {left} กล่อง) "
+                     "— ขั้นถัดไปอาจกดช่อง prompt ไม่ได้")
+            self.shot("ปิดกล่องเลือกสื่อไม่ลง")
+        return not left
 
     def attach_start_image(self, image_path: Path) -> bool:
         """แนบรูปของซีนเป็นภาพตั้งต้นก่อนเจนวิดีโอ (image → video)
@@ -1102,28 +1320,57 @@ class FlowDriver:
         unique_path.write_bytes(image_path.read_bytes())
 
         try:
-            # ปุ่มอัปโหลดต้องอยู่ครึ่งล่างของจอ — แถบบนมีปุ่ม "เพิ่มสื่อ" ที่หน้าตาคล้ายกัน
-            upload = self.page.get_by_role(
-                "button", name=re.compile("อัปโหลดสื่อ|Upload media", re.I)
-            )
             chooser = None
-            if upload.count():
-                viewport = self.page.viewport_size or {"height": 800}
-                for index in range(upload.count()):
-                    item = upload.nth(index)
-                    box = item.bounding_box()
-                    if not box or box["y"] < viewport["height"] * 0.25:
+
+            # ---- ทางที่ 1: ปุ่มอัปโหลด **ในกล่อง** (10 ก.ย. 2569) -----------
+            #
+            # วัดของจริง: ปุ่มชื่อเหลือแค่ `upload` (ชื่อไอคอน Material) ไม่ใช่
+            # "Upload media" อย่างที่เคยเป็น และ **ไม่มี input[type=file] เลย
+            # สักตัว** ทางถอยเดิมจึงใช้ไม่ได้ด้วย
+            #
+            # หาในกล่องเป็นหลักจึง**ไม่ต้องกรองด้วยตำแหน่งบนจอ** — ตัวกรองเดิม
+            # มีไว้กันไปโดนปุ่ม "เพิ่มสื่อ" บนแถบบน ซึ่งอยู่นอกกล่องอยู่แล้ว
+            box = self.page.locator('[role="dialog"]:visible').last
+            names = re.compile(r"^\s*(upload|อัปโหลด)|อัปโหลดสื่อ|Upload media",
+                               re.I)
+            try:
+                inside = box.get_by_role("button", name=names)
+                for index in range(inside.count()):
+                    try:
+                        with self.page.expect_file_chooser(timeout=10_000) as event:
+                            inside.nth(index).click()
+                        chooser = event.value
+                        break
+                    except Exception:                            # noqa: BLE001
                         continue
-                    with self.page.expect_file_chooser(timeout=10_000) as event:
-                        item.click()
-                    chooser = event.value
-                    break
+            except Exception:                                    # noqa: BLE001
+                pass
+
+            # ---- ทางที่ 2: ของเดิม ทั้งหน้า + กรองตำแหน่ง -------------------
+            if chooser is None:
+                upload = self.page.get_by_role(
+                    "button", name=re.compile("อัปโหลดสื่อ|Upload media", re.I)
+                )
+                if upload.count():
+                    viewport = self.page.viewport_size or {"height": 800}
+                    for index in range(upload.count()):
+                        item = upload.nth(index)
+                        spot = item.bounding_box()
+                        if not spot or spot["y"] < viewport["height"] * 0.25:
+                            continue
+                        with self.page.expect_file_chooser(timeout=10_000) as event:
+                            item.click()
+                        chooser = event.value
+                        break
+
             if chooser is not None:
                 chooser.set_files(str(unique_path))
             else:
                 file_input = self.page.locator('input[type="file"]').last
                 if not file_input.count():
-                    raise FlowError("ไม่พบช่องอัปโหลดไฟล์ใน picker")
+                    raise FlowError(
+                        "ไม่พบช่องอัปโหลดไฟล์ใน picker "
+                        "(ทั้งปุ่มในกล่องและ input[type=file])")
                 file_input.set_input_files(str(unique_path))
 
             # อัปโหลด+ประมวลผลฝั่ง Flow ใช้เวลาได้ถึง 60-90 วิ ตามที่วัดไว้ในระบบเดิม
@@ -1134,6 +1381,7 @@ class FlowDriver:
             option.wait_for(state="visible", timeout=UPLOAD_WAIT * 1000)
             option.click()
             time.sleep(1.5)
+            self._close_media_picker()
             self.log("  แนบรูปตั้งต้นสำเร็จ")
             return True
         finally:
@@ -1227,19 +1475,23 @@ class FlowDriver:
 
         # ปุ่มส่งมีอยู่ตลอดแต่ disabled จนกว่าจะมีข้อความ และ UI อัปเดตช้ากว่าการพิมพ์
         # เช็ค count() ทันทีจึงพลาดได้ ต้องรอจน "กดได้จริง" แล้วค่อยกด
-        create = self.page.get_by_role(
-            "button", name=CREATE_BUTTON_RE
-        ).first
+        # ไล่หาทีละชื่อ **ชื่อเจาะจงก่อน** แล้วรอจนกดได้จริง
+        # (ปุ่มมีอยู่ตลอดแต่ disabled จนกว่าจะมีข้อความในช่อง prompt)
+        create = self.page.get_by_role("button", name=CREATE_BUTTON_NAMES[0]).first
         deadline = time.time() + TIMEOUTS["flow_settings"]
         ready = False
-        while time.time() < deadline:
-            try:
-                if create.count() and create.is_enabled():
-                    ready = True
-                    break
-            except Exception:
-                pass
-            time.sleep(0.5)
+        while time.time() < deadline and not ready:
+            for name in CREATE_BUTTON_NAMES:
+                try:
+                    found = self.page.get_by_role("button", name=name).first
+                    if found.count() and found.is_enabled():
+                        create = found
+                        ready = True
+                        break
+                except Exception:                                # noqa: BLE001
+                    continue
+            if not ready:
+                time.sleep(0.5)
         if not ready:
             raise FlowError(
                 "ปุ่ม Create ไม่พร้อมใช้งานภายในเวลา "
@@ -1288,6 +1540,7 @@ class FlowDriver:
         started = time.time()
         deadline = started + timeout_s
         warned_grace = False
+        tries = 0                   # นับรอบที่ลองกดเปิดผลลัพธ์
         while time.time() < deadline:
             snap = self.snapshot()
             if snap.get("signedOut"):
@@ -1295,6 +1548,29 @@ class FlowDriver:
             fresh = [url for url in snap[key] if url not in before]
             if fresh:
                 return fresh[0]
+
+            # ---- คลิปเสร็จแล้วแต่ยังเป็นภาพนิ่ง — กดเปิดให้ <video> โผล่ ----
+            #
+            # **เงื่อนไขต้องแยก "เสร็จแล้วมองไม่เห็น" ออกจาก "ยังเจนอยู่"**
+            # ยังเจนอยู่จะมี pct หรือ active เสมอ — เงียบทั้งคู่แต่มี tile
+            # อยู่บนหน้า = เสร็จแล้ว (กติกาข้อ 2.3.1)
+            #
+            # ลองทุก REVEAL_EVERY รอบ ไม่ใช่ทุกรอบ — การกดเปิด/ปิดถี่เกินไป
+            # รบกวนหน้าที่กำลังทำงานอยู่
+            # ⚠️ **ห้ามใช้ tiles เป็นเงื่อนไข** — `data-tile-id` ไม่มีในหน้าเว็บ
+            # รุ่นนี้แล้ว วัดจริง 10 ก.ย.: tile = 0 ทั้งที่คลิปเสร็จอยู่บนหน้า
+            # ใช้ "มีภาพตัวอย่างอยู่" แทน ซึ่งเป็นของที่โผล่ตอนมีผลลัพธ์จริง
+            if (kind == "video" and snap.get("pct") is None
+                    and not snap.get("active")
+                    and (snap["counts"]["images"] > 0
+                         or snap["counts"]["tiles"] > 0)):
+                tries += 1
+                if tries % REVEAL_EVERY == 1 and self._reveal_videos():
+                    again = self.snapshot()
+                    fresh = [url for url in again[key] if url not in before]
+                    if fresh:
+                        self.log("  คลิปเสร็จแล้ว (ต้องกดเปิดถึงจะเห็นลิงก์)")
+                        return fresh[0]
 
             failure = snap.get("failure") or {}
             # สัญญาณ Failed ช่วงต้นเชื่อไม่ได้ ยกเว้นที่ระบุสาเหตุชัด
@@ -1379,8 +1655,13 @@ class FlowDriver:
         if quality in self.PAID_QUALITIES:
             raise FlowError(f"{quality} กินเครดิต — ห้ามสั่งอัตโนมัติ")
         try:
-            if self._download_from_tile(url, target, quality):
+            # ทางที่ 1 — หน้าเว็บรุ่นปัจจุบัน (สำรวจของจริง 10 ก.ย. 2569)
+            if self._download_via_menu(target, quality):
                 self.log(f"  โหลด {quality} จากเมนูสำเร็จ")
+                return quality
+            # ทางที่ 2 — ของเดิม ผ่านไทล์ที่มี data-tile-id
+            if self._download_from_tile(url, target, quality):
+                self.log(f"  โหลด {quality} จากเมนู (ทางเดิม) สำเร็จ")
                 return quality
             self.log(f"  หาเมนู {quality} ไม่เจอ — ถอยไปโหลดไฟล์ต้นฉบับ 720p")
         except Exception as error:                           # noqa: BLE001
@@ -1388,6 +1669,112 @@ class FlowDriver:
                      f"{str(error)[:80]}) — ถอยไปโหลดไฟล์ต้นฉบับ 720p")
         self.download(url, target)
         return "720p"
+
+    # ป้ายในเมนูโหลด — **ไม่ใช่แค่ตัวเลข** ของจริงเป็น "1080p Upscaled"
+    # จับแบบ exact จึงไม่มีวันเจอ (เจอจริง 10 ก.ย. 2569)
+    DOWNLOAD_MENU_NAMES = ("Download media", "ดาวน์โหลดสื่อ", "download")
+
+    MENU_STATE_JS = """(text) => {
+      const want = new RegExp('^\\s*' + text + '\\b', 'i');
+      let found = null;
+      document.querySelectorAll('button[role=menuitem]').forEach((b) => {
+        if (!want.test((b.innerText || '').trim())) return;
+        found = {
+          disabled: b.disabled === true,
+          ariaDisabled: b.getAttribute('aria-disabled') === 'true',
+          opacity: getComputedStyle(b).opacity,
+        };
+      });
+      return found;
+    }"""
+
+    def _menu_item_state(self, quality: str):
+        """ตัวเลือกความละเอียดนี้กดได้ไหม — คืน None ถ้าหาไม่เจอ
+
+        **None แปลว่าหาไม่เจอ ไม่ใช่กดได้** (กติกาข้อ 2.3.1 ข้อ 4)
+        """
+        try:
+            return self.page.evaluate(self.MENU_STATE_JS, re.escape(quality))
+        except Exception:                                        # noqa: BLE001
+            return None
+
+    def _download_via_menu(self, target: Path, quality: str) -> bool:
+        """โหลดผ่านเมนูของหน้าเว็บรุ่นปัจจุบัน — True เมื่อได้ไฟล์จริง
+
+        เส้นทางที่สำรวจของจริงมาแล้ว (10 ก.ย. 2569)
+            กดเปิดคลิป → More options → Download media → เลือกความละเอียด
+
+        ⚠️ **ต้องเปิดคลิปให้ `<video>` โผล่ก่อน** หน้ารุ่นนี้แสดงผลเป็นภาพนิ่ง
+        จนกว่าจะกด และเมนู More options ของคลิปมีเฉพาะตอนเปิดคลิปอยู่
+        """
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not self._reveal_videos():
+            return False
+        more = self.page.locator('button[aria-label="More options"]')
+        if not more.count():
+            return False
+        try:
+            more.first.click(timeout=8_000)
+            self.page.wait_for_timeout(1500)
+        except Exception:                                        # noqa: BLE001
+            return False
+
+        opened = False
+        for name in self.DOWNLOAD_MENU_NAMES:
+            try:
+                item = self.page.get_by_text(name, exact=False)
+                if not item.count():
+                    continue
+                item.first.click(timeout=6_000)
+                self.page.wait_for_timeout(2000)
+                opened = True
+                break
+            except Exception:                                    # noqa: BLE001
+                continue
+        if not opened:
+            self.page.keyboard.press("Escape")
+            return False
+
+        # ป้ายของจริงคือ "1080p Upscaled" / "720p Original size"
+        want = re.compile(rf"^\s*{re.escape(quality)}\b", re.I)
+        pick = self.page.get_by_text(want)
+        if not pick.count():
+            self.log(f"  เมนูโหลดไม่มีตัวเลือก {quality} "
+                     "— บัญชีนี้อาจโหลดได้แค่ต้นฉบับ")
+            self.page.keyboard.press("Escape")
+            return False
+
+        # ---- ตัวเลือกมีอยู่แต่ถูกปิดไว้ (10 ก.ย. 2569) ---------------------
+        #
+        # **แพ็กเกจฟรีอัปสเกลไม่ได้** วัดของจริงจากบัญชี ko…c9 และเจ้าของ
+        # ยืนยันด้วยตาเองแล้ว
+        #     270p Animated GIF    disabled=False  opacity=1     กดได้
+        #     720p Original size   disabled=False  opacity=1     กดได้
+        #     1080p Upscaled       disabled=True   opacity=0.38  **ปิด**
+        #     4K Upscaled          disabled=True   opacity=0.38  **ปิด**
+        #
+        # ⚠️ **ต้องเช็คก่อนกด** ไม่งั้น Playwright รอจนปุ่มกดได้ (ซึ่งไม่มีวัน
+        # เกิด) ครบ 30 วินาทีทุกคลิป แล้วรายงานเป็น TimeoutError ที่ชี้ผิดทาง
+        state = self._menu_item_state(quality)
+        if state and state.get("disabled"):
+            self.log(f"  🚫 ตัวเลือก {quality} ถูกปิดไว้ในบัญชีนี้ "
+                     "(แพ็กเกจฟรีอัปสเกลไม่ได้) — ใช้ต้นฉบับ 720p แทน")
+            self.page.keyboard.press("Escape")
+            return False
+        try:
+            with self.page.expect_download(
+                timeout=TIMEOUTS["upscale_download"] * 1000
+            ) as info:
+                pick.first.click()
+            info.value.save_as(str(target))
+        except Exception as error:                               # noqa: BLE001
+            self.log(f"  กดโหลด {quality} แล้วไม่ได้ไฟล์: {str(error)[:70]}")
+            try:
+                self.page.keyboard.press("Escape")
+            except Exception:                                    # noqa: BLE001
+                pass
+            return False
+        return target.is_file() and target.stat().st_size > 0
 
     def _download_from_tile(self, url: str, target: Path, quality: str) -> bool:
         """กดเมนูของไทล์ที่มีวิดีโอ url นี้ แล้วเลือกความละเอียด — True เมื่อได้ไฟล์

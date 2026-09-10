@@ -766,31 +766,71 @@ class FlowDriver:
 
     # ------------------------------------------------------------ เลือกโมเดล
 
+    # ตัวเลือกที่ใช้หารายการในเมนูที่กางอยู่
+    #
+    # ⚠️ **Flow ย้ายมาใช้ Angular Material แล้ว** (เจอจริง 10 ก.ย. 2569)
+    # ของจริงคือ `<button role="menuitem" class="mat-mdc-menu-item">`
+    # ส่วนตัวเลือกเดิมเป็นของ Radix UI (`[data-state=open]`,
+    # `.DropdownMenuContent`) ซึ่งไม่มีบนหน้านี้แล้ว — นับได้ 0 เสมอ
+    # ผลคือ "เมนูโมเดลวิดีโอไม่เปิด" แล้วเลือกโมเดลไม่ได้ทั้งบัญชี
+    #
+    # **เพิ่งเจอเพราะบัญชีที่ทดสอบก่อนหน้ามีโมเดลเป็น Omni อยู่แล้ว**
+    # `select_video_model` จึงคืนค่าผ่านโดยไม่ต้องเปิดเมนูเลย
+    #
+    # เก็บของเดิมไว้ด้วย เผื่อบัญชีที่ยังเห็นหน้าเว็บรุ่นเก่า
+    MENU_ITEM_SELECTOR = (
+        '[role="menu"][data-state="open"] [role="menuitem"],'
+        ' .DropdownMenuContent [role="menuitem"],'
+        ' [role="menu"][data-state="open"] button,'
+        ' .DropdownMenuContent button,'
+        ' button[role="menuitem"],'
+        ' .mat-mdc-menu-panel button,'
+        ' [role="menu"] [role="menuitem"]'
+    )
+
     MENU_ITEMS_JS = """
-    () => {
+    (sel) => {
       const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
-      const nodes = document.querySelectorAll(
-        '[role="menu"][data-state="open"] [role="menuitem"], .DropdownMenuContent [role="menuitem"],'
-        + ' [role="menu"][data-state="open"] button, .DropdownMenuContent button'
-      );
-      return Array.from(nodes).map((n, i) => ({ i, text: norm(n.textContent).substring(0, 90) }));
+      const seen = new Set();
+      const out = [];
+      document.querySelectorAll(sel).forEach((n) => {
+        const box = n.getBoundingClientRect();
+        if (box.width < 4 || box.height < 4) return;   // ต้องมองเห็นจริง
+        const text = norm(n.textContent).substring(0, 90);
+        if (!text || seen.has(text)) return;
+        seen.add(text);
+        out.push({ i: out.length, text });
+      });
+      return out;
     }
     """
 
     def _menu_items(self) -> list[dict]:
-        return self.page.evaluate(self.MENU_ITEMS_JS)
+        return self.page.evaluate(self.MENU_ITEMS_JS, self.MENU_ITEM_SELECTOR)
 
     def _click_menu_item(self, index: int) -> None:
+        """กดรายการที่ `index` — **ต้องนับแบบเดียวกับ `_menu_items`**
+
+        เดิมเขียน selector ซ้ำไว้คนละที่ พอแก้ที่หนึ่งลืมอีกที่ ลำดับจะเพี้ยน
+        แล้วไปกดโมเดลผิดตัว = เผาเครดิตกับโมเดลที่ไม่ได้ตั้งใจ
+        """
         self.page.evaluate(
-            """(idx) => {
-              const nodes = document.querySelectorAll(
-                '[role="menu"][data-state="open"] [role="menuitem"], .DropdownMenuContent [role="menuitem"],'
-                + ' [role="menu"][data-state="open"] button, .DropdownMenuContent button'
-              );
-              const n = nodes[idx];
+            """([sel, idx]) => {
+              const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+              const seen = new Set();
+              const rows = [];
+              document.querySelectorAll(sel).forEach((n) => {
+                const box = n.getBoundingClientRect();
+                if (box.width < 4 || box.height < 4) return;
+                const text = norm(n.textContent).substring(0, 90);
+                if (!text || seen.has(text)) return;
+                seen.add(text);
+                rows.push(n);
+              });
+              const n = rows[idx];
               if (n) (n.querySelector('button') || n).click();
             }""",
-            index,
+            [self.MENU_ITEM_SELECTOR, index],
         )
         time.sleep(0.7)
 

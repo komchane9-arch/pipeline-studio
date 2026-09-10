@@ -777,12 +777,17 @@ KEEP_LINE_RE = re.compile(
     re.I)
 
 
-def trim_visual(visual: str, room: int) -> str:
+def trim_visual(visual: str, room: int, hard: bool = False) -> str:
     """ย่อคำบรรยายภาพให้พอดีโควตา โดย **ไม่ทิ้งคำสั่งเรื่องตัวหนังสือ**
 
     เก็บบรรทัดสำคัญไว้ก่อนทั้งหมด แล้วเติมบรรทัดที่เหลือตามลำดับเดิมจนเต็ม
     ถ้าบรรทัดสำคัญอย่างเดียวก็เกินโควตาแล้ว ก็ยอมเกิน — ส่งคำสั่งที่มีตัวหนังสือ
     แต่ยาวไปหน่อย ดีกว่าส่งคำสั่งที่พอดีเป๊ะแต่ไม่มีตัวหนังสือเลย
+
+    `hard=True` = **ห้ามเกินโควตาเด็ดขาด** ยอมตัดบรรทัดสำคัญด้วย
+    ใช้เป็นชั้นสุดท้ายตอนที่ทางเลือกคือ "ตัดภาพ" กับ "ตัดเสียง" —
+    **เสียงสำคัญกว่า** เพราะเป็นบทที่เจ้าของอนุมัติมาแล้ว ส่วนภาพยังมี
+    สตอรีบอร์ดเป็นเฟรมตั้งต้นกำกับอยู่
     """
     if len(visual) <= room:
         return visual
@@ -790,8 +795,14 @@ def trim_visual(visual: str, room: int) -> str:
     keep = [i for i, line in enumerate(lines) if KEEP_LINE_RE.search(line)]
     if not keep:
         return visual[:room].rstrip()
-    picked = set(keep)
-    used = sum(len(lines[i]) + 1 for i in keep)
+    picked, used = set(), 0
+    # บรรทัดสำคัญก่อน — โหมด hard หยุดเติมเมื่อเต็มโควตา
+    for i in keep:
+        need = len(lines[i]) + 1
+        if hard and used + need > room:
+            continue
+        picked.add(i)
+        used += need
     for i, line in enumerate(lines):
         if i in picked:
             continue
@@ -799,7 +810,8 @@ def trim_visual(visual: str, room: int) -> str:
             continue
         picked.add(i)
         used += len(line) + 1
-    return "\n".join(lines[i] for i in sorted(picked)).strip()
+    out = "\n".join(lines[i] for i in sorted(picked)).strip()
+    return out[:room].rstrip() if hard else out
 
 
 def build_one_clip_prompt(prompts: list[str], seconds: int = 8) -> str:
@@ -856,10 +868,33 @@ def build_one_clip_prompt(prompts: list[str], seconds: int = 8) -> str:
     combined = join([(trim_visual(visual, room), audio) for visual, audio in parts])
     if len(combined) <= FLOW_PROMPT_LIMIT:
         return combined
-    # ยังยาวอยู่ = บรรทัดเสียงเองยาวมากผิดปกติ ตัดท้ายเป็นทางสุดท้าย
+    # ---- ชั้นสุดท้าย: **ยอมตัดภาพ ไม่ยอมตัดเสียง** (แก้ 10 ก.ย. 2569) -----
+    #
+    # ของเดิมตัดท้ายด้วย `combined[:FLOW_PROMPT_LIMIT]` ซึ่ง **ท้ายสุดคือ
+    # บรรทัดเสียงของฉากสุดท้าย** พอไม่มีคำสั่งเสียง โมเดลก็แต่งเอง
+    # ตัวตรวจคลิปจับได้จริง 2 จาก 4 ใบ: *"เพิ่มประโยคใหม่และตัดเนื้อหาออก"*
+    #
+    # ที่ย่อแล้วยังไม่พอเพราะ `trim_visual` เก็บบรรทัดสำคัญไว้ทั้งหมด
+    # โดยไม่สนโควตา — วัดจริง: คำบรรยายภาพอย่างเดียว 4,249–5,257 ตัวอักษร
+    # ขณะที่เพดานทั้งก้อนคือ 4,000
+    #
+    # รอบนี้บังคับให้คำบรรยายภาพอยู่ในโควตาจริง (`hard=True`) เสียงจึงครบเสมอ
+    # **ลำดับความสำคัญ: บทพูดที่เจ้าของอนุมัติแล้ว > รายละเอียดภาพ**
+    # เพราะภาพยังมีสตอรีบอร์ดเป็นเฟรมตั้งต้นกำกับอยู่ ส่วนบทพูดไม่มีอะไรกำกับ
+    room = max(60, (FLOW_PROMPT_LIMIT - reserved - frame) // max(1, len(parts)))
+    combined = join([(trim_visual(visual, room, hard=True), audio)
+                     for visual, audio in parts])
+    if len(combined) <= FLOW_PROMPT_LIMIT:
+        _clip_log(f"⚠️ คำสั่งยาวเกินเพดาน — ย่อคำบรรยายภาพเหลือฉากละ {room} "
+                  f"ตัวอักษรเพื่อ **เก็บบรรทัดเสียงไว้ครบทุกฉาก** "
+                  f"(รวม {len(combined)} ตัวอักษร)")
+        return combined
+
+    # ยังยาวอยู่ = บรรทัดเสียงเองยาวมากผิดปกติ ตัดท้ายเป็นทางสุดท้ายจริงๆ
     # **ขึ้น log ด้วย** ไม่ปล่อยให้เสียงหายเงียบๆ อีก
     _clip_log(f"⚠️ คำสั่งยังยาว {len(combined)} เกินเพดาน {FLOW_PROMPT_LIMIT} "
-              "แม้ย่อคำบรรยายภาพจนสุดแล้ว — บรรทัดสั่งเสียงอาจถูกตัดบางส่วน")
+              f"แม้ย่อคำบรรยายภาพเหลือฉากละ {room} ตัวอักษรแล้ว "
+              "— บรรทัดสั่งเสียงอาจถูกตัดบางส่วน")
     return combined[:FLOW_PROMPT_LIMIT]
 
 

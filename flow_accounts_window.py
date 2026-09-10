@@ -164,6 +164,8 @@ class AccountWindow:
         buttons.pack(fill="x", padx=16, pady=(6, 4))
         for text, command, color in (
             ("💾 บันทึก", self.save, "#2f6fd0"),
+            ("🔑 ดูรหัสผ่าน", self.show_password, "#4a5568"),
+            ("📋 คัดลอกรหัส", self.copy_password, "#4a5568"),
             ("🧹 ล้างช่อง", self.clear, "#3a3f48"),
             ("▶ ตั้งเป็นใบที่ใช้อยู่", self.make_current, "#3a3f48"),
             ("⏸ พัก / ใช้ต่อ", self.toggle_disabled, "#3a3f48"),
@@ -211,6 +213,92 @@ class AccountWindow:
         else:
             self._say("ยังไม่มีบัญชีเลย — กรอกอีเมลกับรหัสผ่านข้างล่างแล้วกดบันทึก")
 
+    # ---- ดูรหัสผ่านที่เก็บไว้ (เจ้าของสั่ง 10 ก.ย. 2569) --------------------
+    #
+    # *"แก้โปรแกรม บัญชี google flow ให้ผมสามารถเรียกดู password ได้ด้วย"*
+    #
+    # เดิมตั้งใจไม่ให้ดูย้อน แต่ของจริงคือเจ้าของต้องเอารหัสไปกรอกใน Chrome
+    # ด้วยมือทุกใบ (เพราะ reCAPTCHA เด้งทุกครั้ง) ถ้าดูไม่ได้ก็ใช้งานไม่ได้จริง
+    #
+    # ⚠️ **ยังคงกติกาเดิมไว้ 3 ข้อ**
+    #   1. เห็นได้เฉพาะบนหน้าต่างนี้ **บนเครื่องนี้** — ไฟล์เข้ารหัสด้วยบัญชี
+    #      Windows เครื่องนี้ ก๊อปไปเครื่องอื่นถอดไม่ออก
+    #   2. **ไม่เขียนลง log ไม่ส่งออกไปไหน** ทั้ง `board()` และข้อความสถานะ
+    #   3. **ซ่อนกลับเองใน 60 วินาที** จะได้ไม่ค้างอยู่บนจอตอนลุกไปทำอย่างอื่น
+
+    HIDE_AFTER = 60_000            # มิลลิวินาที — ซ่อนรหัสกลับเองหลังจากนี้
+
+    def _hide_password_again(self) -> None:
+        """ซ่อนรหัสกลับ + ล้างช่อง — เรียกจากตัวจับเวลาหรือเรียกเองก็ได้"""
+        self._hide_job = None
+        self.password.delete(0, "end")
+        self.show.set(False)
+        self._toggle_show()
+        self._say("ซ่อนรหัสกลับแล้ว — กด 🔑 ดูรหัสผ่าน อีกครั้งถ้าต้องการดูใหม่")
+
+    def show_password(self) -> None:
+        """เอารหัสที่เก็บไว้มาโชว์ในช่อง แล้วซ่อนกลับเองใน 1 นาที"""
+        email = self._picked() or self.email.get().strip()
+        if not email:
+            self._say("เลือกบัญชีในตารางข้างบนก่อน", WARN)
+            return
+        try:
+            secret = flow_accounts.password_for(email)
+        except Exception as error:                           # noqa: BLE001
+            self._say(f"อ่านรหัสไม่ได้: {error}", WARN)
+            return
+        if not secret:
+            self._say(f"{flow_accounts.mask(email)} ยังไม่ได้เก็บรหัสไว้", WARN)
+            return
+        self.password.delete(0, "end")
+        self.password.insert(0, secret)
+        secret = None                        # ทิ้งสำเนาในตัวแปรทันที
+        self.show.set(True)
+        self._toggle_show()
+        if getattr(self, "_hide_job", None):
+            self.root.after_cancel(self._hide_job)
+        self._hide_job = self.root.after(self.HIDE_AFTER,
+                                         self._hide_password_again)
+        self._say(f"รหัสของ {flow_accounts.mask(email)} — "
+                  f"ซ่อนกลับเองใน {self.HIDE_AFTER // 1000} วินาที", OK)
+
+    def copy_password(self) -> None:
+        """ก๊อปรหัสลงคลิปบอร์ด แล้วล้างคลิปบอร์ดเองใน 1 นาที
+
+        สะดวกกว่าอ่านแล้วพิมพ์ตาม โดยเฉพาะรหัสยาวๆ ที่พิมพ์ผิดง่าย
+        **ล้างคลิปบอร์ดให้ด้วย** ไม่งั้นรหัสค้างอยู่ให้โปรแกรมอื่นอ่านได้เรื่อยๆ
+        """
+        email = self._picked() or self.email.get().strip()
+        if not email:
+            self._say("เลือกบัญชีในตารางข้างบนก่อน", WARN)
+            return
+        try:
+            secret = flow_accounts.password_for(email)
+        except Exception as error:                           # noqa: BLE001
+            self._say(f"อ่านรหัสไม่ได้: {error}", WARN)
+            return
+        if not secret:
+            self._say(f"{flow_accounts.mask(email)} ยังไม่ได้เก็บรหัสไว้", WARN)
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(secret)
+        secret = None
+        if getattr(self, "_clip_job", None):
+            self.root.after_cancel(self._clip_job)
+        self._clip_job = self.root.after(self.HIDE_AFTER, self._clear_clipboard)
+        self._say(f"ก๊อปรหัสของ {flow_accounts.mask(email)} แล้ว — "
+                  f"วางในหน้า Google ได้เลย · ล้างคลิปบอร์ดเองใน "
+                  f"{self.HIDE_AFTER // 1000} วินาที", OK)
+
+    def _clear_clipboard(self) -> None:
+        self._clip_job = None
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append("")
+        except Exception:                                    # noqa: BLE001
+            pass
+        self._say("ล้างคลิปบอร์ดแล้ว")
+
     def _picked(self) -> str:
         rows = self.tree.selection()
         return rows[0] if rows else ""
@@ -219,15 +307,19 @@ class AccountWindow:
         email = self._picked()
         if not email:
             return
-        # **ไม่เติมรหัสผ่านกลับเข้าช่อง** — เก็บแล้วดูย้อนไม่ได้ ตั้งใหม่ได้อย่างเดียว
+        # **ไม่เติมรหัสผ่านให้เอง** ต้องกดปุ่ม 🔑 ดูรหัสผ่าน ถึงจะโชว์
+        # จะได้ไม่มีรหัสค้างบนจอทุกครั้งที่คลิกดูบัญชีเฉยๆ
         self.email.delete(0, "end"); self.email.insert(0, email)
         row = next((r for r in flow_accounts.board()["accounts"]
                     if r["email"] == email), {})
         self.note.delete(0, "end"); self.note.insert(0, row.get("note", ""))
         self.profile.delete(0, "end"); self.profile.insert(0, row.get("profile", ""))
         self.password.delete(0, "end")
+        self.show.set(False)
+        self._toggle_show()
         self._say(f"เลือก {flow_accounts.mask(email)} — "
-                  "เว้นช่องรหัสผ่านไว้ถ้าไม่ต้องการเปลี่ยน")
+                  "กด 🔑 ดูรหัสผ่าน เพื่อดูรหัสที่เก็บไว้ · "
+                  "เว้นช่องว่างไว้ถ้าไม่ต้องการเปลี่ยน")
 
     def clear(self) -> None:
         for field in (self.email, self.password, self.note, self.profile):

@@ -69,6 +69,59 @@ import studio_shared as shared
 FLOW_URL = "https://labs.google/fx/tools/flow"
 LOGOUT_URL = "https://accounts.google.com/Logout"
 SIGNIN_HOST = "accounts.google.com"
+# หน้าล็อกอินตรงๆ — ใช้ตอนตั้งค่าโปรไฟล์ใหม่ที่ยังไม่มีบัญชีอยู่ในนั้นเลย
+# ไปที่หน้าแรกของ Flow จะได้หน้าโฆษณาที่ยังไม่มีช่องกรอกอีเมล
+#
+# ⚠️ **ห้ามใส่ `continue=` ที่ชี้ไป labs.google** Google ตอบ 400 Bad Request
+# แล้วได้หน้า error ที่ไม่มีช่องกรอกอะไรเลย (เจอจริง 10 ก.ย. 2569 — เสียไป
+# 6 หน้าต่างเพราะเข้าใจว่าตัวหาช่องพัง ทั้งที่หน้ามันพังตั้งแต่โหลด)
+#
+# ล็อกอินเสร็จแล้วค่อยพาไป Flow เอง (`profile_check` ทำให้อยู่แล้ว)
+SIGNIN_URL = "https://accounts.google.com/signin/v2/identifier?hl=th"
+
+# ⚠️ **Flow มีสองชื่อ** ที่อยู่เดิม `labs.google/fx/tools/flow` เด้งไป
+# `flow.google.com` แล้ว ตัวตรวจที่ถามแค่ชื่อเดิมจะตอบว่า "ยังไม่ถึง Flow"
+# ตลอดกาล แล้วสั่งเปลี่ยนหน้าใหม่ทุกรอบจนหน้าโหลดไม่เสร็จสักที
+# (เจอจริง 10 ก.ย. 2569 — ไม่มีใบไหนผ่านเลยเพราะเหตุนี้)
+FLOW_HOSTS = ("labs.google", "flow.google")
+
+# หน้าที่แปลว่า **คนกำลังกรอกอยู่** — ห้ามสั่งเปลี่ยนหน้าเด็ดขาด
+BUSY_HOSTS = ("accounts.google.com",)
+
+
+def on_flow(page) -> bool:
+    """หน้านี้เป็นหน้า Flow แล้วหรือยัง (รับทั้งสองชื่อ)"""
+    url = (page.url or "")
+    return any(host in url for host in FLOW_HOSTS)
+
+
+def busy_signing_in(page) -> bool:
+    """เจ้าของกำลังกรอกอะไรอยู่บนหน้าล็อกอินไหม — **จริง = ห้ามแตะ**"""
+    url = (page.url or "")
+    return any(host in url for host in BUSY_HOSTS)
+
+# ช่องกรอกอีเมลของหน้าล็อกอิน Google
+#
+# ⚠️ **ไม่ใช่ `type=email`** ของจริงเป็น `<input type="text" id="identifierId">`
+# เขียนเผื่อไว้ทั้งสามแบบ เพราะ Google เปลี่ยนหน้าล็อกอินบ่อย และแต่ละทางเข้า
+# (กดจากหน้า Flow กับเข้าตรง) ก็ได้หน้าคนละหน้าตากัน
+EMAIL_BOXES = (
+    "#identifierId",
+    "input[type=email]:visible",
+    "input[name=identifier]:visible",
+)
+
+
+def _find_email_box(page, timeout: int = 20_000):
+    """หาช่องกรอกอีเมลที่ใช้ได้จริง — คืนตัวเลือกที่เจอ ("" = ไม่เจอสักอัน)"""
+    each = max(2_000, int(timeout / max(1, len(EMAIL_BOXES))))
+    for how in EMAIL_BOXES:
+        try:
+            page.wait_for_selector(how, timeout=each, state="visible")
+            return how
+        except Exception:                                    # noqa: BLE001
+            continue
+    return ""
 
 # ป้ายบนหน้าจอที่แปลว่า **ต้องให้คนมาทำเอง** — เจอแล้วหยุดทันที
 NEEDS_HUMAN = (
@@ -213,20 +266,38 @@ def profile_check(page, email: str, log=print) -> dict:
     ซึ่งไม่เท่ากับ "บัญชีผิด"
     """
     want = str(email or "").strip().lower()
+
+    # ⛔ **กำลังกรอกอยู่ = ห้ามแตะหน้านั้นเด็ดขาด** (กติกาข้อ 2.5)
+    #
+    # ของเดิมสั่งเปลี่ยนหน้าไป Flow ทุกรอบที่ตรวจ ซึ่งถ้าเจ้าของกำลังพิมพ์
+    # รหัสผ่านอยู่ **ฟอร์มจะหายไปทั้งอัน** ตัวตรวจไปทำลายงานที่กำลังตรวจเอง
+    if busy_signing_in(page):
+        return {"ok": False, "credits": None, "seen": "",
+                "why": "กำลังอยู่ที่หน้าล็อกอิน — รออยู่ ไม่แตะหน้านั้น"}
+
     try:
-        if FLOW_URL.split("//")[-1].split("/")[0] not in (page.url or ""):
+        if not on_flow(page):
             page.goto(FLOW_URL, wait_until="domcontentloaded", timeout=120_000)
-            time.sleep(5)
+            time.sleep(6)
     except Exception as error:                               # noqa: BLE001
         return {"ok": False, "credits": None, "seen": "",
                 "why": f"เปิดหน้า Flow ไม่ได้: {error}"[:160]}
 
-    if SIGNIN_HOST in (page.url or ""):
+    if busy_signing_in(page):
         return {"ok": False, "credits": None, "seen": "",
-                "why": "ยังอยู่ที่หน้าล็อกอิน ยังไม่ได้เข้าบัญชี"}
+                "why": "Flow เด้งไปหน้าล็อกอิน — ยังไม่ได้เข้าบัญชี"}
 
-    credits = _credits_now(page)
-    seen = account_on_page(page)
+    # ให้โอกาสหลายรอบ **ไม่ใช่ยิงครั้งเดียวแล้วตัดสิน** — เปิด 7 หน้าต่างพร้อมกัน
+    # ทำให้แต่ละหน้าโหลดช้ากว่าเปิดใบเดียวมาก ตัดสินเร็วไปจะได้ "ไม่ผ่าน" ทั้งที่
+    # แค่ยังโหลดไม่เสร็จ (แยก "ยังไม่ได้ตรวจ" ออกจาก "ตรวจแล้วไม่ผ่าน")
+    credits, seen = None, ""
+    for round_no in range(4):
+        credits = _credits_now(page)
+        seen = account_on_page(page)
+        if credits is not None and seen:
+            break
+        if round_no < 3:
+            time.sleep(5)
     if credits is None:
         return {"ok": False, "credits": None, "seen": seen,
                 "why": "อ่านยอดเครดิตไม่ได้ — ยังเข้า Flow ไม่สำเร็จ"}
@@ -297,6 +368,189 @@ def setup_profile(email: str, wait_minutes: int = 15, log=print) -> dict:
     log(f"   ✓ พร้อมใช้แล้ว — {flow_accounts.mask(email)} เครดิต {got['credits']}")
     return {"ok": True, "email": email, "credits": got["credits"],
             "profile": str(folder)}
+
+
+def _hint_email(page, email: str) -> str:
+    """พิมพ์อีเมลใส่หน้าล็อกอินให้ล่วงหน้า — **เพื่อให้รู้ว่าหน้าต่างไหนของใคร**
+
+    เปิด 7 หน้าต่างพร้อมกันแล้วหน้าตาเหมือนกันหมด ถ้าไม่ทำแบบนี้เจ้าของ
+    ต้องจำเองว่าหน้าต่างที่เท่าไรคือบัญชีไหน แล้วกรอกสลับใบกันแน่นอน
+
+    ⚠️ **ล้มก็ไม่เป็นไร** ตัวนี้เป็นแค่ของอำนวยความสะดวก ไม่ใช่ขั้นตอนจริง
+    ล้มแล้วเจ้าของพิมพ์อีเมลเองได้ จึงกลืน error ทั้งหมด
+    """
+    try:
+        # เด้งไปหน้าบัญชี/หน้า Flow แล้ว = **ล็อกอินไว้อยู่แล้ว** ไม่ต้องพิมพ์อะไร
+        url = (page.url or "")
+        if "myaccount.google" in url or on_flow(page):
+            return "ล็อกอินไว้อยู่แล้ว — เดี๋ยวตรวจให้ว่าเข้า Flow ได้ไหม"
+        how = _find_email_box(page, 20_000)
+        if not how:
+            # **ต้องบอกให้ได้ว่าอยู่หน้าไหน** ไม่งั้นไล่ต่อไม่ได้เลย
+            # (ของเดิมตอบแค่ "พิมพ์ไม่ได้" จนต้องไปเปิดเบราว์เซอร์ดูเอง)
+            head = ""
+            try:
+                head = (page.title() or "")[:40]
+            except Exception:                                # noqa: BLE001
+                pass
+            return (f"ไม่เจอช่องกรอกอีเมล — หน้าที่ค้างอยู่คือ "
+                    f"“{head}” ({(page.url or '')[:60]}) · กรอกเองได้เลย")
+        _type_like_human(page, how, email)
+        page.keyboard.press("Enter")
+        time.sleep(4)
+        return "พิมพ์อีเมลให้แล้ว เหลือกรอกรหัสผ่าน"
+    except Exception as error:                               # noqa: BLE001
+        return f"พิมพ์อีเมลให้ไม่ได้ ({type(error).__name__}) — กรอกเองได้เลย"
+
+
+def setup_many(emails: list[str], wait_minutes: int = 30, log=print) -> dict:
+    """เปิดหน้าต่างของทุกบัญชี **พร้อมกัน** แล้วรอให้เจ้าของล็อกอินทีละใบ
+
+    **เจ้าของสั่ง 10 ก.ย. 2569** — *"เด้ง chrome มา 7 หน้าเลยให้ผม log-in"*
+
+    ทำไมถึงคุ้มกว่าเปิดทีละใบ: เปิดทีละใบต้องรอ Chrome เปิดใหม่ทุกรอบ
+    และเจ้าของต้องกลับมานั่งรอหน้าจอ 7 ครั้ง เปิดพร้อมกันแล้วไล่กรอกรวดเดียวจบ
+
+    ⚠️ **แต่ละใบถือล็อกเบราว์เซอร์ของโฟลเดอร์ตัวเอง** ปล่อยพร้อมกันตอนจบ
+    ถ้าใช้ล็อกดอกเดียวกันหมด จะเปิดได้แค่ใบเดียวแล้วที่เหลือยืนรอ
+
+    ⛔ **ห้ามปิดหน้าต่างเอง** (เจ้าของสั่ง 10 ก.ย. 2569 — *"เปิดค้างไว้เลย
+    ห้ามปิดนะ"* ซ้ำกับที่เคยสั่งตอนสอนเปลี่ยนบัญชี *"ห้ามปิด chrome ปิดแล้ว
+    ผมจะสอนได้ไง"*) ของเดิมปิดทันทีที่ตรวจผ่าน ซึ่งเป็นการตัดสินใจแทนเจ้าของ
+    บนของที่เขากำลังใช้อยู่ — กติกาข้อ 2.5
+
+    หน้าต่างจะค้างอยู่จนกว่าจะสั่งหยุด ให้สั่งด้วยการสร้างไฟล์
+    `data/flow_setup_stop` หรือกด Ctrl+C
+
+    ⚠️ **ระหว่างที่ค้างอยู่ สายเจนคลิปใช้โปรไฟล์พวกนี้ไม่ได้** เพราะแต่ละใบ
+    ถือล็อกของโฟลเดอร์ตัวเองไว้ — สั่งหยุดเมื่อตั้งค่าเสร็จแล้ว
+    """
+    from contextlib import ExitStack
+    from playwright.sync_api import sync_playwright
+    from flow_worker import open_browser, flow_gen_profile_dir, FLOW_LOCK
+
+    todo = [str(e).strip() for e in emails if str(e).strip()]
+    if not todo:
+        return {"ok": True, "done": [], "left": []}
+
+    done: list[dict] = []
+    left: list[str] = list(todo)
+    with sync_playwright() as pw:
+        with ExitStack() as stack:
+            windows = []
+            for number, email in enumerate(todo):
+                folder = flow_accounts.profile_dir_of(email)
+                folder.mkdir(parents=True, exist_ok=True)
+                lock = (FLOW_LOCK if folder == flow_gen_profile_dir()
+                        else f"flow-acct-{folder.name}")
+                stack.enter_context(shared.browser_lock(
+                    timeout=120,
+                    label=f"ตั้งค่าโปรไฟล์ {flow_accounts.mask(email)}",
+                    profile=lock))
+                # เยื้องกันเป็นขั้นบันได จะได้เห็นแถบชื่อของทุกใบพร้อมกัน
+                browser = open_browser(pw, hidden=False, profile_dir=folder,
+                                       position=(60 + number * 110,
+                                                 40 + number * 80))
+                page = browser.pages[0] if browser.pages else browser.new_page()
+                # โปรไฟล์ที่เคยล็อกอินไว้แล้ว → ไปหน้า Flow เลย จะได้เช็คเครดิตได้
+                # โปรไฟล์ใหม่ → ไป**หน้าล็อกอินตรงๆ** ไม่งั้นได้หน้าโฆษณา
+                # ที่ยังไม่มีช่องกรอกอีเมล แล้วพิมพ์อีเมลใส่ให้ไม่ได้
+                # ⚠️ ต้องดู `is_ready` ไม่ใช่ `profile_used` — "เคยเปิดโฟลเดอร์นี้"
+                # ไม่ได้แปลว่า "ล็อกอินไว้แล้ว" รอบที่แล้วใช้ตัวหลังแล้วพลาด:
+                # โฟลเดอร์ถูกสร้างไปตั้งแต่รอบก่อน ทุกใบเลยถูกพาไปหน้า Flow
+                # ทั้งที่ยังไม่ได้ล็อกอินสักใบ (กติกาข้อ 2.3.1)
+                where = FLOW_URL if flow_accounts.is_ready(email) else SIGNIN_URL
+                try:
+                    page.goto(where, wait_until="domcontentloaded",
+                              timeout=120_000)
+                    time.sleep(3)
+                except Exception as error:                   # noqa: BLE001
+                    log(f"  เปิดหน้าให้ {flow_accounts.mask(email)} ไม่ได้: {error}")
+                windows.append({"email": email, "browser": browser,
+                                "page": page, "folder": folder})
+                log(f"  หน้าต่างที่ {number + 1} → {flow_accounts.mask(email)}")
+
+            log("")
+            log("กำลังพิมพ์อีเมลใส่ให้แต่ละหน้าต่าง จะได้รู้ว่าหน้าไหนของใคร…")
+            for number, win in enumerate(windows, 1):
+                got = profile_check(win["page"], win["email"], lambda *_: None)
+                if got["ok"]:
+                    win["passed"] = got
+                    log(f"  {number}. {flow_accounts.mask(win['email'])} "
+                        f"— ล็อกอินไว้อยู่แล้ว เครดิต {got['credits']}")
+                    continue
+                # ยังไม่อยู่หน้าล็อกอิน = เคยเปิดโปรไฟล์นี้แล้วแต่ยังไม่ได้เข้า
+                # พาไปหน้าล็อกอินก่อน ไม่งั้นหาช่องกรอกอีเมลไม่เจอ
+                try:
+                    if SIGNIN_HOST not in (win["page"].url or ""):
+                        win["page"].goto(SIGNIN_URL,
+                                         wait_until="domcontentloaded",
+                                         timeout=90_000)
+                        time.sleep(3)
+                except Exception:                            # noqa: BLE001
+                    pass
+                note = _hint_email(win["page"], win["email"])
+                log(f"  {number}. {flow_accounts.mask(win['email'])} — {note}")
+
+            log("")
+            log("=" * 58)
+            log("👉 ล็อกอินในหน้าต่างที่เปิดไว้ได้เลย ใบไหนก่อนก็ได้")
+            log(f"   ผมเช็คให้ทุก 20 วินาที · รอสูงสุด {wait_minutes} นาที")
+            log("   ⛔ ผมไม่ปิดหน้าต่างให้ — ค้างไว้ทั้งหมดตามที่สั่ง")
+            log("=" * 58)
+            log("")
+
+            stop_file = shared.DATA_DIR / "flow_setup_stop"
+            stop_file.unlink(missing_ok=True)
+            deadline = time.time() + wait_minutes * 60
+            waiting = list(windows)          # ใบที่ยังไม่ผ่าน — **ไม่ใช่ใบที่ยังเปิด**
+            told_all_done = False
+            while time.time() < deadline:
+                if stop_file.is_file():
+                    log("ได้รับคำสั่งหยุดแล้ว")
+                    break
+                time.sleep(30)
+                for win in list(waiting):
+                    got = win.get("passed") or profile_check(
+                        win["page"], win["email"], lambda *_: None)
+                    if not got["ok"]:
+                        # **บอกด้วยว่าติดตรงไหน** ของเดิมเงียบสนิท เห็นแต่
+                        # "ยังรออีก N ใบ" ซึ่งแยกไม่ออกระหว่าง "ยังไม่กรอก"
+                        # กับ "ตัวตรวจพัง" (กติกาข้อ 2.4)
+                        if got["why"] != win.get("last_why"):
+                            win["last_why"] = got["why"]
+                            log(f"   · {flow_accounts.mask(win['email'])}: "
+                                f"{got['why']}")
+                        continue
+                    email = win["email"]
+                    flow_accounts.set_ready(
+                        email, True, f"เครดิต {got['credits']} ตอนตั้งค่า")
+                    flow_accounts.note_credits(email, got["credits"])
+                    left.remove(email)
+                    done.append({"email": email, "credits": got["credits"]})
+                    waiting.remove(win)
+                    log(f"✓ {flow_accounts.mask(email)} พร้อมใช้แล้ว "
+                        f"— เครดิต {got['credits']:,} "
+                        f"(เหลืออีก {len(waiting)} ใบ) "
+                        f"· หน้าต่างยังเปิดค้างไว้ตามที่สั่ง")
+                if waiting:
+                    mins = int((deadline - time.time()) / 60)
+                    log(f"   … ยังรออีก {len(waiting)} ใบ · หมดเวลาใน {mins} นาที")
+                elif not told_all_done:
+                    told_all_done = True
+                    log("")
+                    log("🎉 ครบทุกใบแล้ว — **หน้าต่างยังเปิดค้างไว้ทั้งหมด**")
+                    log("   สั่งหยุดเมื่อพร้อม แล้วสายเจนคลิปจะใช้โปรไฟล์พวกนี้ได้")
+                    log("")
+
+            for win in waiting:
+                flow_accounts.set_ready(win["email"], False,
+                                        "ยังไม่ได้ล็อกอินตอนสั่งหยุด")
+            # ⛔ **ไม่ปิดหน้าต่างเอง** — ปิดตอนโปรเซสจบเท่านั้น
+            log("")
+            log(f"ปิดหน้าต่างทั้ง {len(windows)} ใบแล้ว (จบโปรแกรม)")
+
+    return {"ok": not left, "done": done, "left": left}
 
 
 def profile_board(log=print) -> dict:
@@ -399,7 +653,13 @@ def step_email(page, email: str, log) -> str:
     ที่มีอีเมลเก่าค้างอยู่ ถ้าเล็ง `input[type=email]` เฉยๆ จะไปโดนช่องนั้น
     แล้วกดไม่ได้เพราะมองไม่เห็น (เจอจริง 10 ก.ย. 2569)
     """
-    _type_like_human(page, "input[type=email]:visible", email)
+    # ⚠️ **ช่องอีเมลไม่ได้เป็น `type=email` เสมอไป** ทางเข้าตรงได้
+    # `<input type="text" id="identifierId">` (เจอจริง 10 ก.ย. 2569)
+    how = _find_email_box(page, 25_000)
+    if not how:
+        _shot(page, "ไม่เจอช่องกรอกอีเมล")
+        raise LoginFailed(f"ไม่เจอช่องกรอกอีเมล ({page.url[:70]})")
+    _type_like_human(page, how, email)
     page.keyboard.press("Enter")
     time.sleep(4)
     _check_screen(page, "กรอกอีเมล")
@@ -659,8 +919,12 @@ def _cli() -> int:
                         help="ทำเฉพาะใบนี้ ไม่ใส่ = ไล่ทำทุกใบที่ยังไม่พร้อม")
     p_prof.add_argument("--ดู", dest="show", action="store_true",
                         help="ดูอย่างเดียว ไม่เปิดเบราว์เซอร์")
-    p_prof.add_argument("--นาที", dest="minutes", type=int, default=15,
-                        help="รอให้ล็อกอินนานสุดกี่นาทีต่อใบ (ค่าตั้งต้น 15)")
+    p_prof.add_argument("--นาที", dest="minutes", type=int, default=480,
+                        help="ค้างหน้าต่างไว้นานสุดกี่นาที (ค่าตั้งต้น 480 = 8 ชม.)")
+    p_prof.add_argument("--ทีละใบ", dest="one_by_one", action="store_true",
+                        help="เปิดทีละหน้าต่าง แทนที่จะเด้งมาพร้อมกันทุกใบ")
+    p_prof.add_argument("--ทุกใบ", dest="every", action="store_true",
+                        help="เปิดใบที่พร้อมแล้วมาด้วย ไว้ดูให้ครบทุกบัญชี")
     args = parser.parse_args()
 
     if args.command == "สถานะ":
@@ -677,6 +941,7 @@ def _cli() -> int:
             profile_board()
             return 0
         todo = ([args.email] if args.email
+                else flow_accounts.emails() if args.every
                 else [e for e in flow_accounts.emails()
                       if not flow_accounts.is_ready(e)])
         if not todo:
@@ -684,6 +949,15 @@ def _cli() -> int:
             profile_board()
             return 0
         print(f"ต้องตั้งค่า {len(todo)} บัญชี — ล็อกอินครั้งเดียวต่อใบ\n")
+        if not args.one_by_one and len(todo) > 1:
+            # เด้งมาพร้อมกันทุกใบ (เจ้าของสั่ง 10 ก.ย. 2569)
+            got = setup_many(todo, wait_minutes=args.minutes)
+            print("")
+            print(f"ตั้งค่าสำเร็จ {len(got['done'])} ใบ · "
+                  f"ยังไม่ได้ {len(got['left'])} ใบ")
+            profile_board()
+            return 0 if got["ok"] else 1
+
         done, failed = [], []
         for number, email in enumerate(todo, 1):
             print(f"[{number}/{len(todo)}] ----------------------------------")

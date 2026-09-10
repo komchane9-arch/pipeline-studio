@@ -964,7 +964,8 @@ def flow_profile_dir() -> Path:
         ) from error
 
 
-def open_browser(playwright, hidden: bool = False, profile_dir=None):
+def open_browser(playwright, hidden: bool = False, profile_dir=None,
+                 position=None):
     """เปิด Chrome ตัวจริงพร้อมโปรไฟล์ถาวร
 
     - headless=False จำเป็น Google ตรวจจับ headless แล้วบล็อก
@@ -1001,7 +1002,12 @@ def open_browser(playwright, hidden: bool = False, profile_dir=None):
         #
         # ตั้งแต่ตำแหน่งอย่างเดียว **ไม่ตั้งขนาด** — ขนาดหน้าต่างเปลี่ยน
         # การจัดหน้าของเว็บ ซึ่งอาจทำให้ตัวหาปุ่มที่ใช้ได้อยู่แล้วหาไม่เจอ
-        args.append("--window-position=80,60")
+        #
+        # ระบุ `position` มาได้ตอนเปิดหลายหน้าต่างพร้อมกัน — ไม่งั้นทุกใบ
+        # ไปกองซ้อนกันที่จุดเดียว เจ้าของเห็นแค่ใบบนสุดใบเดียว
+        # (เจ้าของสั่ง 10 ก.ย. 2569 — *"เด้ง chrome มา 7 หน้าเลย"*)
+        left, top = position if position else (80, 60)
+        args.append(f"--window-position={int(left)},{int(top)}")
     return playwright.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         channel="chrome",

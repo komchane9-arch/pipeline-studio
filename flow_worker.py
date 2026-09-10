@@ -124,11 +124,35 @@ def flow_seat(number: int = 1) -> dict:
     """
     index = max(1, int(number or 1)) - 1
     seat = FLOW_SEATS[index] if index < len(FLOW_SEATS) else FLOW_SEATS[0]
-    return {
-        "no": index + 1,
-        "dir": profile_named(seat["profile"]) if seat["profile"] else flow_gen_profile_dir(),
-        "lock": seat["lock"],
-    }
+    folder = (profile_named(seat["profile"]) if seat["profile"]
+              else flow_gen_profile_dir())
+    lock = seat["lock"]
+
+    # ---- ช่องที่ 1 ใช้โฟลเดอร์ของบัญชีที่กำลังใช้อยู่ (เจ้าของสั่ง 10 ก.ย. 2569)
+    #
+    # **สลับบัญชี = สลับโฟลเดอร์** ไม่ต้องล็อกอินใหม่ ไม่เจอ reCAPTCHA
+    # (ลองของจริง 10 ก.ย. แล้ว Google เด้ง reCAPTCHA ทุกครั้งที่ล็อกอิน 3/3 รอบ)
+    #
+    # ⚠️ **ใช้เฉพาะโฟลเดอร์ที่ล็อกอินค้างไว้จริงแล้ว** ยังไม่พร้อม = ถอยไปของเดิม
+    # ไม่งั้นจะไปเปิด Chrome เปล่าๆ แล้วเจนไม่ได้ทั้งกองโดยไม่มีอะไรฟ้อง
+    if index == 0 and seat["profile"] is None:
+        try:
+            import flow_accounts                             # noqa: PLC0415
+            email = flow_accounts.current()
+            if email and flow_accounts.is_ready(email):
+                folder = flow_accounts.profile_dir_of(email)
+        except Exception:                                    # noqa: BLE001
+            pass                    # อ่านทะเบียนไม่ได้ = ใช้ของเดิม งานไม่ล้ม
+
+    # ⚠️ **ชื่อล็อกต้องมาคู่กับโฟลเดอร์เสมอ** โฟลเดอร์คนละอันแต่ใช้ล็อกดอก
+    # เดียวกัน = สองงานเปิด Chrome คนละตัวโดยคิดว่าตัวเองกันกันอยู่
+    # ส่วนโฟลเดอร์เดียวกันแต่คนละชื่อล็อก = แย่งโปรไฟล์เดียวกันจน Chrome พัง
+    # โฟลเดอร์เดิมจึงต้องได้ชื่อล็อกเดิมเป๊ะๆ ไม่ใช่ชื่อใหม่ที่แปลว่าที่เดียวกัน
+    if folder != (profile_named(seat["profile"]) if seat["profile"]
+                  else flow_gen_profile_dir()):
+        lock = f"flow-acct-{folder.name}"
+
+    return {"no": index + 1, "dir": folder, "lock": lock}
 
 
 # ---- เว้นระยะระหว่างการยิง (เจ้าของสั่ง 30 ส.ค. 2569) -----------------------

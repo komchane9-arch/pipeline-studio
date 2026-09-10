@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import urllib.error
@@ -33,12 +34,15 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 import chatgpt_driver
+import chrome_view
 import clip_board
+import flow_accounts
 import clip_check
 import clip_claims
 import clip_queue
 import clip_store
 import publish_order
+import publish_stop
 import clip_rules
 
 # ขึ้นบรรทัดใหม่ — ประกาศเป็นค่าคงที่ให้อ่านง่ายเวลาต่อสตริงยาวๆ
@@ -240,10 +244,145 @@ def _gen_set(on: bool) -> None:
     เครดิต 75 หน่วย (5 รอบ x 15) กว่าจะรู้ว่า Flow ยังพังอยู่
     """
     set_config(GEN_PAUSED_KEY, not on)
-    r = globals().get("clip_runner2")
-    if not r:
+    _gen_lane_apply()
+
+
+def _gen_lane_should_open() -> tuple[bool, str]:
+    """ช่องเจนคลิปควรรับงานไหม — **ต้องดูสวิตช์ให้ครบทุกตัว**
+
+    มีสามสวิตช์ที่ปิดช่องนี้ได้ และเดิม**ไม่มีจุดไหนดูครบทั้งสามพร้อมกัน**
+    ต่างคนต่างตั้ง `clip_runner2.stages` เอง ใครตั้งทีหลังก็ทับของคนก่อน
+
+        clip_all_paused    เจ้าของสั่งหยุดสายพานทั้งหมด
+        clip_gen_paused    ปิดเฉพาะช่องเจน (Google Flow ล่ม / เจ้าของสั่ง)
+        clip_flow_enabled  ปิดทั้งขั้นเจน — งานหยุดที่สตอรีบอร์ด + บทพูด
+
+    คืนเหตุผลกลับมาด้วย เพราะ "ปิดอยู่" อย่างเดียวบอกไม่ได้ว่าต้องไปเปิดตัวไหน
+    """
+    config = load_config()
+    if config.get(ALL_PAUSED_KEY):
+        return False, "เจ้าของสั่งหยุดสายพานทั้งหมด"
+    if config.get(GEN_PAUSED_KEY):
+        return False, "ช่องเจนคลิปถูกปิดไว้"
+    if not flow_enabled():
+        return False, "ขั้นเจนคลิปใน Google Flow ถูกปิด (/flow on เพื่อเปิด)"
+    return True, ""
+
+
+def _gen_lane_apply() -> bool:
+    """เปิด/ปิดช่องเจนคลิปให้ตรงกับสวิตช์ทั้งสามตัว ณ ตอนนี้
+
+    เรียกได้ทุกเมื่อ ไม่ต้องรีสตาร์ต — `ClipRunner._loop` อ่าน `self.stages`
+    ใหม่ทุกรอบ **ต้องเรียกทุกครั้งที่สวิตช์ตัวใดตัวหนึ่งเปลี่ยน**
+    """
+    open_it, _why = _gen_lane_should_open()
+    runner = globals().get("clip_runner2")
+    if runner:
+        runner.stages = ({clip_queue.STAGE_READY_FLOW} if open_it
+                         else {GEN_PAUSED_MARK})
+    return open_it
+
+
+# ------------------- โควตารูปของ ChatGPT หมด → หยุดส่งเข้าเอง แล้วเปิดกลับเอง
+#
+# **เจอจริง 31 ส.ค. 2569 23:22–23:31** โควตารูปหมด แต่สายพานยังไล่ส่งใบต่อไป
+# เข้า ChatGPT ทุก ๆ ~4 นาที ได้คำสั่ง Flow กับบทพูดกลับมาครบ **แต่ไม่ได้ภาพ
+# สักใบ** วัดจากล็อกจริง 3 ใบใน 6 นาที ไม่มีใบไหนได้ภาพเลย
+#
+# ปล่อยไว้จนโควตาคืน (เขาบอกเอง 12 ชม. 21 นาที) = ส่งเปล่าอีกราว 150 ครั้ง
+# ซึ่งนอกจากไม่ได้อะไร ยังไปเร่งให้เจอ "Too many requests" เร็วขึ้นด้วย
+#
+# **ปิดเฉพาะขั้น "รอทำสตอรีบอร์ด"** ขั้นสั่งแก้กับขั้นโพสต์ยังเดินต่อตามปกติ
+# เพราะสองอย่างนั้นไม่ต้องใช้โควตารูปเลย — ปิดเหมารวมคือหยุดงานที่ยังทำได้
+SB_PAUSED_KEY = "clip_storyboard_until"       # เวลาที่จะเปิดกลับ (epoch วินาที)
+
+_DURATION_RE = re.compile(r"(\d+)\s*(hour|hr|minute|min)", re.I)
+
+
+def _quota_wait_seconds(text: str) -> float:
+    """แปลง "12 hours and 21 minutes" เป็นวินาที — คืน 0 ถ้าอ่านไม่ออก
+
+    **0 แปลว่าไม่รู้ ไม่ใช่แปลว่าคืนแล้ว** ผู้เรียกต้องใส่ค่าสำรองเอง
+    """
+    total = 0.0
+    for number, unit in _DURATION_RE.findall(text or ""):
+        total += int(number) * (3600 if unit.lower()[0] == "h" else 60)
+    return total
+
+
+def _sb_set(on: bool, until: float = 0.0) -> None:
+    """เปิด/ปิดช่องทำสตอรีบอร์ด **ตอนรัน ไม่ต้องรีสตาร์ต**
+
+    `ClipRunner._loop` อ่าน `self.stages` ใหม่ทุกรอบ แก้ตรงนี้จึงมีผลทันที
+    และ **จำเวลาเปิดกลับลง config** ไม่งั้นรีสตาร์ตแล้วกลับมาส่งเปล่าต่อ
+    """
+    set_config(SB_PAUSED_KEY, 0.0 if on else float(until or 0.0))
+    runner = globals().get("clip_runner")
+    if not runner:
         return
-    r.stages = ({clip_queue.STAGE_READY_FLOW} if on else {GEN_PAUSED_MARK})
+    stages = set(CLIP_SLOT1_STAGES)
+    if not on:
+        stages.discard(clip_queue.STAGE_READY_STORYBOARD)
+    runner.stages = stages
+
+
+def _sb_pause_for(seconds: float, why: str) -> None:
+    """หยุดช่องสตอรีบอร์ดชั่วคราว + บอกให้รู้ว่าหยุดทำไมและจะกลับมาเมื่อไร"""
+    seconds = max(float(seconds or 0), 15 * 60)      # อย่างน้อยครึ่งชั่วโมงที่คุ้ม
+    until = time.time() + seconds
+    _sb_set(False, until)
+    back = datetime.fromtimestamp(until).strftime("%H:%M")
+    waiting = sum(1 for j in clip_jobs.all()
+                  if j.get("stage") == clip_queue.STAGE_READY_STORYBOARD)
+    _clip_log(f"⏸ หยุดช่องทำสตอรีบอร์ดถึง {back} — {why} (ค้างรออยู่ {waiting} ใบ)")
+    _clip_say("", (
+        f"⏸ <b>หยุดทำสตอรีบอร์ดชั่วคราวถึง {back} น.</b>@NL@"
+        f"{why}@NL@@NL@"
+        f"งานค้างรออยู่ {waiting} ใบ ไม่มีใบไหนหาย "
+        f"ระบบจะกลับมาทำต่อให้เองเมื่อถึงเวลา@NL@"
+        f"ขั้นสั่งแก้กับขั้นโพสต์ยังทำงานตามปกติ"
+    ).replace("@NL@", chr(10)))
+
+
+def _sb_keeper() -> None:
+    """ถึงเวลาโควตาคืนแล้วเปิดช่องสตอรีบอร์ดกลับเอง — ไม่ต้องรอคนมากด"""
+    while True:
+        time.sleep(60)
+        try:
+            until = float(load_config().get(SB_PAUSED_KEY) or 0)
+            if until and time.time() < until:
+                continue                       # ยังไม่ถึงเวลา ปิดต่อไป
+            if load_config().get(ALL_PAUSED_KEY):
+                continue                       # เจ้าของสั่งหยุดทั้งหมด อย่าปลุก
+
+            # **ไม่มีเวลาปิดค้างอยู่ แต่ช่องยังปิด = ต้องเปิดกลับ**
+            #
+            # ของเดิมเขียน `if not until or ...: continue` ซึ่งแปลว่า
+            # **พอมีคนล้างค่าเวลาปิดทิ้ง (ตั้งเป็น 0) ตัวเฝ้าจะข้ามทุกรอบ**
+            # แล้วไม่มีใครเปิดช่องกลับเลย ต้องรีสตาร์ตเซิร์ฟเวอร์ถึงจะหาย
+            #
+            # เจอจริง 10 ก.ย. 2569: ล้างค่าแล้วรอ 5 นาที งาน 5 ใบยังนอนอยู่ที่
+            # "รอทำสตอรีบอร์ด" โดยไม่มีอะไรฟ้องว่าทำไมไม่เริ่ม — ตรงกับกติกา
+            # ข้อ 2.4 (ห้ามให้ขั้นตอนไหนเป็นกล่องดำ)
+            runner = globals().get("clip_runner")
+            already_open = bool(
+                runner and clip_queue.STAGE_READY_STORYBOARD in (runner.stages or set()))
+            if already_open:
+                continue                       # เปิดอยู่แล้ว ไม่ต้องทำอะไร
+
+            _sb_set(True)
+            why = ("ถึงเวลาโควตารูป ChatGPT คืนแล้ว" if until
+                   else "ไม่มีคำสั่งปิดค้างอยู่แล้ว")
+            _clip_log(f"▶️ {why} — เปิดช่องทำสตอรีบอร์ดกลับ")
+            if until:
+                _clip_say("", "▶️ <b>โควตารูป ChatGPT น่าจะคืนแล้ว</b>"
+                              + chr(10) + "กลับมาทำสตอรีบอร์ดต่อให้เองแล้ว")
+            try:
+                clip_runner.wake()
+            except Exception:                                     # noqa: BLE001
+                pass
+        except Exception:                                         # noqa: BLE001
+            pass
 
 
 # หยุดทั้งสายพาน — เจ้าของสั่ง "หยุดทั้งหมดก่อน" 31 ส.ค. 2569
@@ -288,13 +427,21 @@ def _gen_restore() -> None:
         _clip_log("⛔ สายพานทั้งหมดยังหยุดอยู่ตามที่เจ้าของสั่ง "
                   "— งานในคิวยังอยู่ครบ")
         return
-    if not load_config().get(GEN_PAUSED_KEY):
-        return
-    r = globals().get("clip_runner2")
-    if r:
-        r.stages = {GEN_PAUSED_MARK}
-    _clip_log("⛔ ช่องเจนคลิปยังปิดอยู่ตามที่จำไว้ก่อนรีสตาร์ต "
-              f"— ตัวลองจะเช็ค Google Flow ให้ทุก {VEO_PROBE_MINUTES} นาที")
+    # ช่องสตอรีบอร์ด — ยังไม่ถึงเวลาโควตาคืนก็ต้องปิดค้างไว้เหมือนเดิม
+    sb_until = float(load_config().get(SB_PAUSED_KEY) or 0)
+    if sb_until and time.time() < sb_until:
+        _sb_set(False, sb_until)
+        back = datetime.fromtimestamp(sb_until).strftime("%H:%M")
+        _clip_log(f"⏸ ช่องทำสตอรีบอร์ดยังปิดอยู่ถึง {back} (โควตารูป ChatGPT)")
+    elif sb_until:
+        set_config(SB_PAUSED_KEY, 0.0)
+
+    # ช่องเจนคลิป — คิดจากสวิตช์ทั้งสามตัว ไม่ใช่ดูแค่ `clip_gen_paused`
+    # เดิมดูตัวเดียว ผลคือปิด `clip_flow_enabled` ไว้แต่ช่องยังเปิดรับงาน
+    if not _gen_lane_apply():
+        _why = _gen_lane_should_open()[1]
+        _clip_log(f"⛔ ช่องเจนคลิปยังปิดอยู่ — {_why} "
+                  f"(ตัวลองจะเช็ค Google Flow ให้ทุก {VEO_PROBE_MINUTES} นาที)")
 
 
 def _note_veo_result(ok: bool) -> None:
@@ -354,6 +501,15 @@ def _veo_prober() -> None:
         try:
             if load_config().get(ALL_PAUSED_KEY):
                 continue                 # เจ้าของสั่งหยุดทั้งหมด อย่าปลุก
+            if not flow_enabled():
+                # ⛔ **เจ้าของปิดขั้นเจนเอง — ห้ามแอบเปิดกลับ**
+                #
+                # ตัวลองนี้มีไว้กู้ตอน Google Flow ล่ม ซึ่งเป็นของที่หายเองได้
+                # แต่ **"เจ้าของสั่งหยุด" ไม่ใช่ของที่หายเอง** ปล่อยไว้แบบเดิม
+                # อีก 20 นาทีมันจะเปิดกลับแล้วเผาเครดิต 15 หน่วยทันที
+                # ทั้งที่เพิ่งได้รับคำสั่งว่า "ห้ามเจนคลิปอะไรเพิ่มอีกทั้งนั้น"
+                # (31 ส.ค. 2569 23:39)
+                continue
             if _gen_running():
                 continue
             waiting = sum(1 for j in clip_jobs.all()
@@ -1895,6 +2051,12 @@ def _clip_make(job: dict) -> None:
     frame_label, frame_ask = clip_rules.ask_of(run)
     if frame_ask:
         rules.append((frame_label, frame_ask))
+    # พรีเซนเตอร์ — **เปิดเองเมื่อมีรูปอยู่ใน data/presenter/** ไม่มีช่องติ๊ก
+    # เพราะกติกาข้อนี้ไม่มีรูปแล้วทำงานไม่ได้ (เจ้าของสั่ง 9 ก.ย. 2569)
+    faces = clip_rules.presenter_images()
+    if faces:
+        rules.append((clip_rules.PRESENTER_LABEL,
+                      clip_rules.presenter_ask(len(faces))))
     extra_ask = (NEWLINE + NEWLINE).join(text for _, text in rules)
     _clip_say(
         chat_id,
@@ -1938,11 +2100,22 @@ def _clip_make(job: dict) -> None:
                     log=_clip_log, extra_ask=extra_ask,
                     gpt_url=slot["gpt"],
                     avoid_openers=_clip_recent_openers(data.get("item_id", "")),
+                    presenter=faces,
                 )
 
             def _gpt_ok(got: dict) -> str:
                 if not got:
                     return "ไม่ได้อะไรกลับมาเลย"
+                # **สองเคสนี้ลองซ้ำไปก็ได้ผลเดิม — ห้ามให้ตัวเฝ้าลองใหม่**
+                #
+                # เจอจริง 31 ส.ค. 23:40 — แก้ชั้นในไปแล้วว่าโควตาหมดห้ามลองซ้ำ
+                # แต่ **ตัวเฝ้าชั้นนอกยังลองซ้ำอยู่ดี** เพราะมันเห็นแค่ว่า
+                # "ไม่ได้ภาพ" ซึ่งเป็นจริงทั้งตอนโควตาหมดและตอนควรลองใหม่
+                # — รูปแบบเดิมซ้ำอีกชั้น (กติกาข้อ 2.3.1)
+                #
+                # บทเรียน: **ปิดรูตรงที่เจอไม่พอ ต้องไล่ดูทุกชั้นที่ถามคำถามเดียวกัน**
+                if got.get("quota_out"):
+                    return ""            # โควตารูปหมด — ลองกี่ครั้งก็ไม่มีรูป
                 if got.get("refused"):
                     return ""            # ปฏิเสธเพราะเนื้อหา — คนละเรื่อง ไม่ต้องลองซ้ำ
                 if not (got.get("frames") or []):
@@ -2017,6 +2190,23 @@ def _clip_make(job: dict) -> None:
     sb_dir = Path(run.get("folder", "")) / clip_store.STORYBOARD_DIR
     if sb_dir.is_dir():
         frames_on_disk = sorted(sb_dir.glob("*.png")) + sorted(sb_dir.glob("*.jpg"))
+    # โควตารูปหมด — บอกสาเหตุจริงกับเวลาที่จะกลับมาได้ แทนคำว่า "ไม่ได้วาด"
+    #
+    # แยกออกมาเพราะ **สิ่งที่คนต้องทำต่างกัน** — โดนตัวกรองต้องแก้คำแล้วสั่งใหม่
+    # ส่วนโควตาหมดไม่ต้องทำอะไรเลย กดสั่งใหม่ตอนนี้ก็ได้ผลเดิม เสียเวลาเปล่า
+    if not frames_on_disk and result.get("quota_out"):
+        when = result.get("quota_reset") or ""
+        # **หยุดส่งใบต่อไปทันที** ไม่ใช่แค่รายงานใบนี้แล้วปล่อยให้ใบถัดไปเจอเอง
+        # ไม่รู้เวลาคืนก็ยังต้องหยุด — ใช้ 1 ชั่วโมงแล้วค่อยลองใหม่ ดีกว่าส่งเปล่า
+        _sb_pause_for(_quota_wait_seconds(when) or 3600,
+                      "โควตารูปของบัญชี ChatGPT หมด — ส่งไปตอนนี้ก็ไม่ได้ภาพ")
+        raise _step_block(
+            3, "โควตารูปของบัญชี ChatGPT หมด — วาดสตอรีบอร์ดไม่ได้"
+               + (f" (เขาบอกว่าคืนสิทธิ์อีก {when})" if when else ""),
+            item_id=item_id, chat_id=chat_id,
+            fix="ไม่ต้องกดอะไร ระบบจะพากลับมาทำใหม่เองเมื่อโควตาคืน "
+                "— กดสั่งใหม่ตอนนี้ก็ได้ผลเดิม")
+
     if not frames_on_disk and not result.get("refused"):
         raise _step_block(
             3, "ChatGPT ให้มาแต่คำสั่ง Flow กับบทพูด **ไม่ได้วาดภาพสตอรีบอร์ด**",
@@ -2538,6 +2728,9 @@ def _clip_generate(job: dict) -> None:
     #
     # ช่อง 1 = โปรไฟล์ Flow เดิม · ช่อง 2 = โปรไฟล์ที่ 2 ที่เจ้าของล็อกอิน Flow ไว้
     # โฟลเดอร์กับชื่อล็อกมาคู่กันจาก `flow_seat()` ที่เดียว จะได้ไม่จับผิดคู่
+    # เลือกบัญชีก่อน **แล้วค่อยถามที่นั่ง** — ที่นั่งช่อง 1 อ่านโฟลเดอร์จาก
+    # บัญชีที่กำลังใช้อยู่ ถามก่อนสลับจะได้โฟลเดอร์ของบัญชีเก่า
+    _flow_pick_account()
     seat = flow_seat(_current_slot())
     chat_id = job["chat_id"]
     run = clip_store.load_run(DATA_DIR, job.get("item_id", ""))
@@ -2659,6 +2852,47 @@ def _clip_generate(job: dict) -> None:
                 else:
                     _clip_log("อ่านเครดิตก่อนเริ่มไม่ได้ — รอบนี้จะบอกยอดใช้ไม่ได้")
 
+                # ---- เครดิตไม่พอเจนอีกใบ = ต้องสลับบัญชี (เจ้าของสั่ง 9 ก.ย. 2569)
+                #
+                # **ต้องเช็คก่อนกดเจน ไม่ใช่หลัง** — กดไปแล้วเครดิตไม่พอ Google
+                # จะปฏิเสธกลางทาง ซึ่งกินเวลาเปิดหน้า/อัปโหลดภาพไปแล้วราว 1 นาที
+                # ต่อใบโดยไม่ได้อะไรกลับมา
+                #
+                # ✅ **สลับบัญชีเองได้แล้ว** (เจ้าของสั่ง 10 ก.ย. 2569 —
+                # *"เอาเลยทำโปรไฟล์แยก"*) การสลับไม่ใช่การล็อกอินใหม่อีกต่อไป
+                # แต่เป็นการ **เปิด Chrome คนละโฟลเดอร์** ที่ล็อกอินค้างไว้แล้ว
+                # จึงไม่ต้องผ่าน reCAPTCHA และไม่ต้องมีคนนั่งเฝ้า
+                #
+                # ตรงนี้เป็นแค่**ตาข่ายรับ** — ทางหลักคือ `_flow_pick_account()`
+                # ที่สลับตั้งแต่ยังไม่เปิดเบราว์เซอร์ จะได้ไม่เสียงานสักใบ
+                # ตรงนี้ทำงานเฉพาะตอนยอดที่จดไว้ไม่ทันสมัย
+                _switch, _why = flow_accounts.should_switch(credits_before)
+                if _switch:
+                    _new = _flow_switch_account(credits_before, _why)
+                    if _new:
+                        # ยังไม่ปิดช่องเจน — รอบหน้าใช้โฟลเดอร์ใหม่แล้วไปต่อได้
+                        raise SwitchAccount(
+                            f"เครดิตเหลือ {credits_before} ไม่พอเจนอีกใบ "
+                            f"— สลับไป {flow_accounts.mask(_new)} แล้ว")
+                    _spare = flow_accounts.next_account()
+                    _gen_set(False)          # หยุดช่องเจนไว้ก่อน อย่าไล่เผาต่อ
+                    if _spare:
+                        _fix = ("บัญชีสำรอง "
+                                f"{flow_accounts.mask(_spare['email'])} "
+                                "ยังไม่ได้ตั้งค่าโปรไฟล์ — สั่ง "
+                                "<code>python flow_login.py โปรไฟล์</code> "
+                                "แล้วล็อกอินในหน้าต่างที่เด้งขึ้นมา ครั้งเดียวจบ")
+                    elif flow_accounts.emails():
+                        _fix = ("บัญชีสำรองที่เก็บไว้เครดิตไม่พอทุกใบ "
+                                "— ต้องเติมเครดิตหรือเพิ่มบัญชีใหม่")
+                    else:
+                        _fix = ("ยังไม่ได้เก็บบัญชีสำรองไว้เลย — เพิ่มด้วย "
+                                "python flow_accounts.py add อีเมล")
+                    raise _step_block(
+                        4, f"เครดิตไม่พอเจนอีกใบ — {_why}",
+                        item_id=str(job.get("item_id") or ""), chat_id=chat_id,
+                        fix=_fix)
+
                 # หนึ่งคลิปจบทุกฉาก = เจนครั้งเดียว เสียเครดิตครั้งเดียว
                 jobs = (
                     [(0, build_one_clip_prompt(prompts, seconds), folder / "clip.mp4")]
@@ -2752,6 +2986,14 @@ def _clip_generate(job: dict) -> None:
                 except Exception:                                # noqa: BLE001
                     after = None
                 _remember_credits(after)
+                # จดลงทะเบียนบัญชีด้วย — **นี่คือของที่ทำให้สลับก่อนเปิด Chrome ได้**
+                # ไม่จดตรงนี้ รอบหน้าจะไม่รู้ว่าใบนี้เหลือเท่าไรจนกว่าจะเปิดเบราว์เซอร์
+                try:
+                    _acct = flow_accounts.current()
+                    if _acct and after is not None:
+                        flow_accounts.note_credits(_acct, after)
+                except Exception as _error:                  # noqa: BLE001
+                    _clip_log(f"จดเครดิตลงทะเบียนบัญชีไม่ได้: {_error}")
                 if after is not None:
                     if credits_before is not None:
                         used = credits_before - after
@@ -2765,43 +3007,69 @@ def _clip_generate(job: dict) -> None:
 
     # โปรไฟล์ของ Flow แยกจาก ChatGPT แล้ว (28 ส.ค. 2569) จึงใช้ล็อกคนละดอก
     # ผลคือ **ทำสตอรีบอร์ดกับเจนคลิปเดินพร้อมกันได้** ไม่ต้องผลัดกันเหมือนเดิม
-    _clip_log(f"เจนคลิปด้วยช่อง {seat['no']} (โปรไฟล์ {seat['dir'].name})")
-    space_out("flow", log=_clip_log)
-    with shared.browser_lock(label=f"เจนคลิปใน Google Flow ช่อง {seat['no']}",
-                             profile=seat["lock"]):
+    def _one_round():
+        """เปิดเบราว์เซอร์แล้วเจนหนึ่งรอบ — อ่าน `seat` ตอนถูกเรียก
+
+        ต้องอ่านตอนถูกเรียก **ไม่ใช่ตอนสร้างฟังก์ชัน** เพราะรอบสองใช้ที่นั่ง
+        ใหม่ที่เพิ่งสลับมา
+        """
+        with shared.browser_lock(label=f"เจนคลิปใน Google Flow ช่อง {seat['no']}",
+                                 profile=seat["lock"]):
+            try:
+                wants_login = attempt()
+            except WrongFlowPlan as error:
+                # แจ้งให้เห็นชัดว่าต้อง**เปลี่ยนบัญชี** ไม่ใช่แค่บอกว่างานล้ม
+                # (เจ้าของสั่งไว้ 30 ส.ค. 2569 — ข้อความต้องบอกวิธีแก้ ไม่ใช่บอกแค่อาการ)
+                how = ("login-slot --slot %d" % seat["no"]) if seat["no"] > 1 else "login"
+                _clip_say(
+                    chat_id,
+                    "🚫 <b>บัญชี Google Flow ผิด — ต้องเปลี่ยนบัญชีก่อน</b>\n"
+                    + telegram_bot._escape(str(error))
+                    + "\n\nโปรไฟล์ที่ใช้อยู่: <code>%s</code>\n" % seat["dir"].name
+                    + "เปิดหน้าต่างสลับบัญชีด้วย\n"
+                    + "<code>python flow_worker.py %s</code>" % how,
+                )
+                _clip_log("🚫 %s" % error)
+                raise
+            if wants_login:
+                # ผู้ใช้สั่งไว้: ถ้าต้องล็อกอิน ให้เด้งหน้าต่างขึ้นมาให้ล็อกอินเอง
+                # ต้องเรียก **นอกบล็อก Playwright** — เปิดซ้อนกันไม่ได้
+                # (เจอจริง: "Sync API inside the asyncio loop" ล้มทั้ง 3 งานรวด)
+                _clip_say(
+                    chat_id,
+                    "🔐 <b>Google Flow ยังไม่ได้ล็อกอิน</b>\n"
+                    "เปิดหน้าต่างขึ้นมาบนเครื่องแล้ว — ล็อกอินในหน้าต่างนั้นได้เลย\n"
+                    "ล็อกอินเสร็จระบบจะเจนต่อให้เอง (รอสูงสุด 15 นาที)",
+                )
+                _clip_log("Google Flow ยังไม่ล็อกอิน — เปิดหน้าต่างให้ผู้ใช้")
+                from flow_worker import login_flow
+                if login_flow(15) != 0:
+                    _clip_say(chat_id, "❌ ยังไม่ได้ล็อกอิน Google Flow — สั่งเจนใหม่ได้ทีหลัง")
+                    raise RuntimeError("ยังไม่ได้ล็อกอิน Google Flow")
+                if attempt():
+                    raise RuntimeError("ล็อกอินแล้วแต่ Flow ยังบอกว่ายังไม่ได้ล็อกอิน")
+
+    # ---- ลองได้สูงสุด 2 รอบ: รอบสองเกิดเฉพาะตอน**สลับบัญชีกลางทาง** -------
+    #
+    # ต้องออกมาปล่อยล็อกก่อนแล้วค่อยเริ่มใหม่ เพราะโฟลเดอร์ใหม่มาคู่กับ
+    # **ชื่อล็อกใหม่** เปิดโฟลเดอร์ใหม่ทั้งที่ยังถือล็อกเก่าอยู่ = งานอื่นที่
+    # ถือล็อกของโฟลเดอร์นั้นจะเปิด Chrome ทับกันโดยไม่มีใครกัน
+    for _try in (1, 2):
+        _clip_log(f"เจนคลิปด้วยช่อง {seat['no']} (โปรไฟล์ {seat['dir'].name})")
+        space_out("flow", log=_clip_log)
         try:
-            wants_login = attempt()
-        except WrongFlowPlan as error:
-            # แจ้งให้เห็นชัดว่าต้อง**เปลี่ยนบัญชี** ไม่ใช่แค่บอกว่างานล้ม
-            # (เจ้าของสั่งไว้ 30 ส.ค. 2569 — ข้อความต้องบอกวิธีแก้ ไม่ใช่บอกแค่อาการ)
-            how = ("login-slot --slot %d" % seat["no"]) if seat["no"] > 1 else "login"
-            _clip_say(
-                chat_id,
-                "🚫 <b>บัญชี Google Flow ผิด — ต้องเปลี่ยนบัญชีก่อน</b>\n"
-                + telegram_bot._escape(str(error))
-                + "\n\nโปรไฟล์ที่ใช้อยู่: <code>%s</code>\n" % seat["dir"].name
-                + "เปิดหน้าต่างสลับบัญชีด้วย\n"
-                + "<code>python flow_worker.py %s</code>" % how,
-            )
-            _clip_log("🚫 %s" % error)
-            raise
-        if wants_login:
-            # ผู้ใช้สั่งไว้: ถ้าต้องล็อกอิน ให้เด้งหน้าต่างขึ้นมาให้ล็อกอินเอง
-            # ต้องเรียก **นอกบล็อก Playwright** — เปิดซ้อนกันไม่ได้
-            # (เจอจริง: "Sync API inside the asyncio loop" ล้มทั้ง 3 งานรวด)
-            _clip_say(
-                chat_id,
-                "🔐 <b>Google Flow ยังไม่ได้ล็อกอิน</b>\n"
-                "เปิดหน้าต่างขึ้นมาบนเครื่องแล้ว — ล็อกอินในหน้าต่างนั้นได้เลย\n"
-                "ล็อกอินเสร็จระบบจะเจนต่อให้เอง (รอสูงสุด 15 นาที)",
-            )
-            _clip_log("Google Flow ยังไม่ล็อกอิน — เปิดหน้าต่างให้ผู้ใช้")
-            from flow_worker import login_flow
-            if login_flow(15) != 0:
-                _clip_say(chat_id, "❌ ยังไม่ได้ล็อกอิน Google Flow — สั่งเจนใหม่ได้ทีหลัง")
-                raise RuntimeError("ยังไม่ได้ล็อกอิน Google Flow")
-            if attempt():
-                raise RuntimeError("ล็อกอินแล้วแต่ Flow ยังบอกว่ายังไม่ได้ล็อกอิน")
+            _one_round()
+        except SwitchAccount as error:
+            if _try == 2:
+                raise _step_block(
+                    4, f"สลับบัญชีแล้วเครดิตก็ยังไม่พอ — {error}",
+                    item_id=str(job.get("item_id") or ""), chat_id=chat_id,
+                    fix="ตั้งค่าโปรไฟล์บัญชีที่เหลือ หรือเติมเครดิตให้ใบที่มีอยู่")
+            _clip_say(chat_id, f"🔁 {telegram_bot._escape(str(error))}\n"
+                               "เริ่มรอบใหม่ด้วยบัญชีนั้นให้เลย")
+            seat = flow_seat(_current_slot())
+            continue
+        break
 
     _clip_keep(
         lambda: clip_store.save_video(
@@ -3066,7 +3334,7 @@ def _tiktok_send_post_review(job: dict) -> None:
 
 
 def _tiktok_post(job: dict) -> None:
-    """ขั้นสุดท้าย: โพสต์คลิปขึ้น TikTok ด้วยตัวโพสต์เดิมใน tiktok_post.py"""
+    """ขั้นสุดท้าย: ส่งงานให้ผัง TikTok บนมือถือจริงโพสต์ให้."""
     chat_id = job["chat_id"]
     run = clip_store.load_run(DATA_DIR, job.get("item_id", ""))
     videos = run.get("videos") or []
@@ -3086,31 +3354,30 @@ def _tiktok_post(job: dict) -> None:
         _clip_log(f"ไม่ได้โพสต์ TikTok ของ {job.get('item_id','')} — {why}")
         return
 
-    folder = Path(run["folder"])
-    video = folder / videos[0]
-    _clip_say(chat_id, f"🚀 กำลังโพสต์ขึ้น TikTok… ({video.name})")
-    outcome = tiktok_repost.post_to_tiktok(
-        video,
-        caption=tiktok_repost.build_post_caption(run),
-        tags=run.get("highlights") or [],
-        pid=run.get("tiktok_product_id") or "",
-        log=_clip_log,
-    )
-    # จดว่าลง TikTok แล้ว — **ขาดตรงนี้มาตลอด** ผลคือ run.json ไม่เคยรู้ว่า
-    # คลิปขึ้น TikTok ไปแล้ว ด่านลำดับจึงตรวจไม่ได้ และรายงานบน Drive ก็ไม่ตรง
+    serial, why = _auto_publish_device("tiktok")
+    if not serial:
+        _clip_say(chat_id, f"⛔ <b>ยังโพสต์ TikTok ไม่ได้</b>\n{_escape(why)}")
+        raise RuntimeError(why)
+    _clip_say(chat_id, "🚀 กำลังโพสต์ TikTok ด้วยการกดบนมือถือจริง…")
+    body = json.dumps({"serial": serial, "target": "tiktok",
+                       "item_id": job.get("item_id", "")}).encode("utf-8")
+    request = urllib.request.Request(
+        MAIN_SERVER + "/api/publish/flow/run", data=body,
+        headers={"Content-Type": "application/json"}, method="POST")
     try:
-        clip_store.mark_posted(DATA_DIR, job.get("item_id", ""), "tiktok",
-                               outcome.get("url") or "")
-    except Exception as error:                               # noqa: BLE001
-        _clip_log(f"โพสต์ TikTok สำเร็จแต่จดไม่ลง: {type(error).__name__}: {error}")
-
+        with urllib.request.urlopen(request, timeout=900) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:400]
+        try:
+            detail = json.loads(detail).get("detail") or detail
+        except Exception:                                       # noqa: BLE001
+            pass
+        raise RuntimeError(str(detail)) from error
+    if not result.get("ok"):
+        raise RuntimeError(str(result.get("error") or "เดินผัง TikTok ไม่จบ"))
     clip_jobs.update(job["id"], stage=clip_queue.STAGE_DONE)
-    _clip_say(
-        chat_id,
-        "✅ <b>โพสต์ขึ้น TikTok แล้ว</b>\n"
-        f"ผูกสินค้า: {'ใช่' if outcome.get('product_attached') else 'ไม่ได้ผูก'} · "
-        f"แก้ปก: {'ใช่' if outcome.get('cover_edited') else 'ไม่'}",
-    )
+    _clip_say(chat_id, f"✅ <b>โพสต์ขึ้น TikTok แล้ว</b> ({result.get('done', 0)}/{result.get('total', 0)} ขั้น)")
 
 
 STAGE_WORK_NAME = {
@@ -3132,6 +3399,56 @@ _SLOT = threading.local()
 
 def _current_slot() -> int:
     return int(getattr(_SLOT, "number", 1) or 1)
+
+
+class SwitchAccount(RuntimeError):
+    """เครดิตบัญชีนี้ไม่พอแล้ว สลับให้แล้ว ขอเปิดเบราว์เซอร์ใหม่ด้วยโฟลเดอร์ใหม่
+
+    **ไม่ใช่ความล้มเหลว** เป็นสัญญาณให้ตัวเรียกเริ่มรอบใหม่ด้วยโปรไฟล์ที่สลับไป
+    """
+
+
+def _flow_switch_account(credits: int | None, why: str) -> str:
+    """สลับไปบัญชีถัดไปที่ **โปรไฟล์พร้อมใช้จริง** — คืนอีเมลใหม่ ("" = สลับไม่ได้)
+
+    ⚠️ **ต้องเป็นใบที่ล็อกอินค้างไว้แล้วเท่านั้น** สลับไปใบที่ยังไม่ได้ตั้งค่า
+    เท่ากับพาไปเปิด Chrome เปล่าๆ แล้วเจนไม่ได้ทั้งกองโดยไม่มีอะไรฟ้อง
+    """
+    here = flow_accounts.current()
+    if here and credits is not None:
+        flow_accounts.note_credits(here, credits)
+    spare = flow_accounts.next_account()
+    if not spare or not flow_accounts.is_ready(spare["email"]):
+        return ""
+    flow_accounts.set_current(spare["email"])
+    flow_accounts.mark_used(spare["email"])
+    _clip_log(f"🔁 สลับบัญชี Flow: {flow_accounts.mask(here)} → "
+              f"{flow_accounts.mask(spare['email'])} ({why})")
+    return spare["email"]
+
+
+def _flow_pick_account() -> None:
+    """เลือกบัญชีให้พร้อมก่อนเปิดเบราว์เซอร์ — **ทางหลักของการสลับ**
+
+    ใช้ยอดเครดิตที่จดไว้ตอนจบรอบก่อน ทำให้รู้ตั้งแต่ยังไม่เปิด Chrome ว่า
+    ใบนี้ไม่พอแล้ว จึงสลับได้โดย**ไม่เสียงานสักใบ** ส่วนด่านกลางทาง
+    (หลังเปิดเบราว์เซอร์แล้ว) เป็นแค่ตาข่ายรับกรณีที่ยอดที่จดไว้ไม่ทันสมัย
+    """
+    try:
+        here = flow_accounts.current()
+        if not here:
+            return
+        known = None
+        for row in (flow_accounts.board().get("accounts") or []):
+            if row["email"] == here:
+                known = row["credits"]
+                break
+        switch, why = flow_accounts.should_switch(known)
+        if switch:
+            _flow_switch_account(known, why)
+    except Exception as error:                               # noqa: BLE001
+        # อ่านทะเบียนไม่ได้ = ใช้บัญชีเดิมต่อ ไม่ทำให้งานล้มทั้งใบ
+        _clip_log(f"เลือกบัญชี Flow ไม่ได้ ใช้ของเดิมต่อ: {error}")
 
 
 def _clip_worker(job: dict, slot: int = 1) -> None:
@@ -3524,6 +3841,14 @@ AUTO_STEPS: dict[str, dict] = {
         # **ขั้นนี้โพสต์ขึ้นจริง ถอนคืนไม่ได้** ต้องบอกให้ชัดบนปุ่ม
         "risk": "กดเปิดแล้วคลิปจะขึ้น TikTok เองโดยไม่ถามอีก — ถอนคืนไม่ได้",
     },
+    "tiktok_link": {
+        "label": "เพิ่มสินค้าเข้าโชว์เคส TikTok",
+        "kind": "product_link",
+        "target": "tiktok",
+        "stages": [],
+        "actions": [],
+        "risk": "",
+    },
     # ---- สองอันล่างเป็นคนละชนิดกับสี่อันบน (เจ้าของสั่งเพิ่ม 28 ส.ค. 2569) ----
     #
     # *"shopee กับ facebook reels ทำโพสต์อัตโนมัติด้วยนะ"*
@@ -3553,6 +3878,26 @@ AUTO_STEPS: dict[str, dict] = {
         "risk": ("กดเปิดแล้วระบบจะแตะจอมือถือลง Facebook Reels เองทีละคลิป "
                  "โดยไม่ถามอีก — โพสต์แล้วถอนคืนไม่ได้ ต้องไปลบเองในแอป"),
     },
+    "tiktok_publish": {
+        "label": "ลง TikTok เอง",
+        "kind": "publish",
+        "target": "tiktok",
+        "stages": [],
+        "actions": [],
+        "risk": ("กดเปิดแล้วระบบจะแตะจอมือถือลง TikTok เองทีละคลิป "
+                 "โดยไม่ถามอีก — โพสต์แล้วถอนคืนไม่ได้ ต้องไปลบเองในแอป"),
+    },
+}
+
+# ปุ่มอัตโนมัติที่แสดงบนแต่ละกอง. TikTok ใช้ตัวโพสต์เป็นเจ้าของสวิตช์ที่เห็น
+# เพราะมันต้องเปิดค้างรอได้ ส่วน worker หาสินค้าเป็นลูกที่จบชุดแล้วปิดตัวเองได้.
+BOARD_AUTO_STEP = {
+    "link": "images",
+    "story": "storyboard",
+    "clip": "clip",
+    "tiktok": "tiktok_publish",
+    "shopee_video": "shopee_post",
+    "facebook_reels": "facebook_post",
 }
 
 # เว้นระยะระหว่างการลงอัตโนมัติแต่ละใบ (วินาที)
@@ -3580,9 +3925,19 @@ AUTO_STEPS: dict[str, dict] = {
 # ผลที่คาด: 48 ใบ ประหยัดได้ราว 2 ชั่วโมง และจอไม่ดับคาระหว่างชุด
 AUTO_PUBLISH_GAP_OK = 30.0
 AUTO_PUBLISH_GAP_FAIL = 600.0
+TIKTOK_LINK_BATCH_LIMIT = 55
+TIKTOK_LINK_BATCH_FILE = DATA_DIR / "tiktok_link_batch.json"
 
 _auto_pub_next: dict[str, float] = {}
 _auto_pub_said: dict[str, str] = {}
+_auto_link_next = 0.0
+_tiktok_link_batch_lock = threading.Lock()
+_tiktok_link_worker_lock = threading.Lock()
+_tiktok_link_worker_thread: threading.Thread | None = None
+# กันซ้ำในโปรเซสทันทีเมื่อปลายทางสั่ง hard stop. ปกติค่าจะถูกเขียนลง config
+# สำเร็จอยู่แล้ว ชุดนี้เป็น safety net กรณีไฟล์ถูกล็อกชั่วคราว; จะปลดได้เฉพาะ
+# เมื่อผู้ใช้กดเปิดสวิตช์นั้นใหม่เอง.
+_auto_pub_runtime_stops: set[str] = set()
 
 
 def _device_label(serial: str) -> str:
@@ -3605,12 +3960,14 @@ def _auto_publish_device(target: str) -> tuple[str, str]:
     try:
         import devices                                          # noqa: PLC0415
         import publish_flow                                     # noqa: PLC0415
+        import tiktok_publish_bot                               # noqa: PLC0415
     except Exception as error:                                  # noqa: BLE001
         return "", "อ่านทะเบียนมือถือไม่ได้: " + str(error)
     ready = []
     for serial in devices.enabled_serials("clip"):
         try:
-            if publish_flow.FlowStore(serial).positions(target):
+            if (target == "tiktok" and tiktok_publish_bot.supports(serial)) or \
+                    publish_flow.FlowStore(serial).positions(target):
                 ready.append(serial)
         except Exception:                                       # noqa: BLE001
             continue
@@ -3621,6 +3978,49 @@ def _auto_publish_device(target: str) -> tuple[str, str]:
         names = " · ".join(devices.label(s) for s in ready)
         return "", (f"มีเครื่องที่ลงได้ {len(ready)} เครื่อง ({names}) — "
                     "ระบบไม่เดาให้ว่าจะลงเครื่องไหน กดลงเองทีละใบแทน")
+    return ready[0], ""
+
+
+def _auto_tiktok_link_device() -> tuple[str, str]:
+    """REDMI 15C สายวิดีโอที่เจ้าของระบุสำหรับเพิ่มสินค้าเข้าโชว์เคส TikTok.
+
+    ใช้ทะเบียนและบทบาทของบอต TikTok แทนการเทียบชื่อที่อาจถูกเปลี่ยนจากหน้าเว็บ:
+    ต้องเป็นเครื่องสาย ``clip`` ที่ ``tiktok_publish_bot`` รองรับ และต้องเสียบอยู่
+    ตอนนี้จริง จึงไม่มีทางเผลอไปแตะ REDMI เครื่องสำรองหรือ Xiaomi เครื่องเดิม.
+    """
+    try:
+        import devices                                          # noqa: PLC0415
+        import tiktok_publish_bot                               # noqa: PLC0415
+    except Exception as error:                                  # noqa: BLE001
+        return "", "อ่านทะเบียนมือถือไม่ได้: " + str(error)
+
+    # ทะเบียนเก็บเครื่องที่เคยเสียบไว้ด้วย จึงต้องตัดด้วยสถานะสดจาก 8866 ซึ่งถาม
+    # ADB ตัวเดียวกับที่ใช้ควบคุมมือถือจริง ไม่เปิด adb server คนละชุดมาชนกัน.
+    try:
+        with urllib.request.urlopen(MAIN_SERVER + "/api/devices", timeout=15) as response:
+            live_payload = json.loads(response.read().decode("utf-8"))
+        live_serials = {
+            str(row.get("serial") or "")
+            for row in (live_payload.get("devices") or [])
+            if row.get("ready") and row.get("state") == "device"
+        }
+    except Exception as error:                                  # noqa: BLE001
+        return "", "อ่านสถานะเชื่อมต่อมือถือจากเซิร์ฟเวอร์หลักไม่ได้: " + str(error)
+
+    registered = [
+        serial for serial in devices.enabled_serials("clip")
+        if tiktok_publish_bot.supports(serial)
+    ]
+    ready = [serial for serial in registered if serial in live_serials]
+    if not registered:
+        return "", "ไม่พบ REDMI 15C สายวิดีโอที่เปิดใช้อยู่ในทะเบียนมือถือ"
+    if not ready:
+        names = " · ".join(devices.label(serial) for serial in registered)
+        return "", f"REDMI 15C สายวิดีโอยังไม่ได้เชื่อมต่อ ({names})"
+    if len(ready) > 1:
+        names = " · ".join(devices.label(serial) for serial in ready)
+        return "", (f"พบ REDMI 15C สายวิดีโอที่เชื่อมต่อพร้อมกันมากกว่าหนึ่งเครื่อง "
+                    f"({names}) — ระบบไม่เดาเครื่องให้")
     return ready[0], ""
 
 
@@ -3635,20 +4035,293 @@ def _auto_publish_ready(target: str) -> list[dict]:
     ไปแล้ว เพราะคลิปขั้นโพสต์ส่วนใหญ่จบจากคิวไปแล้ว เช็คแค่คิวจะข้ามไม่ครบ
     """
     runs = clip_store.list_runs(DATA_DIR) + clip_store.list_done(DATA_DIR)
-    by_id = {str(r.get("item_id")): r for r in runs}
+    # โฟลเดอร์เป็นเพียงเงาของสถานะและในอดีตเคยเกิดสำเนา item_id เดียวกัน
+    # อยู่คนละกองได้. ห้ามใช้ dict แบบ last-wins เพราะสำเนาเก่าที่ pending อาจ
+    # ทับสำเนาที่ posted แล้วทำให้ตัวเลือกหยิบคลิปเดิมขึ้นมาโพสต์ซ้ำ.
+    copies_by_id: dict[str, list[dict]] = {}
+    for run in runs:
+        item_id = str(run.get("item_id") or "").strip()
+        if item_id:
+            copies_by_id.setdefault(item_id, []).append(run)
     parked = {str(j.get("item_id")) for j in clip_jobs.all() if j.get("parked")}
     out = []
+    seen: set[str] = set()
     for row in publish_order.ready_now(runs, target):
-        item = row["item_id"]
-        if item in parked or (by_id.get(item) or {}).get("parked"):
+        item = str(row.get("item_id") or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        copies = copies_by_id.get(item) or []
+
+        # ด่านสำคัญที่สุด: ถ้าสำเนาใดสำเนาหนึ่งจดว่าปลายทางนี้ลงแล้ว ให้ถือว่า
+        # item_id นี้ลงแล้วทั้งก้อน. false-negative (ข้ามให้คนตรวจ) ปลอดภัยกว่า
+        # false-positive ที่สร้างโพสต์ซ้ำซึ่งถอนคืนอัตโนมัติไม่ได้.
+        if any((((copy.get("publish") or {}).get(target) or {}).get("status")
+                == "posted") for copy in copies):
+            continue
+
+        # ใช้ record เดียวกับ route โพสต์จริงจะอ่าน เพื่อไม่ให้หน้าคิวเห็นว่า
+        # พร้อมจากสำเนาหนึ่ง แต่ตอนเริ่มงาน route ไปอ่านอีกสำเนาแล้วตอบ 409.
+        run = clip_store.load_run(DATA_DIR, item) or (copies[0] if copies else {})
+        if len(copies) > 1:
+            can_post, _why = publish_order.check(run, target)
+            if not can_post:
+                continue
+        # TikTok ผังใหม่เริ่มจากสินค้าที่ตรวจชื่อ/รุ่นและเพิ่มเข้าโชว์เคสแล้วเท่านั้น.
+        # `publish_order.ready_now()` ตรวจลำดับวันกับโควตา แต่ไม่รู้เรื่องโชว์เคส;
+        # ถ้าไม่กรองตรงนี้ สวิตช์โพสต์จะหยิบใบ pending_review/no-link ขึ้นมา
+        # แล้วล้มที่ preflight ก่อนถึงขั้น 1 วนขวางใบที่พร้อมจริงด้านหลัง.
+        if target == "tiktok":
+            import tiktok_publish_bot                       # noqa: PLC0415
+            if not tiktok_publish_bot.showcase_prepared(run):
+                continue
+            # โหมดอัตโนมัติต้องเชื่อผลตรวจคลิป ไม่ใช่แค่มีไฟล์อยู่จริง.
+            # ถ้าไม่เคยตรวจหรือผลเป็นไม่ผ่าน ให้ค้างไว้ให้คนแก้/อนุมัติเอง;
+            # มิฉะนั้นคำผิด เสียงเสีย หรือภาพแบ่งจอจะถูกโพสต์แบบถอนคืนไม่ได้.
+            if (run.get("video_check") or {}).get("ok") is not True:
+                continue
+        publish_state = ((run.get("publish") or {}).get(target) or {})
+        skipped = (
+            publish_state.get("auto_skip")
+            and str(publish_state.get("auto_skip_link") or "").strip()
+            == str(run.get("affiliate_url") or "").strip()
+        )
+        if item in parked or run.get("parked") or skipped:
             continue
         out.append(row)
-    return out
+    # ใบที่เจ้าของกด Stop ต้องกลับมาเป็นคิวที่ 1 แม้เซิร์ฟเวอร์ถูกรีสตาร์ต.
+    return publish_stop.first(DATA_DIR, target, out)
+
+
+def _already_posted_conflict(status_code: int, detail: str) -> bool:
+    """409 ที่แปลว่าสถานะเปลี่ยนเป็น posted แล้ว ไม่ใช่เหตุให้พักคิว 10 นาที."""
+    return int(status_code or 0) == 409 and "ลงไปแล้ว" in str(detail or "")
+
+
+def _tiktok_link_batch_rows() -> list[dict]:
+    """คืนใบงานชุดเดิม 55 ใบโดยไม่ให้กองที่โตภายหลังเปลี่ยนสมาชิกชุด.
+
+    การใช้ ``bucket[:55]`` ทุกครั้งดูเหมือนตรึงจำนวน แต่ไม่ได้ตรึง *ตัวงาน*:
+    ถ้ามีใบหนึ่งหลุดจากกอง ใบใหม่ลำดับ 56 จะเลื่อนเข้ามาแทนและบอตไม่มีวันจบ
+    ชุดเดิม. จึง snapshot item_id ครั้งแรกลงไฟล์สถานะและอ่านชุดเดิมตลอด.
+    """
+    runs = clip_store.list_runs(DATA_DIR)
+    board = clip_board.build(
+        clip_jobs.all(), lambda item: clip_store.load_run(DATA_DIR, item), runs)
+    bucket = next((row for row in board.get("buckets") or []
+                   if row.get("key") == clip_board.TIKTOK), {})
+    jobs = list(bucket.get("jobs") or [])
+    by_id = {str(row.get("item_id") or ""): row for row in jobs}
+
+    with _tiktok_link_batch_lock:
+        saved = shared.read_json(TIKTOK_LINK_BATCH_FILE, {})
+        ids = ([str(value) for value in (saved.get("item_ids") or []) if str(value)]
+               if isinstance(saved, dict) else [])
+        if not ids:
+            ids = [str(row.get("item_id") or "")
+                   for row in jobs[:TIKTOK_LINK_BATCH_LIMIT]
+                   if str(row.get("item_id") or "")]
+            shared.write_json_atomic(TIKTOK_LINK_BATCH_FILE, {
+                "limit": TIKTOK_LINK_BATCH_LIMIT,
+                "item_ids": ids,
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "note": "ชุด TikTok 55 ใบที่ผู้ใช้ยืนยัน; ห้ามเติมใบใหม่แทนสมาชิกเดิม",
+            })
+            _clip_log(f"ตรึงชุดเพิ่มสินค้าเข้าโชว์เคส TikTok แล้ว {len(ids)} ใบ")
+    # สมาชิกที่ไม่อยู่ในกอง TikTok แล้วไม่ถูกแทนด้วยใบใหม่ และไม่ต้องค้นย้อนหลัง
+    return [by_id[item_id] for item_id in ids if item_id in by_id]
+
+
+def _auto_tiktok_link_ready() -> list[dict]:
+    """ใบในชุด 55 ที่ยังไม่เพิ่มโชว์เคส/รอตรวจ เรียงตามชุดเดิม."""
+    ready = []
+    for row in _tiktok_link_batch_rows():
+        item_id = str(row.get("item_id") or "")
+        run = clip_store.load_run(DATA_DIR, item_id) or {}
+        # ใบที่ล้มเหลวถูกย้ายเข้ากองรอแก้ด้วย ``park_run``; ชุด snapshot ยังมี
+        # item_id เดิมอยู่โดยตั้งใจ แต่ worker ต้องข้ามจนกว่าผู้ใช้กดเอากลับ.
+        if run.get("parked") or row.get("parked"):
+            continue
+        link = run.get("tiktok_product_link") or {}
+        # รูปแบบใหม่ไม่เก็บ URL: เพิ่มโชว์เคสสำเร็จหรือรอคนตรวจคือจบรอบค้นหาแล้ว
+        # ส่วน running/error และข้อมูลเก่า status=matched ต้องกลับมาทำใบเดิมได้.
+        # ห้ามนับ URL เก่าว่าเสร็จ เพราะตัวโพสต์รุ่นใหม่รับเฉพาะ showcase_added;
+        # ถ้าข้ามตรงนี้ ใบเก่าจะติดกลางทางตลอดไป (ตัวหาเห็นว่าเสร็จ แต่ตัวโพสต์
+        # เห็นว่ายังไม่พร้อม).
+        if link.get("status") in {"showcase_added", "pending_review"}:
+            continue
+        ready.append(row)
+    return ready
+
+
+def _set_auto_flags(changes: dict[str, bool]) -> None:
+    """เปลี่ยนเฉพาะสวิตช์ที่ระบุ โดยไม่เขียนทับสถานะงานอัตโนมัติสายอื่น."""
+    def mutate(data: dict) -> None:
+        current = data.get(AUTO_APPROVE_KEY) or {}
+        if not isinstance(current, dict):
+            current = {}
+        current = dict(current)
+        current.update({key: bool(value) for key, value in changes.items()})
+        data[AUTO_APPROVE_KEY] = current
+
+    shared.update_json(shared.CONFIG_FILE, mutate, default={})
+
+
+def _park_failed_tiktok(item_id: str, name: str, reason: str,
+                        stage: str = "tiktok") -> bool:
+    """พักเฉพาะใบ TikTok ที่ติด แล้วปล่อย worker ไปใบถัดไป."""
+    try:
+        clip_store.park_run(DATA_DIR, item_id, reason, stage)
+    except Exception as error:                                  # noqa: BLE001
+        _clip_log(f"พักใบ TikTok {item_id} ไม่สำเร็จ: {error}")
+        return False
+    _clip_log(f"พักใบ TikTok ที่ติดแล้วข้ามไปใบถัดไป: {item_id} · {reason}")
+    chat_id = _default_clip_chat()
+    if chat_id:
+        _clip_say(chat_id, NEWLINE.join([
+            "⏭ <b>หยุดเฉพาะใบ TikTok ที่ติด แล้วไปใบถัดไป</b>",
+            telegram_bot._escape(name),
+            telegram_bot._escape(reason),
+            "เก็บภาพหน้าจอและเหตุผลไว้ในใบงานแล้ว",
+        ]))
+    return True
+
+
+def _auto_tiktok_link_one(step: str) -> bool:
+    """ค้นหาหนึ่งใบต่อรอบ; ตอนเปิดสวิตช์ถูกเรียกทันที ไม่รอรอบ keeper"""
+    global _auto_link_next
+    now = time.time()
+    if now < _auto_link_next:
+        return False
+
+    # ห้ามใช้ `/api/busy` แบบรวม: ปล่อยให้ route ฝั่ง 8866 ถือ
+    # `_tiktok_link_run_lock` และ `phone_queue.slot(serial)` ตรวจ REDMI รายเครื่อง;
+    # ถ้าเครื่องกำลังโพสต์อยู่ งานค้นหาจะรอคิวอย่างปลอดภัยโดยไม่ชนหน้าจอ.
+
+    # งานนี้ค้นหา/คัดลอกลิงก์เท่านั้น ไม่ใช่การโพสต์ แต่เจ้าของย้ายงานนี้มาใช้
+    # REDMI 15C สายวิดีโอเครื่องเดียวกับงานโพสต์ จึงต้องต่อคิวเครื่องเดียวกัน.
+    serial, why = _auto_tiktok_link_device()
+    if not serial:
+        _auto_link_next = now + AUTO_PUBLISH_GAP_FAIL
+        _set_auto_flags({step: False})
+        _clip_log("ยังไม่เพิ่มสินค้าเข้าโชว์เคส TikTok อัตโนมัติ — " + why)
+        _clip_log("หยุดเฉพาะบอตเพิ่มโชว์เคส TikTok แล้ว — ไม่ได้เปิดหรือปิดงานโพสต์อื่น")
+        return False
+    rows = _auto_tiktok_link_ready()
+    if not rows:
+        _auto_link_next = now + AUTO_PUBLISH_GAP_OK
+        return False
+    row = rows[0]
+    item_id = str(row.get("item_id") or "")
+    name = str(row.get("name") or "")[:55]
+    _clip_log(f"เพิ่มสินค้าเข้าโชว์เคส TikTok อัตโนมัติ: {item_id} · {name} "
+              f"(เหลืออีก {len(rows) - 1} ใบ)")
+    body = json.dumps({"serial": serial, "item_id": item_id}).encode("utf-8")
+    request = urllib.request.Request(
+        MAIN_SERVER + "/api/tiktok/product-link/run", data=body,
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=1800) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as error:                                  # noqa: BLE001
+        _auto_link_next = time.time() + AUTO_PUBLISH_GAP_FAIL
+        detail = str(error)
+        status_code = 0
+        if isinstance(error, urllib.error.HTTPError):
+            status_code = int(error.code or 0)
+            try:
+                raw = json.loads(error.read().decode("utf-8", "replace"))
+                detail = str(raw.get("detail") or detail)
+            except Exception:                                   # noqa: BLE001
+                pass
+        # ตอนกดเปิด route นี้เรียกใบแรกทันที ขณะเดียวกัน keeper อาจตื่นมา
+        # กวาดรอบถัดไปและเห็นใบแรกเป็น `running` จึงหยิบใบที่สอง. ฝั่ง 8866
+        # จะตอบ 409 เพราะตั้งใจให้ค้นทีละใบ — นี่คือการรอ ไม่ใช่งานเสีย และ
+        # ห้ามปิดสวิตช์จนใบแรกที่กำลังทำอยู่จบ.
+        if status_code == 409 and "มีงานเพิ่มสินค้าเข้าโชว์เคส TikTok" in detail:
+            _auto_link_next = time.time() + AUTO_PUBLISH_GAP_OK
+            _clip_log("ยังไม่เริ่มเพิ่มโชว์เคสใบถัดไป — ใบก่อนหน้ายังทำอยู่")
+            return False
+        # HTTP 400 = ใบนี้ติดในขั้นของตัวเองและ 8866 เก็บภาพหลักฐานแล้ว.
+        # พักเฉพาะใบ ไม่ปิด worker ทั้งชุด ตามกติกาใหม่ให้เดินใบถัดไปทันที.
+        if status_code == 400:
+            _auto_link_next = time.time() + AUTO_PUBLISH_GAP_OK
+            _park_failed_tiktok(item_id, name, detail, "tiktok")
+            return False
+        # เซิร์ฟเวอร์/มือถือทั้งระบบไม่พร้อม ไม่ควรเหมารวมพักทุกใบรวดเดียว.
+        _set_auto_flags({step: False})
+        _clip_log(f"เพิ่มสินค้า TikTok ของ {item_id} เข้าโชว์เคสไม่สำเร็จ: {detail}")
+        _clip_log("หยุดเพิ่มสินค้าเข้าโชว์เคสอัตโนมัติแล้ว — เป็นปัญหาระดับระบบ")
+        return False
+    result = payload.get("result") or {}
+    _auto_link_next = time.time() + AUTO_PUBLISH_GAP_OK
+    _clip_log(f"ผลโชว์เคส TikTok ของ {item_id}: อันดับ "
+              f"{result.get('selected_rank') or '-'} · {result.get('label') or '-'}")
+    return bool(payload.get("ok"))
+
+
+def _tiktok_link_worker() -> None:
+    """เดินชุด TikTok ต่อเนื่องใน worker แยก จึงไม่บล็อก auto ของสายอื่น.
+
+    หนึ่งใบยังคงทำทีละใบผ่าน lock ของ 8866; worker นี้เพียงเรียกใบถัดไปเอง
+    จนทุกใบเพิ่มโชว์เคสหรือค้างรอตรวจครบ หรือปิดเฉพาะ ``tiktok_link`` เมื่อเจอ
+    operational error.
+    """
+    global _tiktok_link_worker_thread
+    try:
+        while _auto_on().get("tiktok_link"):
+            # เปิดหา/โพสต์พร้อมกันได้ แต่หน้าจอมีเครื่องเดียว. เมื่อมีใบที่ผ่าน
+            # ผลตรวจและเพิ่มโชว์เคสแล้ว ให้ worker นี้หยุดรับใบค้นใหม่ชั่วคราว;
+            # `_auto_keeper` จะให้ตัวโพสต์จับมือถือก่อน แล้วเราค่อยเดินต่อ.
+            # ห้ามปิดสวิตช์ publish ตรงนี้ เพราะจะทำให้ส่งต่องานไม่ครบวงจร.
+            current = _auto_on()
+            if current.get("tiktok_publish") and _auto_publish_ready("tiktok"):
+                time.sleep(2.0)
+                continue
+
+            waiting = _auto_tiktok_link_ready()
+            if not waiting:
+                _set_auto_flags({"tiktok_link": False})
+                _clip_log(
+                    f"ตรวจสินค้าเข้าโชว์เคส TikTok ครบชุดเดิม {len(_tiktok_link_batch_rows())}/"
+                    f"{TIKTOK_LINK_BATCH_LIMIT} ใบแล้ว — ปิดสวิตช์หาลิงก์อัตโนมัติ")
+                break
+
+            _auto_tiktok_link_one("tiktok_link")
+            if not _auto_on().get("tiktok_link"):
+                break
+            # ตื่นเป็นช่วงสั้นเพื่อให้ปิดสวิตช์แล้วหยุดได้ไว ไม่ sleep ยาวก้อนเดียว
+            deadline = max(time.time() + 1.0, _auto_link_next)
+            while time.time() < deadline and _auto_on().get("tiktok_link"):
+                time.sleep(min(2.0, deadline - time.time()))
+    except Exception as error:                                  # noqa: BLE001
+        _set_auto_flags({"tiktok_link": False})
+        _clip_log(
+            "บอตหาลิงก์ TikTok สะดุดและหยุดเฉพาะสวิตช์นี้: "
+            f"{type(error).__name__}: {error}")
+    finally:
+        with _tiktok_link_worker_lock:
+            _tiktok_link_worker_thread = None
+
+
+def _ensure_tiktok_link_worker() -> bool:
+    """เปิด worker หนึ่งตัวเท่านั้น; คืน True ทั้งตอนเริ่มใหม่และตอนรันอยู่."""
+    global _tiktok_link_worker_thread
+    with _tiktok_link_worker_lock:
+        if _tiktok_link_worker_thread and _tiktok_link_worker_thread.is_alive():
+            return True
+        _tiktok_link_worker_thread = threading.Thread(
+            target=_tiktok_link_worker,
+            name="tiktok-product-link-bot",
+            daemon=True,
+        )
+        _tiktok_link_worker_thread.start()
+        return True
 
 
 # ลำดับที่ต้องลงให้หมดก่อนถึงจะไปตัวถัดไป — เรียงตามกติกาข้อ 2.8 ของโปรเจกต์
 # (Shopee Video → Facebook Reels → TikTok)
-AUTO_PUBLISH_PRIORITY = ["shopee_post", "facebook_post", "tiktok_post"]
+AUTO_PUBLISH_PRIORITY = ["shopee_post", "facebook_post", "tiktok_publish"]
 _auto_wait_said = ""
 
 
@@ -3696,6 +4369,8 @@ def _auto_publish_one(step: str) -> bool:
     meta = AUTO_STEPS[step]
     target = meta["target"]
     now = time.time()
+    if step in _auto_pub_runtime_stops:
+        return False
     if now < _auto_pub_next.get(step, 0.0):
         return False
 
@@ -3706,16 +4381,24 @@ def _auto_publish_one(step: str) -> bool:
         _auto_pub_next[step] = now + AUTO_PUBLISH_GAP_FAIL
         return False
 
-    try:
-        with urllib.request.urlopen(MAIN_SERVER + "/api/busy", timeout=10) as res:
-            if json.loads(res.read().decode("utf-8")).get("busy"):
-                return False          # มีงานกดจออยู่ รอรอบหน้า ไม่ต้องบ่น
-    except Exception:                                           # noqa: BLE001
-        return hush("ติดต่อเซิร์ฟเวอร์หลัก (8866) ไม่ได้")
-
     serial, why = _auto_publish_device(target)
     if not serial:
         return hush(why)
+
+    try:
+        with urllib.request.urlopen(MAIN_SERVER + "/api/busy", timeout=10) as res:
+            busy = json.loads(res.read().decode("utf-8"))
+            # งาน TikTok-link รันบน Xiaomi พร้อมกับ Shopee บน REDMI ได้จริง
+            # มือถือคนละเครื่องและ phone_queue ล็อกแยกตาม serial. ของเดิมดู
+            # busy แบบรวมทั้งระบบ ทำให้บอทหาลิงก์ 45 ใบขวาง Shopee ทั้งวัน
+            # ทั้งที่ไม่แย่งจอกัน — รอเฉพาะงานของเครื่องเดียวกัน หรือรายการ
+            # ที่ไม่ระบุเครื่อง (ไม่ปลอดภัยพอจะเดาว่าว่าง) เท่านั้น
+            for job in busy.get("jobs") or []:
+                held_serial = str(job.get("serial") or "").strip()
+                if not held_serial or held_serial == serial:
+                    return False
+    except Exception:                                           # noqa: BLE001
+        return hush("ติดต่อเซิร์ฟเวอร์หลัก (8866) ไม่ได้")
 
     rows = _auto_publish_ready(target)
     if not rows:
@@ -3753,6 +4436,18 @@ def _auto_publish_one(step: str) -> bool:
             detail = json.loads(detail).get("detail") or detail
         except Exception:                                       # noqa: BLE001
             pass
+        # สถานะอาจเปลี่ยนหลังเลือกคิวแต่ก่อน route เริ่มงาน (หรือมีข้อมูลเก่า
+        # ซ้ำคนละโฟลเดอร์). นี่ไม่ใช่ความล้มเหลวชั่วคราวและไม่ควรพักทั้งคิว
+        # 10 นาที: ปล่อยให้รอบถัดไปคัด ID นี้ออกแล้วเดินใบถัดไปทันที.
+        if _already_posted_conflict(error.code, str(detail)):
+            _auto_pub_next[step] = time.time() + AUTO_PUBLISH_GAP_OK
+            _auto_pub_said.pop(step, None)
+            _clip_log(f"ข้าม {meta['label']} {item_id} — ระบบบันทึกว่าลงแล้ว")
+            return False
+        if step == "tiktok_publish" and int(error.code or 0) == 400:
+            _auto_pub_next[step] = time.time() + AUTO_PUBLISH_GAP_OK
+            _park_failed_tiktok(item_id, name, str(detail), "tiktok")
+            return False
         if chat_id:
             _clip_say(chat_id, NEWLINE.join([
                 "❌ <b>ลงอัตโนมัติไม่สำเร็จ</b>",
@@ -3761,6 +4456,36 @@ def _auto_publish_one(step: str) -> bool:
         return hush(f"{error.code} {detail}")
     except Exception as error:                                  # noqa: BLE001
         return hush(f"{type(error).__name__}: {error}")
+
+    # TikTok ใบหนึ่งติดต้องไม่ปิดทั้งกอง: 8866 แคปจอและจด failure ไว้แล้ว
+    # พักใบนี้ออกจากตัวคัด แล้วรอบถัดไปหยิบใบถัดไปทันที. ยกเว้น Stop ที่ผู้ใช้
+    # กดเอง ซึ่งยังต้องปิดทั้งระบบตามเจตนาของปุ่ม.
+    if (step == "tiktok_publish" and not result.get("ok")
+            and not result.get("stopped")):
+        reason = str(result.get("error") or "TikTok เดินผังไม่จบ")
+        _park_failed_tiktok(item_id, name, reason, "tiktok")
+        _auto_pub_next[step] = time.time() + AUTO_PUBLISH_GAP_OK
+        _auto_pub_said.pop(step, None)
+        return False
+
+    if _apply_auto_publish_stop(step, result, chat_id, item_id, name):
+        # hard stop ไม่ใช่ความล้มเหลวชั่วคราว: ห้ามเรียก hush เพราะ hush จะตั้ง
+        # backoff แล้วเปิดทางให้ลอง Post เดิมซ้ำเมื่อครบเวลา.
+        return False
+
+    if result.get("stopped"):
+        # ผู้ใช้ตั้งใจหยุด: config ถูกปิดแล้วและใบนี้ถูก pin เป็นหัวคิวโดย 8866.
+        # ห้ามเข้า hush เพราะ hush จะตีเป็นความล้มเหลวและตั้ง backoff 10 นาที.
+        _auto_pub_next.pop(step, None)
+        _auto_pub_said.pop(step, None)
+        _clip_log(f"หยุด {meta['label']} ตามคำสั่ง: {item_id} · รอเป็นคิวที่ 1")
+        if chat_id:
+            _clip_say(chat_id, NEWLINE.join([
+                "⏹ <b>หยุดตามคำสั่งแล้ว</b>",
+                telegram_bot._escape(name),
+                "ใบงานกลับเป็นคิวที่ 1 และจะรอจนกว่าจะเปิดอัตโนมัติอีกครั้ง",
+            ]))
+        return False
 
     done = result.get("done", 0)
     total = result.get("total", 0)
@@ -3775,12 +4500,86 @@ def _auto_publish_one(step: str) -> bool:
                 telegram_bot._escape(name),
             ]))
         return True
+    if result.get("auto_skip"):
+        note = str(result.get("auto_skip_note") or "ไม่พบสินค้า — ข้ามใบนี้อัตโนมัติ")
+        _auto_pub_next[step] = time.time() + AUTO_PUBLISH_GAP_OK
+        _clip_log(f"ข้าม {meta['label']} อัตโนมัติ: {item_id} · {note}")
+        if chat_id:
+            _clip_say(chat_id, NEWLINE.join([
+                "⏭ <b>ข้ามใบนี้และไปใบถัดไป</b>",
+                telegram_bot._escape(name),
+                telegram_bot._escape(note),
+                "ใบงานยังค้างอยู่ในกอง Shopee Video พร้อมโน้ต",
+            ]))
+        return False
     if chat_id:
         _clip_say(chat_id, NEWLINE.join([
             f"⚠️ <b>เดินผังไม่จบ</b> — ทำได้ {done}/{total} ขั้น",
             telegram_bot._escape(str(result.get("error") or "")),
         ]))
     return hush(f"เดินผังไม่จบ {done}/{total} ขั้น")
+
+
+def _apply_auto_publish_stop(
+    step: str, result: dict, chat_id: str, item_id: str, name: str
+) -> bool:
+    """ปิด auto จริงเมื่อปลายทางคืน hard stop; True = caller ต้องจบรอบทันที.
+
+    สัญญาณต้องระบุ ``auto_key`` ตรงกับขั้นที่กำลังรันและ ``retry=false``
+    เท่านั้น ป้องกันผลของ Shopee ไปปิด TikTok/Facebook หรือข้อความ error ทั่วไป
+    ถูกตีความเป็นคำสั่งปิดสวิตช์.
+    """
+    signal = result.get("automation_stop") if isinstance(result, dict) else None
+    if not isinstance(signal, dict):
+        return False
+    if signal.get("auto_key") != step or signal.get("retry") is not False:
+        return False
+
+    reason = str(signal.get("reason") or result.get("error")
+                 or "ปลายทางสั่งหยุดอัตโนมัติ")
+    # ปิดในหน่วยความจำก่อนแตะไฟล์ จึงไม่มีช่องว่างที่ตัวกวาดรอบใหม่จะแทรกมา
+    # เริ่มงานใบถัดไปได้ แม้ config.json กำลังถูกอีกโปรเซสถืออยู่.
+    _auto_pub_runtime_stops.add(step)
+    _auto_pub_next.pop(step, None)
+    _auto_pub_said.pop(step, None)
+
+    saved = True
+
+    def disable_only_this(data: dict) -> dict:
+        if not isinstance(data, dict):
+            data = {}
+        current = data.get(AUTO_APPROVE_KEY) or {}
+        current = dict(current) if isinstance(current, dict) else {}
+        current[step] = False
+        data[AUTO_APPROVE_KEY] = current
+        return data
+
+    try:
+        shared.update_json(
+            shared.CONFIG_FILE,
+            disable_only_this,
+            default={},
+            label=f"ปิดอัตโนมัติ {step} เพราะปลายทางสั่งหยุด",
+        )
+    except (OSError, shared.DataBusy) as error:
+        saved = False
+        _clip_log(f"บันทึกปิดสวิตช์ {step} ไม่ได้: {error} — "
+                  "หยุดในโปรเซสนี้ไว้แล้ว")
+
+    label = AUTO_STEPS.get(step, {}).get("label") or step
+    _clip_log(f"หยุด {label} อัตโนมัติ: {item_id} · {reason} · "
+              + ("ปิดสวิตช์แล้ว" if saved else "หยุดในโปรเซสแล้วแต่บันทึกสวิตช์ไม่ได้"))
+    if chat_id:
+        lines = [
+            "⛔ <b>หยุด " + telegram_bot._escape(label) + " อัตโนมัติแล้ว</b>",
+            telegram_bot._escape(name),
+            telegram_bot._escape(reason),
+            ("ปิดสวิตช์ Shopee ให้แล้ว · ไม่ปิดกล่องและไม่ลอง Post ซ้ำ"
+             if saved else
+             "หยุดการลองซ้ำแล้ว แต่บันทึกสวิตช์ไม่ได้ — กรุณาปิดสวิตช์จากหน้าเว็บ"),
+        ]
+        _clip_say(chat_id, NEWLINE.join(lines))
+    return True
 
 
 def _auto_on() -> dict:
@@ -3791,7 +4590,8 @@ def _auto_on() -> dict:
     saved = (shared.read_config() or {}).get(AUTO_APPROVE_KEY) or {}
     if not isinstance(saved, dict):
         return {}
-    return {k: bool(v) for k, v in saved.items() if k in AUTO_STEPS}
+    return {k: bool(v) and k not in _auto_pub_runtime_stops
+            for k, v in saved.items() if k in AUTO_STEPS}
 
 
 def _auto_eligible(step: str) -> list[dict]:
@@ -3803,6 +4603,8 @@ def _auto_eligible(step: str) -> list[dict]:
     if AUTO_STEPS[step].get("kind") == "publish":
         # ขั้นโพสต์นับ "คลิปที่ลงได้เดี๋ยวนี้" ไม่ใช่ "ใบงานที่ค้างในคิว"
         return _auto_publish_ready(AUTO_STEPS[step]["target"])
+    if AUTO_STEPS[step].get("kind") == "product_link":
+        return _auto_tiktok_link_ready()
     stages = set(AUTO_STEPS[step]["stages"])
     return [job for job in clip_jobs.all()
             if job.get("stage") in stages and not job.get("parked")]
@@ -3839,6 +4641,13 @@ def _auto_sweep(only: str = "") -> dict:
     """
     on = _auto_on()
     steps = [only] if only else [s for s in AUTO_STEPS if on.get(s)]
+    # TikTok ใช้มือถือเครื่องเดียวกันทั้งเพิ่มสินค้าและโพสต์. ถ้าเริ่ม link ก่อน
+    # ทุก sweep มันจะรับใบใหม่ถือจอต่อเนื่องจนหมดชุด แล้วใบ showcase_added
+    # อดคิวโพสต์ทั้งที่พร้อมแล้ว. ให้ตัวโพสต์ได้ลองก่อน: ไม่มีใบพร้อมมันคืนทันที
+    # แล้ว worker หาสินค้าจึงเดินต่อใน sweep เดียวกันตามปกติ.
+    if not only and "tiktok_publish" in steps and "tiktok_link" in steps:
+        steps.remove("tiktok_publish")
+        steps.insert(steps.index("tiktok_link"), "tiktok_publish")
     result: dict[str, int] = {}
     # ---- ลำดับก่อนหลังของขั้นโพสต์ (เจ้าของสั่ง 29 ส.ค. 2569) ----------------
     #
@@ -3863,6 +4672,11 @@ def _auto_sweep(only: str = "") -> dict:
             # **ลงทีละใบเท่านั้น ห้ามไล่ลงรวด** — ลงหนึ่งใบกินเวลาราว 10 นาที
             # และมือถือมีจอเดียว ที่สำคัญกว่าคือถ้าอะไรผิดพลาด จะผิดแค่ใบเดียว
             result[step] = 1 if _auto_publish_one(step) else 0
+            continue
+        if AUTO_STEPS[step].get("kind") == "product_link":
+            # แยกเป็น worker ไม่ให้การค้นหนึ่งใบ (หลายนาที) ขวางตัวกวาดของ
+            # Facebook/Shopee. ภายใน worker ยังเรียก 8866 ทีละใบและถือคิวมือถือ.
+            result[step] = 1 if _ensure_tiktok_link_worker() else 0
             continue
         count = 0
         for job in _auto_eligible(step):
@@ -6259,7 +7073,7 @@ def _clip_credits(chat_id: str, argument: str) -> None:
     )
 
 
-def _genall_plan() -> dict:
+def _genall_plan(only_ids: set[str] | None = None) -> dict:
     """คัดว่างานไหนพร้อมเจนวิดีโอ — **อ่านอย่างเดียว ไม่แตะคิว ไม่เสียเครดิต**
 
     แยกออกมาเพราะมีสองที่ต้องใช้คำตอบชุดเดียวกัน: `/genall` ในแชท กับ
@@ -6270,6 +7084,13 @@ def _genall_plan() -> dict:
     "พร้อมครบ" = มีสตอรีบอร์ด + บทพูด + คำสั่ง Flow และยังไม่มีคลิป
     """
     runs = clip_store.list_runs(DATA_DIR)
+    if only_ids is not None:
+        wanted = {str(item_id).strip() for item_id in only_ids if str(item_id).strip()}
+        found = {str(run.get("item_id") or "") for run in runs}
+        missing_ids = sorted(wanted - found)
+        runs = [run for run in runs if str(run.get("item_id") or "") in wanted]
+    else:
+        missing_ids = []
     # แยกเป็นสองรอบ: รอบแรกแค่ **คัด** ว่าใครพร้อม รอบสองค่อยเข้าคิวจริง
     # เพราะต้องรู้ยอดเครดิตรวมก่อนตัดสินใจ — เข้าคิวไปครึ่งทางแล้วเพิ่งพบว่า
     # เครดิตไม่พอ คืองานค้างครึ่งคิวและเครดิตที่จ่ายไปแล้วเอาคืนไม่ได้
@@ -6279,6 +7100,11 @@ def _genall_plan() -> dict:
         if not item_id:
             continue
         name = (run.get("name") or item_id)[:42]
+        # งาน banned เก็บไว้เป็นหลักฐานย้อนหลังเท่านั้น ห้ามกลับเข้า Flow แม้ไฟล์
+        # สตอรีบอร์ด/บทพูด/คำสั่งจะยังอยู่ครบ
+        if run.get("banned"):
+            not_ready.append(f"{name} — ถูกแบน ห้ามเจนคลิป")
+            continue
         if run.get("videos"):
             has_video += 1
             continue
@@ -6294,6 +7120,7 @@ def _genall_plan() -> dict:
             continue
         ready.append((item_id, name, _credit_estimate(run)))
 
+    not_ready.extend(f"{item_id} — ไม่พบใบงาน" for item_id in missing_ids)
     have, age = known_credits()
     return {
         "total": len(runs), "ready": ready, "has_video": has_video,
@@ -6302,7 +7129,8 @@ def _genall_plan() -> dict:
     }
 
 
-def _clip_gen_all(chat_id: str, argument: str) -> None:
+def _clip_gen_all(chat_id: str, argument: str,
+                  only_ids: set[str] | None = None) -> None:
     """ไล่ **เจนวิดีโอ** ทุกงานที่ยังไม่มีคลิป และของพร้อมครบแล้ว
 
     "พร้อมครบ" = มีสตอรีบอร์ด + มีบทพูด + มีคำสั่ง Flow  ขาดข้อไหนไม่เอาเข้าคิว
@@ -6321,7 +7149,7 @@ def _clip_gen_all(chat_id: str, argument: str) -> None:
     # ลองดูก่อนว่าจะทำอะไรบ้าง ใช้เครดิตเท่าไร — ไม่เข้าคิวจริง
     dry_run = want in ("ลอง", "dry", "preview", "ดู", "เช็ค")
 
-    plan = _genall_plan()
+    plan = _genall_plan(only_ids)
     total_runs = plan["total"]
     if not total_runs:
         _clip_say(chat_id, "ยังไม่มีงานที่เก็บไว้ — ส่งลิงก์ Shopee เข้ามาก่อน")
@@ -6548,6 +7376,10 @@ def _clip_start_flow(chat_id: str, item_id: str, announce: bool = True) -> str:
     run = clip_store.load_run(DATA_DIR, item_id)
     if not run:
         return "ไม่พบงานนี้"
+    if run.get("banned"):
+        if announce:
+            _clip_say(chat_id, "⛔ งานนี้ถูกแบนและเก็บไว้เป็นหลักฐาน — ไม่ส่งเข้า Google Flow")
+        return "ถูกแบน ห้ามเจนคลิป"
     prompts = run.get("flow_prompts") or []
     if not prompts:
         if announce:
@@ -6842,10 +7674,18 @@ def _clip_telegram_command(chat_id: str, text: str) -> bool:
             _clip_flow_check(chat_id)
         elif want in ("on", "เปิด", "1"):
             set_config(FLOW_ENABLED_KEY, True)
-            _clip_say(chat_id, "🎥 เปิดขั้นเจนคลิปใน Google Flow แล้ว")
+            _gen_lane_apply()
+            _wake_runners()
+            waiting = sum(1 for j in clip_jobs.all()
+                          if j.get("stage") == clip_queue.STAGE_READY_FLOW)
+            _clip_say(chat_id, "🎥 เปิดขั้นเจนคลิปใน Google Flow แล้ว"
+                      + (f"\nงานที่รออยู่ {waiting} ใบจะเริ่มเจนให้เอง"
+                         if waiting else ""))
         elif want in ("off", "ปิด", "0"):
             set_config(FLOW_ENABLED_KEY, False)
-            _clip_say(chat_id, "⏸ ปิดขั้นเจนคลิปแล้ว — จะหยุดที่สตอรีบอร์ด + บทพูด")
+            _gen_lane_apply()
+            _clip_say(chat_id, "⏸ ปิดขั้นเจนคลิปแล้ว — งานที่อนุมัติครบจะ"
+                               "**ค้างรอในคิว** ไม่ถูกปิดทิ้ง")
         else:
             state = "เปิด" if flow_enabled() else "ปิด"
             _clip_say(
@@ -6870,20 +7710,35 @@ def _clip_after_approve(job_id: str, chat_id: str, note: str) -> str:
         return note
 
     if not flow_enabled():
-        # ขั้นเจน Flow ปิดอยู่ — จบงานตรงนี้ ของที่ทำเสร็จถูกเก็บครบแล้วตั้งแต่
-        # ก่อนขออนุมัติ ไม่ต้องไปเปิด Flow ทิ้งไว้ฉากละ ~50 วินาทีโดยไม่ได้อะไร
-        clip_jobs.update(job_id, stage=clip_queue.STAGE_DONE)
+        # ⛔ **ปิดขั้นเจน = ใบรออยู่ในคิว ห้ามตีตราว่า "เสร็จแล้ว"**
+        #
+        # ของเดิมสั่ง `stage=done` แล้วบอกในแชทว่า "เปิดขั้นเจนเมื่อพร้อมด้วย
+        # /flow on" — **แต่ไม่มีอะไรพากลับมา** พอเปิดขั้นเจนคืน ใบพวกนั้น
+        # นอนอยู่ในกอง "เสร็จแล้ว" ต่อไปโดยไม่มีใครเรียก และหน้าเว็บก็ไม่มี
+        # ปุ่มอะไรให้กดเพราะอนุมัติไปหมดแล้ว
+        #
+        # วัดได้จริง 8 ก.ย. 2569: ค้างแบบนี้ **92 ใบ** ปิดพร้อมกันหมดเมื่อ
+        # 1 ก.ย. ซึ่งเป็นวันที่เจ้าของสั่งหยุดเจน ทุกใบมีของครบ
+        # (สตอรีบอร์ด · คำสั่ง Flow · บทพูด) แค่ไม่มีใครพาไปเจน
+        #
+        # ตอนนี้ใบไปนอนที่ขั้น "รอเข้าเจน" แทน ส่วนช่องเจนถูกปิดโดย
+        # `_gen_lane_apply()` จึงไม่มีใครไปเปิด Flow ทิ้งไว้เปล่าๆ —
+        # ได้ผลเดิมที่ตั้งใจไว้ โดยไม่ทำของหาย
+        clip_jobs.update(job_id, stage=clip_queue.STAGE_READY_FLOW)
         item_id = job.get("item_id", "")
         run = clip_store.load_run(DATA_DIR, item_id)
+        waiting = sum(1 for j in clip_jobs.all()
+                      if j.get("stage") == clip_queue.STAGE_READY_FLOW)
         _clip_say(
             chat_id,
-            "✅ <b>อนุมัติครบแล้ว — จบงานตรงนี้</b>\n"
-            "(ขั้นเจนคลิปใน Google Flow ปิดอยู่ระหว่างแก้ไข)\n\n"
+            "✅ <b>อนุมัติครบแล้ว — เข้าคิวรอเจนไว้ให้</b>\n"
+            "(ขั้นเจนคลิปใน Google Flow ปิดอยู่ตอนนี้ ยังไม่เจนจริง)\n\n"
             f"เก็บไว้แล้ว: 🖼 สตอรีบอร์ด {run.get('storyboard_count', 0)} ภาพ · "
             f"🎥 คำสั่ง {run.get('flow_prompt_count', 0)} ชุด · "
             f"🗣 บทพูด {run.get('script_count', 0)} ท่อน\n"
             f"<code>{telegram_bot._escape(str(run.get('folder', '')))}</code>\n\n"
-            "เปิดขั้นเจนคลิปเมื่อพร้อมด้วย /flow on",
+            f"ตอนนี้มีงานรอเจนอยู่ {waiting} ใบ — "
+            "สั่ง /flow on เมื่อพร้อม แล้วระบบจะเริ่มให้เอง",
         )
         return note
 
@@ -7845,6 +8700,8 @@ async def clips_detail(item_id: str) -> dict:
     # ไม่ใช่เฉพาะงานที่ยังอยู่ในคิว — ตอนจะโพสต์จริงผู้ใช้เปิดดูจากตรงนี้
     return {
         "ok": True, **run,
+        # ประโยคปกติไว้โชว์ — ของจริงที่ส่งเข้า Flow ยังเป็น `script` เหมือนเดิม
+        "script_show": thai_speech.plain_lines(run.get("script") or []),
         "video_check_view": _check_payload(run),
         "publish_order": publish_order.rows(run),
         "publish_next": publish_order.next_target(run),
@@ -7875,6 +8732,8 @@ async def clips_generate(item_id: str, request: Request) -> dict:
     run = await asyncio.to_thread(clip_store.load_run, DATA_DIR, item_id)
     if not run:
         raise HTTPException(status_code=404, detail="ไม่พบงานของสินค้านี้")
+    if run.get("banned"):
+        raise HTTPException(status_code=409, detail="งานนี้ถูกแบนและเก็บไว้เป็นหลักฐาน ห้ามเจนคลิป")
     if not (run.get("flow_prompts") or []):
         raise HTTPException(status_code=400, detail="งานนี้ยังไม่มีคำสั่งสำหรับ Google Flow")
     if _runner_busy():
@@ -8202,6 +9061,21 @@ async def jobs_detail(job_id: str) -> dict:
             "script_max_words": chatgpt_driver.SCRIPT_MAX_WORDS,
             "thai_chars_per_word": chatgpt_driver.THAI_CHARS_PER_WORD,
             "script_words": chatgpt_driver.count_words(run.get("script") or []),
+            # ---- บทพูดสองแบบ (เจ้าของสั่ง 9 ก.ย. 2569) --------------------
+            #
+            # *"บทที่แยกการพูดแบบในรูปให้ใช้แค่ตอนส่งเจน flow แต่หน้าที่โชว์ผม
+            # ให้เขียนมาเป็นประโยคปกติ"*
+            #
+            #   script       คำอ่านคั่นพยางค์  → **ส่งเข้า Flow เท่านั้น**
+            #   script_show  ประโยคปกติ        → เอาไปโชว์/ให้คนแก้
+            #
+            # แปลงด้วยการ **ตัดขีดที่ขนาบด้วยอักษรไทย** เท่านั้น จึงไม่แตะ
+            # `USB-C` หรือ `5-in-1` (วัดกับบทจริง 2,327 บรรทัดแล้ว ขีดที่เหลือ
+            # เป็นภาษาอังกฤษล้วนทั้งหมด)
+            #
+            # ⚠️ **ทางกลับทำเองไม่ได้** ใส่ขีดคืนต้องให้ ChatGPT ทำ ตัวใส่ขีด
+            # ในเครื่องตรงกับที่ GPT เขียนแค่ 51–69% และผิดแบบทำให้อ่านเพี้ยน
+            "script_show": thai_speech.plain_lines(run.get("script") or []),
             "flow_enabled": flow_enabled(),
             # ผลตรวจคลิป (1080p · เสียงพูด · ตัวอักษรอ่านออก) อยู่ใน run.video_check
             # อยู่แล้ว — ยกขึ้นมาไว้ชั้นบนด้วยเพื่อให้หน้าเว็บหาเจอง่าย
@@ -8592,11 +9466,15 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
         # (Shopee Video · Facebook Reels) ได้ค่า None ไม่ใช่ค่าปลอม
         # เพราะสองกองนั้นไม่ใช่การ "กดผ่าน" แต่เป็นการ "สั่งโพสต์ด้วยเครื่องไหน"
         # ซึ่งโพสต์แล้วถอนไม่ได้ และต้องเลือกมือถือเสมอ (กติกาข้อ 8)
-        auto_of = {"link": "images", "story": "storyboard",
-                   "clip": "clip", "tiktok": "tiktok_post",
-                   # เจ้าของสั่งเพิ่ม 28 ส.ค. 2569 — สองกองนี้ลงเองได้แล้ว
-                   "shopee_video": "shopee_post",
-                   "facebook_reels": "facebook_post"}
+        # ปุ่มบนกอง TikTok คือสวิตช์ทั้งสาย หา → โพสต์ ไม่ใช่สวิตช์ worker
+        # หาสินค้าอย่างเดียว; mapping กลางอยู่ที่ BOARD_AUTO_STEP เพื่อให้ทดสอบได้.
+        # ปุ่มเรียกดู Chrome อ่าน mapping จาก API เพื่อไม่ให้หน้าเว็บเดาชื่อโปรไฟล์.
+        # มีเฉพาะสามขั้นที่ทำงานผ่าน Chrome โดยตรง; กองโพสต์ใช้มือถือจึงไม่มีปุ่ม.
+        browser_of = {
+            "link": {"stage": "link", "label": "Chrome ดึง Link"},
+            "story": {"stage": "storyboard", "label": "Chrome Storyboard"},
+            "clip": {"stage": "clip", "label": "Chrome เจนคลิป"},
+        }
         auto = {s["key"]: s for s in _auto_view()["steps"]}
         # โควตา 70/วัน มีเฉพาะสามปลายทางที่โพสต์จริง
         all_runs = runs + clip_store.list_done(DATA_DIR)
@@ -8611,8 +9489,9 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
                 "text": f"{used}/{publish_order.DAY_LIMIT}",
             }
         for bucket in board.get("buckets") or []:
-            bucket["auto"] = auto.get(auto_of.get(bucket["key"], ""))
+            bucket["auto"] = auto.get(BOARD_AUTO_STEP.get(bucket["key"], ""))
             bucket["quota"] = quota_of.get(bucket["key"])
+            bucket["browser"] = browser_of.get(bucket["key"])
         board["quota_note"] = ("โควตานับเป็นวันที่เริ่มตี 4 — "
                                "ลงตอนตี 3 ถือว่ายังเป็นยอดของเมื่อวาน")
         board["auto_note"] = "งานที่กด 🅿 พักไว้รอแก้ จะไม่ถูกอนุมัติอัตโนมัติ"
@@ -8627,10 +9506,147 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
     return {"ok": True, **await asyncio.to_thread(work)}
 
 
+def _browser_view_spec(stage: str) -> dict:
+    """ผูกชื่อขั้นกับโปรไฟล์จริงที่ worker ใช้; ห้ามคัดลอกพาธไปฝั่งเว็บ."""
+    import flow_worker                                      # noqa: PLC0415
+
+    specs = {
+        "link": {
+            "label": "ดึง Link",
+            "profile": flow_worker.profile_named(flow_worker.SHOPEE_PROFILE),
+            "lock": flow_worker.SHOPEE_PROFILE,
+            "url": "https://shopee.co.th/",
+        },
+        "storyboard": {
+            "label": "เจน Storyboard",
+            "profile": flow_worker.flow_profile_dir(),
+            "lock": "",
+            "url": chatgpt_driver.STORYBOARD_GPT_URL,
+        },
+        # ช่อง 2 เป็นผู้รับ ready_flow ทั้งหมดตาม CLIP_SLOT2_STAGES.
+        "clip": {
+            "label": "เจน Clip",
+            "profile": flow_worker.flow_seat(2)["dir"],
+            "lock": flow_worker.flow_seat(2)["lock"],
+            "url": flow_worker.FLOW_URL,
+        },
+    }
+    return specs.get(str(stage or "").strip()) or {}
+
+
+_browser_view_session_lock = threading.Lock()
+_browser_view_sessions: dict[str, threading.Thread] = {}
+# หน้าต่างที่ปุ่มเปิดขึ้นเองห้ามถือโปรไฟล์จน worker รอครบ 900 วินาทีแล้วล้ม.
+# แปดนาทีพอสำหรับตรวจหน้าและเหลือระยะให้ worker รับล็อกก่อน timeout 15 นาที.
+BROWSER_VIEW_IDLE_MAX_SECONDS = 8 * 60.0
+
+
+def _launch_browser_view_session(stage: str, spec: dict) -> dict:
+    """เปิดหน้าต่างดูแบบถือ browser lock จนผู้ใช้ปิด Chrome."""
+    ready = threading.Event()
+    outcome: dict = {}
+
+    def work() -> None:
+        current = threading.current_thread()
+        try:
+            with shared.browser_lock(
+                timeout=1.0,
+                label=f"เจ้าของเปิดดู Chrome ขั้น {spec['label']}",
+                profile=str(spec.get("lock") or ""),
+            ):
+                outcome.update(chrome_view.launch_profile(spec["profile"], spec["url"]))
+                ready.set()
+                if not outcome.get("ok"):
+                    return
+                # คงล็อกไว้ตลอดเวลาที่หน้าต่างยังเปิด ป้องกัน worker เปิด
+                # user-data-dir เดียวกันซ้อนและไล่หน้าที่เจ้าของกำลังดูออก.
+                deadline = time.monotonic() + BROWSER_VIEW_IDLE_MAX_SECONDS
+                while (chrome_view.profile_running(spec["profile"])
+                       and time.monotonic() < deadline):
+                    time.sleep(1.0)
+                if chrome_view.profile_running(spec["profile"]):
+                    closed = chrome_view.close_profile(spec["profile"])
+                    if closed.get("ok"):
+                        _clip_log(
+                            f"ปิด Chrome ขั้น {spec['label']} อัตโนมัติหลังเปิดดูครบ "
+                            f"{int(BROWSER_VIEW_IDLE_MAX_SECONDS // 60)} นาที — คืนคิวให้ worker")
+                    else:
+                        _clip_log(
+                            f"ปิด Chrome ขั้น {spec['label']} อัตโนมัติไม่สำเร็จ — "
+                            f"{closed.get('reason') or 'ไม่ทราบสาเหตุ'}")
+                        # ถ้าปิดแบบปกติไม่ได้ ต้องถือล็อกต่อ ห้ามปล่อยให้ worker
+                        # เปิด user-data-dir เดียวกันซ้อนแล้วทำโปรไฟล์เสีย.
+                        while chrome_view.profile_running(spec["profile"]):
+                            time.sleep(1.0)
+        except shared.BrowserBusy as error:
+            outcome.update({"ok": False, "running": False, "reason": str(error)})
+        except Exception as error:                              # noqa: BLE001
+            outcome.update({"ok": False, "running": False,
+                            "reason": f"{type(error).__name__}: {error}"})
+        finally:
+            ready.set()
+            with _browser_view_session_lock:
+                if _browser_view_sessions.get(stage) is current:
+                    _browser_view_sessions.pop(stage, None)
+
+    with _browser_view_session_lock:
+        active = _browser_view_sessions.get(stage)
+        if active and active.is_alive():
+            return {"ok": False, "running": True,
+                    "reason": "กำลังเปิดหน้าต่างนี้อยู่ โปรดลองอีกครั้ง"}
+        thread = threading.Thread(target=work, name=f"view-chrome-{stage}", daemon=True)
+        _browser_view_sessions[stage] = thread
+        thread.start()
+    ready.wait(15.0)
+    return dict(outcome or {"ok": False, "running": False,
+                            "reason": "เปิด Chrome เกินเวลาที่กำหนด"})
+
+
+@app.post("/api/browser/show")
+async def browser_show(request: Request) -> dict:
+    """ยก Chrome ที่รันอยู่ หรือเปิดโปรไฟล์จริงเมื่อขั้นนั้นยังว่าง."""
+    payload = await request.json() if await request.body() else {}
+    stage = str((payload or {}).get("stage") or "").strip()
+    spec = _browser_view_spec(stage)
+    if not spec:
+        raise HTTPException(status_code=400, detail="ไม่รู้จักขั้น Chrome ที่ต้องการดู")
+    result = await asyncio.to_thread(chrome_view.show_profile, spec["profile"])
+    if not result.get("ok") and not result.get("running"):
+        result = await asyncio.to_thread(_launch_browser_view_session, stage, spec)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{spec['label']}: {result.get('reason') or 'เรียกหน้าต่างไม่ได้'}",
+        )
+    _clip_log(f"เรียกดู Chrome ขั้น {spec['label']} — PID {result.get('pid')}")
+    opened = bool(result.get("launched"))
+    return {"ok": True, "stage": stage, **result,
+            "message": ((f"เปิด Chrome ที่ใช้{spec['label']}แล้ว — "
+                         "ปิดหน้าต่างเมื่อดูเสร็จเพื่อคืนโปรไฟล์ให้บอท "
+                         f"(ถ้าไม่ปิด ระบบจะปิดเองใน {int(BROWSER_VIEW_IDLE_MAX_SECONDS // 60)} นาที)")
+                        if opened else
+                        f"ยก Chrome ที่ใช้{spec['label']}ขึ้นมาด้านหน้าแล้ว")}
+
+
 @app.get("/api/auto-approve")
 async def auto_approve_view() -> dict:
     """ตอนนี้ติ๊กเปิดอนุมัติอัตโนมัติขั้นไหนไว้บ้าง + มีงานรออยู่กี่ใบ"""
     return {"ok": True, **await asyncio.to_thread(_auto_view)}
+
+
+def _auto_toggle_state(current: dict, step: str, want: bool) -> dict:
+    """คืนค่าสวิตช์หลังคำสั่งหนึ่งครั้ง โดยรวมสาย TikTok ที่หน้าเว็บเห็นเป็นปุ่มเดียว."""
+    updated = dict(current or {})
+    updated[step] = bool(want)
+    if step == "tiktok_link" and want:
+        updated["tiktok_post"] = False
+    if step == "tiktok_publish":
+        # ปิดปุ่มหลัก = หยุดรับใบใหม่ทั้งหาและโพสต์. เปิดปุ่มหลัก = เปิดตัวหา
+        # เฉพาะเมื่อยังมีงานใน snapshot; ครบแล้วให้ publish เปิดรอโดยไม่เด้งออก.
+        updated["tiktok_link"] = bool(want and _auto_tiktok_link_ready())
+        if want:
+            updated["tiktok_post"] = False
+    return updated
 
 
 @app.post("/api/auto-approve")
@@ -8654,8 +9670,15 @@ async def auto_approve_set(request: Request) -> dict:
     want = bool((payload or {}).get("on"))
 
     def work() -> dict:
-        current = _auto_on()
-        current[step] = want
+        if want:
+            # hard stop จะปลดได้เมื่อผู้ใช้ตัดสินใจเปิดสวิตช์นี้ใหม่เองเท่านั้น.
+            _auto_pub_runtime_stops.discard(step)
+        current = _auto_toggle_state(_auto_on(), step, want)
+        # ปุ่มที่ผู้ใช้เห็นบนกอง TikTok คือสวิตช์สายเต็ม: หาสินค้าให้เสร็จก่อน
+        # แล้วค่อยโพสต์บนมือถือเครื่องเดียวกัน. เปิดตัวโพสต์จึงเปิด worker หา
+        # เฉพาะเมื่อยังมีสมาชิกชุดเดิมรออยู่; ชุดค้นหาครบแล้วต้องคง publish=True
+        # ไว้ ไม่ให้ปุ่มดีดออกตามการปิดตัวเองของ worker หา. ปิดจากหน้าเว็บต้อง
+        # ปิดทั้งคู่ เพราะผู้ใช้มองเห็นปุ่มเดียว.
         shared.update_json(
             shared.CONFIG_FILE,
             lambda data: data.update({AUTO_APPROVE_KEY: current}),
@@ -8674,14 +9697,30 @@ async def auto_approve_set(request: Request) -> dict:
 
     result = await asyncio.to_thread(work)
     publish_kind = AUTO_STEPS[step].get("kind") == "publish"
+    link_kind = AUTO_STEPS[step].get("kind") == "product_link"
     if not want:
-        message = ("ปิดแล้ว — ใบที่กำลังลงอยู่จะลงจนจบ ที่เหลือรอให้คุณกดเอง"
-                   if publish_kind else "ปิดแล้ว — งานถัดไปจะรอให้คุณกดเอง")
+        message = ("ปิดแล้ว — ใบที่กำลังทำอยู่จะทำจนจบ ที่เหลือหยุดรอ"
+                   if publish_kind or link_kind else "ปิดแล้ว — งานถัดไปจะรอให้คุณกดเอง")
     elif publish_kind:
         ready = len(_auto_publish_ready(AUTO_STEPS[step]["target"]))
-        message = (f"เปิดแล้ว — มี {ready} คลิปที่ลงได้ ระบบจะทยอยลงให้เองทีละใบ "
-                   "และแจ้งในแชททุกครั้ง" if ready else
-                   "เปิดแล้ว — ตอนนี้ยังไม่มีคลิปที่ถึงคิวลง พอถึงเวลาจะลงให้เอง")
+        if step == "tiktok_publish":
+            link_left = len(_auto_tiktok_link_ready())
+            message = (
+                f"เปิดสาย TikTok แล้ว — พร้อมโพสต์ {ready} ใบ · รอหาสินค้า {link_left} ใบ "
+                "ระบบใช้มือถือเครื่องเดียวและจะทำทีละช่วง"
+                if ready or link_left else
+                "เปิดสาย TikTok แล้ว — ตอนนี้ยังไม่มีใบที่หาสินค้าและตรวจคลิปพร้อม "
+                "สวิตช์จะเปิดรอ ไม่ปิดตัวเอง"
+            )
+        else:
+            message = (f"เปิดแล้ว — มี {ready} คลิปที่ลงได้ ระบบจะทยอยลงให้เองทีละใบ "
+                       "และแจ้งในแชททุกครั้ง" if ready else
+                       "เปิดแล้ว — ตอนนี้ยังไม่มีคลิปที่ถึงคิวลง พอถึงเวลาจะลงให้เอง")
+    elif link_kind:
+        left = len(_auto_tiktok_link_ready())
+        message = ("เปิดแล้ว — เริ่มตรวจและเพิ่มสินค้าเข้าโชว์เคส TikTok ใบแรกทันที "
+                   f"และจะไล่ต่อทีละใบ (เหลือ {left} ใบ)" if result["swept"] else
+                   f"เปิดแล้ว — ยังไม่ได้เริ่มใบใหม่ตอนนี้ เหลือรอ {left} ใบ")
     else:
         message = f"เปิดแล้ว — อนุมัติงานที่รออยู่ให้ {result['swept']} ใบ"
     return {"ok": True, "step": step, "on": want, "message": message, **result}
@@ -9433,6 +10472,95 @@ async def jobs_retry(job_id: str) -> dict:
     return {"ok": True, "message": f"เข้าคิวแล้ว · {what}"}
 
 
+def _reopen_candidates() -> list[dict]:
+    """ใบที่ถูกตีตราว่า "เสร็จแล้ว" ทั้งที่ยังไม่ได้คลิปสักใบ
+
+    **ต้องมีของครบถึงจะดึงกลับ** — สตอรีบอร์ด + คำสั่ง Flow + บทพูด
+    ใบที่ของไม่ครบไม่ใช่เคสนี้ มันค้างด้วยเหตุผลอื่นและต้องแก้คนละทาง
+    ถ้าเหมารวมจะได้ใบที่กดอนุมัติไม่ได้จริงมากองรอให้คนงง
+    """
+    rows = []
+    for job in clip_jobs.all():
+        if job.get("stage") != clip_queue.STAGE_DONE:
+            continue
+        item_id = str(job.get("item_id") or "")
+        run = clip_store.load_run(DATA_DIR, item_id) or {}
+        if run.get("videos"):
+            continue                    # มีคลิปแล้ว = จบจริง ห้ามแตะ
+        if not (run.get("storyboard") and run.get("flow_prompts")
+                and run.get("script")):
+            continue                    # ของไม่ครบ คนละอาการ
+        rows.append({
+            "id": job.get("id", ""),
+            "item_id": item_id,
+            "name": str(run.get("name") or "")[:70],
+            "storyboard": len(run.get("storyboard") or []),
+            "prompts": len(run.get("flow_prompts") or []),
+            "script": len(run.get("script") or []),
+        })
+    return rows
+
+
+@app.post("/api/jobs/reopen-review")
+async def jobs_reopen_review(request: Request) -> dict:
+    """ดึงใบที่ถูกปิดทั้งที่ยังไม่มีคลิป กลับมา **รออนุมัติสตอรีบอร์ด + บทพูด**
+
+    **เจ้าของสั่ง 8 ก.ย. 2569** — *"ดึงกลับมาให้รออนุมัติ storyboard + บทพูด
+    ทั้งหมดเลย"*
+
+    **ทำไมถึงมีใบแบบนี้** ตอนคนกดอนุมัติ ถ้าขั้นเจน Flow ปิดอยู่ โค้ดจะสั่ง
+    `stage=done` แล้วบอกในแชทว่า "เปิดขั้นเจนเมื่อพร้อมด้วย /flow on" —
+    **แต่ไม่มีอะไรพากลับมา** พอเปิดขั้นเจนคืน ใบพวกนั้นนอนอยู่ในกอง
+    "เสร็จแล้ว" ต่อไปโดยไม่มีใครเรียก วัดได้จริง 8 ก.ย. 2569: ค้างแบบนี้ 91 ใบ
+    ปิดพร้อมกันหมดเมื่อ 1 ก.ย. ซึ่งเป็นวันที่เจ้าของสั่งหยุดเจน
+
+    **ล้างธงอนุมัติทั้งสองใบด้วย** ไม่ใช่แค่ย้ายสถานะ — ไม่งั้นใบจะเด้งผ่าน
+    ด่านอนุมัติทันทีที่มีอะไรมาปลุก แล้วไหลไปขั้นเจนโดยที่คนยังไม่ได้ดู
+
+    body `{"dry": true}` = ดูก่อนว่าจะดึงใบไหนบ้าง ไม่แก้อะไรจริง
+    body `{"item_ids": [...]}` = จำกัดเฉพาะรหัสที่ระบุ
+    """
+    try:
+        payload = await request.json()
+    except Exception:                                        # noqa: BLE001
+        payload = {}
+    dry = bool(payload.get("dry"))
+    only = {str(x) for x in (payload.get("item_ids") or [])}
+
+    def work() -> dict:
+        rows = await_rows = _reopen_candidates()
+        if only:
+            await_rows = [r for r in rows if r["item_id"] in only]
+        if dry:
+            return {"dry": True, "found": len(await_rows), "jobs": await_rows[:200]}
+        moved = []
+        for row in await_rows:
+            try:
+                clip_jobs.update(
+                    row["id"], stage=clip_queue.STAGE_STORYBOARD_REVIEW,
+                    storyboard_ok=False, script_ok=False, awaiting="",
+                )
+            except Exception as error:                       # noqa: BLE001
+                _clip_log(f"ดึงใบ {row['item_id']} กลับไม่สำเร็จ: {error}")
+                continue
+            moved.append(row)
+        if moved:
+            _clip_log(f"ดึงใบที่ปิดทั้งที่ยังไม่มีคลิปกลับมารออนุมัติ {len(moved)} ใบ")
+        return {"dry": False, "found": len(await_rows), "moved": len(moved),
+                "jobs": moved[:200]}
+
+    result = await asyncio.to_thread(work)
+    if not result.get("dry") and result.get("moved"):
+        _clip_say("", (
+            f"↩️ <b>ดึงใบกลับมารออนุมัติแล้ว {result['moved']} ใบ</b>@NL@"
+            "ใบพวกนี้เคยถูกปิดว่า “เสร็จแล้ว” ตอนที่ขั้นเจนคลิปปิดอยู่ "
+            "ทั้งที่ยังไม่ได้คลิปสักใบ@NL@@NL@"
+            "ของครบทุกใบ (สตอรีบอร์ด · คำสั่ง Flow · บทพูด) "
+            "รอกดอนุมัติได้เลย"
+        ).replace("@NL@", chr(10)))
+    return {"ok": True, **result}
+
+
 @app.post("/api/jobs/{job_id}/move")
 async def jobs_move(job_id: str, request: Request) -> dict:
     """สลับลำดับงานที่ยังรอคิว — ของด่วนแซงขึ้นก่อนได้"""
@@ -9471,6 +10599,8 @@ async def genall_run(request: Request) -> dict:
     เดิมสั่งได้จากแชทที่เดียว จะสั่งจากหน้าเว็บหรือเครื่องมือไม่มีทางเลย
 
     body: `{"dry": true}` = ดูก่อนว่าจะทำอะไร ใช้เครดิตเท่าไร ไม่เข้าคิวจริง
+    body: `{"item_ids": ["..."]}` = จำกัดเฉพาะใบที่หน้า Clip คัดไว้ ไม่กวาดงาน
+    พร้อมเจนจากกองอื่นเข้ามาปน
 
     รายงานผลไปที่แชทเหมือนสั่งจากแชท — คนที่เฝ้าฝั่งแชทจะได้ไม่งงว่างานโผล่มาจากไหน
     ส่วนตัวเลขที่ตอบกลับทางนี้คือจำนวนงานที่เข้าคิว **เพิ่มขึ้นจริง** วัดจากคิวก่อน/หลัง
@@ -9481,13 +10611,20 @@ async def genall_run(request: Request) -> dict:
     except Exception:                                           # noqa: BLE001
         pass
     dry = bool(payload.get("dry"))
+    raw_ids = payload.get("item_ids")
+    if raw_ids is not None and not isinstance(raw_ids, list):
+        raise HTTPException(status_code=400, detail="item_ids ต้องเป็นรายการรหัสใบงาน")
+    if isinstance(raw_ids, list) and len(raw_ids) > 500:
+        raise HTTPException(status_code=400, detail="item_ids ใส่ได้ไม่เกิน 500 ใบต่อครั้ง")
+    only_ids = ({str(item_id).strip() for item_id in (raw_ids or [])
+                 if str(item_id).strip()} if raw_ids is not None else None)
     chat_id = str(payload.get("chat_id") or _default_clip_chat())
 
     before = len(clip_jobs.waiting())
 
     def work() -> None:
         with _web_lock:
-            _clip_gen_all(chat_id, "ลอง" if dry else "")
+            _clip_gen_all(chat_id, "ลอง" if dry else "", only_ids)
 
     await asyncio.to_thread(work)
     after = len(clip_jobs.waiting())
@@ -9509,6 +10646,11 @@ async def flow_enabled_set(request: Request) -> dict:
     payload = await request.json()
     on = bool(payload.get("on"))
     set_config(FLOW_ENABLED_KEY, on)
+    # **ต้องสั่งช่องเจนด้วย ไม่ใช่แค่จดค่า** — เดิมจดอย่างเดียว ช่องจึงยังเปิด
+    # รับงานอยู่ทั้งที่หน้าเว็บขึ้นว่าปิดแล้ว
+    await asyncio.to_thread(_gen_lane_apply)
+    if on:
+        await asyncio.to_thread(_wake_runners)
     _clip_log(f"{'เปิด' if on else 'ปิด'}ขั้นเจนคลิปใน Google Flow (จากหน้าเว็บ)")
     return {"ok": True, "flow_enabled": on}
 
@@ -9591,8 +10733,15 @@ async def _startup() -> None:
             continue
         try:
             runner.start()
-            append_log("clip", f"เปิดช่องที่ {no} แล้ว — ทำ: "
-                       + " · ".join(sorted(jobs_of)))
+            # **ต้องอ่านค่าที่ช่องถืออยู่จริง ไม่ใช่ค่าคงที่ตอนตั้งโปรแกรม**
+            # ของเดิมพิมพ์ `jobs_of` ซึ่งเป็นค่าคงที่ จึงขึ้นว่า "ทำ: ready_flow"
+            # ทุกครั้ง **แม้ช่องจะถูกปิดไปแล้ว** — บรรทัดสถานะที่โกหกแบบนี้
+            # ทำให้คนอ่านเชื่อว่าเจนอยู่ทั้งที่หยุด (กติกาข้อ 2.3)
+            live = sorted(runner.stages or jobs_of)
+            shut = (live == [GEN_PAUSED_MARK])
+            append_log("clip", f"เปิดช่องที่ {no} แล้ว — "
+                       + ("ปิดรับงานอยู่" if shut
+                          else "ทำ: " + " · ".join(live)))
         except Exception as error:                              # noqa: BLE001
             append_log("clip", f"เปิดช่องที่ {no} ไม่สำเร็จ: {error}")
 
@@ -9607,11 +10756,18 @@ async def _startup() -> None:
     threading.Thread(target=_auto_keeper, daemon=True).start()
     threading.Thread(target=_retry_keeper, daemon=True).start()
     threading.Thread(target=_veo_prober, daemon=True).start()
+    threading.Thread(target=_sb_keeper, daemon=True).start()
     append_log("clip", f"เซิร์ฟเวอร์สายคลิปพร้อม — พอร์ต {PORT}")
 
 
 if __name__ == "__main__":
     import uvicorn
 
+    # เวลาถูกปลุกแบบ background บน Windows stdout อาจเป็น cp1252 ซึ่งพิมพ์
+    # ชื่อเซิร์ฟเวอร์ภาษาไทยไม่ได้และทำให้โปรเซสตายก่อนเปิดพอร์ต
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     print(f"Pipeline Studio — สายเจนคลิป v{APP_VERSION} — http://127.0.0.1:{PORT}")
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")

@@ -420,7 +420,11 @@ def listen(path, api_key: str, log=print) -> dict:
             # Google บอกมาเองว่าให้รอกี่วินาที ก็เชื่อเขา — เดาเองน้อยไปก็โดนซ้ำ
             # เดามากไปก็ช้าเปล่า ค่าของเราเป็นแค่ทางถอยเมื่อเขาไม่ได้บอก
             wait = max(told_wait, RETRY_WAITS[min(attempt, len(RETRY_WAITS)) - 1])
-            log(f"  รอ {wait} วิแล้วฟังใหม่ (ครั้งที่ {attempt}/{len(RETRY_WAITS)}) — {last}")
+            # นับเทียบกับ **จำนวนรอบจริงที่วนได้** ไม่ใช่แค่ len(RETRY_WAITS)
+            # ของเดิมพิมพ์ "ครั้งที่ 6/3" ซึ่งอ่านแล้วเหมือนลูปหลุดเพดาน
+            # ทั้งที่มันมีเพดานอยู่ — ป้ายที่บอกตัวเลขผิดทำให้ไล่บั๊กผิดทาง
+            log(f"  รอ {wait} วิแล้วฟังใหม่ "
+                f"(ครั้งที่ {attempt}/{len(RETRY_WAITS) + len(MODELS) - 1}) — {last}")
             time.sleep(wait)
         # สลับโมเดลแล้วยิงต่อได้เลย ไม่ต้องรอ — คนละถังโควตากัน การรอไม่ช่วยอะไร
         skip_wait = False
@@ -453,6 +457,28 @@ def listen(path, api_key: str, log=print) -> dict:
             # (ต่อนาที = เว้นจังหวะแล้วหาย · ต่อวัน = ต้องรอพรุ่งนี้หรือเปลี่ยนคีย์)
             told_wait, daily, why = _busy_hint(response)
             last = why or f"Gemini ตอบ {response.status_code}"
+            # ---- เครดิตหมด = เลิกทันที ห้ามนอนรอ (30 ส.ค. 2569) --------------
+            #
+            # **เหตุการณ์จริง 16:51–16:55** เครดิตเติมล่วงหน้าหมดทั้ง 4 ใบ
+            # ตัวนี้ยังไล่ลองใหม่ นอนรอบละ 60 วินาที ครั้งที่ 3 · 4 · 5 · 6…
+            # ทั้งที่เครดิตไม่มีวันคืนเองจนกว่าจะมีคนไปเติมเงิน
+            #
+            # **ที่แพงกว่าเวลาที่เสียคือช่องที่ถูกยึด** — ตัวรันมีช่องเดียวต่องาน
+            # นอนรออยู่ในนี้ = งานทำสตอรีบอร์ด 200 กว่าใบหยุดเดินตามไปด้วย
+            # (วัดได้: `making_storyboard` เหลือ 0 ทั้งที่มี 204 ใบจอดรอ)
+            #
+            # กติกาข้อ 3 เขียนไว้แล้วว่า **retry ต้องเปลี่ยนอะไรบางอย่าง**
+            # ยิงของเดิมด้วยคีย์เดิมที่เครดิตหมด ไม่ได้เปลี่ยนอะไรเลย
+            try:
+                import flow_worker as _fw                        # noqa: PLC0415
+                trouble = _fw.gemini_trouble_kind(response.text)
+            except Exception:                                    # noqa: BLE001
+                low = (response.text or "").lower()
+                trouble = "credits" if "credits are depleted" in low else ""
+            if trouble == "credits":
+                raise ClipCheckError(
+                    f"{why or 'เครดิต Gemini หมด'} — เติมเครดิตที่ "
+                    "https://ai.studio/projects ก่อน แล้วสั่งตรวจใหม่")
             if daily:
                 # ถังของโมเดลนี้หมดวันแล้ว — ไล่ไปตัวถัดไปที่นับคนละถัง
                 if queue:

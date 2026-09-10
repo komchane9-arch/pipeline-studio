@@ -221,7 +221,7 @@ def parked_by_bucket(rows: list[dict]) -> list[dict]:
 BOARD = (
     (LINK,   "🐣 ดึง Link",        "มีลิงก์แล้ว รอดึงข้อมูลสินค้า"),
     (STORY,  "🎨 Storyboard",      "ได้ข้อมูลแล้ว รอตรวจรูป · จุดเด่น · สตอรีบอร์ด · บทพูด"),
-    (CLIP,   "🎬 Clip",            "มีคลิปแล้ว รออนุมัติก่อนโพสต์"),
+    (CLIP,   "🎬 Clip",            "รอเจนคลิป หรือมีคลิปแล้วรออนุมัติก่อนโพสต์"),
     (SHOPEE, "🛍️ Shopee Video",    "อนุมัติคลิปแล้ว รอลง Shopee Video"),
     (REELS,  "💙 Facebook Reels",  "ลง Shopee แล้ว รอลง Facebook Reels"),
     (TIKTOK, "🎵 TikTok",          "ลง Facebook แล้ว รอลง TikTok"),
@@ -236,12 +236,28 @@ NO_TARGET: set[str] = set()
 POST_TARGET = {SHOPEE: "shopee_video", REELS: "facebook_reels", TIKTOK: "tiktok"}
 
 
+def active_auto_skip_target(run: dict | None) -> str:
+    """ปลายทางที่ใบนี้ถูกกันออกจากอัตโนมัติอยู่ — ว่างเมื่อแก้ลิงก์แล้ว."""
+    run = run or {}
+    target = publish_order.next_target(run) or ""
+    state = ((run.get("publish") or {}).get(target) or {})
+    if (state.get("auto_skip")
+            and str(state.get("auto_skip_link") or "").strip()
+            == str(run.get("affiliate_url") or "").strip()):
+        return target
+    return ""
+
+
 def bucket_of(job: dict, run: dict | None = None) -> tuple[str, str]:
     """งานใบนี้อยู่กองไหน — คืน (รหัสกอง, เหตุผลภาษาคน)
 
     คืนกองว่างถ้างานจบ/ล้ม/ยกเลิก หรือยังตอบไม่ได้
     """
     stage = (job or {}).get("stage") or ""
+    # ใบที่ถูกแบนคือหลักฐานย้อนหลัง ไม่ใช่งานที่ต้องเดินต่อ ห้ามให้สถานะคิวเก่า
+    # (เช่น ready_flow) ดึงกลับเข้ากอง Clip และเผลอเจนซ้ำ
+    if run and run.get("banned"):
+        return "", ""
     # **ใบที่พักไว้รอแก้ อยู่ใต้กองของขั้นที่มันค้าง** (ผู้ใช้สั่งแก้ 27 ส.ค. 2026)
     #
     # *"ตัวรอแก้ให้ใส่ในแต่ละใต้ stage แยกกันเลย ว่ารอแก้ stage ไหน"*
@@ -256,6 +272,15 @@ def bucket_of(job: dict, run: dict | None = None) -> tuple[str, str]:
     parked = (job or {}).get("parked") or {}
     if parked:
         stage = parked.get("from") or stage
+    # ใบที่นำเข้าลิงก์แล้ว Shopee ตอบว่าไม่มีสินค้า ต้องอยู่ให้เห็นในกอง
+    # Shopee Video แม้ใบงานเก่าในคิวยังค้างป้าย video_review อยู่ก็ตาม
+    # นี่ไม่ใช่การพักทั้งใบ: แค่กันตัวโพสต์อัตโนมัติจนกว่าลิงก์จะถูกแก้
+    skipped_target = active_auto_skip_target(run)
+    if skipped_target:
+        for key, target in POST_TARGET.items():
+            if target == skipped_target:
+                state = ((run or {}).get("publish") or {}).get(target) or {}
+                return key, str(state.get("error") or "ข้ามอัตโนมัติจนกว่าจะแก้ลิงก์")
     if stage in LINK_STAGES:
         return LINK, clip_queue.STAGE_LABEL.get(stage, stage)
     if stage in STORY_STAGES:
@@ -295,19 +320,33 @@ def bucket_of_run(run: dict) -> str:
 
     คืนค่าว่าง = ลงครบทั้งสามที่แล้ว ไม่ต้องทำอะไรต่อ จึงไม่เข้ากองไหน
     """
-    if not run:
+    if not run or run.get("banned"):
+        return ""
+    # คลิปที่มีไฟล์จริงคือหลักฐานว่าผ่านขั้นต้นน้ำมาแล้ว แม้ metadata เก่าบางใบ
+    # จะไม่มี storyboard เหลืออยู่ก็ตาม ต้องส่งต่อไปกองโพสต์ตามสถานะเดิมก่อน
+    # ตรวจความครบของรูป/Storyboard ไม่เช่นนั้นงานที่มีคลิปแล้วจะถอยหลังผิดกอง
+    if _existing_video_names(run):
+        target = publish_order.next_target(run)
+        for key, name in POST_TARGET.items():
+            if name == target:
+                return key
         return ""
     if not (run.get("images") or []):
         return LINK
-    if not (run.get("storyboard") or []) and not (run.get("script") or []):
+    # ต้องครบทั้งสองอย่างถึงจะพ้นกอง Storyboard — ของเดิมใช้ `and` ทำให้ใบที่มี
+    # แค่บทพูดแต่ไม่มีสตอรีบอร์ดหลุดไปกอง Clip ทั้งที่ยังเจนไม่ได้
+    if not (run.get("storyboard") or []) or not (run.get("script") or []):
         return STORY
-    if not (run.get("videos") or []):
-        return CLIP
-    target = publish_order.next_target(run)
-    for key, name in POST_TARGET.items():
-        if name == target:
-            return key
-    return ""
+    return CLIP
+
+
+def _existing_video_names(run: dict) -> list[str]:
+    """ชื่อคลิปที่มีไฟล์จริง — ไม่เชื่อ metadata เก่าที่ไฟล์ถูกย้าย/ลบแล้ว"""
+    from pathlib import Path as _Path                          # noqa: PLC0415
+
+    run = run or {}
+    folder = _Path(run.get("folder") or "")
+    return [n for n in (run.get("videos") or []) if (folder / n).is_file()]
 
 
 def clip_info(run: dict) -> dict:
@@ -322,19 +361,43 @@ def clip_info(run: dict) -> dict:
     ของเสียจะได้เครื่องหมายถูก (เกิดจริง 30 ส.ค.: เครดิต Gemini หมดตอนตรวจ
     ผลออกมาว่างเปล่า ถ้าไม่แยกจะดูเหมือนคลิปไม่มีเสียง ทั้งที่แค่ตรวจไม่ได้)
     """
-    from pathlib import Path as _Path                          # noqa: PLC0415
-
     run = run or {}          # บางแถวยังไม่มีข้อมูลงาน (ใบที่เพิ่งเข้าคิว)
-    folder = _Path(run.get("folder") or "")
-    files = [n for n in (run.get("videos") or []) if (folder / n).is_file()]
+    files = _existing_video_names(run)
     check = run.get("video_check") or {}
     ok = check.get("ok") if check else None
+    tiktok_link = run.get("tiktok_product_link") or {}
+    current_target = publish_order.next_target(run)
+    publish_state = ((run.get("publish") or {}).get(current_target) or {})
+    active_skip = active_auto_skip_target(run) == current_target
+    publish_note = (str(publish_state.get("error") or "").strip()
+                    if active_skip else "")
+    if files:
+        clip_state = "approval"
+    elif (run.get("storyboard") and run.get("script") and run.get("flow_prompts")
+          and not run.get("banned")):
+        clip_state = "generation"
+    else:
+        clip_state = "incomplete"
     return {
         "video_count": len(files),
+        # แยก "รอเจน" ออกจาก "มีคลิปรอตรวจ" ให้หน้าเว็บไม่เรียก 112 ใบรวมกัน
+        # ว่าเป็นคลิปพร้อมอนุมัติ ทั้งที่จริงยังไม่มีไฟล์
+        "clip_state": clip_state,
         "video_at": run.get("videos_at") or "",
         "video_ok": ok,
         "video_note": (check.get("problems") or [None])[0] if ok is False else "",
         "resolution": check.get("resolution") or "",
+        # ผลนำสินค้าเข้าโชว์เคส TikTok ต้องเห็นได้จากแถวโดยไม่ต้องเปิดการ์ด.
+        # ``pending_review`` หมายถึงยังไม่ได้เลือกสินค้า ไม่ใช่เลือกอันดับแรกไว้.
+        "tiktok_link_status": tiktok_link.get("status") or "",
+        "tiktok_link_label": tiktok_link.get("label") or "",
+        "tiktok_product_url": tiktok_link.get("url") or run.get("tiktok_product_url") or "",
+        "tiktok_showcase_added": bool(tiktok_link.get("showcase_added")),
+        "tiktok_product_name": tiktok_link.get("tiktok_product_name") or "",
+        "tiktok_link_rank": tiktok_link.get("selected_rank") or 0,
+        "tiktok_link_reason": tiktok_link.get("reason") or "",
+        "publish_auto_skip": bool(active_skip),
+        "publish_note": publish_note,
     }
 
 
@@ -448,17 +511,31 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
     # แยกถังเพราะตัวเลขในวงเล็บบนหัวกองต้องหมายถึง "งานที่เดินได้จริง" เท่านั้น
     # ถ้านับรวมของที่พักไว้ ตัวเลขจะบอกว่ามีของเยอะทั้งที่แตะไม่ได้สักใบ
     parked_piles: dict[str, list[dict]] = {key: [] for key, _, _ in BOARD}
+    # มีรายการ run อยู่ในหน่วยความจำจากผู้เรียกแล้ว ใช้ตรวจเฉพาะใบที่ถูกข้าม
+    # โดยไม่ต้องเปิด run.json เพิ่มเป็นร้อยไฟล์เพราะงานขั้นต้นน้ำ
+    run_by_item = {str(r.get("item_id") or ""): r for r in (runs or [])}
     for job in jobs or []:
         stage = job.get("stage") or ""
-        run = None
+        candidate = run_by_item.get(str(job.get("item_id") or ""))
+        if candidate and candidate.get("banned"):
+            continue
+        run = candidate if active_auto_skip_target(candidate) else None
         # **ใบที่พักไว้ไม่ต้องอ่าน run.json** ขั้นที่มันค้างบอกกองได้อยู่แล้ว
         #
         # ต้องดักก่อนด่านข้างล่าง เพราะใบที่ "ล้มแล้วพักไว้รอแก้" จะโดนกรองทิ้ง
         # ตรงบรรทัด failed/cancelled — ซึ่งเป็นเคสที่ผู้ใช้อยากเห็นที่สุด
-        if job.get("parked"):
-            park = job.get("parked") or {}
+        # งานเดียวกันอาจยังมีแถวประวัติใน clip_queue แต่ถูกพักภายหลังที่ run.json
+        # (เช่นใบแอร์ 9154852607). ถ้าดูเฉพาะ job จะเอาใบพักไปนับในกองพร้อมลง
+        # ทั้งที่ตัว Auto ตรวจ run แล้วข้าม จึงเกิดกอง 68 แต่พร้อมจริง 67.
+        park = (job.get("parked") or
+                ((candidate or {}).get("parked") if candidate else None) or {})
+        if park:
             came = park.get("from") or stage
-            key, _why = bucket_of(job, None)
+            if came in piles:
+                key = came
+            else:
+                parked_job = {**job, "parked": park}
+                key, _why = bucket_of(parked_job, None)
             if not key:
                 # ค้างที่ขั้นที่แมปกองไม่ได้ (เช่นล้มตอนโพสต์ หรือล้มก่อนได้รูป)
                 # ลงกองคลิปไว้ก่อน ดีกว่าหายเงียบจากทุกกองแล้วไม่มีใครเห็น
@@ -468,7 +545,8 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
             parked_piles[key].append({
                 "id": job.get("id"),
                 "item_id": job.get("item_id") or "",
-                "name": job.get("name") or job.get("link") or "(ยังไม่รู้ชื่อสินค้า)",
+                "name": (job.get("name") or (candidate or {}).get("name")
+                         or job.get("link") or "(ยังไม่รู้ชื่อสินค้า)"),
                 "stage": stage,
                 "stage_label": clip_queue.STAGE_LABEL.get(stage, stage),
                 # ขั้นที่ค้างตอนถูกพัก — ต่างจาก `stage` เมื่อใบนั้นล้มก่อนถูกพัก
@@ -539,6 +617,10 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
             key = bucket_of_run(run)
             if key not in (SHOPEE, REELS, TIKTOK):
                 continue          # ขั้นต้นน้ำยังอยู่ในคิว ไม่ต้องเติมจากไฟล์
+            # ป้องกันสำเนาโฟลเดอร์ `-ซ้ำ-` ของ item เดียวกันเพิ่มสองแถวบน
+            # กระดาน ขณะที่ตัว Auto รวมเป็นหนึ่งคิวอยู่แล้ว. ต้องจดทันทีในลูป;
+            # เซตเดิมมีเฉพาะใบจาก clip_queue จึงกันสำเนาระหว่าง runs ไม่ได้.
+            already.add(item_id)
             row = {
                 "id": "",                     # ไม่มีใบงานในคิวแล้ว
                 "item_id": item_id,
@@ -569,10 +651,16 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 piles[key].append(row)
 
     counts = {key: len(rows) for key, rows in piles.items()}
+    clip_waiting_generation = sum(
+        1 for row in piles[CLIP] if row.get("clip_state") == "generation")
+    clip_waiting_approval = sum(
+        1 for row in piles[CLIP] if row.get("clip_state") == "approval")
     return {
         "buckets": [
             {"key": key, "title": title, "hint": hint,
              "count": counts[key],
+             "waiting_generation": clip_waiting_generation if key == CLIP else 0,
+             "waiting_approval": clip_waiting_approval if key == CLIP else 0,
              # กองรอแก้ไม่มีเส้นวัด — ยิ่งน้อยยิ่งดี ไม่ใช่ของที่ต้องมีสำรอง
              "target": 0 if key in NO_TARGET else STOCK_TARGET,
              # ขาดอีกกี่ใบถึงจะถึงเส้นวัด — 0 = ถึงแล้วหรือเกินแล้ว

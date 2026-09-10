@@ -723,6 +723,60 @@ def set_story_full_shot(root: Path, item_id: str, value: bool) -> dict:
     return run
 
 
+# ---- ขีดคำอ่านต้องอยู่แค่ในบรรทัดเสียงพูด (เจ้าของเจอเอง 30 ส.ค. 2569) ----
+#
+# **เหตุการณ์** เจ้าของดูคลิป TCL 55 นิ้วแล้วเห็นตัวหนังสือบนจอเขียนว่า
+# `สี-สด สวย-สะ-ดุด-ตา / คิว-แอล-อี-ดี` มีขีดคั่นเต็มไปหมด แล้วถามว่า
+# *"มันเอาคำพูดมาทำเป็นตัวอักษร ถ้าส่งปกติ ถ้าจะมาจาก model มันเอง"*
+#
+# **ไม่ใช่ Veo คิดเอง — เราส่งไปแบบนั้นจริงๆ** คำสั่งที่ส่งเข้า Flow เขียนว่า
+#     Thai on-screen text:
+#     "สี-สด สวย-สะ-ดุด-ตา
+#      คิว-แอล-อี-ดี"
+# Veo วาดตามที่สั่งเป๊ะทุกขีด
+#
+# **ราก** กติกาข้อ 3 ที่ส่งให้ ChatGPT เขียนว่า "เขียนบทพูดเป็นคำอ่านคั่นพยางค์
+# ด้วยขีด **ทุกคำ**" — คำว่า "ทุกคำ" กว้างเกินไป ChatGPT เลยเอาไปใช้กับ
+# ตัวหนังสือที่โชว์บนจอด้วย ทั้งที่ขีดมีไว้ช่วย**การอ่านออกเสียง**เท่านั้น
+#
+# แก้สองชั้น: แก้ถ้อยคำในกติกา (ที่ `chatgpt_driver.FLOW_AUDIO_RULE`) และ
+# **ตัวนี้เป็นตาข่ายรับ** เพราะเชื่อคำตอบของโมเดลชั้นเดียวไม่ได้ (หลักข้อ 3)
+# ตาข่ายยังช่วยงานเก่าที่เก็บคำสั่งผิดไว้แล้วด้วย โดยไม่ต้องไปทำสตอรีบอร์ดใหม่
+_READ_HYPHEN_RE = re.compile("(?<=[ก-๛])[-‐‑‒–]+(?=[ก-๛])")
+_AUDIO_HEAD_RE = re.compile(r"^[ 	]*Audio[ 	]*[:：]", re.I)
+
+
+# บรรทัดที่เป็นเรื่องของ "เสียงพูด" ห้ามแตะขีด — ขีดตรงนั้นคือของที่ต้องมี
+_SPEECH_LINE_RE = re.compile(r"บทพูด|เสียงพูด|narration|voice[- ]?over", re.I)
+
+
+def strip_reading_hyphens(prompt: str) -> str:
+    """เอาขีดคำอ่านออกจากตัวหนังสือที่จะโชว์บนจอ — ไม่แตะบรรทัดที่เป็นเสียงพูด
+
+    **ไม่ลบขีดทุกตัวที่เจอ** เพราะภาษาไทยมีขีดที่ควรอยู่จริง วัดกับงานจริง
+    112 ใบแล้วเจอสองแบบปนกัน:
+
+        ปรับสูง–ต่ำได้      ← ขีดของจริง แปลว่า "สูงถึงต่ำ" ต้องเก็บไว้
+        แยกหลัง-ขา          ← ขีดของจริง แปลว่า "หลังกับขา" ต้องเก็บไว้
+        สี-สด สวย-สะ-ดุด-ตา  ← คำอ่าน ต้องเอาออก
+
+    **แยกด้วยจำนวนขีดในบรรทัดนั้น** — คำอ่านใส่ขีดแทบทุกพยางค์ จึงมีตั้งแต่
+    สองตัวขึ้นไปเสมอ ส่วนคำประสมของจริงมีตัวเดียวต่อวลี ตัดที่ "ตั้งแต่ 2 ตัว"
+    จึงแยกสองอย่างนี้ออกจากกันได้โดยไม่ต้องรู้ความหมายของคำ
+
+    เรียกซ้ำได้ ข้อความที่สะอาดอยู่แล้วผ่านไปโดยไม่เปลี่ยนรูป
+    """
+    out = []
+    for line in str(prompt or "").split(chr(10)):
+        if _AUDIO_HEAD_RE.match(line) or _SPEECH_LINE_RE.search(line):
+            out.append(line)
+        elif len(_READ_HYPHEN_RE.findall(line)) >= 2:
+            out.append(_READ_HYPHEN_RE.sub("", line))
+        else:
+            out.append(line)
+    return chr(10).join(out)
+
+
 def set_flow_prompts(root: Path, item_id: str, prompts: list[str]) -> dict:
     """เขียนคำสั่ง Flow ชุดที่แก้แล้วกลับลงงาน
 
@@ -734,7 +788,7 @@ def set_flow_prompts(root: Path, item_id: str, prompts: list[str]) -> dict:
     run = _read_json(folder / RUN_FILE)
     if not run:
         raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
-    rows = [str(text) for text in prompts if str(text).strip()]
+    rows = [strip_reading_hyphens(str(text)) for text in prompts if str(text).strip()]
     if not rows:
         raise ClipStoreError("คำสั่ง Flow ว่างเปล่า")
     before = list(run.get("flow_prompts") or [])
@@ -793,7 +847,7 @@ def save_storyboard(root: Path, data: dict, result: dict) -> Path:
         except ValueError:
             frames.append(f"{STORYBOARD_DIR}/{Path(path).name}")
 
-    prompts = result.get("flow_prompts") or []
+    prompts = [strip_reading_hyphens(p) for p in (result.get("flow_prompts") or [])]
     script = result.get("script") or []
     run = _read_json(folder / RUN_FILE)
     run.update({
@@ -1098,6 +1152,37 @@ def save_hashtags(root: Path, item_id: str, plan: dict) -> dict:
 PUBLISH_TARGETS = ("shopee_video", "facebook_reels", "tiktok")
 
 
+def posted_copy(root: Path, item_id: str, target: str) -> dict:
+    """คืนสำเนาที่จดว่าโพสต์ปลายทางนี้แล้วจากทุกกอง; ไม่พบคืน ``{}``.
+
+    ด่านก่อนแตะมือถือห้ามเชื่อ ``target_dir()`` เพียงสำเนาเดียว เพราะข้อมูลเก่า
+    อาจมี item_id เดียวกันอยู่คนละกอง หรือมีชื่อ ``<id>-ซ้ำ-<เวลา>`` จากตอน
+    ``refile()`` พบปลายทางชนกัน. การพลาดว่า "ยังไม่ลง" จะสร้างโพสต์ซ้ำจริง
+    ส่วนการพบ posted แล้วหยุดไว้ยังตรวจย้อนหลังและแก้ข้อมูลได้อย่างปลอดภัย.
+    """
+    wanted = str(item_id or "").strip()
+    if not wanted or target not in PUBLISH_TARGETS:
+        return {}
+    duplicate_prefix = wanted + "-ซ้ำ-"
+    for name in ALL_DIRS:
+        base = Path(root) / name
+        if not base.is_dir():
+            continue
+        for folder in base.iterdir():
+            if not folder.is_dir():
+                continue
+            if folder.name != wanted and not folder.name.startswith(duplicate_prefix):
+                continue
+            run = _read_json(folder / RUN_FILE)
+            if str(run.get("item_id") or folder.name) != wanted:
+                continue
+            state = ((run.get("publish") or {}).get(target) or {})
+            if state.get("status") == "posted":
+                run["folder"] = str(folder)
+                return run
+    return {}
+
+
 def build_caption(run: dict) -> str:
     """แคปชันสำหรับโพสต์ — ชื่อสินค้า + จุดเด่น + **ลิงก์ affiliate ปิดท้าย**
 
@@ -1133,6 +1218,46 @@ def set_hashtag_plan(root: Path, item_id: str, plan: dict) -> dict:
     return run
 
 
+def set_tiktok_product_link(root: Path, item_id: str, result: dict) -> dict:
+    """บันทึกผลนำสินค้าเข้าโชว์เคส TikTok และหลักฐานสี่อันดับในใบงาน.
+
+    ``pending_review`` ไม่ได้แปลว่าค้นหาล้ม: ระบบตรวจสี่อันดับแล้วแต่ยังไม่มี
+    ตัวที่มั่นใจ จึงไม่เลือกสินค้าและไม่เก็บ URL. ``showcase_added`` เท่านั้น
+    ที่ยืนยันว่าเลือกตัวตรงและกดเพิ่มเข้าโชว์เคสสำเร็จแล้ว.
+
+    URL เก่าของใบงานเดิมยังอ่านได้เพื่อ backward compatibility แต่ผลรูปแบบใหม่
+    จะไม่สร้าง URL เพิ่มและไม่ใช้ URL เป็นหลักฐานว่างานเสร็จอีกต่อไป.
+    """
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+    clean = dict(result or {})
+    clean["status"] = str(clean.get("status") or "pending_review")
+    clean["label"] = {
+        "showcase_added": "เพิ่มโชว์เคสแล้ว",
+        "matched": "ตรง",
+        "pending_review": "รอตรวจ",
+        "running": "กำลังตรวจสินค้า",
+        "error": "เพิ่มโชว์เคสไม่สำเร็จ",
+    }.get(clean["status"], str(clean.get("label") or "รอตรวจ"))
+    previous = run.get("tiktok_product_link") or {}
+    # ผลรุ่นใหม่จงใจไม่มีคีย์ url; อย่าลบลิงก์เก่าของใบงาน legacy ทิ้ง.
+    if "url" in clean:
+        clean["url"] = str(clean.get("url") or "").strip()
+    elif previous.get("url") or run.get("tiktok_product_url"):
+        clean["url"] = str(previous.get("url") or run.get("tiktok_product_url") or "").strip()
+    clean["showcase_added"] = bool(
+        clean.get("showcase_added") or clean["status"] == "showcase_added")
+    clean["updated_at"] = str(clean.get("updated_at") or _now())
+    run["tiktok_product_link"] = clean
+    if clean.get("url"):
+        run["tiktok_product_url"] = clean["url"]
+    run["tiktok_product_status"] = clean["status"]
+    _write_json(folder / RUN_FILE, run)
+    return run
+
+
 def mark_ready_to_post(root: Path, item_id: str) -> dict:
     """คลิปผ่านการอนุมัติแล้ว — ตั้งคิวปลายทางไว้รอตัวโพสต์มาหยิบ
 
@@ -1156,7 +1281,7 @@ def mark_ready_to_post(root: Path, item_id: str) -> dict:
 
 def mark_posted(
     root: Path, item_id: str, target: str, url: str = "", error: str = "",
-    account: str = "",
+    account: str = "", auto_skip: bool = False,
 ) -> dict:
     """บันทึกผลการโพสต์ของปลายทางหนึ่ง
 
@@ -1179,6 +1304,14 @@ def mark_posted(
         "url": url,
         "error": error,
         "account": str(account or ""),
+        # ไม่พบสินค้าในหน้าผูกสินค้า Shopee = เก็บใบไว้ในกองเดิม แต่ตัว
+        # อัตโนมัติห้ามหยิบวนซ้ำจนขวางทุกใบข้างหลัง
+        "auto_skip": bool(auto_skip and error),
+        "auto_skip_at": _now() if auto_skip and error else "",
+        # จำลิงก์ที่มีปัญหาไว้ด้วย พอใบงานถูกแก้เป็นลิงก์ใหม่ ตัวคัดอัตโนมัติ
+        # จะรู้ว่าไม่ใช่ลิงก์เดิมและนำใบนี้กลับเข้าคิวได้เอง
+        "auto_skip_link": (str(run.get("affiliate_url") or "").strip()
+                           if auto_skip and error else ""),
     }
     run["publish"] = publish
     _write_json(folder / RUN_FILE, run)
@@ -1287,6 +1420,25 @@ def park_run(root: Path, item_id: str, why: str = "", stage: str = "") -> dict:
     _write_json(folder / RUN_FILE, run)
     # พักแล้วย้ายเข้าโฟลเดอร์ wait* ของขั้นนั้น — เปิดดูแล้วรู้ทันทีว่าค้างตรงไหน
     run["folder"] = str(refile(root, str(item_id)))
+    return run
+
+
+def record_publish_failure(root: Path, item_id: str, target: str, step: str,
+                           reason: str, screenshot: str = "") -> dict:
+    """จดหลักฐานใบที่หยุด เพื่อให้เปิดย้อนหลังได้หลังข้ามไปใบถัดไป."""
+    folder = target_dir(root, item_id)
+    run = _read_json(folder / RUN_FILE)
+    if not run:
+        raise ClipStoreError(f"ไม่พบงานของสินค้า {item_id}")
+    row = {
+        "at": _now(), "target": str(target or ""), "step": str(step or ""),
+        "reason": str(reason or "")[:500], "screenshot": str(screenshot or ""),
+    }
+    history = list(run.get("publish_failures") or [])
+    history.append(row)
+    run["publish_failures"] = history[-20:]
+    run["last_publish_failure"] = row
+    _write_json(folder / RUN_FILE, run)
     return run
 
 

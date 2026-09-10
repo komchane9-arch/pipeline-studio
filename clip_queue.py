@@ -91,6 +91,11 @@ ACTIONABLE = {
 # ไม่งั้นงานที่ผู้ใช้นั่งรออยู่หน้าจอจะค้างเพราะติดเพดานของงานอื่น
 BATCH_LIMIT = 8
 
+# ไม่ได้เริ่มลิงก์ใหม่มานานเกินนี้ = คราวหน้าต้องเป็นคิวของลิงก์ (วินาที)
+# ดูเหตุผลเต็มใน `claim_next` — สั้นๆ คือกันงานลำดับต่ำอดตายเมื่อมีงานลำดับสูง
+# ค้างเป็นร้อยใบ โดยยังช้ากว่าจังหวะที่เคยทำให้ Shopee บล็อกราว 3.6 เท่า
+QUEUE_FAIR_SECONDS = 300
+
 # สถานะที่แปลว่า **เครื่องกำลังลงมือทำอยู่จริง** (ไม่ใช่จอดรอคนกด)
 #
 # แยกออกมาเพราะเพดานข้างบนต้องนับแค่พวกนี้ — งานที่รอคนกดอนุมัติไม่ได้ใช้
@@ -539,7 +544,7 @@ class ClipQueue:
         rows.sort(key=lambda j: (j.get("parked") or {}).get("at") or "")
         return rows
 
-    def claim_next(self) -> dict | None:
+    def claim_next(self, stages: set | None = None) -> dict | None:
         """หยิบงานที่ทำได้ทันทีมาหนึ่งงาน แล้วตั้งสถานะ "กำลังทำ" ทันทีในล็อกเดียว
 
         ต้องเปลี่ยนสถานะในล็อกเดียวกับตอนหยิบ ไม่งั้นถ้ามีตัวรันสองตัว (หรือกดสั่ง
@@ -585,12 +590,39 @@ class ClipQueue:
                 return None
             full = busy >= BATCH_LIMIT or paused
 
+            # ---- กันลิงก์ใหม่อดคิวถาวร (เจ้าของถาม 30 ส.ค. 2569) --------------
+            #
+            # *"ทำไม ช่องดึงลิ้งไม่เดินเลย"* — วัดตอนนั้น: ลิงก์รออยู่ 34 ใบ
+            # แต่มีงาน "รอทำสตอรีบอร์ด" ค้างอยู่ 144 ใบ ซึ่ง**ลำดับสูงกว่า**
+            # ตัวรันจึงหยิบสตอรีบอร์ดตลอด ลิงก์ใหม่ไม่ได้คิวเลยสักครั้งใน 40 นาที
+            #
+            # **นี่ไม่ใช่เพดานเต็ม** เพดานยังว่าง 6 จาก 8 ที่ — เป็นอาการที่งาน
+            # ลำดับต่ำ**อดตาย**เพราะงานลำดับสูงมีไม่มีวันหมด
+            #
+            # **แก้ด้วยการรับประกันช่องเวลา** ไม่ใช่สลับลำดับ — ถ้าไม่ได้เริ่ม
+            # ลิงก์ใหม่มานานเกิน `QUEUE_FAIR_SECONDS` ให้รอบนี้เลือกลิงก์ก่อน
+            # รอบเดียว แล้วกลับไปลำดับปกติ
+            #
+            # **ทำไมไม่เร็วกว่านี้** การดึง Shopee คือขั้นที่โดนบล็อก วัดไว้
+            # 25 ส.ค.: ดึง 8 ใบใน 11 นาที (1 ใบ/82 วินาที) แล้วโดนบล็อกที่ใบ 9
+            # ช่วงห่าง 300 วินาทีจึงช้ากว่าจังหวะที่เคยโดนบล็อกราว 3.6 เท่า
+            fair_turn = False
+            if not stages:                       # เฉพาะตัวรันหลักที่หยิบได้ทุกขั้น
+                since = time.time() - getattr(self, "_last_queued_at", 0.0)
+                has_queued = any(j.get("stage") == STAGE_QUEUED and not j.get("parked")
+                                 for j in self.jobs)
+                fair_turn = bool(has_queued and since >= QUEUE_FAIR_SECONDS)
+
             # เลือกงานที่ "มีคนรออยู่" ก่อนงานที่ไม่มีใครรอ (ดู STAGE_PRIORITY)
             # ตัวเลขเท่ากันให้ตัวที่อยู่ก่อนในลิสต์ชนะ — ลำดับเข้าคิวเดิมไม่สลับ
             best = None
             for index, job in enumerate(self.jobs):
                 stage = job.get("stage")
                 if stage not in ACTIONABLE:
+                    continue
+                # ตัวรันที่จำกัดขั้น (ช่องทำสตอรีบอร์ดช่องที่ 2) หยิบเฉพาะขั้นของตัวเอง
+                # ตัวรันหลักไม่ส่ง stages มา จึงหยิบได้ทุกขั้นเหมือนเดิม
+                if stages and stage not in stages:
                     continue
                 # **พักไว้รอแก้ = เครื่องห้ามแตะ** (ผู้ใช้สั่ง 27 ส.ค. 2026)
                 # ไม่งั้นกดพักแล้วอีกเดี๋ยวตัวรันก็หยิบไปทำต่อ = ปุ่มพักไร้ความหมาย
@@ -599,7 +631,11 @@ class ClipQueue:
                 # เต็มเพดานแล้ว = เริ่มใบใหม่ไม่ได้ แต่งานที่เริ่มไปแล้วเดินต่อได้
                 if full and stage == STAGE_QUEUED:
                     continue
-                rank = (STAGE_PRIORITY.get(stage, 99), index)
+                # ถึงตาของลิงก์ใหม่แล้ว = ยกให้เป็นลำดับสูงสุดรอบนี้รอบเดียว
+                priority = STAGE_PRIORITY.get(stage, 99)
+                if fair_turn and stage == STAGE_QUEUED:
+                    priority = -1
+                rank = (priority, index)
                 if best is None or rank < best[0]:
                     best = (rank, job)
             if best is not None:
@@ -607,6 +643,8 @@ class ClipQueue:
                 was = job["stage"]
                 job["stage"] = moving[was]
                 job["claimed_from"] = was
+                if was == STAGE_QUEUED:
+                    self._last_queued_at = time.time()
                 job["updated_at"] = _now()
                 self._save()
                 return dict(job)
@@ -822,7 +860,8 @@ class ClipRunner:
     """
 
     def __init__(self, queue: ClipQueue, handler: Callable[[dict], None], log=print,
-                 on_hold: Callable[[dict], None] | None = None) -> None:
+                 on_hold: Callable[[dict], None] | None = None,
+                 stages: set | None = None, slot: int = 1) -> None:
         self.queue = queue
         self.handler = handler
         self.log = log
@@ -831,6 +870,15 @@ class ClipRunner:
         # ต้องเป็น callback ไม่ใช่ให้ clip_queue ส่ง Telegram เอง เพราะไฟล์นี้เป็น
         # คิวล้วนๆ ไม่รู้จักแชท ถ้าผูกกันจะเทสคิวโดยไม่มีโทเคน Telegram ไม่ได้
         self.on_hold = on_hold
+        # ---- ตัวรันตัวที่สองขึ้นไป (เจ้าของสั่ง 30 ส.ค. 2569) ------------------
+        #
+        # `stages` = หยิบเฉพาะขั้นเหล่านี้ · None = หยิบได้ทุกขั้นเหมือนเดิม
+        # `slot` = หมายเลขช่อง ส่งต่อให้ผู้เรียกรู้ว่าต้องใช้โปรไฟล์/GPT ตัวไหน
+        #
+        # **ปลอดภัยกับหลายตัวรัน** เพราะ `claim_next` เปลี่ยนสถานะในล็อกเดียวกับ
+        # ตอนหยิบอยู่แล้ว สองตัวจึงหยิบงานเดียวกันไม่ได้ (ดูคำอธิบายในเมท็อดนั้น)
+        self.stages = stages
+        self.slot = slot
         self.signal = threading.Event()
         self.thread: threading.Thread | None = None
         self.current = ""
@@ -850,7 +898,7 @@ class ClipRunner:
 
     def _loop(self) -> None:
         while True:
-            job = self.queue.claim_next()
+            job = self.queue.claim_next(self.stages)
             if not job:
                 # รอสัญญาณ แต่ตื่นเองทุก 30 วิด้วย เผื่อมีคนแก้ไฟล์คิวจากข้างนอก
                 self.signal.wait(timeout=30)
@@ -858,7 +906,7 @@ class ClipRunner:
                 continue
             self.current = job["id"]
             try:
-                self.handler(job)
+                self.handler(job, self.slot)
             except Exception as error:
                 # นับว่าล้มด้วยเรื่องเดียวกันติดกันกี่ใบแล้ว (ดู REPEAT_FAIL_LIMIT)
                 key = _error_key(str(error))

@@ -9599,6 +9599,8 @@ _browser_view_sessions: dict[str, threading.Thread] = {}
 # หน้าต่างที่ปุ่มเปิดขึ้นเองห้ามถือโปรไฟล์จน worker รอครบ 900 วินาทีแล้วล้ม.
 # แปดนาทีพอสำหรับตรวจหน้าและเหลือระยะให้ worker รับล็อกก่อน timeout 15 นาที.
 BROWSER_VIEW_IDLE_MAX_SECONDS = 8 * 60.0
+# ล็อกอิน TikTok ต้องรอรหัสจากมือถือ/อีเมล ให้เวลามากกว่าการแวะดูเฉยๆ
+TIKTOK_LOGIN_IDLE_MAX_SECONDS = 30 * 60.0
 
 
 def _launch_browser_view_session(stage: str, spec: dict) -> dict:
@@ -9620,16 +9622,27 @@ def _launch_browser_view_session(stage: str, spec: dict) -> dict:
                     return
                 # คงล็อกไว้ตลอดเวลาที่หน้าต่างยังเปิด ป้องกัน worker เปิด
                 # user-data-dir เดียวกันซ้อนและไล่หน้าที่เจ้าของกำลังดูออก.
-                deadline = time.monotonic() + BROWSER_VIEW_IDLE_MAX_SECONDS
-                while (chrome_view.profile_running(spec["profile"])
-                       and time.monotonic() < deadline):
+                # เพดานนี้คือ "อยู่เฉยๆ ได้นานแค่ไหน" ไม่ใช่ "เปิดได้นานแค่ไหน"
+                # ทุกครั้งที่ชื่อหน้าต่างเปลี่ยน = เจ้าของยังกดอยู่ ให้ต่อเวลาใหม่
+                # ถ้านับเป็นเวลาเปิดรวม หน้าต่างจะถูกปิดกลางคันตอนล็อกอิน
+                # ซึ่งรอรหัส SMS ทีเดียวก็เกิน 8 นาทีแล้ว (กติกา 2.5)
+                idle_max = float(spec.get("idle_max") or BROWSER_VIEW_IDLE_MAX_SECONDS)
+                deadline = time.monotonic() + idle_max
+                seen = chrome_view.activity_mark(spec["profile"])
+                while chrome_view.profile_running(spec["profile"]):
+                    now_title = chrome_view.activity_mark(spec["profile"])
+                    if now_title != seen:
+                        seen = now_title
+                        deadline = time.monotonic() + idle_max
+                    if time.monotonic() >= deadline:
+                        break
                     time.sleep(1.0)
                 if chrome_view.profile_running(spec["profile"]):
                     closed = chrome_view.close_profile(spec["profile"])
                     if closed.get("ok"):
                         _clip_log(
-                            f"ปิด Chrome ขั้น {spec['label']} อัตโนมัติหลังเปิดดูครบ "
-                            f"{int(BROWSER_VIEW_IDLE_MAX_SECONDS // 60)} นาที — คืนคิวให้ worker")
+                            f"ปิด Chrome ขั้น {spec['label']} อัตโนมัติหลังไม่มีความ"
+                            f"เคลื่อนไหว {int(idle_max // 60)} นาที — คืนคิวให้ worker")
                     else:
                         _clip_log(
                             f"ปิด Chrome ขั้น {spec['label']} อัตโนมัติไม่สำเร็จ — "
@@ -9672,7 +9685,8 @@ def _read_tiktok_id_after_close(slot: int) -> None:
     import tiktok_chromes                                      # noqa: PLC0415
 
     folder = tiktok_chromes.profile_dir(slot)
-    deadline = time.monotonic() + BROWSER_VIEW_IDLE_MAX_SECONDS + 120
+    # ต้องรอนานกว่าหน้าต่างเสมอ ไม่งั้นเลิกรอก่อนเจ้าของปิด แล้วไอดีหายไปเฉยๆ
+    deadline = time.monotonic() + TIKTOK_LOGIN_IDLE_MAX_SECONDS * 2 + 120
     try:
         while time.monotonic() < deadline:
             if not chrome_view.profile_running(folder):
@@ -9861,8 +9875,11 @@ async def tiktok_chrome_open(request: Request) -> dict:
         return {"ok": True, "slot": slot, "launched": False, **got,
                 "message": f"ยก Chrome ช่อง {slot} ขึ้นมาแล้ว"}
 
+    # ช่องนี้เปิดไว้ให้ "ล็อกอิน" ไม่ใช่แวะดู จึงให้เวลาอยู่เฉยได้นานกว่า
+    # รอรหัสจาก SMS/อีเมลรอบเดียวก็กินเวลาหลายนาทีแล้ว
     spec = {"label": f"TikTok ช่อง {slot}", "profile": folder,
-            "lock": f"tiktok-{folder.name}", "url": tiktok_chromes.UPLOAD_URL}
+            "lock": f"tiktok-{folder.name}", "url": tiktok_chromes.UPLOAD_URL,
+            "idle_max": TIKTOK_LOGIN_IDLE_MAX_SECONDS}
     result = await asyncio.to_thread(
         _launch_browser_view_session, f"tiktok:{folder.name}", spec)
     if not result.get("ok"):
@@ -9872,11 +9889,11 @@ async def tiktok_chrome_open(request: Request) -> dict:
     # ตามอ่านไอดีหลังเจ้าของปิดหน้าต่าง — ล็อกอินเสร็จแล้วระบบจำให้เอง
     threading.Thread(target=_read_tiktok_id_after_close, args=(slot,),
                      daemon=True, name=f"tiktok-id-{slot}").start()
-    minutes = int(BROWSER_VIEW_IDLE_MAX_SECONDS // 60)
+    minutes = int(TIKTOK_LOGIN_IDLE_MAX_SECONDS // 60)
     return {"ok": True, "slot": slot, **result,
             "message": (f"เปิด Chrome ช่อง {slot} แล้ว — ล็อกอิน TikTok "
                         f"ในหน้าต่างนั้นได้เลย ปิดแล้วระบบจะจำไอดีให้เอง "
-                        f"(ถ้าไม่ปิด จะปิดเองใน {minutes} นาที)")}
+                        f"(วางทิ้งไว้เฉยๆ เกิน {minutes} นาทีถึงจะปิดเอง)")}
 
 
 @app.post("/api/tiktok/chromes/refresh")

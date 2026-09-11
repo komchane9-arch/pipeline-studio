@@ -95,6 +95,20 @@ def profile_running(profile_dir: str | Path) -> bool:
     return bool(_matching_windows(profile_dir)) if os.name == "nt" else False
 
 
+def activity_mark(profile_dir: str | Path) -> str:
+    """รอยชี้ว่าเจ้าของยังกดอยู่ไหม — ค่าเปลี่ยน = ยังใช้งานอยู่
+
+    รวมชื่อ **ทุกบาน** ไม่ใช่บานแรก เพราะบานแรกที่เจอมักไม่ใช่หน้าต่าง
+    เบราว์เซอร์ — วัดของจริง 11 ก.ย. 2569: โปรไฟล์ใหม่มีกล่องแจ้งเตือน
+    ส่วนเสริมชื่อ '"Application Launcher For Drive (by Google)" added'
+    ค้างอยู่ข้างหน้าต่างจริง และชื่อกล่องนั้นไม่เปลี่ยนเลย ถ้าไปจับบานนั้น
+    ระบบจะนึกว่าเจ้าของนั่งเฉยๆ แล้วปิดหน้าต่างทิ้งกลางคันตอนล็อกอิน
+    """
+    if os.name != "nt":
+        return ""
+    return " | ".join(sorted(title for _h, _p, title in _matching_windows(profile_dir)))
+
+
 def show_profile(profile_dir: str | Path) -> dict:
     """ย้าย/ยกหน้าต่าง Chrome ของโปรไฟล์ขึ้นหน้า; ไม่พบแล้วคืน ``running=False``."""
     if os.name != "nt":

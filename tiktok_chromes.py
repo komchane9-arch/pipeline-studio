@@ -195,63 +195,98 @@ def read_identity(profile: str | Path, log=print) -> dict:
     return {"ok": True, "profile": folder.name, "handle": handle}
 
 
+# ----------------------------------------------- ที่อยู่ของชื่อบัญชีบนหน้า TikTok
+#
+# วัดจากบัญชีจริงที่ล็อกอินอยู่ (12 ก.ย. 2569) — สองหน้าเก็บคนละที่
+#
+#   หน้า Studio   <script id="__Creator_Center_Context__">   (เข้ารหัสแบบ HTML)
+#                 commonAppContext.user.uniqueId
+#   หน้าแรก       <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">
+#                 __DEFAULT_SCOPE__["webapp.app-context"].user.uniqueId
+#
+# ทั้งสองให้ค่าตรงกัน และ **หน้า Studio ไม่มีก้อนของหน้าแรกเลย**
+# ตอนแรกเขียนไว้เฉพาะก้อนของหน้าแรกแล้วอ่านหน้า Studio ไม่ออก
 BLOB_ID = "__UNIVERSAL_DATA_FOR_REHYDRATION__"
-# ที่อยู่ของ "บัญชีที่ล็อกอินอยู่" เท่านั้น ห้ามไล่หาทั้งก้อน (เหตุผลอยู่ข้างล่าง)
-OWN_ACCOUNT_PATH = ("webapp.app-context", "user")
-# ช่องที่เก็บไอดี — เผื่อสะกดต่าง แต่ต้องเป็นความหมายเดียวกันเท่านั้น
-# ห้ามใส่ nickName เข้ามา เพราะนั่นคือชื่อที่โชว์ ไม่ใช่ไอดีของช่อง
-HANDLE_FIELDS = ("uniqueId", "unique_id", "uniqueID")
+STUDIO_BLOB_ID = "__Creator_Center_Context__"
+STUDIO_PATH = ("commonAppContext", "user", "uniqueId")
+WWW_PATH = ("__DEFAULT_SCOPE__", "webapp.app-context", "user", "uniqueId")
+
+# สคริปต์นี้ทดสอบกับบัญชีจริงที่ล็อกอินอยู่แล้ว ได้ "taiwhatsale" ทั้งสองหน้า
+READ_JS = """() => {
+  const parse = (raw) => {
+    try { return JSON.parse(raw); } catch (e) {}
+    try { const ta = document.createElement('textarea');
+          ta.innerHTML = raw; return JSON.parse(ta.value); } catch (e) { return null; }
+  };
+  const read = (id, path) => {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    let n = parse(el.textContent || '');
+    for (const k of path) {
+      n = (n && typeof n === 'object') ? n[k] : null;
+      if (n === null || n === undefined) return null;
+    }
+    return typeof n === 'string' ? n : null;
+  };
+  return {
+    studio: read(%(studio_id)s, %(studio_path)s),
+    www: read(%(www_id)s, %(www_path)s),
+    hasStudioBlob: !!document.getElementById(%(studio_id)s),
+    hasWwwBlob: !!document.getElementById(%(www_id)s)
+  };
+}""" % {
+    "studio_id": json.dumps(STUDIO_BLOB_ID),
+    "www_id": json.dumps(BLOB_ID),
+    "studio_path": json.dumps(list(STUDIO_PATH)),
+    "www_path": json.dumps(list(WWW_PATH)),
+}
 
 
-def handle_from_blob(blob: dict | None, url: str) -> tuple[str | None, str]:
-    """แกะไอดีบัญชีตัวเองจากข้อมูลที่ TikTok ฝังมากับหน้า
+def pick_handle(found: dict | None, url: str) -> tuple[str | None, str]:
+    """เลือกไอดีจากค่าที่อ่านมาได้ — คืน (ไอดี, เหตุผลถ้าไม่ได้)
 
-    **ห้ามไล่หาคำว่า uniqueId ทั้งก้อนเด็ดขาด** วัดของจริง 11 ก.ย. 2569:
-    หน้าแรก tiktok.com ตอนยังไม่ล็อกอิน มีชื่อบัญชีคนอื่นฝังอยู่ 3 ชื่อ
-    ที่ webapp.updated-items[].author.uniqueId (รายการคลิปในฟีด)
+    **รับเฉพาะที่อยู่ของบัญชีตัวเอง ห้ามไล่หาทั้งหน้า** วัดของจริง 11 ก.ย.:
+    หน้าแรก TikTok ตอนยังไม่ล็อกอิน มีชื่อบัญชีคนอื่นฝังอยู่ 3 ชื่อในฟีด
     ตัวอ่านที่ไล่หาทั้งก้อนจะหยิบชื่อคนแปลกหน้ามาจดว่าเป็นช่องเรา
     แล้ววันหนึ่งคลิปจะขึ้นผิดช่องแบบถอนไม่ได้
 
-    รับเฉพาะ webapp.app-context.user.uniqueId ซึ่ง**มีเฉพาะตอนล็อกอินแล้ว**
-    ตรงตามกติกา 2.3.1 — ดูของที่มีเฉพาะตอนสำเร็จ ไม่ใช่เดาจากของที่พอจะใช่
-
-    คืน (ไอดี, เหตุผลถ้าไม่ได้)
+    สองแหล่งที่ได้มาต้องตรงกัน ไม่ตรง = ไม่เดา ไม่เลือกข้าง
     """
     text = str(url or "")
-    if "/login" in text or "/signup" in text:
+    if "/login" in text or "signup" in text:
         return None, "ยังไม่ได้ล็อกอิน — หน้าเด้งไปหน้าเข้าสู่ระบบ"
-    # อยู่หน้า Studio ได้ = ล็อกอินแล้วแน่นอน เพราะหน้านั้นไล่คนที่ยังไม่
-    # ล็อกอินไปหน้าเข้าสู่ระบบเสมอ (วัดจริง) ฉะนั้นถ้าอ่านไม่ออกตรงนี้
-    # ต้องรายงานว่า "ต้องแก้โค้ด" ห้ามรายงานว่า "หน้ายังไม่พร้อม"
-    # ไม่งั้นจะไปนั่งรอโหลดหน้าใหม่ทั้งที่ต้นเหตุคือ TikTok ย้ายที่เก็บ
-    on_studio = "tiktokstudio" in text
-    blocked = ("ล็อกอินแล้วแต่ยังอ่านไอดีไม่ได้ — TikTok ย้ายที่เก็บ "
-               "ชื่อบัญชี ต้องแก้โค้ด (เก็บภาพหน้าจอไว้แล้ว)")
+    if not isinstance(found, dict):
+        return None, "อ่านหน้าไม่ได้ — ไม่ได้ค่ากลับมาเลย"
 
-    if not isinstance(blob, dict):
-        return None, blocked if on_studio else "หน้ายังไม่พร้อม — ไม่มีข้อมูลบัญชีฝังมากับหน้า"
+    picks = {}
+    for key in ("studio", "www"):
+        value = str(found.get(key) or "").strip()
+        if value and HANDLE_RE.fullmatch("@" + value):
+            picks[key] = "@" + value
 
-    scope = blob.get("__DEFAULT_SCOPE__")
-    if not isinstance(scope, dict):
-        return None, blocked if on_studio else "หน้ายังไม่พร้อม — ข้อมูลที่ฝังมาไม่ใช่รูปแบบที่รู้จัก"
+    if len(set(picks.values())) > 1:
+        return None, ("สองแหล่งบนหน้าให้ไอดีไม่ตรงกัน (" +
+                      " กับ ".join(sorted(set(picks.values()))) +
+                      ") — ไม่เดา ต้องดูด้วยตาก่อน")
+    if picks:
+        return next(iter(picks.values())), ""
 
-    node = scope
-    for key in OWN_ACCOUNT_PATH:
-        node = node.get(key) if isinstance(node, dict) else None
-        if node is None:
-            break
-    if isinstance(node, dict):
-        for field in HANDLE_FIELDS:
-            value = str(node.get(field) or "").strip()
-            if value and HANDLE_RE.fullmatch("@" + value):
-                return "@" + value, ""
-        # มีก้อนบัญชีแต่ไม่มีช่องไอดี = ล็อกอินแล้วแน่ แต่ TikTok เปลี่ยนชื่อช่อง
-        return None, ("ล็อกอินแล้วแต่ก้อนบัญชีไม่มีช่องไอดี — มีช่อง: "
-                      + ",".join(sorted(str(k) for k in node)[:12]))
-
-    if on_studio:
-        return None, blocked
+    # ไม่มีบัญชีตัวเองในหน้า — แต่ถ้ายังอยู่หน้า Studio ได้แปลว่าล็อกอินแล้วแน่
+    # เพราะหน้านั้นไล่คนที่ยังไม่ล็อกอินไปหน้าเข้าสู่ระบบเสมอ (วัดแล้ว)
+    if "tiktokstudio" in text:
+        return None, ("ล็อกอินแล้วแต่ยังอ่านไอดีไม่ได้ — TikTok ย้ายที่เก็บ "
+                      "ชื่อบัญชี ต้องแก้โค้ด (เก็บภาพหน้าจอไว้แล้ว)")
     return None, f"ยังไม่ได้ล็อกอิน — ไม่พบบัญชีในหน้า ({text[:60]})"
+
+
+def _handle_on_page(page) -> tuple[str | None, str]:
+    """อ่าน @ไอดี จากหน้า TikTok — คืน (ไอดี, เหตุผลถ้าไม่ได้)"""
+    url = str(page.url or "")
+    try:
+        found = page.evaluate(READ_JS)
+    except Exception as error:                                 # noqa: BLE001
+        return None, f"อ่านหน้าไม่ได้: {type(error).__name__}"
+    return pick_handle(found, url)
 
 
 def _where_names_live(page) -> str:
@@ -262,44 +297,35 @@ def _where_names_live(page) -> str:
     """
     try:
         found = page.evaluate(
-            """(id) => {
-                 const el = document.getElementById(id);
-                 if (!el) return ['ไม่มีข้อมูลฝังมากับหน้า'];
-                 let d; try { d = JSON.parse(el.textContent); } catch (e) { return ['แกะข้อมูลไม่ได้']; }
-                 const out = [];
-                 const walk = (node, path) => {
-                   if (node && typeof node === 'object') {
-                     for (const k of Object.keys(node)) {
-                       if (k === 'uniqueId' || k === 'nickName' || k === 'uid') {
-                         out.push(path + '.' + k + ' = ' + String(node[k]).slice(0, 30));
-                       } else { walk(node[k], path + '.' + k); }
-                     }
-                   }
+            """(ids) => {
+                 const parse = (raw) => {
+                   try { return JSON.parse(raw); } catch (e) {}
+                   try { const ta = document.createElement('textarea');
+                         ta.innerHTML = raw; return JSON.parse(ta.value); }
+                   catch (e) { return null; }
                  };
-                 walk(d, '');
-                 const scope = d['__DEFAULT_SCOPE__'] || {};
-                 const ctx = scope['webapp.app-context'] || {};
-                 return ['ช่องใน app-context: ' + Object.keys(ctx).join(',')]
-                          .concat(out.slice(0, 12));
-               }""", BLOB_ID) or []
+                 const out = [];
+                 for (const id of ids) {
+                   const el = document.getElementById(id);
+                   if (!el) { out.push(id + ': ไม่มีก้อนนี้บนหน้า'); continue; }
+                   const d = parse(el.textContent || '');
+                   if (!d) { out.push(id + ': แกะข้อมูลไม่ได้'); continue; }
+                   out.push(id + ': ช่องบนสุด ' + Object.keys(d).slice(0, 10).join(','));
+                   const walk = (node, path, depth) => {
+                     if (depth > 9 || !node || typeof node !== 'object') return;
+                     for (const k of Object.keys(node)) {
+                       if (k === 'uniqueId' || k === 'nickName') {
+                         out.push('  ' + path + '.' + k + ' = ' + String(node[k]).slice(0, 30));
+                       } else { walk(node[k], path + '.' + k, depth + 1); }
+                     }
+                   };
+                   walk(d, id, 0);
+                 }
+                 return out.slice(0, 20);
+               }""", [STUDIO_BLOB_ID, BLOB_ID]) or []
     except Exception as error:                                 # noqa: BLE001
         return f"ดูที่เก็บชื่อไม่ได้: {type(error).__name__}"
     return "ชื่อบัญชีโผล่ที่: " + " | ".join(str(x) for x in found)
-
-
-def _handle_on_page(page) -> tuple[str | None, str]:
-    """อ่าน @ไอดี จากหน้า TikTok Studio — คืน (ไอดี, เหตุผลถ้าไม่ได้)"""
-    url = str(page.url or "")
-    try:
-        blob = page.evaluate(
-            """(id) => {
-                 const el = document.getElementById(id);
-                 if (!el) return null;
-                 try { return JSON.parse(el.textContent); } catch (e) { return null; }
-               }""", BLOB_ID)
-    except Exception as error:                                 # noqa: BLE001
-        return None, f"อ่านหน้าไม่ได้: {type(error).__name__}"
-    return handle_from_blob(blob, url)
 
 
 def refresh_all(log=print) -> dict:
@@ -372,27 +398,51 @@ def prove_reader(log=print) -> dict:
                 handle, why = _handle_on_page(page)
                 step1 = handle is None and strangers >= 3
                 out["steps"].append(
-                    {"ชื่อ": "หน้าจริงที่ยังไม่ล็อกอิน + มีชื่อคนอื่นวางเป็นกับดัก",
+                    {"ชื่อ": "หน้าจริงที่ยังไม่ล็อกอิน + วางชื่อคนอื่นเป็นกับดัก",
                      "ผ่าน": step1,
                      "ชื่อบัญชีคนอื่นในหน้า": strangers,
                      "ตัวอ่านตอบ": handle or why})
 
+                # ก้อนของหน้า Studio — ของจริงเข้ารหัสแบบ HTML และเก็บคนละที่
+                # กับหน้าแรก ต้องทดสอบแยก ไม่งั้นพลาดแบบเดิมอีก
                 page.evaluate(
-                    """(id) => {
-                         const el = document.getElementById(id);
-                         const d = JSON.parse(el.textContent);
-                         d.__DEFAULT_SCOPE__['webapp.app-context'].user = {
-                           uid: '6912345678901234567', secUid: 'MS4wLjABAAAA',
-                           nickName: 'ชื่อที่โชว์ ไม่ใช่ไอดี',
-                           uniqueId: 'komchan.shop', storeRegion: 'TH'};
-                         el.textContent = JSON.stringify(d);
+                    """(args) => {
+                         const [id, want] = args;
+                         document.getElementById(id)?.remove();
+                         const s = document.createElement('script');
+                         s.id = id; s.type = 'application/json';
+                         const raw = JSON.stringify({isUpload: true, commonAppContext:
+                           {user: {uid: '69123', nickName: 'ชื่อที่โชว์ ไม่ใช่ไอดี',
+                                   uniqueId: want, storeRegion: 'TH'}}});
+                         const ta = document.createElement('textarea');
+                         ta.textContent = raw;           // เข้ารหัสแบบ HTML เหมือนของจริง
+                         s.textContent = ta.innerHTML;
+                         document.body.appendChild(s);
                          history.replaceState(null, '', '/tiktokstudio/upload');
-                       }""", BLOB_ID)
+                       }""", [STUDIO_BLOB_ID, want.lstrip("@")])
                 handle2, why2 = _handle_on_page(page)
                 step2 = handle2 == want
                 out["steps"].append(
-                    {"ชื่อ": "หน้าเดียวกันแบบล็อกอินแล้ว", "ผ่าน": step2,
-                     "ตัวอ่านตอบ": handle2 or why2, "ที่ควรได้": want})
+                    {"ชื่อ": "หน้า Studio แบบล็อกอินแล้ว (ก้อนเข้ารหัส HTML)",
+                     "ผ่าน": step2, "ตัวอ่านตอบ": handle2 or why2, "ที่ควรได้": want})
+
+                # ก้อนของหน้าแรก
+                page.evaluate(
+                    """(args) => {
+                         const [studioId, wwwId, want] = args;
+                         document.getElementById(studioId)?.remove();
+                         const el = document.getElementById(wwwId);
+                         const d = JSON.parse(el.textContent);
+                         d.__DEFAULT_SCOPE__['webapp.app-context'].user =
+                           {uniqueId: want, storeRegion: 'TH'};
+                         el.textContent = JSON.stringify(d);
+                         history.replaceState(null, '', '/');
+                       }""", [STUDIO_BLOB_ID, BLOB_ID, want.lstrip("@")])
+                handle3, why3 = _handle_on_page(page)
+                step3 = handle3 == want
+                out["steps"].append(
+                    {"ชื่อ": "หน้าแรกแบบล็อกอินแล้ว", "ผ่าน": step3,
+                     "ตัวอ่านตอบ": handle3 or why3, "ที่ควรได้": want})
             finally:
                 browser.close()
 

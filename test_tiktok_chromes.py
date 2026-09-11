@@ -73,6 +73,18 @@ class HandleReaderTests(unittest.TestCase):
         self.assertIn("ล็อกอินแล้ว", why)
         self.assertNotIn("ยังไม่ได้ล็อกอิน", why)
 
+    def test_studio_page_without_any_blob_is_still_a_code_problem(self) -> None:
+        """หน้า Studio ที่ไม่มีข้อมูลฝังมาเลย ก็ยังแปลว่าล็อกอินแล้ว
+
+        ถ้ารายงานว่า "หน้ายังไม่พร้อม" คนจะไปนั่งรอโหลดใหม่เรื่อยๆ
+        ทั้งที่ต้นเหตุคือ TikTok ย้ายที่เก็บชื่อบัญชี ต้องแก้โค้ด
+        """
+        for blob in (None, {}, {"__DEFAULT_SCOPE__": "ไม่ใช่รูปแบบที่รู้จัก"}):
+            handle, why = tc.handle_from_blob(blob, STUDIO_URL)
+            self.assertIsNone(handle)
+            self.assertIn("ล็อกอินแล้ว", why)
+            self.assertNotIn("หน้ายังไม่พร้อม", why)
+
     def test_rejects_junk_handle(self) -> None:
         for junk in ("", "  ", "a", "x" * 40, "ชื่อไทย"):
             blob = {"__DEFAULT_SCOPE__": {

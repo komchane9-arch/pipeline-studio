@@ -217,12 +217,20 @@ def handle_from_blob(blob: dict | None, url: str) -> tuple[str | None, str]:
     text = str(url or "")
     if "/login" in text or "/signup" in text:
         return None, "ยังไม่ได้ล็อกอิน — หน้าเด้งไปหน้าเข้าสู่ระบบ"
+    # อยู่หน้า Studio ได้ = ล็อกอินแล้วแน่นอน เพราะหน้านั้นไล่คนที่ยังไม่
+    # ล็อกอินไปหน้าเข้าสู่ระบบเสมอ (วัดจริง) ฉะนั้นถ้าอ่านไม่ออกตรงนี้
+    # ต้องรายงานว่า "ต้องแก้โค้ด" ห้ามรายงานว่า "หน้ายังไม่พร้อม"
+    # ไม่งั้นจะไปนั่งรอโหลดหน้าใหม่ทั้งที่ต้นเหตุคือ TikTok ย้ายที่เก็บ
+    on_studio = "tiktokstudio" in text
+    blocked = ("ล็อกอินแล้วแต่ยังอ่านไอดีไม่ได้ — TikTok ย้ายที่เก็บ "
+               "ชื่อบัญชี ต้องแก้โค้ด (เก็บภาพหน้าจอไว้แล้ว)")
+
     if not isinstance(blob, dict):
-        return None, "หน้ายังไม่พร้อม — ไม่มีข้อมูลบัญชีฝังมากับหน้า"
+        return None, blocked if on_studio else "หน้ายังไม่พร้อม — ไม่มีข้อมูลบัญชีฝังมากับหน้า"
 
     scope = blob.get("__DEFAULT_SCOPE__")
     if not isinstance(scope, dict):
-        return None, "หน้ายังไม่พร้อม — ข้อมูลที่ฝังมาไม่ใช่รูปแบบที่รู้จัก"
+        return None, blocked if on_studio else "หน้ายังไม่พร้อม — ข้อมูลที่ฝังมาไม่ใช่รูปแบบที่รู้จัก"
 
     node = scope
     for key in OWN_HANDLE_PATH:
@@ -232,12 +240,8 @@ def handle_from_blob(blob: dict | None, url: str) -> tuple[str | None, str]:
     if isinstance(node, str) and HANDLE_RE.fullmatch("@" + node.strip()):
         return "@" + node.strip(), ""
 
-    # ถึงตรงนี้แปลว่าไม่มีบัญชีตัวเองในข้อมูล — แต่ยังอยู่หน้า Studio ได้
-    # ซึ่งหน้านั้นไล่คนที่ยังไม่ล็อกอินออกไปหน้าเข้าสู่ระบบเสมอ (วัดแล้ว)
-    # จึงแยกได้ว่า "ยังไม่ล็อกอิน" กับ "ล็อกอินแล้วแต่หน้าเปลี่ยนรูปแบบ"
-    if "tiktokstudio" in text:
-        return None, ("ล็อกอินแล้วแต่ยังอ่านไอดีไม่ได้ — TikTok ย้ายที่เก็บ "
-                      "ชื่อบัญชี ต้องแก้โค้ด (เก็บภาพหน้าจอไว้แล้ว)")
+    if on_studio:
+        return None, blocked
     return None, f"ยังไม่ได้ล็อกอิน — ไม่พบบัญชีในหน้า ({text[:60]})"
 
 

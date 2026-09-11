@@ -183,8 +183,65 @@ def check_disk() -> dict:
         return _row("ที่ว่างในเครื่อง", UNKNOWN, f"{type(error).__name__}")
 
 
+def phone_usage(hours: float = 24.0) -> list[dict]:
+    """ใครใช้มือถือสายคลิปไปเท่าไรในรอบที่ผ่านมา — และใครต้องรอ
+
+    **มือถือสายคลิปมีเครื่องเดียวแต่ทำ 3 แพลตฟอร์ม** (Shopee Video ·
+    Facebook Reels · TikTok) ใช้ทำอะไรอยู่ = อีกสองอย่างหยุดหมด
+
+    วันนี้เห็นชัด: ระหว่างลง TikTok คือ Shopee/Facebook ลงไม่ได้เลย **แต่ไม่มี
+    ที่ไหนแสดงให้เห็น** สายที่มาทีหลังจึงโดนบล็อกโดยไม่รู้ตัว แล้วไปนั่งไล่หา
+    บั๊กที่ไม่มีอยู่จริง (เหมือนกรณี Shopee หยุด 7 วันที่แท้จริงคือไม่มีใครกด)
+
+    คิวจดเวลาไว้ครบอยู่แล้ว — แค่ไม่เคยมีใครเอามาสรุป
+    """
+    import time as _time
+    try:
+        import phone_queue
+        rows = phone_queue.history(device=CLIP_PHONE, limit=400)
+    except Exception:                                          # noqa: BLE001
+        return []
+    since = _time.time() - hours * 3600
+    used: dict[str, dict] = {}
+    for row in rows:
+        try:
+            started = float(row.get("started_at") or 0)
+            ended = float(row.get("ended_at") or 0)
+            made = float(row.get("created_at") or started)
+        except (TypeError, ValueError):
+            continue
+        if not started or not ended or ended < since:
+            continue
+        who = str(row.get("owner") or "?")[:26]
+        slot = used.setdefault(who, {"who": who, "times": 0, "held": 0.0,
+                                     "waited": 0.0})
+        slot["times"] += 1
+        slot["held"] += max(0.0, ended - started)
+        slot["waited"] += max(0.0, started - made)
+    return sorted(used.values(), key=lambda r: -r["held"])
+
+
+def check_phone_sharing() -> dict:
+    """มือถือเครื่องเดียวถูกใช้ไปกี่ % ของวัน — ยิ่งสูงยิ่งชนกันง่าย"""
+    rows = phone_usage()
+    if not rows:
+        return _row("การแบ่งใช้มือถือ", UNKNOWN, "ยังไม่มีประวัติในรอบ 24 ชม.")
+    held = sum(r["held"] for r in rows)
+    waited = sum(r["waited"] for r in rows)
+    percent = held / (24 * 3600) * 100
+    top = ", ".join(f"{r['who']} {r['held'] / 60:.0f} นาที" for r in rows[:3])
+    detail = f"ถูกใช้ {held / 3600:.1f} ชม. ({percent:.0f}% ของวัน) · {top}"
+    if waited > 600:
+        detail += f" · มีคนรอคิวรวม {waited / 60:.0f} นาที"
+    # เกิน 60% ของวัน = งานใหม่แทบไม่มีที่ว่างให้แทรก
+    state = BAD if percent > 60 else OK
+    return _row("การแบ่งใช้มือถือ", state, detail,
+                "" if state == OK else
+                "จัดตารางว่าเวลาไหนเป็นของสายไหน หรือเพิ่มเครื่อง")
+
+
 CHECKS = (check_ollama, check_thai_ocr, check_flow_credits, check_phone,
-          check_switches, check_disk)
+          check_phone_sharing, check_switches, check_disk)
 
 
 def board(log=print) -> dict:
@@ -217,6 +274,34 @@ def board(log=print) -> dict:
     return {"rows": rows, "bad": len(bad), "unknown": len(unknown)}
 
 
+def phone_report(log=print) -> None:
+    """รายละเอียดว่าใครใช้มือถือสายคลิปไปเท่าไร — ไว้ตัดสินใจเรื่องตารางเวลา"""
+    rows = phone_usage()
+    if not rows:
+        log("ยังไม่มีประวัติการใช้มือถือในรอบ 24 ชั่วโมง")
+        return
+    log(f"การใช้มือถือสายคลิป {CLIP_PHONE} รอบ 24 ชั่วโมง\n")
+    log(f"   {'ใคร':<28}{'กี่ครั้ง':>8}{'ถือไปนาน':>12}{'รอคิว':>10}")
+    log("   " + "-" * 58)
+    for row in rows:
+        log(f"   {row['who']:<28}{row['times']:>8}"
+            f"{row['held'] / 60:>10.0f} น.{row['waited'] / 60:>8.0f} น.")
+    held = sum(r["held"] for r in rows)
+    waited = sum(r["waited"] for r in rows)
+    log("   " + "-" * 58)
+    log(f"   {'รวม':<28}{sum(r['times'] for r in rows):>8}"
+        f"{held / 60:>10.0f} น.{waited / 60:>8.0f} น.")
+    log(f"\n   ว่างอยู่ {24 - held / 3600:.1f} ชั่วโมงจาก 24 "
+        f"({100 - held / (24 * 3600) * 100:.0f}% ของวัน)")
+    if waited > 600:
+        log(f"   ⚠️ เสียเวลารอคิวรวม {waited / 60:.0f} นาที — "
+            "งานที่มาทีหลังถูกบล็อกโดยไม่มีที่ไหนแสดงให้เห็น")
+
+
 if __name__ == "__main__":
     import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "มือถือ":
+        phone_report()
+        sys.exit(0)
     sys.exit(1 if board()["bad"] else 0)

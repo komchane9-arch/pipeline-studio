@@ -161,7 +161,8 @@ def close_profile(profile_dir: str | Path, timeout: float = 10.0) -> dict:
             "reason": "ส่งคำสั่งปิดแล้วแต่หน้าต่าง Chrome ยังไม่ปิด"}
 
 
-def launch_profile(profile_dir: str | Path, url: str, timeout: float = 12.0) -> dict:
+def launch_profile(profile_dir: str | Path, url: str, timeout: float = 12.0,
+                   extra_args: tuple[str, ...] = ()) -> dict:
     """เปิด Chrome โปรไฟล์จริงบนจอ แล้วรอจนพบ top-level window."""
     if os.name != "nt":
         return {"ok": False, "running": False, "reason": "รองรับเฉพาะ Windows"}
@@ -181,8 +182,15 @@ def launch_profile(profile_dir: str | Path, url: str, timeout: float = 12.0) -> 
     profile.mkdir(parents=True, exist_ok=True)
     flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
         subprocess, "CREATE_NO_WINDOW", 0)
+    # โปรไฟล์ที่เพิ่งสร้างจะโดนกล่องเด้งบังหน้างานเสมอ วัดของจริง 11 ก.ย. 2569:
+    # หน้าล็อกอิน TikTok โดนบัง 2 ชั้น — "ตั้ง Chrome เป็นเบราว์เซอร์หลัก"
+    # กับกล่องแจ้งว่ามีโปรแกรมอื่นติดตั้งส่วนเสริมเข้ามา ('McAfee WebAdvisor')
+    # 7 ช่องก็ 14 กล่องที่เจ้าของต้องไล่ปิดเองก่อนได้เริ่มงานจริง
     process = subprocess.Popen(
         [str(chrome), f"--user-data-dir={profile}", "--profile-directory=Default",
+         "--no-first-run", "--no-default-browser-check",
+         "--hide-crash-restore-bubble",
+         *[str(flag) for flag in extra_args],
          "--window-position=80,60", "--new-window", str(url or "about:blank")],
         creationflags=flags,
         close_fds=True,

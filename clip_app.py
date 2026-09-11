@@ -9616,7 +9616,9 @@ def _launch_browser_view_session(stage: str, spec: dict) -> dict:
                 label=f"เจ้าของเปิดดู Chrome ขั้น {spec['label']}",
                 profile=str(spec.get("lock") or ""),
             ):
-                outcome.update(chrome_view.launch_profile(spec["profile"], spec["url"]))
+                outcome.update(chrome_view.launch_profile(
+                    spec["profile"], spec["url"],
+                    extra_args=tuple(spec.get("args") or ())))
                 ready.set()
                 if not outcome.get("ok"):
                     return
@@ -9879,7 +9881,10 @@ async def tiktok_chrome_open(request: Request) -> dict:
     # รอรหัสจาก SMS/อีเมลรอบเดียวก็กินเวลาหลายนาทีแล้ว
     spec = {"label": f"TikTok ช่อง {slot}", "profile": folder,
             "lock": f"tiktok-{folder.name}", "url": tiktok_chromes.UPLOAD_URL,
-            "idle_max": TIKTOK_LOGIN_IDLE_MAX_SECONDS}
+            "idle_max": TIKTOK_LOGIN_IDLE_MAX_SECONDS,
+            # ช่องนี้ใช้ล็อกอิน+ลงคลิปอย่างเดียว ไม่ต้องมีส่วนเสริมใดๆ
+            # และส่วนเสริมที่โปรแกรมอื่นยัดเข้ามาจะเด้งกล่องบังหน้าล็อกอิน
+            "args": ("--disable-extensions",)}
     result = await asyncio.to_thread(
         _launch_browser_view_session, f"tiktok:{folder.name}", spec)
     if not result.get("ok"):

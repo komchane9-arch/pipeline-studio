@@ -1168,16 +1168,18 @@ function autoToggle(bucket) {
   });
   button.setAttribute("role", "switch");
   button.setAttribute("aria-checked", auto.on ? "true" : "false");
-  const paint = (on, waiting) => {
+  const paint = (on, waiting, parked = 0) => {
     button.classList.toggle("is-on", on);
     button.setAttribute("aria-checked", on ? "true" : "false");
-    button.textContent = `${on ? "☑" : "☐"} อัตโนมัติ`
-      + (!on && waiting ? ` · รอ ${waiting}` : "");
+    const publishCounts = auto.risk
+      ? ` · พร้อม ${waiting || 0}${parked ? ` · พัก ${parked}` : ""}`
+      : (!on && waiting ? ` · รอ ${waiting}` : "");
+    button.textContent = `${on ? "☑" : "☐"} อัตโนมัติ${publishCounts}`;
   };
-  paint(auto.on, auto.waiting);
+  paint(auto.on, auto.waiting, auto.parked_skipped);
   button.title = auto.on
-    ? `เปิดอยู่ — งานที่ถึงขั้น "${auto.label}" จะผ่านเองโดยไม่ต้องกด`
-    : `ปิดอยู่ — ต้องกดผ่านเอง${auto.waiting ? ` (รออยู่ ${auto.waiting} ใบ)` : ""}`;
+    ? `เปิดอยู่ — พร้อมทำ ${auto.waiting || 0} ใบ${auto.parked_skipped ? ` · พักไว้ ${auto.parked_skipped} ใบ` : ""}`
+    : `ปิดอยู่ — พร้อมทำ ${auto.waiting || 0} ใบ${auto.parked_skipped ? ` · พักไว้ ${auto.parked_skipped} ใบ` : ""}`;
 
   button.addEventListener("click", async (event) => {
     // ห้ามทะลุไปโดนกล่อง — ไม่งั้นกดสวิตช์แล้วกองที่เลือกอยู่เปลี่ยนตาม
@@ -1193,7 +1195,7 @@ function autoToggle(bucket) {
       return;
     }
     button.disabled = true;
-    paint(next, auto.waiting);          // ขยับให้เห็นทันที แล้วค่อยยืนยันกับเซิร์ฟเวอร์
+    paint(next, auto.waiting, auto.parked_skipped); // ขยับให้เห็นทันที แล้วค่อยยืนยันกับเซิร์ฟเวอร์
     try {
       const out = await api(`${CLIP_API}/api/auto-approve`, {
         method: "POST",
@@ -1205,7 +1207,7 @@ function autoToggle(bucket) {
       loadJobQueue();
     } catch (error) {
       // **ดีดกลับ** ห้ามให้ดูเหมือนเปิดแล้วทั้งที่ไม่ได้เปิด (CLAUDE.md ข้อ 2.3)
-      paint(!next, auto.waiting);
+      paint(!next, auto.waiting, auto.parked_skipped);
       $("#storyNote").textContent = `สั่งไม่สำเร็จ — ${error.message}`;
     } finally {
       button.disabled = false;

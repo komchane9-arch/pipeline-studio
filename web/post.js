@@ -607,6 +607,7 @@ function setupPublishFlow() {
 // ที่นี่และในแชท — ข้อมูลอยู่ที่เซิร์ฟเวอร์ที่เดียว ไม่มีสำเนาสองชุดให้เพี้ยน
 let fbGroups = [];
 let fbTimer = null;
+let gfpDevices = [];
 
 const FB_STATUS_TEXT = {
   waiting_caption: "รอแคปชัน",
@@ -615,8 +616,119 @@ const FB_STATUS_TEXT = {
   running: "กำลังโพสต์…",
   done: "เสร็จแล้ว",
   failed: "ล้มเหลว",
+  stopped: "หยุดไว้",
   cancelled: "ยกเลิก",
 };
+
+// แผง gfpFlow ถูกยุบไปรวมกับแผงบอทบนสุด (web/fbcontrol.js) เมื่อ 11 ก.ย. 2569
+// ตามที่เจ้าของสั่ง — หน้าเดียวมีสองแผงบอกเรื่องเดียวกันคนละหน้าตา
+// ปุ่มทำต่อ/รีเซ็ต/หยุด กับผลรายกลุ่มย้ายไปอยู่ในใบโพสต์ของแผงนั้นแล้ว
+
+function fbMessage(text) {
+  if ($("#fbNote")) $("#fbNote").textContent = text;
+  if ($("#gfpNote")) $("#gfpNote").textContent = text;
+}
+
+function gfpSelectedGroups() {
+  return [...document.querySelectorAll("#gfpGroupChoices input:checked")].map((box) => box.value);
+}
+
+function renderGfpDevice() {
+  const select = $("#gfpPostDevice");
+  const option = select?.selectedOptions?.[0];
+  if ($("#gfpDevice")) {
+    $("#gfpDevice").textContent = option
+      ? `เลือกแล้ว: ${option.textContent}`
+      : "ยังไม่มีมือถือสายโพสต์ที่ผูกบัญชีและเชื่อมต่ออยู่";
+  }
+}
+
+async function loadGfpDevices() {
+  const select = $("#gfpPostDevice");
+  if (!select) return;
+  try {
+    const payload = await api("/api/devices");
+    gfpDevices = (payload.devices || []).filter((row) =>
+      row.enabled && (row.lanes || []).includes("post"));
+    const usable = gfpDevices.filter((row) => row.ready && row.account);
+    select.replaceChildren(...(gfpDevices.length ? gfpDevices.map((row) => {
+      const option = new Option(
+        `${row.label} · ${row.account || "ยังไม่ได้ผูกบัญชี"}` + (row.ready ? "" : " · ไม่ได้เสียบ"),
+        row.serial,
+      );
+      option.disabled = !row.ready || !row.account;
+      return option;
+    }) : [new Option("— ยังไม่มีมือถือสายโพสต์ —", "")]));
+    const focused = usable.find((row) => row.serial === deviceSelect.value);
+    select.value = (focused || usable[0] || {}).serial || "";
+    renderGfpDevice();
+  } catch (error) {
+    select.replaceChildren(new Option("อ่านรายการมือถือไม่ได้", ""));
+    fbMessage(error.message);
+    renderGfpDevice();
+  }
+}
+
+function updateGfpSteps() {
+  const caption = $("#gfpCaption").value.trim();
+  const postFiles = $("#gfpPostImages").files.length;
+  const comments = [$("#gfpComment1").value.trim(), $("#gfpComment2").value.trim()];
+  const commentFiles = [$("#gfpCommentImage1").files.length, $("#gfpCommentImage2").files.length];
+  const states = {
+    caption: Boolean(caption),
+    "post-image": postFiles > 0 && postFiles <= 3,
+    comment: comments.some(Boolean),
+    "comment-image": commentFiles.some(Boolean),
+    groups: gfpSelectedGroups().length > 0 && gfpSelectedGroups().length <= 6,
+  };
+  document.querySelectorAll("#gfpDraftSteps [data-part]").forEach((step) => {
+    step.classList.toggle("done", Boolean(states[step.dataset.part]));
+    step.classList.toggle("optional", ["comment", "comment-image"].includes(step.dataset.part));
+  });
+  $("#gfpCaptionCount").textContent = `${$("#gfpCaption").value.length.toLocaleString("th-TH")} ตัวอักษร`;
+  $("#gfpGroupCount").textContent = `${gfpSelectedGroups().length}/6`;
+  renderGfpDevice();
+}
+
+function previewFiles(input, wrap) {
+  const images = [...input.files].map((file) => {
+    const image = document.createElement("img");
+    const url = URL.createObjectURL(file);
+    image.src = url;
+    image.alt = file.name;
+    image.title = `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MB`;
+    image.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
+    return image;
+  });
+  wrap.replaceChildren(...images);
+  updateGfpSteps();
+}
+
+function renderGfpGroups() {
+  const wrap = $("#gfpGroupChoices");
+  if (!wrap) return;
+  wrap.replaceChildren(...fbGroups.map((group) => {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = group.group_id;
+    box.checked = group.enabled !== false;
+    box.addEventListener("change", () => {
+      if (gfpSelectedGroups().length > 6) {
+        box.checked = false;
+        fbMessage("เลือกได้ไม่เกิน 6 กลุ่มต่อโพสต์");
+      }
+      updateGfpSteps();
+    });
+    const name = document.createElement("span");
+    name.textContent = group.name || group.group_id;
+    name.title = group.group_id;
+    label.append(box, name);
+    return label;
+  }));
+  if (!fbGroups.length) wrap.textContent = "ยังไม่มีกลุ่มในทะเบียน";
+  updateGfpSteps();
+}
 
 function renderFbGroups() {
   $("#fbGroupList").replaceChildren(
@@ -701,11 +813,13 @@ function renderFbGroups() {
 
 export async function loadFbGroups() {
   try {
+    await loadGfpDevices();
     const payload = await api("/api/fb/groups");
     fbGroups = payload.groups;
     $("#fbGapMin").value = payload.gap_min;
     $("#fbGapMax").value = payload.gap_max;
     $("#fbAutoStart").checked = payload.auto_start;
+    $("#fbAutoFollowup").checked = payload.auto_followup !== false;
     // ไม่มีค่าส่งมา = ถือว่าเปิด — ค่าตั้งต้นของฟีเจอร์นี้คือเปิด ถ้าเขียนเป็น
     // `!!payload.phone_clean` เฉยๆ เซิร์ฟเวอร์รุ่นเก่าที่ยังไม่ส่งค่านี้มาจะทำให้
     // ปุ่มโชว์ว่าปิด แล้วผู้ใช้กดบันทึกทีเดียวคือปิดฟีเจอร์จริงโดยไม่ตั้งใจ
@@ -717,18 +831,29 @@ export async function loadFbGroups() {
       : "⚠️ บอทหลักยังไม่ได้ตั้งโทเคน — งานที่ส่งเข้า Telegram จะไม่เข้าระบบ " +
         "(ตั้งที่ ⚙ ตั้งค่า → อนุมัติทาง Telegram)";
     renderFbGroups();
+    renderGfpGroups();
   } catch (error) {
     $("#fbNote").textContent = error.message;
   }
 }
 
-function renderFbJobs(jobs, running) {
-  $("#fbJobs").replaceChildren(
-    ...jobs.slice(0, 3).map((job) => {
+function jobMedia(job, kind, index, alt) {
+  const image = document.createElement("img");
+  image.src = `/api/fb/jobs/${job.id}/media/${kind}/${index}`;
+  image.alt = alt;
+  image.title = "คลิกเพื่อเปิดรูปเต็ม";
+  image.addEventListener("click", () => window.open(image.src, "_blank", "noopener"));
+  return image;
+}
+
+function renderFbJobsInto(wrap, jobs, running, detailed = false) {
+  if (!wrap) return;
+  wrap.replaceChildren(
+    ...jobs.slice(0, detailed ? 6 : 3).map((job) => {
       const card = document.createElement("div");
       card.className = "fb-job";
 
-      if (job.has_image) {
+      if (job.has_image && !detailed) {
         const image = document.createElement("img");
         image.src = `/api/fb/jobs/${job.id}/image`;
         image.alt = "รูปที่จะโพสต์";
@@ -740,12 +865,57 @@ function renderFbJobs(jobs, running) {
 
       const head = document.createElement("strong");
       head.textContent = `${job.id} · ${FB_STATUS_TEXT[job.status] || job.status}`;
+      if (detailed) {
+        const source = document.createElement("span");
+        source.className = "gfp-job-source";
+        source.textContent = job.source === "web" ? "หน้าเว็บ" : "Telegram";
+        head.append(source);
+      }
       body.append(head);
 
       const caption = document.createElement("p");
-      caption.className = "fb-caption";
+      caption.className = detailed ? "gfp-content-block" : "fb-caption";
       caption.textContent = job.caption || "(ยังไม่มีแคปชัน)";
+      if (detailed) {
+        const label = document.createElement("strong");
+        label.textContent = "แคปชัน";
+        caption.prepend(label);
+      }
       body.append(caption);
+
+      if (detailed && (job.images || []).length) {
+        const media = document.createElement("div");
+        media.className = "gfp-media";
+        (job.images || []).forEach((_path, index) => {
+          media.append(jobMedia(job, "post", index, `รูปโพสต์ใบที่ ${index + 1}`));
+        });
+        body.append(media);
+      }
+
+      if (detailed) {
+        const comments = (job.comments?.length ? job.comments : (job.comment ? [job.comment] : []));
+        const commentImages = job.comment_images || [];
+        if (!comments.length) {
+          const none = document.createElement("p");
+          none.className = "note";
+          none.textContent = "คอมเมนต์: ไม่มี";
+          body.append(none);
+        }
+        comments.forEach((text, index) => {
+          const comment = document.createElement("div");
+          comment.className = "gfp-content-block";
+          const label = document.createElement("strong");
+          label.textContent = `คอมเมนต์ช่อง ${index + 1}`;
+          comment.append(label, document.createTextNode(text));
+          if (commentImages[index]) {
+            const media = document.createElement("div");
+            media.className = "gfp-media";
+            media.append(jobMedia(job, "comment", index, `รูปคอมเมนต์ช่อง ${index + 1}`));
+            comment.append(media);
+          }
+          body.append(comment);
+        });
+      }
 
       const groups = document.createElement("p");
       groups.className = "note";
@@ -786,10 +956,10 @@ function renderFbJobs(jobs, running) {
           run.disabled = true;
           try {
             const payload = await api(`/api/fb/jobs/${job.id}/run`, { method: "POST" });
-            $("#fbNote").textContent = payload.message;
+            fbMessage(payload.message);
             startFbPolling();
           } catch (error) {
-            $("#fbNote").textContent = error.message;
+            fbMessage(error.message);
             run.disabled = false;
           }
         });
@@ -803,22 +973,50 @@ function renderFbJobs(jobs, running) {
         cancel.addEventListener("click", async () => {
           try {
             const payload = await api(`/api/fb/jobs/${job.id}/cancel`, { method: "POST" });
-            $("#fbNote").textContent = payload.message;
+            fbMessage(payload.message);
             loadFbJobs();
           } catch (error) {
-            $("#fbNote").textContent = error.message;
+            fbMessage(error.message);
           }
         });
         actions.append(cancel);
       }
       body.append(actions);
+
+      if (detailed) {
+        const timeline = document.createElement("details");
+        timeline.className = "gfp-timeline";
+        timeline.open = job.status === "running";
+        const summary = document.createElement("summary");
+        const logs = job.log || [];
+        summary.textContent = logs.length
+          ? `ขั้นตอนที่ทำแล้ว ${logs.length} รายการ`
+          : "ยังไม่ได้เริ่มทำบนมือถือ";
+        timeline.append(summary);
+        if (logs.length) {
+          const list = document.createElement("ol");
+          logs.slice(-30).forEach((text) => {
+            const line = document.createElement("li");
+            line.textContent = text;
+            list.append(line);
+          });
+          timeline.append(list);
+        }
+        body.append(timeline);
+      }
       card.append(body);
       return card;
     }),
   );
   if (!jobs.length) {
-    $("#fbJobs").textContent = "ยังไม่มีงาน — ส่งรูปพร้อมแคปชันเข้าบอทใน Telegram";
+    wrap.textContent = detailed
+      ? "ยังไม่มีงาน — สร้างจากฟอร์มด้านบน หรือส่งผ่าน Telegram ได้"
+      : "ยังไม่มีงาน — ส่งรูปพร้อมแคปชันเข้าบอทใน Telegram";
   }
+}
+
+function renderFbJobs(jobs, running) {
+  renderFbJobsInto($("#fbJobs"), jobs, running, false);
 }
 
 export async function loadFbJobs() {
@@ -844,6 +1042,93 @@ function stopFbPolling() {
   clearInterval(fbTimer);
   fbTimer = null;
 }
+
+function resetGfpForm() {
+  $("#gfpCaption").value = "";
+  $("#gfpPostImages").value = "";
+  $("#gfpComment1").value = "";
+  $("#gfpComment2").value = "";
+  $("#gfpCommentImage1").value = "";
+  $("#gfpCommentImage2").value = "";
+  $("#gfpPostPreview").replaceChildren();
+  $("#gfpCommentPreview1").replaceChildren();
+  $("#gfpCommentPreview2").replaceChildren();
+  updateGfpSteps();
+}
+
+async function submitGfp(runNow) {
+  const caption = $("#gfpCaption").value.trim();
+  const files = [...$("#gfpPostImages").files];
+  const groups = gfpSelectedGroups();
+  const serial = $("#gfpPostDevice").value;
+  if (!serial) { fbMessage("เลือกมือถือสายโพสต์ที่ผูกบัญชีก่อน"); return; }
+  if (!caption) { fbMessage("ใส่แคปชันก่อน"); return; }
+  if (!files.length) { fbMessage("เลือกรูปโพสต์อย่างน้อย 1 ใบ"); return; }
+  if (files.length > 3) { fbMessage("รูปโพสต์เลือกได้สูงสุด 3 ใบ"); return; }
+  if (!groups.length || groups.length > 6) { fbMessage("เลือกกลุ่ม 1–6 กลุ่ม"); return; }
+  for (const index of [1, 2]) {
+    if ($(`#gfpCommentImage${index}`).files.length && !$(`#gfpComment${index}`).value.trim()) {
+      fbMessage(`รูปคอมเมนต์ช่อง ${index} ต้องมีข้อความคอมเมนต์ด้วย`);
+      return;
+    }
+  }
+
+  const form = new FormData();
+  form.append("serial", serial);
+  form.append("caption", caption);
+  form.append("groups", JSON.stringify(groups));
+  form.append("comment_1", $("#gfpComment1").value);
+  form.append("comment_2", $("#gfpComment2").value);
+  form.append("run_now", String(runNow));
+  files.forEach((file) => form.append("post_images", file));
+  for (const index of [1, 2]) {
+    const file = $(`#gfpCommentImage${index}`).files[0];
+    if (file) form.append(`comment_image_${index}`, file);
+  }
+
+  $("#gfpSave").disabled = true;
+  $("#gfpSend").disabled = true;
+  fbMessage(runNow ? "กำลังสร้างงานและเริ่มโพสต์…" : "กำลังบันทึกงาน…");
+  try {
+    const payload = await api("/api/fb/jobs", { method: "POST", body: form });
+    fbMessage(payload.message);
+    resetGfpForm();
+    await loadFbJobs();
+    if (payload.started) startFbPolling();
+  } catch (error) {
+    fbMessage(error.message);
+  } finally {
+    $("#gfpSave").disabled = false;
+    $("#gfpSend").disabled = false;
+  }
+}
+
+$("#gfpCaption").addEventListener("input", updateGfpSteps);
+$("#gfpComment1").addEventListener("input", updateGfpSteps);
+$("#gfpComment2").addEventListener("input", updateGfpSteps);
+$("#gfpPostImages").addEventListener("change", (event) => {
+  if (event.target.files.length > 3) {
+    event.target.value = "";
+    $("#gfpPostPreview").replaceChildren();
+    fbMessage("รูปโพสต์เลือกได้สูงสุด 3 ใบ");
+    updateGfpSteps();
+    return;
+  }
+  previewFiles(event.target, $("#gfpPostPreview"));
+});
+$("#gfpCommentImage1").addEventListener("change", (event) =>
+  previewFiles(event.target, $("#gfpCommentPreview1")));
+$("#gfpCommentImage2").addEventListener("change", (event) =>
+  previewFiles(event.target, $("#gfpCommentPreview2")));
+$("#gfpSave").addEventListener("click", () => submitGfp(false));
+$("#gfpSend").addEventListener("click", () => submitGfp(true));
+$("#gfpPostDevice").addEventListener("change", renderGfpDevice);
+deviceSelect.addEventListener("change", () => {
+  const matching = gfpDevices.find((row) =>
+    row.serial === deviceSelect.value && row.ready && row.account);
+  if (matching) $("#gfpPostDevice").value = matching.serial;
+  renderGfpDevice();
+});
 
 $("#fbGroupAdd").addEventListener("click", async () => {
   const link = $("#fbGroupLink").value.trim();
@@ -876,12 +1161,14 @@ $("#fbSettingsSave").addEventListener("click", async () => {
         gap_min: Number($("#fbGapMin").value),
         gap_max: Number($("#fbGapMax").value),
         auto_start: $("#fbAutoStart").checked,
+        auto_followup: $("#fbAutoFollowup").checked,
         phone_clean: $("#fbPhoneClean").checked,
         screen_saver: $("#fbScreenSaver").checked,
       }),
     });
     $("#fbGapMin").value = payload.gap_min;
     $("#fbGapMax").value = payload.gap_max;
+    $("#fbAutoFollowup").checked = payload.auto_followup !== false;
     $("#fbPhoneClean").checked = payload.phone_clean !== false;
     $("#fbScreenSaver").checked = payload.screen_saver !== false;
     $("#fbNote").textContent = "บันทึกค่าแล้ว";

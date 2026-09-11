@@ -3261,3 +3261,101 @@ body.typing-through {
 .gfp-fold[open] > summary::before { content: "BE "; }
 /* หัวข้อข้างในซ้ำกับป้ายที่พับอยู่แล้ว ซ่อนไว้กันอ่านสองรอบ */
 .gfp-fold .gfp-studio > .row:first-child { display: none; }
+
+/* ============ 🧾 ใบโพสต์ในแผงบอทสายโพสต์ (11 ก.ย. 2569) */
+/* เจ้าของสั่ง "โชว์คิวและรายละเอียด เหมือนใบโพสต์ มีเวลาที่รอโพสต์ด้วย"
+   ใช้ตัวแปรสีล้วน จึงตามโหมดมืด/สว่างเองโดยไม่ต้องเขียนสองชุด */
+
+.fc-top { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.fc-stamp { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.fc-cancelled { border-left-color: var(--none); }
+.fc-waiting_caption, .fc-waiting_image { border-left-color: var(--info); }
+
+.fc-src { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+/* แคปชันเต็ม ขึ้นบรรทัดตามที่พิมพ์มา — ตัดกลางแล้วดูไม่ออกว่าใบไหน */
+.fc-caption {
+  margin: 6px 0 0; padding: 6px 9px; border-radius: 6px;
+  background: var(--shade); font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 96px; overflow-y: auto;
+}
+.fc-meta { margin: 5px 0 0; font-size: 11px; color: var(--ink-3); }
+.fc-when {
+  margin: 3px 0 0; font-size: 11px; color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+/* เรื่องที่ต้องรู้เดี๋ยวนี้ — กำลังหยุด / ตัวรันหลุด / จอไม่ว่าง */
+.fc-alert {
+  margin: 6px 0 0; padding: 6px 9px; border-radius: 6px;
+  background: var(--warn-bg); border: 1px solid var(--warn-chip);
+  color: var(--warn-ink); font-size: 11px; line-height: 1.55;
+}
+
+.fc-bar {
+  margin: 7px 0 0; height: 6px; border-radius: 999px;
+  background: var(--line); overflow: hidden;
+}
+.fc-bar > span {
+  display: block; height: 100%; width: 0;
+  background: var(--ok); transition: width 0.35s ease;
+}
+/* มีกลุ่มที่ล้มปนอยู่ ห้ามโชว์แถบเขียวล้วนเหมือนทุกอย่างเรียบร้อย */
+.fc-bar > span.fc-bar-some { background: var(--warn); }
+
+.fc-queue-box { margin: 7px 0 0; }
+.fc-queue-sum {
+  cursor: pointer; font-size: 11px; font-weight: 700; color: var(--ink-2);
+}
+.fc-queue { margin: 5px 0 0; padding: 0; list-style: none; }
+.fc-q {
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+  padding: 3px 0; font-size: 11.5px; line-height: 1.5;
+  border-top: 1px solid var(--line);
+}
+.fc-q:first-child { border-top: 0; }
+.fc-q-icon { width: 1.2em; text-align: center; }
+.fc-q-name { flex: 1 1 140px; color: var(--ink); overflow-wrap: anywhere; }
+.fc-q-state { color: var(--ink-3); white-space: nowrap; }
+.fc-q-err { color: var(--bad-ink); flex: 1 1 100%; overflow-wrap: anywhere; }
+.fc-q-link { color: var(--link); text-decoration: none; white-space: nowrap; }
+.fc-q-link:hover { text-decoration: underline; }
+.fc-q-ok .fc-q-state { color: var(--ok-ink); }
+.fc-q-fail .fc-q-state { color: var(--bad-ink); }
+/* กลุ่มที่มืออยู่ตรงนั้นเดี๋ยวนี้ ต้องหาเจอโดยไม่ต้องไล่อ่าน */
+.fc-q-now { background: var(--warn-bg); border-radius: 6px; padding: 3px 6px; }
+.fc-q-now .fc-q-state { color: var(--warn-ink); font-weight: 700; }
+.fc-q-wait .fc-q-name { color: var(--ink-3); }
+
+.fc-content { margin: 7px 0 0; font-size: 11px; }
+.fc-content > summary { cursor: pointer; color: var(--ink-3); }
+.fc-content-body { margin-top: 6px; }
+.fc-shots { display: flex; gap: 6px; flex-wrap: wrap; }
+.fc-shots img, .fc-comment img {
+  width: 84px; height: 84px; object-fit: cover;
+  border-radius: 8px; border: 1px solid var(--line);
+}
+.fc-comment {
+  display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+  margin-top: 7px; padding: 6px 9px; border-radius: 6px;
+  background: var(--shade); white-space: pre-wrap; overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+
+.fc-run { border-color: var(--ok); color: var(--ok-ink); font-weight: 700; }
+.fc-reset { border-color: var(--none); color: var(--ink-3); }
+.fc-help { margin: 6px 0 0; font-size: 10.5px; color: var(--ink-3); line-height: 1.5; }
+
+.fc-history-box { margin: 4px 0 0; font-size: 12px; }
+.fc-history-box > summary { cursor: pointer; color: var(--ink-3); }
+.fc-history { margin-top: 6px; display: flex; flex-direction: column; }
+.fc-past {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 5px 0; border-top: 1px solid var(--line); font-size: 11.5px;
+}
+.fc-past-when { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.fc-past-badge { white-space: nowrap; }
+.fc-past-text {
+  flex: 1 1 160px; color: var(--ink-2); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}

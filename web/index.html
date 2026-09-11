@@ -282,8 +282,16 @@
             <h2>บอทสายโพสต์</h2>
             <button id="fcReload" class="ghost" type="button">🔄 โหลดใหม่</button>
           </div>
-          <p id="fcNote" class="note" aria-live="polite"></p>
+          <p class="note fc-top">
+            <span id="fcNote" aria-live="polite"></span>
+            <span id="fcStamp" class="fc-stamp"></span>
+          </p>
           <div id="fcList" class="fc-list"></div>
+          <!-- ประวัติโหลดเฉพาะตอนกางดู ไม่ติดไปกับรอบที่ถามทุกวินาที -->
+          <details id="fcHistoryBox" class="fc-history-box">
+            <summary>งานที่ทำจบไปแล้ว</summary>
+            <div id="fcHistory" class="fc-history"></div>
+          </details>
           <hr class="bd-split">
           <!-- พับกล่องสร้างโพสต์ (เจ้าของสั่ง 11 ก.ย. 2569 "สร้างโพสต์
                facebook group หุบ แล้วทำเป็น drop down") — เปิดหน้านี้มาเพื่อดู
@@ -364,39 +372,6 @@
             </section>
           </details>
 
-          <hr class="bd-split">
-          <div class="row">
-            <h2>งานโพสต์และขั้นตอนล่าสุด</h2>
-            <button id="gfpReload" class="ghost" type="button">🔄 โหลดใหม่</button>
-          </div>
-          <p class="note">
-            แสดงทั้งงานที่ส่งจากหน้าเว็บและ Telegram · งานที่กำลังทำจะอัปเดตทุก 3 วินาที
-          </p>
-          <section id="gfpFlow" class="gfp-flow" aria-live="polite">
-            <div class="gfp-flow-head">
-              <div>
-                <strong>สายโพสต์ Facebook Group</strong>
-                <p id="gfpFlowJob" class="note">สถานะว่าง — ยังไม่มีใบงานกำลังทำ</p>
-              </div>
-              <span id="gfpFlowStatus" class="gfp-flow-status">ว่าง</span>
-            </div>
-            <div class="gfp-flow-progress" aria-label="ความคืบหน้าการโพสต์">
-              <span id="gfpFlowBar"></span>
-            </div>
-            <p id="gfpFlowNow" class="gfp-flow-now">ตอนนี้: รอใบงาน</p>
-            <ol id="gfpFlowSteps" class="gfp-flow-steps">
-              <li>ยังไม่มีขั้นตอนที่กำลังทำ</li>
-            </ol>
-            <div class="inline-row gfp-flow-controls">
-              <button id="gfpResume" class="ghost" type="button" disabled>▶ Resume</button>
-              <button id="gfpReset" class="ghost" type="button" disabled>↺ Reset</button>
-              <button id="gfpStop" class="ghost danger" type="button">■ Stop</button>
-            </div>
-            <p class="note gfp-flow-help">
-              Resume ทำต่อเฉพาะกลุ่มที่ยังไม่โพสต์ · Reset ล้างเฉพาะกล่องสถานะ · Stop หยุดที่จุดปลอดภัย
-            </p>
-          </section>
-          <div id="gfpJobs" class="fb-jobs gfp-jobs"></div>
 
           <hr class="bd-split">
 

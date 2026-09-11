@@ -11914,59 +11914,159 @@ async def fb_save_settings(request: Request) -> dict:
 
 
 @app.get("/api/fb/jobs/live")
-async def fb_jobs_live() -> dict:
-    """เฉพาะของที่แผงสายโพสต์ใช้โชว์สด — **เบาพอให้ถามทุกวินาที**
+async def fb_jobs_live(history: int = 0) -> dict:
+    """ใบโพสต์ที่ยังไม่จบ พร้อมคิวกลุ่มและเวลา — **เบาพอให้ถามทุกวินาที**
 
     **ทำไมต้องมีเส้นนี้** (เจ้าของสั่ง 11 ก.ย. 2569 ว่า "ปรับให้อัปเดตไวขึ้น")
     `/api/fb/jobs` ส่งใบงาน 10 ใบพร้อมของครบทุกอย่าง วัดจริงได้ **134 KB
     ใช้เวลาเกือบ 1 วินาทีต่อครั้ง** ถามทุกวินาทีคือยิงซ้อนกันไม่จบ และเจ้าของ
     เปิดหน้าผ่าน Tailscale ไม่ใช่ในเครื่อง ยิ่งช้ากว่านั้นอีก
 
-    ตัวหนักคือ log ของทุกใบ (ใบเดียว 200 บรรทัด) กับผลรายกลุ่ม ซึ่งแผงไม่ได้ใช้
-    เส้นนี้จึงส่ง **เฉพาะใบที่ยังไม่จบ** และ log แค่ท้าย 14 บรรทัดตามที่จอโชว์
+    ตัวหนักคือ log เต็มของทุกใบ (ใบเดียว 200 บรรทัด) กับผลตรวจรายกลุ่มที่มี
+    รายละเอียดการตรวจซ้อนอยู่ข้างใน เส้นนี้จึงส่ง **เฉพาะใบที่ยังไม่จบ**
+    log แค่ท้าย 14 บรรทัดตามที่จอโชว์ และผลรายกลุ่มเหลือเท่าที่ตาเห็น
 
     ห้ามเอาไปใช้แทน `/api/fb/jobs` — เส้นนั้นมีของที่หน้าอื่นต้องใช้ครบ
+
+    ## คิวกลุ่ม — ตัดสินจากของที่มีเฉพาะตอนทำจริง (กติกาข้อ 2.3.1)
+
+    กลุ่มไหน "กำลังโพสต์อยู่" **ห้ามเดาจากกลุ่มแรกที่ยังไม่สำเร็จ** เพราะกลุ่ม
+    ที่ลองแล้วล้มก็ยังนับว่าไม่สำเร็จ แล้วจอจะชี้ไปที่กลุ่มที่ผ่านไปนานแล้ว
+
+    ใช้หลักฐานเดียวคือ **มีแถวผลของกลุ่มนั้นหรือยัง** — ตัวรันเขียนแถวผลตอนจบ
+    กลุ่มเสมอ ไม่ว่าจะสำเร็จหรือล้ม กลุ่มแรกที่ยังไม่มีแถวผลจึงคือกลุ่มที่มือ
+    กำลังทำอยู่จริง ส่วนที่เหลือคือยังไม่ได้แตะ
+
+    ## สถานะที่ขัดกันเอง ต้องบอกออกไป ไม่ใช่ทำให้ดูปกติ
+
+    `stopping`  สั่งหยุดแล้วแต่มือถือยังทำกลุ่มปัจจุบันค้างอยู่ (วัดจริง 63 วินาที)
+    `orphan`    ใบงานเขียนว่า running แต่ไม่มีตัวรันถืออยู่ — ตัวรันตายไปแล้ว
+    `deferred`  ถึงเวลาที่ตั้งไว้แล้วแต่จอไม่ว่าง ระบบเลื่อนไปลองรอบหน้าเอง
     """
     running_on = fb_runner.running()
     running_ids = set(running_on.values())
     where = {job_id: device_book.label(serial)
              for serial, job_id in running_on.items()}
-    live = [job for job in fb_jobs.listing()
-            if job.get("status") not in {fb_auto_post.STATUS_DONE,
-                                         fb_auto_post.STATUS_CANCELLED}]
-    # ไม่มีใบค้างเลย = โชว์ใบล่าสุดใบเดียวพอ ให้เห็นว่าเพิ่งทำอะไรจบไป
-    rows = live or fb_jobs.listing()[:1]
+    finished = {fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_CANCELLED}
+    everything = fb_jobs.listing()
+    live = [job for job in everything if job.get("status") not in finished]
 
-    out = []
-    for job in rows[:6]:
+    def queue_key(job: dict) -> tuple:
+        # เรียงเหมือนคิวใน Telegram — ตัวที่มือถือทำอยู่มาก่อนเสมอ แล้วค่อย
+        # เรียงตามเวลาที่นัดไว้ ที่ไม่ได้นัดถือว่าอยู่ท้ายสุด
+        return (job.get("id") not in running_ids,
+                job.get("run_at") or "9999",
+                job.get("created_at") or "")
+
+    # ไม่มีใบค้างเลย = โชว์ใบล่าสุดใบเดียวพอ ให้เห็นว่าเพิ่งทำอะไรจบไป
+    rows = sorted(live, key=queue_key) if live else everything[:1]
+
+    def slip(job: dict) -> dict:
+        job_id = job.get("id")
+        status = job.get("status")
         log = job.get("log") or []
-        pending = _fb_pending_groups(job)
         results = job.get("results") or []
-        out.append({
-            "id": job.get("id"),
-            "status": job.get("status"),
-            "caption": str(job.get("caption") or "")[:120],
-            "posted_count": sum(1 for row in results if row.get("posted") is True),
-            "total": len(job.get("groups") or []),
+        by_group = {str(row.get("group_id") or ""): row for row in results}
+        pending = _fb_pending_groups(job)
+        posted_count = sum(1 for row in results if row.get("posted") is True)
+        on_phone = job_id in running_ids
+        stopping = on_phone and status == fb_auto_post.STATUS_STOPPED
+
+        queue, seen_gap = [], False
+        for group_id in dict.fromkeys(job.get("groups") or []):
+            row = by_group.get(str(group_id))
+            if row is None:
+                # ยังไม่มีแถวผล = ยังไม่จบ ใบแรกแบบนี้คือใบที่มือกำลังทำอยู่
+                state = "now" if (on_phone and not seen_gap) else "wait"
+                seen_gap = True
+                queue.append({"name": fb_groups.label(group_id), "state": state})
+                continue
+            queue.append({
+                "name": fb_groups.label(group_id),
+                "state": "ok" if row.get("posted") is True else "fail",
+                "link": str(row.get("link") or ""),
+                "error": str(row.get("error") or ""),
+                "liked": bool(row.get("liked")),
+                "commented": bool(row.get("commented")),
+            })
+
+        # ทำต่อไม่ได้ ต้องบอกว่าเพราะอะไร — ปุ่มที่หายไปเฉยๆ แยกไม่ออกจากปุ่มเสีย
+        can_resume = (
+            status in {fb_auto_post.STATUS_READY, fb_auto_post.STATUS_STOPPED,
+                       fb_auto_post.STATUS_FAILED, fb_auto_post.STATUS_CANCELLED}
+            and bool(pending) and not on_phone
+        )
+        why = ""
+        if not can_resume:
+            if status == fb_auto_post.STATUS_RUNNING:
+                why = ""
+            elif on_phone:
+                why = "มือถือยังทำกลุ่มปัจจุบันค้างอยู่ — รอให้หยุดสนิทก่อนถึงจะทำต่อได้"
+            elif not pending:
+                why = "ทุกกลุ่มโพสต์สำเร็จแล้ว ไม่มีกลุ่มเหลือให้ทำต่อ"
+
+        return {
+            "id": job_id,
+            "status": status,
+            "caption": str(job.get("caption") or "")[:400],
+            "source": str(job.get("source") or ""),
+            "created_at": job.get("created_at") or "",
+            "run_at": job.get("run_at") or "",
+            "started_at": job.get("started_at") or "",
+            "finished_at": job.get("finished_at") or "",
+            "images": len(job.get("images") or
+                          ([job["image"]] if job.get("image") else [])),
+            "comments": len([c for c in (job.get("comments") or
+                                         ([job["comment"]] if job.get("comment") else []))
+                             if str(c).strip()]),
+            "comment_images": len([c for c in (job.get("comment_images") or []) if c]),
+            # ข้อความคอมเมนต์ส่งมาด้วยเพื่อให้กางดูเนื้อหาได้โดยไม่ต้องยิงเส้นหนัก
+            # ตัดที่ 300 ตัวอักษรต่อช่อง — ยาวกว่านั้นไม่มีใครอ่านบนการ์ดสถานะ
+            "comment_texts": [str(c)[:300] for c in (job.get("comments") or
+                              ([job["comment"]] if job.get("comment") else []))
+                              if str(c).strip()],
+            "posted_count": posted_count,
+            "failed": sum(1 for row in results if row.get("posted") is not True),
+            "total": len(dict.fromkeys(job.get("groups") or [])),
             "pending": len(pending),
+            "queue": queue,
             "latest_step": log[-1] if log else "",
             "tail": log[-14:],
-            "device": where.get(job.get("id"), ""),
-            "can_resume": (
-                job.get("status") in {
-                    fb_auto_post.STATUS_READY, fb_auto_post.STATUS_STOPPED,
-                    fb_auto_post.STATUS_FAILED, fb_auto_post.STATUS_CANCELLED,
-                }
-                and bool(pending)
-                and job.get("id") not in running_ids
-            ),
-        })
+            "device": where.get(job_id, ""),
+            "deferred": job_id in _deferred_jobs,
+            "stopping": stopping,
+            "orphan": status == fb_auto_post.STATUS_RUNNING and not on_phone,
+            "can_run": status == fb_auto_post.STATUS_READY and not on_phone,
+            "can_resume": can_resume,
+            "can_reset": not on_phone,
+            "can_stop": on_phone or status == fb_auto_post.STATUS_READY,
+            "why": why,
+        }
+
+    out = [slip(job) for job in rows[:6]]
+
+    # ประวัติโหลดเฉพาะตอนผู้ใช้กางดู — ไม่งั้นติดไปกับทุกรอบที่ถามทุกวินาที
+    past = []
+    if history:
+        for job in [j for j in everything if j.get("status") in finished][:8]:
+            results = job.get("results") or []
+            past.append({
+                "id": job.get("id"),
+                "status": job.get("status"),
+                "caption": str(job.get("caption") or "")[:90],
+                "posted_count": sum(1 for r in results if r.get("posted") is True),
+                "total": len(dict.fromkeys(job.get("groups") or [])),
+                "finished_at": job.get("finished_at") or job.get("created_at") or "",
+                "links": [str(r.get("link")) for r in results if r.get("link")][:6],
+            })
+
     return {
         "ok": True,
         "running": fb_runner.any_busy(),
         "live_count": len(live),
         "at": datetime.now().strftime("%H:%M:%S"),
         "jobs": out,
+        "history": past,
     }
 
 

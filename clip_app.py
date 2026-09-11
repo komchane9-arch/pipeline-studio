@@ -4588,7 +4588,23 @@ def _auto_publish_one(step: str) -> bool:
             f"⚠️ <b>เดินผังไม่จบ</b> — ทำได้ {done}/{total} ขั้น",
             telegram_bot._escape(str(result.get("error") or "")),
         ]))
-    return hush(f"เดินผังไม่จบ {done}/{total} ขั้น")
+    # **ต้องบอกเหตุผลใน log ด้วย ไม่ใช่แค่ตัวเลขขั้น** (แก้ 11 ก.ย. 2569)
+    #
+    # ของเดิมเขียนแค่ "เดินผังไม่จบ 0/22 ขั้น" ซึ่ง **ไล่ต่อไม่ได้เลย** —
+    # ผิดกติกาข้อ 2.4 ที่ห้ามความล้มเหลวแบบที่บอกแค่ว่าล้ม
+    #
+    # เกิดจริงคืนนี้: Shopee Video ล้ม 0/22 แล้วทั้งเจ้าของและอีกแชทไล่หา
+    # สาเหตุไม่เจอ ต้องไปขุด data/logs/publish.log ถึงจะพบว่าเหตุผลจริงคือ
+    # "คลิปใน /sdcard/Movies/autopost ไม่ตรงกับใบงาน — พบสองไฟล์"
+    # (คลิปทดสอบของอีกใบค้างอยู่ในเครื่อง) เหตุผลอยู่คนละไฟล์กับคนที่มาหา
+    why = str(result.get("error") or "").strip()
+    shot = str(result.get("failure_screenshot") or "").strip()
+    line = f"เดินผังไม่จบ {done}/{total} ขั้น"
+    if why:
+        line += f" — {why[:220]}"
+    if shot:
+        line += f" · ภาพตอนล้ม {shot}"
+    return hush(line)
 
 
 def _apply_auto_publish_stop(

@@ -13,7 +13,10 @@
   หน้า Studio ตอนยังไม่ล็อกอิน  เด้งไปหน้าเข้าสู่ระบบเสมอ
 """
 
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
 import tiktok_chromes as tc
 
@@ -96,6 +99,61 @@ class HandleReaderTests(unittest.TestCase):
                       "__UNIVERSAL_DATA_FOR_REHYDRATION__", "webapp.app-context",
                       "uniqueId"):
             self.assertIn(piece, tc.READ_JS)
+
+
+class RecordingTests(unittest.TestCase):
+    """อ่านไอดีออกแล้วต้องจดลงแฟ้มได้ด้วย — อ่านออกแต่จดไม่ลงก็เท่ากับไม่ได้ทำ
+
+    ใช้แฟ้มชั่วคราว ไม่แตะข้อมูลจริง (กติกา 7.4)
+    """
+
+    def setUp(self) -> None:
+        self.temp = Path(tempfile.mkdtemp(prefix="tiktok-test-"))
+        self.real = tc.STATE_FILE
+        tc.STATE_FILE = self.temp / "tiktok_chromes.json"
+
+    def tearDown(self) -> None:
+        tc.STATE_FILE = self.real
+        shutil.rmtree(self.temp, ignore_errors=True)
+
+    def test_saved_handle_comes_back_ready(self) -> None:
+        tc.save("tiktok1", REAL, note="ล็อกอินแล้ว")
+        row = tc.load()["tiktok1"]
+        self.assertEqual(row["handle"], REAL)
+        self.assertFalse(row["stale"])
+        self.assertTrue(row["checked_at"])
+        self.assertTrue(row["last_ok_at"])
+
+    def test_unreadable_round_keeps_the_old_handle(self) -> None:
+        """เน็ตสะดุดรอบเดียว ห้ามทำให้ช่องที่ล็อกอินไว้กลายเป็นว่างเปล่า
+
+        ถ้าลบไอดีทิ้งทุกครั้งที่อ่านไม่ได้ ช่องที่ล็อกอินอยู่จะขึ้นว่า
+        "ยังไม่ได้ล็อกอิน" แล้วคนจะไปล็อกอินซ้ำโดยไม่จำเป็น
+        """
+        tc.save("tiktok1", REAL, note="ล็อกอินแล้ว")
+        tc.save("tiktok1", None, note="อ่านไม่ได้รอบนี้")
+        row = tc.load()["tiktok1"]
+        self.assertEqual(row["handle"], REAL, "ไอดีเดิมหายไป")
+        self.assertTrue(row["stale"], "ไม่ได้ติดธงว่าไอดีอาจเก่าแล้ว")
+        self.assertEqual(row["note"], "อ่านไม่ได้รอบนี้")
+
+    def test_never_read_is_not_the_same_as_read_and_failed(self) -> None:
+        """ยังไม่เคยตรวจ กับ ตรวจแล้วไม่ผ่าน ต้องแยกออก (กติกา 2.3.1 ข้อ 4)"""
+        never = tc.load().get("tiktok5")
+        self.assertIsNone(never)
+        tc.save("tiktok5", None, note="ยังไม่ได้ล็อกอิน")
+        failed = tc.load()["tiktok5"]
+        self.assertIsNone(failed["handle"])
+        self.assertTrue(failed["stale"])
+        self.assertTrue(failed["checked_at"])
+
+    def test_board_shows_the_saved_handle(self) -> None:
+        """สิ่งที่จดไว้ต้องไปโผล่ในรายการที่หน้าเว็บดึงไปแสดง"""
+        tc.save("tiktok3", REAL, note="ล็อกอินแล้ว")
+        row = next(r for r in tc.rows() if r["profile"] == "tiktok3")
+        self.assertEqual(row["handle"], REAL)
+        self.assertTrue(row["ready"])
+        self.assertFalse(row["stale"])
 
 
 if __name__ == "__main__":

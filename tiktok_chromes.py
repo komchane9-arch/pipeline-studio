@@ -360,6 +360,11 @@ def prove_reader(log=print) -> dict:
     ข้อ (ข) ใส่ก้อนบัญชีเข้าไปในข้อมูลเดิมของหน้าจริง ไม่ได้แต่งหน้าขึ้นใหม่
     จึงพิสูจน์ได้ทั้งเส้น ตั้งแต่ดึงข้อมูลจากหน้า แกะ ไล่ที่อยู่ ไปจนตรวจรูปแบบ
     """
+    global STATE_FILE
+
+    import shutil
+    import tempfile
+
     from playwright.sync_api import sync_playwright
 
     import flow_worker
@@ -443,6 +448,39 @@ def prove_reader(log=print) -> dict:
                 out["steps"].append(
                     {"ชื่อ": "หน้าแรกแบบล็อกอินแล้ว", "ผ่าน": step3,
                      "ตัวอ่านตอบ": handle3 or why3, "ที่ควรได้": want})
+
+                # ---- อ่านออกแล้วต้อง "จดลงแฟ้ม" ได้จริงด้วย ----
+                # อ่านออกแต่จดไม่ลง = ช่องนั้นยังขึ้นว่ายังไม่ได้ล็อกอินอยู่ดี
+                # ใช้แฟ้มชั่วคราว ไม่แตะของจริง (กติกา 7.4)
+                real_file = STATE_FILE
+                temp_dir = Path(tempfile.mkdtemp(prefix="tiktok-prove-"))
+                try:
+                    STATE_FILE = temp_dir / "tiktok_chromes.json"
+                    save(folder.name, handle3, note="พิสูจน์การจด")
+                    row = next(r for r in rows() if r["profile"] == folder.name)
+                    step4 = bool(row["handle"] == want and row["ready"]
+                                 and not row["stale"] and row["checked_at"])
+                    out["steps"].append(
+                        {"ชื่อ": "จดไอดีลงแฟ้มแล้วอ่านกลับมาได้",
+                         "ผ่าน": step4,
+                         "ในแฟ้ม": {"ไอดี": row["handle"], "พร้อมใช้": row["ready"],
+                                    "ไอดีเก่า": row["stale"],
+                                    "ตรวจเมื่อ": row["checked_at"]}})
+
+                    # รอบถัดไปอ่านไม่ได้ ต้อง **ไม่ลบไอดีเดิมทิ้ง** แต่ติดธงว่าเก่า
+                    # ถ้าลบทิ้ง วันที่เน็ตสะดุดครั้งเดียว ช่องที่ล็อกอินไว้แล้ว
+                    # จะกลายเป็น "ยังไม่ได้ล็อกอิน" ทั้งที่ยังล็อกอินอยู่
+                    save(folder.name, None, note="อ่านไม่ได้รอบนี้")
+                    row2 = next(r for r in rows() if r["profile"] == folder.name)
+                    step5 = bool(row2["handle"] == want and row2["stale"])
+                    out["steps"].append(
+                        {"ชื่อ": "รอบถัดไปอ่านไม่ได้ ต้องเก็บไอดีเดิมไว้และติดธงว่าเก่า",
+                         "ผ่าน": step5,
+                         "ในแฟ้ม": {"ไอดี": row2["handle"], "ไอดีเก่า": row2["stale"],
+                                    "เหตุผล": row2["note"]}})
+                finally:
+                    STATE_FILE = real_file
+                    shutil.rmtree(temp_dir, ignore_errors=True)
             finally:
                 browser.close()
 

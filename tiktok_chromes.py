@@ -197,7 +197,10 @@ def read_identity(profile: str | Path, log=print) -> dict:
 
 BLOB_ID = "__UNIVERSAL_DATA_FOR_REHYDRATION__"
 # ที่อยู่ของ "บัญชีที่ล็อกอินอยู่" เท่านั้น ห้ามไล่หาทั้งก้อน (เหตุผลอยู่ข้างล่าง)
-OWN_HANDLE_PATH = ("webapp.app-context", "user", "uniqueId")
+OWN_ACCOUNT_PATH = ("webapp.app-context", "user")
+# ช่องที่เก็บไอดี — เผื่อสะกดต่าง แต่ต้องเป็นความหมายเดียวกันเท่านั้น
+# ห้ามใส่ nickName เข้ามา เพราะนั่นคือชื่อที่โชว์ ไม่ใช่ไอดีของช่อง
+HANDLE_FIELDS = ("uniqueId", "unique_id", "uniqueID")
 
 
 def handle_from_blob(blob: dict | None, url: str) -> tuple[str | None, str]:
@@ -233,12 +236,18 @@ def handle_from_blob(blob: dict | None, url: str) -> tuple[str | None, str]:
         return None, blocked if on_studio else "หน้ายังไม่พร้อม — ข้อมูลที่ฝังมาไม่ใช่รูปแบบที่รู้จัก"
 
     node = scope
-    for key in OWN_HANDLE_PATH:
+    for key in OWN_ACCOUNT_PATH:
         node = node.get(key) if isinstance(node, dict) else None
         if node is None:
             break
-    if isinstance(node, str) and HANDLE_RE.fullmatch("@" + node.strip()):
-        return "@" + node.strip(), ""
+    if isinstance(node, dict):
+        for field in HANDLE_FIELDS:
+            value = str(node.get(field) or "").strip()
+            if value and HANDLE_RE.fullmatch("@" + value):
+                return "@" + value, ""
+        # มีก้อนบัญชีแต่ไม่มีช่องไอดี = ล็อกอินแล้วแน่ แต่ TikTok เปลี่ยนชื่อช่อง
+        return None, ("ล็อกอินแล้วแต่ก้อนบัญชีไม่มีช่องไอดี — มีช่อง: "
+                      + ",".join(sorted(str(k) for k in node)[:12]))
 
     if on_studio:
         return None, blocked
@@ -311,10 +320,95 @@ def refresh_all(log=print) -> dict:
             "skipped": skipped, "total": HOW_MANY}
 
 
+def prove_reader(log=print) -> dict:
+    """พิสูจน์ตัวอ่านไอดีบน **หน้าเว็บจริง** โดยไม่ต้องมีบัญชี
+
+    ทำไมต้องมีคำสั่งนี้ — ตัวอ่านจะถูกใช้ตัดสินว่าคลิปจะขึ้นช่องไหน
+    อ่านผิดแปลว่าคลิปขึ้นผิดช่องแบบถอนไม่ได้ จะรอพิสูจน์ตอนมีบัญชีจริง
+    ไม่ได้ และเทสที่รันจากข้อมูลแช่แข็งอย่างเดียวก็ไม่ได้แตะเบราว์เซอร์เลย
+
+    เปิดหน้า TikTok จริง แล้ววัดสองด้าน
+      ก) หน้าที่ยังไม่ล็อกอิน ซึ่งมีชื่อบัญชีคนอื่นฝังอยู่ในฟีด -> ต้องปฏิเสธ
+      ข) หน้าเดียวกันที่เติมก้อนบัญชีแบบตอนล็อกอินแล้ว -> ต้องอ่านไอดีออก
+
+    ข้อ (ข) ใส่ก้อนบัญชีเข้าไปในข้อมูลเดิมของหน้าจริง ไม่ได้แต่งหน้าขึ้นใหม่
+    จึงพิสูจน์ได้ทั้งเส้น ตั้งแต่ดึงข้อมูลจากหน้า แกะ ไล่ที่อยู่ ไปจนตรวจรูปแบบ
+    """
+    from playwright.sync_api import sync_playwright
+
+    import flow_worker
+
+    want = "@komchan.shop"
+    out = {"ok": False, "steps": []}
+    folder = profile_dir(HOW_MANY)          # ใช้ช่องสุดท้าย ไม่ไปชนช่องที่ใช้จริง
+    folder.mkdir(parents=True, exist_ok=True)
+    with shared.browser_lock(timeout=120, profile=f"tiktok-{folder.name}",
+                             label="พิสูจน์ตัวอ่านไอดี TikTok"):
+        with sync_playwright() as pw:
+            browser = flow_worker.open_browser(pw, hidden=True, profile_dir=folder)
+            try:
+                page = browser.pages[0] if browser.pages else browser.new_page()
+                page.goto("https://www.tiktok.com/", wait_until="domcontentloaded",
+                          timeout=90_000)
+                page.wait_for_timeout(6_000)
+
+                # ฟีดหน้าแรกเปลี่ยนทุกวัน บางรอบไม่มีชื่อคนอื่นติดมาเลย
+                # ถ้าปล่อยไว้ ขั้นนี้จะ "ผ่าน" ทั้งที่ไม่ได้ทดสอบกับดักอะไร
+                # จึงวางกับดักเองให้มีแน่นอนทุกรอบ ใช้ชื่อที่เคยติดมาจริง
+                strangers = page.evaluate(
+                    """(id) => {
+                         const el = document.getElementById(id);
+                         if (!el) return 0;
+                         const d = JSON.parse(el.textContent);
+                         const scope = d.__DEFAULT_SCOPE__ || (d.__DEFAULT_SCOPE__ = {});
+                         const items = scope['webapp.updated-items'] || [];
+                         for (const name of ['armkiss', '_ply01', 'wan.vogvax']) {
+                           items.push({author: {uniqueId: name}});
+                         }
+                         scope['webapp.updated-items'] = items;
+                         el.textContent = JSON.stringify(d);
+                         return ((el.textContent || '').match(/"uniqueId"/g) || []).length;
+                       }""", BLOB_ID)
+                handle, why = _handle_on_page(page)
+                step1 = handle is None and strangers >= 3
+                out["steps"].append(
+                    {"ชื่อ": "หน้าจริงที่ยังไม่ล็อกอิน + มีชื่อคนอื่นวางเป็นกับดัก",
+                     "ผ่าน": step1,
+                     "ชื่อบัญชีคนอื่นในหน้า": strangers,
+                     "ตัวอ่านตอบ": handle or why})
+
+                page.evaluate(
+                    """(id) => {
+                         const el = document.getElementById(id);
+                         const d = JSON.parse(el.textContent);
+                         d.__DEFAULT_SCOPE__['webapp.app-context'].user = {
+                           uid: '6912345678901234567', secUid: 'MS4wLjABAAAA',
+                           nickName: 'ชื่อที่โชว์ ไม่ใช่ไอดี',
+                           uniqueId: 'komchan.shop', storeRegion: 'TH'};
+                         el.textContent = JSON.stringify(d);
+                         history.replaceState(null, '', '/tiktokstudio/upload');
+                       }""", BLOB_ID)
+                handle2, why2 = _handle_on_page(page)
+                step2 = handle2 == want
+                out["steps"].append(
+                    {"ชื่อ": "หน้าเดียวกันแบบล็อกอินแล้ว", "ผ่าน": step2,
+                     "ตัวอ่านตอบ": handle2 or why2, "ที่ควรได้": want})
+            finally:
+                browser.close()
+
+    out["ok"] = all(bool(s["ผ่าน"]) for s in out["steps"])
+    for step in out["steps"]:
+        log(("   ผ่าน  " if step["ผ่าน"] else "   ไม่ผ่าน ") + str(step))
+    log("   สรุป: " + ("ตัวอ่านใช้ได้" if out["ok"] else "ตัวอ่านมีปัญหา"))
+    return out
+
+
 if __name__ == "__main__":
     import sys
 
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "พิสูจน์":
+        raise SystemExit(0 if prove_reader().get("ok") else 1)
     if arg == "อ่าน":
         print(refresh_all())
     elif arg == "เปิด" and len(sys.argv) > 2:

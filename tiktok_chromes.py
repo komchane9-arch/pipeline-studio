@@ -166,6 +166,19 @@ def read_identity(profile: str | Path, log=print) -> dict:
                               timeout=90_000)
                     page.wait_for_timeout(9_000)
                     handle, why = _handle_on_page(page)
+                    if not handle:
+                        # เก็บภาพ + ผังหน้าไว้ **ก่อนปิด** ปิดแล้วแคปไม่ได้อีก
+                        # (กติกา 2.6.1) รอบหน้าที่มีคนล็อกอินจริงแล้วยังอ่านไม่ได้
+                        # จะได้เห็นหน้าจริงเลยว่า TikTok วางชื่อบัญชีไว้ตรงไหน
+                        # ไม่ต้องไล่เดาทีละรอบ
+                        try:
+                            import evidence
+                            evidence.shot(
+                                page, f"อ่านไอดี TikTok ไม่ได้ {folder.name}",
+                                tag="tiktok",
+                                note=f"เหตุผล: {why} · ที่อยู่หน้า: {page.url}")
+                        except Exception as snap:              # noqa: BLE001
+                            log(f"   (เก็บภาพหน้าไม่ได้: {type(snap).__name__})")
                 finally:
                     browser.close()
     except Exception as error:                                 # noqa: BLE001

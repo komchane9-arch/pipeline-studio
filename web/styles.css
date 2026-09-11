@@ -3222,3 +3222,42 @@ body.typing-through {
   font-size: 12px;
   color: var(--ink-3);
 }
+
+/* ============ 🤖 สายสดของบอทสายโพสต์ + กล่องสร้างโพสต์แบบพับ (11 ก.ย. 2569) */
+/* บันทึกทีละขั้น — จำกัดความสูงแล้วเลื่อนในกล่อง ไม่ให้ดันหน้ายาวเป็นจอ */
+.fc-feed {
+  margin: 6px 0 0;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--panel-deep);
+  max-height: 190px;
+  overflow-y: auto;
+  font-size: 11px;
+  line-height: 1.65;
+  font-variant-numeric: tabular-nums;
+}
+.fc-line { color: var(--ink-3); overflow-wrap: anywhere; }
+/* บรรทัดล่าสุดเน้นไว้ ตาจะได้วิ่งไปหาก่อน */
+.fc-line-now { color: var(--ink); font-weight: 600; }
+
+.fc-idle { margin: 5px 0 0; font-size: 11px; color: var(--ink-3); }
+/* ค้างนานผิดปกติต้องสะดุดตา — แยก "กำลังทำ" ออกจาก "ค้าง" ให้เห็นด้วยตา */
+.fc-idle-long { color: var(--warn); font-weight: 700; }
+
+/* กล่องสร้างโพสต์แบบพับ */
+.gfp-fold {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 8px 12px;
+  margin: 4px 0 10px;
+}
+.gfp-fold > summary {
+  cursor: pointer; font-size: 15px; font-weight: 600; padding: 2px 0;
+  list-style: none; color: var(--ink);
+}
+.gfp-fold > summary::-webkit-details-marker { display: none; }
+.gfp-fold > summary::before { content: "B8 "; opacity: 0.55; }
+.gfp-fold[open] > summary::before { content: "BE "; }
+/* หัวข้อข้างในซ้ำกับป้ายที่พับอยู่แล้ว ซ่อนไว้กันอ่านสองรอบ */
+.gfp-fold .gfp-studio > .row:first-child { display: none; }

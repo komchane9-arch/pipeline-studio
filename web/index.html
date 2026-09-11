@@ -278,78 +278,91 @@
 
         <!-- ========================================= 👥 Group Facebook -->
         <div id="tab-groups" class="tab-area" hidden>
-          <section class="gfp-studio" aria-labelledby="gfpTitle">
-            <div class="row">
-              <h2 id="gfpTitle">สร้างโพสต์ Facebook Group</h2>
-              <span class="gfp-channel">ช่องทางหน้าเว็บ</span>
-            </div>
-            <p class="note">
-              สร้างงานจากหน้านี้ได้ครบชุด และใช้คิวเดียวกับ Telegram
-              <b>Telegram ยังทำงานเหมือนเดิมทุกอย่าง</b>
-              งานหนึ่งเลือกได้ไม่เกิน 6 กลุ่ม · รูปโพสต์สูงสุด 3 ใบ · คอมเมนต์สูงสุด 2 ช่อง
-            </p>
-
-            <ol id="gfpDraftSteps" class="gfp-steps" aria-label="ความครบของโพสต์">
-              <li data-part="caption">1 แคปชัน</li>
-              <li data-part="post-image">2 รูปโพสต์</li>
-              <li data-part="comment">3 คอมเมนต์ (ถ้ามี)</li>
-              <li data-part="comment-image">4 รูปคอมเมนต์ (ถ้ามี)</li>
-              <li data-part="groups">5 กลุ่มปลายทาง</li>
-            </ol>
-
-            <div class="gfp-compose-grid">
-              <label class="gfp-field gfp-caption-field">
-                <span>ข้อความ / แคปชัน <b>*</b></span>
-                <textarea id="gfpCaption" rows="7"
-                  placeholder="พิมพ์ข้อความที่จะโพสต์ลง Facebook"></textarea>
-                <small id="gfpCaptionCount">0 ตัวอักษร</small>
-              </label>
-
-              <div class="gfp-field">
-                <label for="gfpPostImages">รูปในโพสต์ <b>*</b></label>
-                <input id="gfpPostImages" type="file" accept=".jpg,.jpeg,.png,.webp"
-                       multiple />
-                <small>เลือกได้ 1–3 ใบ เรียงตามลำดับที่เลือก</small>
-                <div id="gfpPostPreview" class="gfp-preview"></div>
+          <div class="row">
+            <h2>บอทสายโพสต์</h2>
+            <button id="fcReload" class="ghost" type="button">🔄 โหลดใหม่</button>
+          </div>
+          <p id="fcNote" class="note" aria-live="polite"></p>
+          <div id="fcList" class="fc-list"></div>
+          <hr class="bd-split">
+          <!-- พับกล่องสร้างโพสต์ (เจ้าของสั่ง 11 ก.ย. 2569 "สร้างโพสต์
+               facebook group หุบ แล้วทำเป็น drop down") — เปิดหน้านี้มาเพื่อดู
+               ว่าบอททำอะไรอยู่เป็นหลัก ส่วนฟอร์มสร้างงานใช้นานๆ ครั้ง -->
+          <details class="gfp-fold">
+            <summary>📝 สร้างโพสต์ Facebook Group</summary>
+            <section class="gfp-studio" aria-labelledby="gfpTitle">
+              <div class="row">
+                <h2 id="gfpTitle">สร้างโพสต์ Facebook Group</h2>
+                <span class="gfp-channel">ช่องทางหน้าเว็บ</span>
               </div>
-            </div>
+              <p class="note">
+                สร้างงานจากหน้านี้ได้ครบชุด และใช้คิวเดียวกับ Telegram
+                <b>Telegram ยังทำงานเหมือนเดิมทุกอย่าง</b>
+                งานหนึ่งเลือกได้ไม่เกิน 6 กลุ่ม · รูปโพสต์สูงสุด 3 ใบ · คอมเมนต์สูงสุด 2 ช่อง
+              </p>
 
-            <div class="gfp-comments">
-              <section class="gfp-comment-card">
-                <strong>คอมเมนต์ช่อง 1</strong>
-                <textarea id="gfpComment1" rows="3"
-                  placeholder="ข้อความคอมเมนต์ เช่น ลิงก์ Shopee / Lazada"></textarea>
-                <label>รูปในคอมเมนต์ (ไม่ใส่ก็ได้)
-                  <input id="gfpCommentImage1" type="file" accept=".jpg,.jpeg,.png,.webp" />
+              <ol id="gfpDraftSteps" class="gfp-steps" aria-label="ความครบของโพสต์">
+                <li data-part="caption">1 แคปชัน</li>
+                <li data-part="post-image">2 รูปโพสต์</li>
+                <li data-part="comment">3 คอมเมนต์ (ถ้ามี)</li>
+                <li data-part="comment-image">4 รูปคอมเมนต์ (ถ้ามี)</li>
+                <li data-part="groups">5 กลุ่มปลายทาง</li>
+              </ol>
+
+              <div class="gfp-compose-grid">
+                <label class="gfp-field gfp-caption-field">
+                  <span>ข้อความ / แคปชัน <b>*</b></span>
+                  <textarea id="gfpCaption" rows="7"
+                    placeholder="พิมพ์ข้อความที่จะโพสต์ลง Facebook"></textarea>
+                  <small id="gfpCaptionCount">0 ตัวอักษร</small>
                 </label>
-                <div id="gfpCommentPreview1" class="gfp-preview compact"></div>
-              </section>
-              <section class="gfp-comment-card">
-                <strong>คอมเมนต์ช่อง 2</strong>
-                <textarea id="gfpComment2" rows="3"
-                  placeholder="คอมเมนต์เพิ่มเติม (ไม่ใส่ก็ได้)"></textarea>
-                <label>รูปในคอมเมนต์ (ไม่ใส่ก็ได้)
-                  <input id="gfpCommentImage2" type="file" accept=".jpg,.jpeg,.png,.webp" />
+
+                <div class="gfp-field">
+                  <label for="gfpPostImages">รูปในโพสต์ <b>*</b></label>
+                  <input id="gfpPostImages" type="file" accept=".jpg,.jpeg,.png,.webp"
+                         multiple />
+                  <small>เลือกได้ 1–3 ใบ เรียงตามลำดับที่เลือก</small>
+                  <div id="gfpPostPreview" class="gfp-preview"></div>
+                </div>
+              </div>
+
+              <div class="gfp-comments">
+                <section class="gfp-comment-card">
+                  <strong>คอมเมนต์ช่อง 1</strong>
+                  <textarea id="gfpComment1" rows="3"
+                    placeholder="ข้อความคอมเมนต์ เช่น ลิงก์ Shopee / Lazada"></textarea>
+                  <label>รูปในคอมเมนต์ (ไม่ใส่ก็ได้)
+                    <input id="gfpCommentImage1" type="file" accept=".jpg,.jpeg,.png,.webp" />
+                  </label>
+                  <div id="gfpCommentPreview1" class="gfp-preview compact"></div>
+                </section>
+                <section class="gfp-comment-card">
+                  <strong>คอมเมนต์ช่อง 2</strong>
+                  <textarea id="gfpComment2" rows="3"
+                    placeholder="คอมเมนต์เพิ่มเติม (ไม่ใส่ก็ได้)"></textarea>
+                  <label>รูปในคอมเมนต์ (ไม่ใส่ก็ได้)
+                    <input id="gfpCommentImage2" type="file" accept=".jpg,.jpeg,.png,.webp" />
+                  </label>
+                  <div id="gfpCommentPreview2" class="gfp-preview compact"></div>
+                </section>
+              </div>
+
+              <fieldset class="gfp-group-pick">
+                <legend>เลือกกลุ่มปลายทาง <b>*</b> <span id="gfpGroupCount">0/6</span></legend>
+                <div id="gfpGroupChoices" class="gfp-group-choices"></div>
+              </fieldset>
+
+              <div class="inline-row gfp-actions">
+                <label>มือถือ / บัญชีที่จะโพสต์
+                  <select id="gfpPostDevice"></select>
                 </label>
-                <div id="gfpCommentPreview2" class="gfp-preview compact"></div>
-              </section>
-            </div>
-
-            <fieldset class="gfp-group-pick">
-              <legend>เลือกกลุ่มปลายทาง <b>*</b> <span id="gfpGroupCount">0/6</span></legend>
-              <div id="gfpGroupChoices" class="gfp-group-choices"></div>
-            </fieldset>
-
-            <div class="inline-row gfp-actions">
-              <label>มือถือ / บัญชีที่จะโพสต์
-                <select id="gfpPostDevice"></select>
-              </label>
-              <button id="gfpSave" class="ghost" type="button">บันทึกเป็นงานพร้อมโพสต์</button>
-              <button id="gfpSend" class="primary" type="button">🚀 สร้างแล้วโพสต์ทันที</button>
-              <span id="gfpDevice" class="note"></span>
-            </div>
-            <p id="gfpNote" class="note" aria-live="polite"></p>
-          </section>
+                <button id="gfpSave" class="ghost" type="button">บันทึกเป็นงานพร้อมโพสต์</button>
+                <button id="gfpSend" class="primary" type="button">🚀 สร้างแล้วโพสต์ทันที</button>
+                <span id="gfpDevice" class="note"></span>
+              </div>
+              <p id="gfpNote" class="note" aria-live="polite"></p>
+            </section>
+          </details>
 
           <hr class="bd-split">
           <div class="row">
@@ -385,13 +398,6 @@
           </section>
           <div id="gfpJobs" class="fb-jobs gfp-jobs"></div>
 
-          <hr class="bd-split">
-          <div class="row">
-            <h2>บอทสายโพสต์</h2>
-            <button id="fcReload" class="ghost" type="button">🔄 โหลดใหม่</button>
-          </div>
-          <p id="fcNote" class="note" aria-live="polite"></p>
-          <div id="fcList" class="fc-list"></div>
           <hr class="bd-split">
 
           <div class="row">

@@ -11913,6 +11913,63 @@ async def fb_save_settings(request: Request) -> dict:
     return {"ok": True, **settings}
 
 
+@app.get("/api/fb/jobs/live")
+async def fb_jobs_live() -> dict:
+    """เฉพาะของที่แผงสายโพสต์ใช้โชว์สด — **เบาพอให้ถามทุกวินาที**
+
+    **ทำไมต้องมีเส้นนี้** (เจ้าของสั่ง 11 ก.ย. 2569 ว่า "ปรับให้อัปเดตไวขึ้น")
+    `/api/fb/jobs` ส่งใบงาน 10 ใบพร้อมของครบทุกอย่าง วัดจริงได้ **134 KB
+    ใช้เวลาเกือบ 1 วินาทีต่อครั้ง** ถามทุกวินาทีคือยิงซ้อนกันไม่จบ และเจ้าของ
+    เปิดหน้าผ่าน Tailscale ไม่ใช่ในเครื่อง ยิ่งช้ากว่านั้นอีก
+
+    ตัวหนักคือ log ของทุกใบ (ใบเดียว 200 บรรทัด) กับผลรายกลุ่ม ซึ่งแผงไม่ได้ใช้
+    เส้นนี้จึงส่ง **เฉพาะใบที่ยังไม่จบ** และ log แค่ท้าย 14 บรรทัดตามที่จอโชว์
+
+    ห้ามเอาไปใช้แทน `/api/fb/jobs` — เส้นนั้นมีของที่หน้าอื่นต้องใช้ครบ
+    """
+    running_on = fb_runner.running()
+    running_ids = set(running_on.values())
+    where = {job_id: device_book.label(serial)
+             for serial, job_id in running_on.items()}
+    live = [job for job in fb_jobs.listing()
+            if job.get("status") not in {fb_auto_post.STATUS_DONE,
+                                         fb_auto_post.STATUS_CANCELLED}]
+    # ไม่มีใบค้างเลย = โชว์ใบล่าสุดใบเดียวพอ ให้เห็นว่าเพิ่งทำอะไรจบไป
+    rows = live or fb_jobs.listing()[:1]
+
+    out = []
+    for job in rows[:6]:
+        log = job.get("log") or []
+        pending = _fb_pending_groups(job)
+        results = job.get("results") or []
+        out.append({
+            "id": job.get("id"),
+            "status": job.get("status"),
+            "caption": str(job.get("caption") or "")[:120],
+            "posted_count": sum(1 for row in results if row.get("posted") is True),
+            "total": len(job.get("groups") or []),
+            "pending": len(pending),
+            "latest_step": log[-1] if log else "",
+            "tail": log[-14:],
+            "device": where.get(job.get("id"), ""),
+            "can_resume": (
+                job.get("status") in {
+                    fb_auto_post.STATUS_READY, fb_auto_post.STATUS_STOPPED,
+                    fb_auto_post.STATUS_FAILED, fb_auto_post.STATUS_CANCELLED,
+                }
+                and bool(pending)
+                and job.get("id") not in running_ids
+            ),
+        })
+    return {
+        "ok": True,
+        "running": fb_runner.any_busy(),
+        "live_count": len(live),
+        "at": datetime.now().strftime("%H:%M:%S"),
+        "jobs": out,
+    }
+
+
 @app.get("/api/fb/jobs")
 async def fb_list_jobs() -> dict:
     all_jobs = fb_jobs.listing()

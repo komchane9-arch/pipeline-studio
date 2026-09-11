@@ -1925,6 +1925,42 @@ def _clip_finish_collect(job: dict, data: dict) -> None:
             )
             picked = [paired[i] for i in indexes if 0 <= i < len(paired)]
         if not picked:
+            # ---- ทางถอย: ให้ AI ในเครื่องดูรูปแทน (เสียบ 11 ก.ย. 2569) -------
+            #
+            # `clip_pickimg` ถูกเขียนไว้ตั้งแต่ 30 ส.ค. ตอนโควตา Gemini หมดจน
+            # งานหยุดไป 17 ใบ **แต่ไม่เคยถูกเรียกใช้เลย** — วันนี้เจ้าของสั่ง
+            # ให้ต่อสายเข้ามา
+            #
+            # **ยังไม่เอามาแทน Gemini** เพราะวัดแล้วเลือกทับกันแค่ 1-2 จาก 4 ใบ
+            # (25-50%) แปลว่าใช้เกณฑ์คนละชุด ยังไม่มีหลักฐานว่าดีเท่ากัน
+            # แต่ **ด่านตัดรูปซ้ำพิสูจน์แล้วว่าปลอดภัย 100%** (รูปที่ Gemini
+            # เลือกรอดครบ 40/40 จาก 10 ใบงาน) และตัวนี้ **ดูรูปจริงทุกใบ**
+            # จึงไม่ใช่การ "เลือกแบบกระจาย" ที่เจ้าของห้ามไว้
+            #
+            # ใช้เฉพาะตอน Gemini ใช้ไม่ได้เท่านั้น — ดีกว่าหยุดทั้งใบ
+            try:
+                import clip_pickimg                          # noqa: PLC0415
+                from pathlib import Path as _Path            # noqa: PLC0415
+                # คีย์ของรูปในใบงานคือ "file" (เก็บเป็นพาธเต็ม) ไม่ใช่ "path"
+                paths = [_Path(item["file"]) for item in paired
+                         if item.get("file") and _Path(item["file"]).is_file()]
+                if not paths:
+                    raise RuntimeError("ไม่มีไฟล์รูปให้ดูสักใบ")
+                local = clip_pickimg.ollama_pick(paths, want,
+                                                 log=lambda m: _clip_log(str(m)))
+                if local:
+                    chosen = {p.name for p in local}
+                    picked = [item for item in paired
+                              if item.get("file")
+                              and _Path(item["file"]).name in chosen]
+                    _clip_log(f"🖼 Gemini ใช้ไม่ได้ — ใช้ AI ในเครื่องดูรูปแทน "
+                              f"เลือกได้ {len(picked)} ใบจาก {len(paths)} ใบ "
+                              "(เกณฑ์คนละชุดกับ Gemini กด 🖼 ตรวจได้)")
+            except Exception as error:                       # noqa: BLE001
+                _clip_log(f"🖼 AI ในเครื่องก็ใช้ไม่ได้: {type(error).__name__}: "
+                          f"{str(error)[:80]}")
+
+        if not picked:
             # ⛔ **ห้ามถอยไปเลือกแบบกระจาย** (เจ้าของสั่ง 31 ส.ค. 2569)
             #
             # "เลือกแบบกระจาย" คือหยิบตามลำดับเว้นช่วง **ไม่ได้ดูรูปเลยสักใบ**

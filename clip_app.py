@@ -9526,6 +9526,58 @@ def _browser_view_spec(stage: str) -> dict:
     return specs.get(str(stage or "").strip()) or {}
 
 
+def _clip_browser_targets() -> list[dict]:
+    """Chrome ทุกตัวที่ **สายเจนคลิปใช้อยู่ตอนนี้** (เจ้าของสั่ง 11 ก.ย. 2569)
+
+    *"ตรงเจนคลิป ให้โชว์ chrome ทั้งหมดที่ใช้อยู่ตอนนี้"*
+
+    ของเดิมปุ่ม "ดู Chrome" ของกอง Clip เปิดแค่ **ช่อง 2 ช่องเดียว** เพราะการ
+    เจนคลิปวิ่งบนช่องนั้น แต่ของจริงสายนี้มีหน้าต่างที่เกี่ยวข้องมากกว่านั้น
+
+        ช่อง 1 · ช่อง 2        ที่เจนคลิปจริง (ตอนนี้ทั้งคู่ชี้ไปบัญชีเดียวกัน
+                              เพราะระบบสลับบัญชีแบบเปลี่ยนโฟลเดอร์โปรไฟล์)
+        โปรไฟล์รายบัญชี         หน้าต่างที่เจ้าของล็อกอินค้างไว้ 6-7 บัญชี
+                              สำหรับสลับตอนเครดิตหมด
+
+    **เรียงตามความสำคัญ** — ช่องที่เจนจริงมาก่อน แล้วค่อยบัญชีอื่นที่เปิดค้าง
+    ตัดตัวซ้ำด้วยพาธโฟลเดอร์ เพราะหลายช่องอาจชี้ไปโฟลเดอร์เดียวกัน
+    """
+    import flow_worker                                       # noqa: PLC0415
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+
+    def add(folder, label: str, url: str, lock: str = "") -> None:
+        if folder is None:
+            return
+        key = str(folder).casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append({"label": label, "profile": folder, "lock": lock, "url": url})
+
+    for number in (2, 1):        # ช่อง 2 คือช่องที่เจนจริง จึงมาก่อน
+        try:
+            seat = flow_worker.flow_seat(number)
+        except Exception:                                    # noqa: BLE001
+            continue
+        add(seat.get("dir"), f"เจน Clip ช่อง {number}",
+            flow_worker.FLOW_URL, str(seat.get("lock") or ""))
+
+    # บัญชีอื่นที่เจ้าของเปิดค้างไว้ — ใส่เฉพาะตัวที่มีโฟลเดอร์จริง
+    try:
+        import flow_accounts                                 # noqa: PLC0415
+        folder = getattr(flow_accounts, "PROFILES_DIR", None)
+        if folder and folder.is_dir():
+            for item in sorted(folder.iterdir()):
+                if item.is_dir():
+                    add(item, f"บัญชี {item.name}", flow_worker.FLOW_URL,
+                        f"flow-acct-{item.name}")
+    except Exception:                                        # noqa: BLE001
+        pass
+    return rows
+
+
 _browser_view_session_lock = threading.Lock()
 _browser_view_sessions: dict[str, threading.Thread] = {}
 # หน้าต่างที่ปุ่มเปิดขึ้นเองห้ามถือโปรไฟล์จน worker รอครบ 900 วินาทีแล้วล้ม.
@@ -9594,11 +9646,67 @@ def _launch_browser_view_session(stage: str, spec: dict) -> dict:
                             "reason": "เปิด Chrome เกินเวลาที่กำหนด"})
 
 
+async def _show_all_clip_browsers() -> dict:
+    """ยก Chrome ของสายเจนคลิปขึ้นมา **ทุกตัวที่เปิดอยู่** (เจ้าของสั่ง 11 ก.ย. 2569)
+
+    **ยกที่เปิดอยู่ ไม่ใช่เปิดใหม่ให้ครบทุกบัญชี** — เจ้าของขอ "ทั้งหมดที่ใช้อยู่
+    ตอนนี้" ซึ่งแปลว่าของที่กำลังใช้งานจริง ถ้าไปเปิดทั้ง 7 บัญชีให้เอง
+    จะกินแรมหนักและไปแย่งโปรไฟล์ที่ worker กำลังจะใช้
+
+    ถ้าไม่มีสักตัวเปิดอยู่ จึงค่อยเปิดช่องที่เจนจริงให้หนึ่งบาน (พฤติกรรมเดิม)
+    """
+    targets = await asyncio.to_thread(_clip_browser_targets)
+    if not targets:
+        raise HTTPException(status_code=409,
+                            detail="ไม่พบโปรไฟล์ Chrome ของสายเจนคลิปเลย")
+
+    raised, failed = [], []
+    for target in targets:
+        if not await asyncio.to_thread(chrome_view.profile_running,
+                                       target["profile"]):
+            continue
+        got = await asyncio.to_thread(chrome_view.show_profile, target["profile"])
+        if got.get("ok"):
+            raised.append({"label": target["label"], "pid": got.get("pid")})
+        else:
+            failed.append(f"{target['label']}: "
+                          f"{got.get('reason') or 'ยกหน้าต่างไม่ได้'}")
+
+    if raised:
+        names = " · ".join(row["label"] for row in raised)
+        note = f"ยก Chrome ของสายเจนคลิปขึ้นมาแล้ว {len(raised)} บาน — {names}"
+        if failed:
+            note += f" · ยกไม่ขึ้น {len(failed)} บาน: {'; '.join(failed[:2])}"
+        _clip_log(note)
+        return {"ok": True, "stage": "clip", "raised": raised,
+                "failed": failed, "launched": False, "message": note}
+
+    # ไม่มีสักบานเปิดอยู่ — เปิดช่องที่เจนจริงให้หนึ่งบาน
+    spec = _browser_view_spec("clip")
+    if not spec:
+        raise HTTPException(status_code=409, detail="หาช่องเจนคลิปไม่เจอ")
+    result = await asyncio.to_thread(_launch_browser_view_session, "clip", spec)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{spec['label']}: {result.get('reason') or 'เปิดหน้าต่างไม่ได้'}")
+    minutes = int(BROWSER_VIEW_IDLE_MAX_SECONDS // 60)
+    note = (f"ไม่มี Chrome ของสายเจนคลิปเปิดอยู่เลย — เปิด{spec['label']}ให้แล้ว "
+            f"ปิดหน้าต่างเมื่อดูเสร็จเพื่อคืนโปรไฟล์ให้บอท "
+            f"(ถ้าไม่ปิด ระบบจะปิดเองใน {minutes} นาที)")
+    _clip_log(note)
+    return {"ok": True, "stage": "clip", "raised": [], "failed": [],
+            **result, "message": note}
+
+
 @app.post("/api/browser/show")
 async def browser_show(request: Request) -> dict:
     """ยก Chrome ที่รันอยู่ หรือเปิดโปรไฟล์จริงเมื่อขั้นนั้นยังว่าง."""
     payload = await request.json() if await request.body() else {}
     stage = str((payload or {}).get("stage") or "").strip()
+    if stage == "clip":
+        return await _show_all_clip_browsers()
+
     spec = _browser_view_spec(stage)
     if not spec:
         raise HTTPException(status_code=400, detail="ไม่รู้จักขั้น Chrome ที่ต้องการดู")

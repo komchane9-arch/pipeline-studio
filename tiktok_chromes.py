@@ -176,7 +176,8 @@ def read_identity(profile: str | Path, log=print) -> dict:
                             evidence.shot(
                                 page, f"อ่านไอดี TikTok ไม่ได้ {folder.name}",
                                 tag="tiktok",
-                                note=f"เหตุผล: {why} · ที่อยู่หน้า: {page.url}")
+                                note=f"เหตุผล: {why} · ที่อยู่หน้า: {page.url}"
+                                     f" · {_where_names_live(page)}")
                         except Exception as snap:              # noqa: BLE001
                             log(f"   (เก็บภาพหน้าไม่ได้: {type(snap).__name__})")
                 finally:
@@ -194,48 +195,98 @@ def read_identity(profile: str | Path, log=print) -> dict:
     return {"ok": True, "profile": folder.name, "handle": handle}
 
 
-def _handle_on_page(page) -> tuple[str | None, str]:
-    """อ่าน @ไอดี จากหน้า TikTok Studio — คืน (ไอดี, เหตุผลถ้าไม่ได้)
+BLOB_ID = "__UNIVERSAL_DATA_FOR_REHYDRATION__"
+# ที่อยู่ของ "บัญชีที่ล็อกอินอยู่" เท่านั้น ห้ามไล่หาทั้งก้อน (เหตุผลอยู่ข้างล่าง)
+OWN_HANDLE_PATH = ("webapp.app-context", "user", "uniqueId")
 
-    **ต้องแยก "ยังไม่ล็อกอิน" ออกจาก "ล็อกอินแล้วแต่อ่านชื่อไม่ได้"**
-    สองอย่างนี้แก้คนละทาง: อย่างแรกต้องให้คนไปล็อกอิน อย่างหลังเป็นเรื่อง
-    หน้าเว็บเปลี่ยน ต้องแก้โค้ด (กติกาข้อ 2.3.1 ข้อ 4)
+
+def handle_from_blob(blob: dict | None, url: str) -> tuple[str | None, str]:
+    """แกะไอดีบัญชีตัวเองจากข้อมูลที่ TikTok ฝังมากับหน้า
+
+    **ห้ามไล่หาคำว่า uniqueId ทั้งก้อนเด็ดขาด** วัดของจริง 11 ก.ย. 2569:
+    หน้าแรก tiktok.com ตอนยังไม่ล็อกอิน มีชื่อบัญชีคนอื่นฝังอยู่ 3 ชื่อ
+    ที่ webapp.updated-items[].author.uniqueId (รายการคลิปในฟีด)
+    ตัวอ่านที่ไล่หาทั้งก้อนจะหยิบชื่อคนแปลกหน้ามาจดว่าเป็นช่องเรา
+    แล้ววันหนึ่งคลิปจะขึ้นผิดช่องแบบถอนไม่ได้
+
+    รับเฉพาะ webapp.app-context.user.uniqueId ซึ่ง**มีเฉพาะตอนล็อกอินแล้ว**
+    ตรงตามกติกา 2.3.1 — ดูของที่มีเฉพาะตอนสำเร็จ ไม่ใช่เดาจากของที่พอจะใช่
+
+    คืน (ไอดี, เหตุผลถ้าไม่ได้)
     """
-    url = str(page.url or "")
-    if "/login" in url or "signup" in url:
+    text = str(url or "")
+    if "/login" in text or "/signup" in text:
         return None, "ยังไม่ได้ล็อกอิน — หน้าเด้งไปหน้าเข้าสู่ระบบ"
+    if not isinstance(blob, dict):
+        return None, "หน้ายังไม่พร้อม — ไม่มีข้อมูลบัญชีฝังมากับหน้า"
 
+    scope = blob.get("__DEFAULT_SCOPE__")
+    if not isinstance(scope, dict):
+        return None, "หน้ายังไม่พร้อม — ข้อมูลที่ฝังมาไม่ใช่รูปแบบที่รู้จัก"
+
+    node = scope
+    for key in OWN_HANDLE_PATH:
+        node = node.get(key) if isinstance(node, dict) else None
+        if node is None:
+            break
+    if isinstance(node, str) and HANDLE_RE.fullmatch("@" + node.strip()):
+        return "@" + node.strip(), ""
+
+    # ถึงตรงนี้แปลว่าไม่มีบัญชีตัวเองในข้อมูล — แต่ยังอยู่หน้า Studio ได้
+    # ซึ่งหน้านั้นไล่คนที่ยังไม่ล็อกอินออกไปหน้าเข้าสู่ระบบเสมอ (วัดแล้ว)
+    # จึงแยกได้ว่า "ยังไม่ล็อกอิน" กับ "ล็อกอินแล้วแต่หน้าเปลี่ยนรูปแบบ"
+    if "tiktokstudio" in text:
+        return None, ("ล็อกอินแล้วแต่ยังอ่านไอดีไม่ได้ — TikTok ย้ายที่เก็บ "
+                      "ชื่อบัญชี ต้องแก้โค้ด (เก็บภาพหน้าจอไว้แล้ว)")
+    return None, f"ยังไม่ได้ล็อกอิน — ไม่พบบัญชีในหน้า ({text[:60]})"
+
+
+def _where_names_live(page) -> str:
+    """ตอนอ่านไอดีไม่ได้ ให้บอกว่าชื่อบัญชีไปโผล่ตรงไหนในข้อมูลบ้าง
+
+    เก็บไว้กับหลักฐาน เพื่อให้รอบที่มีคนล็อกอินจริงแล้วยังอ่านไม่ออก
+    แก้ได้จบในรอบเดียว ไม่ต้องให้เจ้าของล็อกอินซ้ำหลายรอบเพื่อไล่เดา
+    """
     try:
-        found = page.evaluate(r"""() => {
-          const out = [];
-          const push = (v) => { const t=(v||'').trim(); if (t) out.push(t); };
-          // ที่ TikTok วางชื่อบัญชีไว้จริงบนหน้า Studio
-          document.querySelectorAll(
-            '[data-e2e*="profile"], [class*="profile"], [class*="account"], a[href^="/@"]'
-          ).forEach((el) => {
-            push(el.getAttribute('href'));
-            push(el.textContent);
-            push(el.getAttribute('title'));
-          });
-          return out.slice(0, 60);
-        }""") or []
+        found = page.evaluate(
+            """(id) => {
+                 const el = document.getElementById(id);
+                 if (!el) return ['ไม่มีข้อมูลฝังมากับหน้า'];
+                 let d; try { d = JSON.parse(el.textContent); } catch (e) { return ['แกะข้อมูลไม่ได้']; }
+                 const out = [];
+                 const walk = (node, path) => {
+                   if (node && typeof node === 'object') {
+                     for (const k of Object.keys(node)) {
+                       if (k === 'uniqueId' || k === 'nickName' || k === 'uid') {
+                         out.push(path + '.' + k + ' = ' + String(node[k]).slice(0, 30));
+                       } else { walk(node[k], path + '.' + k); }
+                     }
+                   }
+                 };
+                 walk(d, '');
+                 const scope = d['__DEFAULT_SCOPE__'] || {};
+                 const ctx = scope['webapp.app-context'] || {};
+                 return ['ช่องใน app-context: ' + Object.keys(ctx).join(',')]
+                          .concat(out.slice(0, 12));
+               }""", BLOB_ID) or []
+    except Exception as error:                                 # noqa: BLE001
+        return f"ดูที่เก็บชื่อไม่ได้: {type(error).__name__}"
+    return "ชื่อบัญชีโผล่ที่: " + " | ".join(str(x) for x in found)
+
+
+def _handle_on_page(page) -> tuple[str | None, str]:
+    """อ่าน @ไอดี จากหน้า TikTok Studio — คืน (ไอดี, เหตุผลถ้าไม่ได้)"""
+    url = str(page.url or "")
+    try:
+        blob = page.evaluate(
+            """(id) => {
+                 const el = document.getElementById(id);
+                 if (!el) return null;
+                 try { return JSON.parse(el.textContent); } catch (e) { return null; }
+               }""", BLOB_ID)
     except Exception as error:                                 # noqa: BLE001
         return None, f"อ่านหน้าไม่ได้: {type(error).__name__}"
-
-    for text in found:
-        # ลิงก์โปรไฟล์มาในรูป /@ไอดี — เป็นแหล่งที่แม่นที่สุด
-        if str(text).startswith("/@"):
-            handle = str(text).split("?")[0].strip("/")
-            if HANDLE_RE.fullmatch(handle):
-                return handle, ""
-    for text in found:
-        hit = HANDLE_RE.search(str(text))
-        if hit:
-            return hit.group(0), ""
-
-    if "tiktokstudio" not in url:
-        return None, f"ไม่ได้อยู่หน้า TikTok Studio (อยู่ที่ {url[:60]})"
-    return None, "อยู่หน้า Studio แล้วแต่หาไอดีบนหน้าไม่เจอ"
+    return handle_from_blob(blob, url)
 
 
 def refresh_all(log=print) -> dict:

@@ -9662,6 +9662,78 @@ def _launch_browser_view_session(stage: str, spec: dict) -> dict:
                             "reason": "เปิด Chrome เกินเวลาที่กำหนด"})
 
 
+def _read_credits_after_close(profile_name: str) -> None:
+    """รอจนเจ้าของปิดโครมบานนั้น **แล้วอ่านเครดิตล่าสุดเก็บไว้ทันที**
+
+    **เจ้าของสั่ง 11 ก.ย. 2569** — *"เมื่อปิดโครมให้บันทึกเครดิตล่าสุดที่เหลืออยู่"*
+
+    อ่านตอนหน้าต่างยังเปิดไม่ได้ เพราะบานนั้นเป็น Chrome ธรรมดาที่เจ้าของใช้เอง
+    ไม่ได้ถูกคุมด้วย Playwright — แต่พอปิดแล้วโปรไฟล์ว่าง จึงเปิดแบบซ่อนอ่าน
+    แล้วปิดได้ทันที ใช้เวลาไม่ถึงครึ่งนาทีและไม่รบกวนอะไร
+
+    ถ้าเจ้าของไม่ปิดเลย ตัวนี้เลิกรอเองตามเพดานเดียวกับหน้าต่างดู
+    """
+    import flow_credits                                        # noqa: PLC0415
+
+    folder = flow_credits.PROFILES_ROOT() / profile_name
+    deadline = time.monotonic() + BROWSER_VIEW_IDLE_MAX_SECONDS + 120
+    try:
+        while time.monotonic() < deadline:
+            if not chrome_view.profile_running(folder):
+                time.sleep(4.0)          # เผื่อ Chrome ปล่อยไฟล์โปรไฟล์ไม่ทัน
+                if chrome_view.profile_running(folder):
+                    continue
+                got = flow_credits.read_now(folder, log=_clip_log)
+                if got.get("ok"):
+                    _clip_log(f"ปิดโครม {profile_name} แล้ว — จดเครดิตล่าสุด "
+                              f"{got.get('credits')} หน่วย")
+                else:
+                    _clip_log(f"ปิดโครม {profile_name} แล้ว แต่อ่านเครดิตไม่ได้ — "
+                              f"{got.get('why') or 'ไม่ทราบสาเหตุ'}")
+                return
+            time.sleep(5.0)
+    except Exception as error:                                 # noqa: BLE001
+        _clip_log(f"ตามอ่านเครดิตหลังปิดโครม {profile_name} ไม่สำเร็จ: "
+                  f"{type(error).__name__}")
+
+
+async def _show_one_clip_browser(profile_name: str) -> dict:
+    """เปิด Chrome บานเดียวตามที่ระบุ — ปุ่มรายโครมบนหน้าเว็บใช้ทางนี้"""
+    import flow_credits                                        # noqa: PLC0415
+
+    folder = flow_credits.PROFILES_ROOT() / profile_name
+    if not folder.is_dir():
+        raise HTTPException(status_code=400,
+                            detail=f"ไม่รู้จักโปรไฟล์ {profile_name}")
+
+    if await asyncio.to_thread(chrome_view.profile_running, folder):
+        got = await asyncio.to_thread(chrome_view.show_profile, folder)
+        if not got.get("ok"):
+            raise HTTPException(status_code=409,
+                                detail=f"{profile_name}: "
+                                       f"{got.get('reason') or 'ยกหน้าต่างไม่ได้'}")
+        return {"ok": True, "profile": profile_name, "launched": False, **got,
+                "message": f"ยก Chrome ของ {profile_name} ขึ้นมาแล้ว"}
+
+    import flow_worker                                         # noqa: PLC0415
+    spec = {"label": f"บัญชี {profile_name}", "profile": folder,
+            "lock": f"flow-acct-{folder.name}", "url": flow_worker.FLOW_URL}
+    result = await asyncio.to_thread(
+        _launch_browser_view_session, f"chrome:{profile_name}", spec)
+    if not result.get("ok"):
+        raise HTTPException(status_code=409,
+                            detail=f"{profile_name}: "
+                                   f"{result.get('reason') or 'เปิดหน้าต่างไม่ได้'}")
+    # ตามเก็บเครดิตหลังเจ้าของปิดหน้าต่างเอง
+    threading.Thread(target=_read_credits_after_close, args=(profile_name,),
+                     daemon=True, name=f"credits-{profile_name}").start()
+    minutes = int(BROWSER_VIEW_IDLE_MAX_SECONDS // 60)
+    return {"ok": True, "profile": profile_name, **result,
+            "message": (f"เปิด Chrome ของ {profile_name} แล้ว — "
+                        f"ปิดหน้าต่างเมื่อดูเสร็จ ระบบจะจดเครดิตล่าสุดให้เอง "
+                        f"(ถ้าไม่ปิด จะปิดเองใน {minutes} นาที)")}
+
+
 async def _show_all_clip_browsers() -> dict:
     """ยก Chrome ของสายเจนคลิปขึ้นมา **ทุกตัวที่เปิดอยู่** (เจ้าของสั่ง 11 ก.ย. 2569)
 
@@ -9715,11 +9787,71 @@ async def _show_all_clip_browsers() -> dict:
             **result, "message": note}
 
 
+@app.get("/api/flow/chromes")
+async def flow_chromes() -> dict:
+    """Chrome ของสายเจนคลิปทุกบาน พร้อมเครดิตที่เหลือของแต่ละบัญชี
+
+    **เจ้าของสั่ง 11 ก.ย. 2569** — *"โชว์ chrome ทุก chrome แล้วผมสามารถกดเข้าได้
+    แต่ละหน้า แต่ละ log in รวมดึงอัพเดตเครดิตไว้ มีปุ่มรีเฟรชคอยอัพเดตเครดิตให้ด้วย"*
+
+    ของเดิมมีปุ่มเดียวที่เปิดได้ช่องเดียว และเครดิตเก็บค่าเดียวใน config
+    ซึ่งเป็นของบัญชีที่ใช้ล่าสุดเท่านั้น พอสลับบัญชีก็ใช้ไม่ได้แล้ว
+    """
+    import flow_credits                                        # noqa: PLC0415
+    rows = await asyncio.to_thread(flow_credits.rows)
+    total = sum(int(r["credits"]) for r in rows
+                if isinstance(r.get("credits"), int))
+    return {"ok": True, "chromes": rows, "credits_total": total,
+            "credits_per_clip": flow_credits.CREDITS_PER_CLIP,
+            "note": ("เครดิตอัปเดตตอนกดรีเฟรช หรือหลังปิดโครมที่เปิดจากปุ่มนี้ "
+                     "· 'ยังไม่เคยวัด' ไม่ได้แปลว่าเหลือศูนย์")}
+
+
+@app.post("/api/flow/credits/refresh")
+async def flow_credits_refresh(request: Request) -> dict:
+    """กดรีเฟรช — เปิด Chrome อ่านเครดิตแล้วอัปเดต ทำได้ทั้งบานเดียวและทุกบาน
+
+    ส่ง `{"profile": "komchanc9"}` = เฉพาะบานนั้น · ไม่ส่ง = ไล่ทุกบาน
+
+    **ข้ามบานที่เปิดค้างอยู่** พร้อมบอกเหตุผล ไม่ไปไล่หน้าต่างที่เจ้าของ
+    กำลังดูอยู่ออก (กติกาข้อ 2.5)
+    """
+    import flow_credits                                        # noqa: PLC0415
+    payload = await request.json() if await request.body() else {}
+    one = str((payload or {}).get("profile") or "").strip()
+
+    if one:
+        folder = flow_credits.PROFILES_ROOT() / one
+        if not folder.is_dir():
+            raise HTTPException(status_code=400, detail=f"ไม่รู้จักโปรไฟล์ {one}")
+        got = await asyncio.to_thread(flow_credits.read_now, folder, _clip_log)
+        rows = await asyncio.to_thread(flow_credits.rows)
+        return {"ok": bool(got.get("ok")), "result": got, "chromes": rows,
+                "message": (f"{one}: เหลือ {got.get('credits')} หน่วย"
+                            if got.get("ok")
+                            else f"{one}: {got.get('why') or 'อ่านไม่ได้'}")}
+
+    got = await asyncio.to_thread(flow_credits.refresh_all, _clip_log)
+    rows = await asyncio.to_thread(flow_credits.rows)
+    parts = [f"อ่านได้ {len(got['done'])} บาน"]
+    if got["skipped"]:
+        parts.append(f"ข้ามเพราะเปิดค้างอยู่ {len(got['skipped'])} บาน")
+    if got["failed"]:
+        parts.append(f"อ่านไม่ได้ {len(got['failed'])} บาน")
+    return {"ok": bool(got["done"]), **got, "chromes": rows,
+            "message": " · ".join(parts)}
+
+
 @app.post("/api/browser/show")
 async def browser_show(request: Request) -> dict:
     """ยก Chrome ที่รันอยู่ หรือเปิดโปรไฟล์จริงเมื่อขั้นนั้นยังว่าง."""
     payload = await request.json() if await request.body() else {}
     stage = str((payload or {}).get("stage") or "").strip()
+    # เปิด **บานเดียวที่ระบุ** — ปุ่มรายโครมบนหน้าเว็บส่ง profile มาด้วย
+    one = str((payload or {}).get("profile") or "").strip()
+    if one:
+        return await _show_one_clip_browser(one)
+
     if stage == "clip":
         return await _show_all_clip_browsers()
 

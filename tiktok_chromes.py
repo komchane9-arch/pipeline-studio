@@ -1,0 +1,274 @@
+"""Chrome แยกรายบัญชี TikTok — สำหรับลงคลิปผ่านคอม ไม่ใช่ผ่านมือถือ
+
+**เจ้าของสั่ง 11 ก.ย. 2569** — *"ทำ chrome ตรง tiktok ไว้ 7 chrome ทำให้สามารถ
+กดเรียกดูและจำ ไอดี tiktok ที่ล็อกอินแยกแต่ละ chrome อันนี้จะเอาไว้ลง tiktok
+ผ่าน chrome ในคอม แยกจากการลงผ่านมือถือ"*
+
+---
+
+## ทำไมต้องแยกโปรไฟล์
+
+ของเดิม `flow_worker.login_tiktok()` ให้ล็อกอิน TikTok **ในโปรไฟล์เดียวกับ Flow**
+ซึ่งใช้ได้กับบัญชีเดียวเท่านั้น — คุกกี้ TikTok มีชุดเดียวต่อโปรไฟล์
+
+พอต้องการหลายบัญชี **ต้องแยกโฟลเดอร์โปรไฟล์** ทางเดียว เหมือนที่ทำกับบัญชี
+Google Flow ตอน 10 ก.ย. ซึ่งพิสูจน์แล้วว่าสลับบัญชีได้จริงโดยไม่ต้องล็อกอินใหม่
+และไม่เจอ reCAPTCHA เลย
+
+## ต่างจากการลงผ่านมือถืออย่างไร
+
+    ผ่านมือถือ (tiktok_publish_bot)  กดจอจริงบน REDMI 15C · หนึ่งบัญชีต่อเครื่อง
+                                     ต้องรอคิวมือถือ · ใบละ 4-7 นาที
+    ผ่านคอม (ตัวนี้ + tiktok_post)   เปิด TikTok Studio บนเว็บ · หลายบัญชีพร้อมกัน
+                                     ไม่แย่งมือถือ · คลิปอยู่บนคอมอยู่แล้ว
+
+**ทั้งสองทางอยู่ร่วมกันได้** ไม่ต้องเลือกอย่างใดอย่างหนึ่ง
+
+## กติกาที่ยึด
+
+**ไอดีที่จำไว้ต้องมาจากหน้าจริง ไม่ใช่ให้คนพิมพ์เอง** (กติกาข้อ 2.3.1) —
+ถ้าให้พิมพ์เอง วันหนึ่งโปรไฟล์กับไอดีจะไม่ตรงกันโดยไม่มีใครรู้ แล้วคลิปจะขึ้น
+ผิดช่องแบบถอนไม่ได้ ตัวนี้อ่านจากหน้า TikTok ที่ล็อกอินอยู่เท่านั้น
+
+**ยังไม่รู้ ≠ ยังไม่ได้ล็อกอิน** — เก็บเป็น `None` แล้วแสดงต่างหาก
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+import studio_shared as shared
+
+PROFILES_DIR = shared.DATA_DIR / "tiktok_profiles"
+STATE_FILE = shared.DATA_DIR / "tiktok_chromes.json"
+HOW_MANY = 7
+UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload"
+
+# ไอดี TikTok บนหน้า — ขึ้นต้นด้วย @ ตามด้วยตัวอักษร/ตัวเลข/จุด/ขีดล่าง
+HANDLE_RE = re.compile(r"@[A-Za-z0-9._]{2,24}")
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def profile_dir(slot: int) -> Path:
+    """โฟลเดอร์โปรไฟล์ของช่องที่ N — ตั้งชื่อด้วยเลขช่อง ไม่ใช่ชื่อบัญชี
+
+    **ตั้งใจไม่ใช้ชื่อบัญชีเป็นชื่อโฟลเดอร์** เพราะบทเรียนจากฝั่ง Flow:
+    พอล็อกอินสลับหน้าต่างกันแล้วต้องมาซ่อม ชื่อโฟลเดอร์กับบัญชีจึงไม่ตรงกัน
+    และหลอกคนอ่านตลอดมา เลขช่องเป็นแค่ที่อยู่ ส่วนไอดีจริงอ่านจากหน้าเว็บ
+    """
+    return PROFILES_DIR / f"tiktok{int(slot)}"
+
+
+def ensure_profiles(how_many: int = HOW_MANY) -> list[Path]:
+    """สร้างโฟลเดอร์โปรไฟล์ให้ครบ — ว่างเปล่าก็ได้ Chrome จะเติมเองตอนเปิด"""
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    made = []
+    for slot in range(1, int(how_many) + 1):
+        folder = profile_dir(slot)
+        folder.mkdir(parents=True, exist_ok=True)
+        made.append(folder)
+    return made
+
+
+# ------------------------------------------------------------ ที่เก็บไอดี
+
+
+def load() -> dict:
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save(name: str, handle: str | None, note: str = "") -> None:
+    """จดไอดีของโปรไฟล์หนึ่ง — `handle=None` แปลว่า **ยังอ่านไม่ได้** ไม่ใช่ไม่มี"""
+    def change(data: dict) -> dict:
+        if not isinstance(data, dict):
+            data = {}
+        old = data.get(str(name)) or {}
+        row = {"profile": str(name), "checked_at": _now(), "note": str(note or "")}
+        if handle:
+            row["handle"] = str(handle)
+            row["stale"] = False
+            row["last_ok_at"] = row["checked_at"]
+        else:
+            row["handle"] = old.get("handle")
+            row["stale"] = True
+            row["last_ok_at"] = old.get("last_ok_at") or ""
+        data[str(name)] = row
+        return data
+
+    shared.update_json(STATE_FILE, change, default={},
+                       label=f"จดไอดี TikTok ของ {name}")
+
+
+def rows() -> list[dict]:
+    """ทั้ง 7 ช่อง พร้อมไอดีที่รู้ — ช่องที่ยังไม่ล็อกอินก็ต้องอยู่ในรายการ"""
+    import chrome_view
+
+    ensure_profiles()
+    known = load()
+    out = []
+    for slot in range(1, HOW_MANY + 1):
+        folder = profile_dir(slot)
+        row = dict(known.get(folder.name) or {})
+        out.append({
+            "slot": slot,
+            "profile": folder.name,
+            "handle": row.get("handle"),
+            "checked_at": row.get("checked_at") or "",
+            "stale": bool(row.get("stale")),
+            "note": row.get("note") or "",
+            "running": chrome_view.profile_running(folder),
+            "ready": bool(row.get("handle")),
+        })
+    return out
+
+
+# --------------------------------------------------------- อ่านไอดีจากหน้าจริง
+
+
+def read_identity(profile: str | Path, log=print) -> dict:
+    """เปิดโปรไฟล์นี้แล้วอ่านไอดี TikTok ที่ล็อกอินอยู่
+
+    **เปิดแบบซ่อน** ไม่แย่งจอที่เจ้าของใช้ และถือล็อกของโฟลเดอร์ตัวเองไว้
+    ไม่ให้ตัวอื่นเปิด user-data-dir เดียวกันซ้อนจนโปรไฟล์เสีย
+    """
+    from playwright.sync_api import sync_playwright
+
+    import chrome_view
+    import flow_worker
+
+    folder = Path(profile)
+    if not folder.is_dir():
+        return {"ok": False, "profile": folder.name, "why": "ไม่พบโฟลเดอร์โปรไฟล์"}
+    if chrome_view.profile_running(folder):
+        return {"ok": False, "profile": folder.name,
+                "why": "โครมของช่องนี้เปิดอยู่ — ปิดก่อนแล้วค่อยกดอ่านใหม่"}
+
+    lock = f"tiktok-{folder.name}"
+    try:
+        with shared.browser_lock(timeout=120, profile=lock,
+                                 label=f"อ่านไอดี TikTok {folder.name}"):
+            with sync_playwright() as pw:
+                browser = flow_worker.open_browser(pw, hidden=True,
+                                                   profile_dir=folder)
+                try:
+                    page = browser.pages[0] if browser.pages else browser.new_page()
+                    page.goto(UPLOAD_URL, wait_until="domcontentloaded",
+                              timeout=90_000)
+                    page.wait_for_timeout(9_000)
+                    handle, why = _handle_on_page(page)
+                finally:
+                    browser.close()
+    except Exception as error:                                 # noqa: BLE001
+        save(folder.name, None, note=f"{type(error).__name__}")
+        return {"ok": False, "profile": folder.name,
+                "why": f"{type(error).__name__}: {str(error)[:90]}"}
+
+    save(folder.name, handle, note=why)
+    if not handle:
+        log(f"   {folder.name}: ยังอ่านไอดีไม่ได้ — {why}")
+        return {"ok": False, "profile": folder.name, "handle": None, "why": why}
+    log(f"   {folder.name}: {handle}")
+    return {"ok": True, "profile": folder.name, "handle": handle}
+
+
+def _handle_on_page(page) -> tuple[str | None, str]:
+    """อ่าน @ไอดี จากหน้า TikTok Studio — คืน (ไอดี, เหตุผลถ้าไม่ได้)
+
+    **ต้องแยก "ยังไม่ล็อกอิน" ออกจาก "ล็อกอินแล้วแต่อ่านชื่อไม่ได้"**
+    สองอย่างนี้แก้คนละทาง: อย่างแรกต้องให้คนไปล็อกอิน อย่างหลังเป็นเรื่อง
+    หน้าเว็บเปลี่ยน ต้องแก้โค้ด (กติกาข้อ 2.3.1 ข้อ 4)
+    """
+    url = str(page.url or "")
+    if "/login" in url or "signup" in url:
+        return None, "ยังไม่ได้ล็อกอิน — หน้าเด้งไปหน้าเข้าสู่ระบบ"
+
+    try:
+        found = page.evaluate(r"""() => {
+          const out = [];
+          const push = (v) => { const t=(v||'').trim(); if (t) out.push(t); };
+          // ที่ TikTok วางชื่อบัญชีไว้จริงบนหน้า Studio
+          document.querySelectorAll(
+            '[data-e2e*="profile"], [class*="profile"], [class*="account"], a[href^="/@"]'
+          ).forEach((el) => {
+            push(el.getAttribute('href'));
+            push(el.textContent);
+            push(el.getAttribute('title'));
+          });
+          return out.slice(0, 60);
+        }""") or []
+    except Exception as error:                                 # noqa: BLE001
+        return None, f"อ่านหน้าไม่ได้: {type(error).__name__}"
+
+    for text in found:
+        # ลิงก์โปรไฟล์มาในรูป /@ไอดี — เป็นแหล่งที่แม่นที่สุด
+        if str(text).startswith("/@"):
+            handle = str(text).split("?")[0].strip("/")
+            if HANDLE_RE.fullmatch(handle):
+                return handle, ""
+    for text in found:
+        hit = HANDLE_RE.search(str(text))
+        if hit:
+            return hit.group(0), ""
+
+    if "tiktokstudio" not in url:
+        return None, f"ไม่ได้อยู่หน้า TikTok Studio (อยู่ที่ {url[:60]})"
+    return None, "อยู่หน้า Studio แล้วแต่หาไอดีบนหน้าไม่เจอ"
+
+
+def refresh_all(log=print) -> dict:
+    """ไล่อ่านไอดีทุกช่อง — ข้ามช่องที่เปิดค้างอยู่พร้อมบอกเหตุผล"""
+    ensure_profiles()
+    done, failed, skipped = [], [], []
+    log(f"ไล่อ่านไอดี TikTok {HOW_MANY} ช่อง")
+    for slot in range(1, HOW_MANY + 1):
+        folder = profile_dir(slot)
+        got = read_identity(folder, log=log)
+        if got.get("ok"):
+            done.append(got)
+        elif "เปิดอยู่" in str(got.get("why") or ""):
+            skipped.append(got)
+        else:
+            failed.append(got)
+    return {"ok": bool(done), "done": done, "failed": failed,
+            "skipped": skipped, "total": HOW_MANY}
+
+
+if __name__ == "__main__":
+    import sys
+
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "อ่าน":
+        print(refresh_all())
+    elif arg == "เปิด" and len(sys.argv) > 2:
+        import chrome_view
+        folder = profile_dir(int(sys.argv[2]))
+        folder.mkdir(parents=True, exist_ok=True)
+        print(chrome_view.launch_profile(folder, UPLOAD_URL))
+    else:
+        data = rows()
+        print(f"Chrome ของ TikTok {len(data)} ช่อง "
+              f"(สำหรับลงผ่านคอม แยกจากการลงผ่านมือถือ)\n")
+        print(f"   {'ช่อง':<7}{'โปรไฟล์':<12}{'ไอดี TikTok':<22}{'อ่านเมื่อ':<18}สถานะ")
+        for row in data:
+            handle = row["handle"] or "— ยังไม่ได้ล็อกอิน —"
+            mark = []
+            if row["running"]:
+                mark.append("เปิดอยู่")
+            if row["stale"] and row["handle"]:
+                mark.append("ไอดีเก่า")
+            print(f"   {row['slot']:<7}{row['profile']:<12}{handle:<22}"
+                  f"{(row['checked_at'] or '-')[:16]:<18}{' · '.join(mark)}")
+        ready = sum(1 for r in data if r["ready"])
+        print(f"\n   ล็อกอินแล้ว {ready} จาก {len(data)} ช่อง")
+        if ready < len(data):
+            print("   เปิดช่องที่ยังว่างด้วย: python tiktok_chromes.py เปิด <เลขช่อง>")

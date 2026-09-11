@@ -9662,6 +9662,36 @@ def _launch_browser_view_session(stage: str, spec: dict) -> dict:
                             "reason": "เปิด Chrome เกินเวลาที่กำหนด"})
 
 
+def _read_tiktok_id_after_close(slot: int) -> None:
+    """รอจนเจ้าของปิดโครมช่องนั้น **แล้วอ่านไอดี TikTok เก็บไว้ทันที**
+
+    ตั้งใจให้เป็นแบบนี้เพราะขั้นตอนจริงคือ "กดเปิด → ล็อกอิน → ปิด"
+    พอปิดปุ๊บระบบก็รู้เองว่าช่องนั้นเป็นบัญชีไหน **ไม่ต้องให้พิมพ์เอง**
+    ซึ่งกันเคสโปรไฟล์กับไอดีไม่ตรงกันแบบที่เคยเกิดกับฝั่ง Flow
+    """
+    import tiktok_chromes                                      # noqa: PLC0415
+
+    folder = tiktok_chromes.profile_dir(slot)
+    deadline = time.monotonic() + BROWSER_VIEW_IDLE_MAX_SECONDS + 120
+    try:
+        while time.monotonic() < deadline:
+            if not chrome_view.profile_running(folder):
+                time.sleep(4.0)          # เผื่อ Chrome ปล่อยไฟล์โปรไฟล์ไม่ทัน
+                if chrome_view.profile_running(folder):
+                    continue
+                got = tiktok_chromes.read_identity(folder, log=_clip_log)
+                if got.get("ok"):
+                    _clip_log(f"ปิดโครม TikTok ช่อง {slot} แล้ว — "
+                              f"จำไอดี {got.get('handle')} ไว้แล้ว")
+                else:
+                    _clip_log(f"ปิดโครม TikTok ช่อง {slot} แล้ว แต่ยังอ่านไอดีไม่ได้ "
+                              f"— {got.get('why') or 'ไม่ทราบสาเหตุ'}")
+                return
+            time.sleep(5.0)
+    except Exception as error:                                 # noqa: BLE001
+        _clip_log(f"ตามอ่านไอดี TikTok ช่อง {slot} ไม่สำเร็จ: {type(error).__name__}")
+
+
 def _read_credits_after_close(profile_name: str) -> None:
     """รอจนเจ้าของปิดโครมบานนั้น **แล้วอ่านเครดิตล่าสุดเก็บไว้ทันที**
 
@@ -9785,6 +9815,101 @@ async def _show_all_clip_browsers() -> dict:
     _clip_log(note)
     return {"ok": True, "stage": "clip", "raised": [], "failed": [],
             **result, "message": note}
+
+
+@app.get("/api/tiktok/chromes")
+async def tiktok_chromes_view() -> dict:
+    """Chrome ของ TikTok ทั้ง 7 ช่อง พร้อมไอดีที่ล็อกอินไว้แต่ละช่อง
+
+    **เจ้าของสั่ง 11 ก.ย. 2569** — *"ทำ chrome ตรง tiktok ไว้ 7 chrome ทำให้
+    สามารถกดเรียกดูและจำไอดี tiktok ที่ล็อกอินแยกแต่ละ chrome"*
+
+    ใช้สำหรับลงคลิปผ่านคอม (TikTok Studio บนเว็บ) **แยกจากการลงผ่านมือถือ**
+    ซึ่งมีบัญชีเดียวต่อเครื่องและต้องรอคิวจอ
+    """
+    import tiktok_chromes                                      # noqa: PLC0415
+    rows = await asyncio.to_thread(tiktok_chromes.rows)
+    ready = sum(1 for r in rows if r["ready"])
+    return {"ok": True, "chromes": rows, "ready": ready, "total": len(rows),
+            "note": ("ไอดีอ่านจากหน้า TikTok จริง ไม่ได้ให้พิมพ์เอง "
+                     "· ช่องที่ยังไม่ล็อกอินให้กดเปิดแล้วล็อกอินในหน้าต่างนั้น")}
+
+
+@app.post("/api/tiktok/chromes/open")
+async def tiktok_chrome_open(request: Request) -> dict:
+    """เปิด Chrome ของช่อง TikTok ที่ระบุ — ใช้ล็อกอินหรือเข้าไปดู"""
+    import chrome_view as cv                                   # noqa: PLC0415
+    import tiktok_chromes                                      # noqa: PLC0415
+
+    payload = await request.json() if await request.body() else {}
+    try:
+        slot = int((payload or {}).get("slot") or 0)
+    except (TypeError, ValueError):
+        slot = 0
+    if not 1 <= slot <= tiktok_chromes.HOW_MANY:
+        raise HTTPException(status_code=400,
+                            detail=f"เลือกช่อง 1-{tiktok_chromes.HOW_MANY}")
+
+    folder = tiktok_chromes.profile_dir(slot)
+    folder.mkdir(parents=True, exist_ok=True)
+    if await asyncio.to_thread(cv.profile_running, folder):
+        got = await asyncio.to_thread(cv.show_profile, folder)
+        if not got.get("ok"):
+            raise HTTPException(status_code=409,
+                                detail=f"ช่อง {slot}: "
+                                       f"{got.get('reason') or 'ยกหน้าต่างไม่ได้'}")
+        return {"ok": True, "slot": slot, "launched": False, **got,
+                "message": f"ยก Chrome ช่อง {slot} ขึ้นมาแล้ว"}
+
+    spec = {"label": f"TikTok ช่อง {slot}", "profile": folder,
+            "lock": f"tiktok-{folder.name}", "url": tiktok_chromes.UPLOAD_URL}
+    result = await asyncio.to_thread(
+        _launch_browser_view_session, f"tiktok:{folder.name}", spec)
+    if not result.get("ok"):
+        raise HTTPException(status_code=409,
+                            detail=f"ช่อง {slot}: "
+                                   f"{result.get('reason') or 'เปิดหน้าต่างไม่ได้'}")
+    # ตามอ่านไอดีหลังเจ้าของปิดหน้าต่าง — ล็อกอินเสร็จแล้วระบบจำให้เอง
+    threading.Thread(target=_read_tiktok_id_after_close, args=(slot,),
+                     daemon=True, name=f"tiktok-id-{slot}").start()
+    minutes = int(BROWSER_VIEW_IDLE_MAX_SECONDS // 60)
+    return {"ok": True, "slot": slot, **result,
+            "message": (f"เปิด Chrome ช่อง {slot} แล้ว — ล็อกอิน TikTok "
+                        f"ในหน้าต่างนั้นได้เลย ปิดแล้วระบบจะจำไอดีให้เอง "
+                        f"(ถ้าไม่ปิด จะปิดเองใน {minutes} นาที)")}
+
+
+@app.post("/api/tiktok/chromes/refresh")
+async def tiktok_chromes_refresh(request: Request) -> dict:
+    """อ่านไอดีใหม่ — ส่ง slot = ช่องเดียว · ไม่ส่ง = ไล่ทุกช่อง"""
+    import tiktok_chromes                                      # noqa: PLC0415
+
+    payload = await request.json() if await request.body() else {}
+    try:
+        slot = int((payload or {}).get("slot") or 0)
+    except (TypeError, ValueError):
+        slot = 0
+
+    if slot:
+        if not 1 <= slot <= tiktok_chromes.HOW_MANY:
+            raise HTTPException(status_code=400,
+                                detail=f"เลือกช่อง 1-{tiktok_chromes.HOW_MANY}")
+        got = await asyncio.to_thread(tiktok_chromes.read_identity,
+                                      tiktok_chromes.profile_dir(slot), _clip_log)
+        rows = await asyncio.to_thread(tiktok_chromes.rows)
+        return {"ok": bool(got.get("ok")), "result": got, "chromes": rows,
+                "message": (f"ช่อง {slot}: {got.get('handle')}" if got.get("ok")
+                            else f"ช่อง {slot}: {got.get('why') or 'อ่านไม่ได้'}")}
+
+    got = await asyncio.to_thread(tiktok_chromes.refresh_all, _clip_log)
+    rows = await asyncio.to_thread(tiktok_chromes.rows)
+    parts = [f"อ่านไอดีได้ {len(got['done'])} ช่อง"]
+    if got["skipped"]:
+        parts.append(f"ข้ามเพราะเปิดค้างอยู่ {len(got['skipped'])} ช่อง")
+    if got["failed"]:
+        parts.append(f"ยังไม่ได้ล็อกอิน/อ่านไม่ได้ {len(got['failed'])} ช่อง")
+    return {"ok": bool(got["done"]), **got, "chromes": rows,
+            "message": " · ".join(parts)}
 
 
 @app.get("/api/flow/chromes")

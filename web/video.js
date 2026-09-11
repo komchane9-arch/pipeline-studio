@@ -1168,13 +1168,30 @@ function autoToggle(bucket) {
   });
   button.setAttribute("role", "switch");
   button.setAttribute("aria-checked", auto.on ? "true" : "false");
+  /* เลข "พัก" ต้องโผล่ทุกขั้นที่มีของค้าง ไม่ใช่เฉพาะขั้นที่โพสต์ขึ้นจริง
+   *
+   * ของเดิมใช้ `auto.risk` เป็นตัวตัดสินว่าจะโชว์เลขพักไหม แต่ `risk` แปลว่า
+   * "กดแล้วของขึ้นจริง ถอนคืนไม่ได้" ไม่ได้เกี่ยวกับการพักเลย เอาสองเรื่องที่
+   * ไม่เกี่ยวกันมาผูกกัน ผลจึงออกมากลับหัว
+   *
+   * วัดจริง 11 ก.ย. 2569: ขั้นสตอรีบอร์ดพักไว้ **40 ใบ ซึ่งเยอะที่สุดในระบบ**
+   * กลับเป็นขั้นที่ตัวเลขไม่โผล่บนจอ ต้องเอาเมาส์ไปชี้ค้างถึงจะเห็น ส่วนขั้นที่
+   * พักน้อยกว่ากลับเห็น — และ 40 ใบนั้นคือใบที่ **รอเจ้าของตัดสินใจอยู่**
+   * (คลิป 20 วินาทีต้องเจน 2 รอบ เครดิตเป็น 2 เท่า ยังไม่ได้ตัดสินว่าจะทำไหม)
+   * ของค้างที่รอคนตัดสินแต่คนไม่เห็น = รอไปเรื่อยๆ โดยไม่มีใครรู้ (กติกาข้อ 2.3.1)
+   *
+   * คำยังต่างกันตามเดิม เพราะสองขั้นนี้รอคนละเรื่อง
+   *   ขั้นที่โพสต์ขึ้นจริง  "พร้อม N"  = พร้อมโพสต์ขึ้นจริงแล้ว
+   *   ขั้นอื่น              "รอ N"     = รอกดอนุมัติ
+   */
   const paint = (on, waiting, parked = 0) => {
     button.classList.toggle("is-on", on);
     button.setAttribute("aria-checked", on ? "true" : "false");
-    const publishCounts = auto.risk
-      ? ` · พร้อม ${waiting || 0}${parked ? ` · พัก ${parked}` : ""}`
+    const ready = auto.risk
+      ? ` · พร้อม ${waiting || 0}`
       : (!on && waiting ? ` · รอ ${waiting}` : "");
-    button.textContent = `${on ? "☑" : "☐"} อัตโนมัติ${publishCounts}`;
+    const held = parked ? ` · พัก ${parked}` : "";
+    button.textContent = `${on ? "☑" : "☐"} อัตโนมัติ${ready}${held}`;
   };
   paint(auto.on, auto.waiting, auto.parked_skipped);
   button.title = auto.on

@@ -34,6 +34,16 @@ import secrets
 import shutil
 import subprocess
 import sys
+
+# ป้องกัน UnicodeEncodeError บน Windows เมื่อพิมพ์ภาษาไทย/emoji ออก console หรือ log
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import threading
 import time
 from ctypes import wintypes
@@ -45,7 +55,9 @@ from fastapi import (
     FastAPI, HTTPException, Request, UploadFile, File, Form,
     WebSocket, WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 import access_control
@@ -452,6 +464,14 @@ def adb_message(result: subprocess.CompletedProcess) -> str:
     return " ".join(part for part in (out, err) if part)[:300]
 
 
+def ensure_device_reverse(serial: str) -> None:
+    """เปิดทาง adb reverse tcp:PORT tcp:PORT ให้มือถือเข้าถึง localhost:PORT บนเครื่องอัตโนมัติ"""
+    try:
+        run_adb("-s", serial, "reverse", f"tcp:{PORT}", f"tcp:{PORT}", timeout=3)
+    except Exception:
+        pass
+
+
 def list_devices() -> list[dict]:
     """ทุกเครื่องรวม unauthorized/offline — ซ่อนไปเฉยๆ ผู้ใช้จะไม่รู้ว่าติดอะไร"""
     result = run_adb("devices", "-l", timeout=10)
@@ -463,18 +483,23 @@ def list_devices() -> list[dict]:
         if len(parts) < 2 or line.startswith("*"):
             continue
         state = parts[1]
+        serial = parts[0]
+        if state == "device":
+            ensure_device_reverse(serial)
         model = next(
             (p.split(":", 1)[1] for p in parts if p.startswith("model:")), ""
         ) or next(
             (p.split(":", 1)[1] for p in parts if p.startswith("product:")), ""
         ) or "Android"
+        if serial.startswith("emulator-") or "127.0.0.1" in serial or "5555" in serial:
+            model = "LDPlayer (Camera Injection)"
         note = ""
         if state == "unauthorized":
             note = "ปลดล็อกจอแล้วกดอนุญาต USB debugging บนมือถือ"
         elif state != "device":
             note = f"สถานะ {state} — เสียบสายใหม่หรือเช็ค Wireless debugging"
         devices.append({
-            "serial": parts[0],
+            "serial": serial,
             "model": model.replace("_", " "),
             "state": state,
             "ready": state == "device",
@@ -570,6 +595,79 @@ async def index() -> Response:
         media_type="text/html; charset=utf-8",
         # no-store — โปรเจกต์เดิมโดน Chrome cache หน้า HTML จนเวอร์ชันไม่ตรงมาแล้ว
         headers={"Cache-Control": "no-store, must-revalidate"},
+    )
+
+
+@app.api_route(
+    "/clip-api/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+)
+async def clip_api_proxy(path: str, request: Request) -> Response:
+    """ส่ง API ของสายคลิปผ่านพอร์ตเว็บหลัก เพื่อให้เปิดจาก Notebook ได้จริง
+
+    เดิมหน้าเว็บประกอบ URL เป็น ``http://<tailscale-host>:8877`` ตาม protocol
+    ของหน้า 8866 แต่ Tailscale Serve ของเครื่องนี้เปิด 8877 เป็น **HTTPS** เท่านั้น
+    เบราว์เซอร์จึงได้รับ 400 ก่อนถึง clip_app และกอง Clip ดูว่างเปล่า ทั้งที่
+    โปรเซส 8877 ยังทำงานอยู่ การวิ่งผ่าน same-origin 8866 ยังช่วยตัดปัญหา CORS,
+    mixed content และ certificate คนละพอร์ต โดยไม่เปลี่ยนการทำงานของ clip_app
+
+    ต้องส่ง Range/Content-Range ต่อด้วย ไม่เช่นนั้นตัวเล่นวิดีโอจะ seek ไม่ได้
+    หรือดาวน์โหลดไฟล์ทั้งก้อนใหม่ทุกครั้งที่ผู้ใช้เลื่อนดูคลิป
+    """
+    import requests as http_requests                       # noqa: PLC0415
+
+    upstream_url = f"http://127.0.0.1:8877/{path}"
+    if request.url.query:
+        upstream_url += f"?{request.url.query}"
+    body = await request.body()
+    forwarded_headers = {
+        name: value
+        for name, value in request.headers.items()
+        if name.lower() in {
+            "accept", "content-type", "range", "if-none-match",
+            "if-modified-since",
+        }
+    }
+
+    def fetch():
+        return http_requests.request(
+            request.method,
+            upstream_url,
+            data=body or None,
+            headers=forwarded_headers,
+            stream=True,
+            timeout=(3, 180),
+        )
+
+    try:
+        upstream = await asyncio.to_thread(fetch)
+    except http_requests.RequestException as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"สายคลิปพอร์ต 8877 ไม่ตอบ: {error}",
+        ) from error
+
+    response_headers = {
+        name: value
+        for name, value in upstream.headers.items()
+        if name.lower() in {
+            "accept-ranges", "cache-control", "content-disposition",
+            "content-length", "content-range", "content-type", "etag",
+            "last-modified",
+        }
+    }
+
+    def chunks():
+        try:
+            yield from upstream.iter_content(chunk_size=64 * 1024)
+        finally:
+            upstream.close()
+
+    return StreamingResponse(
+        chunks(),
+        status_code=upstream.status_code,
+        headers=response_headers,
+        media_type=upstream.headers.get("content-type"),
     )
 
 
@@ -1329,11 +1427,72 @@ async def train_position(request: Request) -> dict:
 
 import clip_store                                                # noqa: E402
 import publish_flow                                              # noqa: E402
+import publish_media                                             # noqa: E402
+import tiktok_product_link                                      # noqa: E402
+import tiktok_publish_bot                                       # noqa: E402
 import publish_order                                             # noqa: E402
+import publish_stop                                              # noqa: E402
 import hashtag as hashtag_lib                                    # noqa: E402
 
 # มือถือมีจอเดียว สองงานยิง adb พร้อมกันจะกดทับกันทั้งคู่ — ล็อกให้รันทีละงาน
 _publish_run_lock = threading.Lock()
+
+# Stop ต้องตอบได้จาก event-loop แม้ thread ที่โพสต์กำลังรอ/กดมือถืออยู่ จึงแยก
+# state lock ออกจาก `_publish_run_lock`. หนึ่งปลายทางมี active ได้อย่างมากหนึ่งใบ
+# (และล็อกหลักยังบังคับรวมทุกปลายทางให้ใช้จอทีละงานเหมือนเดิม).
+_publish_active_lock = threading.Lock()
+_publish_active: dict[str, dict] = {}
+_tiktok_link_active: dict | None = None
+_PUBLISH_AUTO_KEYS = {
+    "shopee_video": ("shopee_post",),
+    "facebook_reels": ("facebook_post",),
+    # กล่อง TikTok เป็นเจ้าของทั้งตัวเตรียมสินค้าและตัวโพสต์บนเครื่องเดียวกัน.
+    "tiktok": ("tiktok_link", "tiktok_publish", "tiktok_post"),
+}
+
+
+def _publish_register(target: str, serial: str, item_id: str) -> dict:
+    state = {
+        "target": target, "serial": serial, "item_id": item_id,
+        "stop": threading.Event(), "irreversible": False,
+    }
+    with _publish_active_lock:
+        _publish_active[target] = state
+    return state
+
+
+def _publish_unregister(target: str, state: dict) -> None:
+    with _publish_active_lock:
+        if _publish_active.get(target) is state:
+            _publish_active.pop(target, None)
+
+
+def _publish_begin_irreversible(state: dict) -> bool:
+    """ให้ Stop กับการแตะ Post แข่งกันภายใต้ล็อกเดียวกัน ไม่มีช่อง race."""
+    with _publish_active_lock:
+        if state["stop"].is_set():
+            return False
+        state["irreversible"] = True
+        return True
+
+
+def _disable_publish_auto(target: str) -> None:
+    keys = _PUBLISH_AUTO_KEYS[target]
+
+    def change(data: dict) -> dict:
+        if not isinstance(data, dict):
+            data = {}
+        current = data.get("clip_auto_approve") or {}
+        if not isinstance(current, dict):
+            current = {}
+        current = dict(current)
+        for key in keys:
+            current[key] = False
+        data["clip_auto_approve"] = current
+        return data
+
+    studio_shared.update_json(
+        studio_shared.CONFIG_FILE, change, default={}, label=f"Stop {target}")
 
 # ---- สมุดจดว่าตอนนี้กำลังกดจอมือถืออยู่หรือเปล่า (28 ส.ค. 2569) -------------
 #
@@ -1611,6 +1770,127 @@ async def publish_hashtags_save(request: Request) -> dict:
     return {"ok": True, "plan": plan}
 
 
+# ------------------------------------------ นำสินค้า Shopee เข้าโชว์เคส TikTok
+
+_tiktok_link_run_lock = threading.Lock()
+
+
+@app.post("/api/tiktok/product-link/run")
+async def tiktok_product_link_run(request: Request) -> dict:
+    """ค้นหาสินค้าตรงจากใบงานแล้วเพิ่มเข้าโชว์เคส TikTok บนมือถือจริง.
+
+    จุดนี้แยกจากผังโพสต์โดยตั้งใจ: เปิดอัตโนมัติของกอง TikTok ต้องเริ่มตรวจ
+    สินค้าทันที แต่ **ห้ามทำให้คลิปถูกโพสต์ตามไปด้วย** และไม่เก็บ URL แล้ว.
+    """
+    payload = await request.json()
+    serial = clean_serial(str(payload.get("serial", "")), True)
+    item_id = str(payload.get("item_id") or "").strip()
+    force = bool(payload.get("force"))
+    if not item_id:
+        raise HTTPException(status_code=400, detail="ต้องระบุรหัสใบงาน")
+    run = clip_store.load_run(DATA_DIR, item_id) or {}
+    if not run:
+        raise HTTPException(status_code=404, detail=f"ไม่พบใบงาน {item_id}")
+    old = run.get("tiktok_product_link") or {}
+    if not force and old.get("status") in {
+            "showcase_added", "pending_review"}:
+        return {"ok": True, "cached": True, "item_id": item_id, "result": old}
+    if not _tiktok_link_run_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="มีงานเพิ่มสินค้าเข้าโชว์เคส TikTok รันอยู่แล้ว")
+    link_state = {"target": "tiktok", "serial": serial, "item_id": item_id,
+                  "stop": threading.Event(), "irreversible": False}
+    global _tiktok_link_active
+    with _publish_active_lock:
+        _tiktok_link_active = link_state
+    _progress_start(item_id, "tiktok", serial, 7)
+
+    def work() -> dict:
+        import phone_queue                                      # noqa: PLC0415
+
+        busy_key = f"tiktok-link:{serial}"
+        try:
+            with phone_queue.slot(
+                serial, owner="เพิ่มสินค้าเข้าโชว์เคส TikTok",
+                task=f"ใบงาน {item_id}", lane="post", timeout=600.0,
+            ):
+                _busy_mark(
+                    busy_key, what=f"เพิ่มสินค้าเข้าโชว์เคส TikTok ({item_id})",
+                    serial=serial, target="tiktok_product_link", item_id=item_id,
+                    step=0, steps=7,
+                )
+                clip_store.set_tiktok_product_link(DATA_DIR, item_id, {
+                    "status": "running", "reason": "กำลังตรวจสินค้าสี่อันดับแรก",
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                result = tiktok_product_link.find_product_link(
+                    serial, item_id, run, DATA_DIR, adb=ADB,
+                    log=lambda message: append_log(
+                        "publish", f"[tiktok-link:{item_id}] {message}"),
+                    stop=link_state["stop"].is_set,
+                    progress=lambda no, step_id, name, ok, message: _progress_at(
+                        item_id, no, step_id, name, ok, message),
+                )
+                clip_store.set_tiktok_product_link(DATA_DIR, item_id, result)
+                append_log(
+                    "publish", f"[tiktok-link:{item_id}] ผลสินค้าอันดับ "
+                    f"{result.get('selected_rank') or '-'} · {result.get('label')}",
+                )
+                return result
+        except tiktok_product_link.TikTokLinkStopped:
+            result = {
+                "status": "stopped", "label": "หยุดแล้ว", "showcase_added": False,
+                "reason": "ผู้ใช้กด Stop — ใบนี้ยังอยู่ลำดับแรกของชุด",
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            clip_store.set_tiktok_product_link(DATA_DIR, item_id, result)
+            append_log("publish", f"[tiktok-link:{item_id}] หยุดตามคำสั่งและคืนหัวคิว")
+            return result
+        except Exception as error:
+            clip_store.set_tiktok_product_link(DATA_DIR, item_id, {
+                "status": "error", "showcase_added": False,
+                "reason": f"{type(error).__name__}: {error}"[:400],
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            raise
+        finally:
+            _busy_clear(busy_key)
+            global _tiktok_link_active
+            with _publish_active_lock:
+                if _tiktok_link_active is link_state:
+                    _tiktok_link_active = None
+            _tiktok_link_run_lock.release()
+
+    try:
+        result = await asyncio.to_thread(work)
+    except tiktok_product_link.TikTokLinkError as error:
+        with _progress_lock:
+            row = dict(_progress.get(item_id) or {})
+        step = f"link-{row.get('step') or 1}"
+        await asyncio.to_thread(
+            _capture_publish_failure, serial, "tiktok", item_id, step, str(error),
+        )
+        _progress_end(item_id, False, str(error))
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if result.get("status") == "stopped":
+        _progress_end(item_id, False, str(result.get("reason") or "ผู้ใช้กด Stop"),
+                      stopped=True)
+    elif result.get("status") == "pending_review":
+        images = list(result.get("results_images") or [])
+        screenshot = images[-1] if images else ""
+        await asyncio.to_thread(
+            clip_store.record_publish_failure,
+            DATA_DIR, item_id, "tiktok", "link-6",
+            str(result.get("reason") or "ไม่พบสินค้าที่มั่นใจ"), screenshot,
+        )
+        _progress_end(item_id, False,
+                      "ไม่พบสินค้าที่มั่นใจ — เก็บภาพแล้วและข้ามไปใบถัดไป")
+    else:
+        _progress_end(item_id, True, "เพิ่มสินค้าเข้าโชว์เคสครบ 7/7 แล้ว")
+    return {"ok": not bool(result.get("status") == "stopped"),
+            "stopped": bool(result.get("status") == "stopped"),
+            "cached": False, "item_id": item_id, "result": result}
+
+
 # --------------------------------------------------------------- เดินผังจริง
 
 
@@ -1674,7 +1954,141 @@ def _wake_for_publish(serial: str):
     return work
 
 
-def _clip_sender(serial: str, item_id: str, run: dict):
+def _clear_facebook_post_media(serial: str) -> str:
+    """ล้างเฉพาะคลิปที่ระบบสร้างใน ``Movies/autopost`` พร้อมทะเบียน MediaStore.
+
+    Facebook อ่านหน้าเลือกคลิปจาก MediaStore ไม่ได้ไล่อ่านไฟล์จากโฟลเดอร์ตรงๆ
+    จึงต้องล้างทั้งสองฝั่ง มิฉะนั้นไฟล์หายแล้วแต่ภาพย่อเก่ายังค้างให้กดซ้ำได้
+    """
+    media_uri = "content://media/external/video/media"
+
+    def sh(*args: str) -> str:
+        done = run_adb("-s", serial, "shell", *args, timeout=60)
+        if done.returncode != 0:
+            detail = (done.stderr or done.stdout).decode("utf-8", errors="replace")[:180]
+            raise RuntimeError(f"ล้างคลิปเก่าในมือถือไม่สำเร็จ: {detail or 'ADB error'}")
+        return done.stdout.decode("utf-8", errors="replace")
+
+    sh("mkdir", "-p", PHONE_POST_REMOTE_DIR)
+    rows = sh(
+        "content", "query", "--uri", media_uri,
+        "--projection", "_id:_display_name:_data",
+    )
+    media_ids: list[str] = []
+    for line in rows.splitlines():
+        if "/Movies/autopost/" not in line.replace("\\", "/"):
+            continue
+        found = re.search(r"(?:^|[, ])_id=(\d+)", line)
+        if found:
+            media_ids.append(found.group(1))
+
+    # ลบทะเบียนก่อน แล้วค่อยลบไฟล์จริง เผื่อ MediaProvider ต้องเปิดไฟล์เพื่อจัดการ
+    # thumbnail ของรายการนั้น การลบทั้งหมดจำกัดด้วย _id ที่อ่านแล้วว่าอยู่ใต้
+    # Movies/autopost เท่านั้น จึงไม่แตะรูปหรือวิดีโอส่วนตัวของผู้ใช้
+    for media_id in media_ids:
+        sh("content", "delete", "--uri", media_uri,
+           "--where", f"_id={media_id}")
+    sh("rm", "-f", f"{PHONE_POST_REMOTE_DIR}/*")
+
+    # ล้างรูปภาพชั่วคราว/ภาพแคปหน้าจอที่อาจตกค้างบน /sdcard ซึ่ง Facebook Reels
+    # รวมรูปและวิดีโอเข้าด้วยกันในหน้าเลือกสื่อ หากมีรูปภาพใหม่กว่าอาจแย่งช่องที่ 1 ได้
+    img_uri = "content://media/external/images/media"
+    img_rows = sh(
+        "content", "query", "--uri", img_uri,
+        "--projection", "_id:_display_name:_data",
+    )
+    img_ids: list[str] = []
+    for line in img_rows.splitlines():
+        norm = line.replace("\\", "/")
+        # ดักจับภาพชั่วคราวบน root /storage/emulated/0 หรือใน pipeline/autopost
+        #
+        # **"/Pictures/pipeline" ไม่มีทับปิดท้ายโดยตั้งใจ** (แก้ 10 ก.ย. 2569)
+        # ของเดิมเขียน "/Pictures/pipeline/" ซึ่ง **ไม่ตรงกับโฟลเดอร์จริงที่ใช้อยู่**
+        # คือ `/Pictures/pipeline-products/` (ตัวผูกสินค้า TikTok วางรูปไว้ที่นั่น)
+        # ต่างกันแค่ขีดเดียว แต่ทำให้รูปสินค้ารอดจากการล้างทุกรอบ
+        #
+        # **เกิดจริงวันนี้** รูปสายชาร์จ USB ค้างมาตั้งแต่ 16:43 แล้ว Facebook
+        # เอาไปวางไว้ช่องที่ 1 ของหน้าเลือกสื่อ **4 ครั้งจาก 13 ครั้ง (31%)**
+        # ขั้น "เลือกคลิป" แตะพิกัดตายตัวจึงหยิบรูปไปโพสต์ — ขึ้นเพจจริง 3 ใบ
+        # แคปชันเป็นเก้าอี้/โซฟา แต่ภาพเป็นสายชาร์จ ถอนไม่ได้ ต้องไปลบเอง
+        #
+        # ตัดทับปิดท้ายออกเพื่อให้ครอบทั้ง `pipeline/` และ `pipeline-products/`
+        # รวมถึงโฟลเดอร์ตระกูล `pipeline-*` ที่อาจเพิ่มมาทีหลัง — โฟลเดอร์ที่
+        # ขึ้นต้นด้วยคำนี้เป็นของระบบเราทั้งหมด ไม่ใช่รูปส่วนตัวของเจ้าของ
+        if any(p in norm for p in ("/Movies/autopost/", "/Pictures/pipeline")) or (
+            "/storage/emulated/0/" in norm and norm.count("/") <= 4 and norm.lower().endswith((".png", ".jpg", ".jpeg"))
+        ):
+            found = re.search(r"(?:^|[, ])_id=(\d+)", line)
+            if found:
+                img_ids.append(found.group(1))
+
+    for img_id in img_ids:
+        sh("content", "delete", "--uri", img_uri,
+           "--where", f"_id={img_id}")
+
+    # ลบไฟล์ภาพชั่วคราวตกค้างบน root /sdcard
+    sh("rm", "-f", "/sdcard/*.png", "/sdcard/*.jpg", "/sdcard/*.jpeg")
+
+    files_left = [name.strip() for name in sh("ls", "-A", PHONE_POST_REMOTE_DIR).splitlines()
+                  if name.strip()]
+    rows_left = sh(
+        "content", "query", "--uri", media_uri,
+        "--projection", "_id:_display_name:_data",
+    )
+    ghosts = [line for line in rows_left.splitlines()
+              if "/Movies/autopost/" in line.replace("\\", "/")]
+    if files_left or ghosts:
+        raise RuntimeError(
+            "ล้างคลิปเก่าแล้วแต่ยังเหลือ "
+            f"ไฟล์ {len(files_left)} ใบ · MediaStore {len(ghosts)} รายการ — "
+            "หยุดก่อนเพื่อไม่ให้ Facebook เลือกคลิปเดิมซ้ำ")
+    img_note = f" / ภาพตกค้าง {len(img_ids)} รายการ" if img_ids else ""
+    return (f"ล้างคลิปเก่าก่อนรับใบใหม่แล้ว — ไฟล์และ MediaStore ว่าง "
+            f"(ลบทะเบียนวิดีโอ {len(media_ids)}{img_note})")
+
+
+def _clear_tiktok_all_shared_media(serial: str) -> str:
+    """ล้างรูป/วิดีโอที่ผู้ใช้สั่งหลังโพสต์ เฉพาะ REDMI 15C สายวิดีโอ."""
+    if serial != tiktok_publish_bot.SUPPORTED_SERIAL:
+        raise RuntimeError("คำสั่งล้างสื่อทั้งหมดอนุญาตเฉพาะ REDMI 15C สายวิดีโอ")
+
+    def sh(*args: str) -> str:
+        done = run_adb("-s", serial, "shell", *args, timeout=90)
+        if done.returncode != 0:
+            detail = (done.stderr or done.stdout).decode("utf-8", errors="replace")[:180]
+            raise RuntimeError(detail or "ADB error")
+        return done.stdout.decode("utf-8", errors="replace")
+
+    stores = ("content://media/external/images/media",
+              "content://media/external/video/media")
+    deleted = 0
+    for uri in stores:
+        rows = sh("content", "query", "--uri", uri, "--projection", "_id:_data")
+        ids = re.findall(r"(?:^|[, ])_id=(\d+)", rows, flags=re.M)
+        for media_id in ids:
+            sh("content", "delete", "--uri", uri, "--where", f"_id={media_id}")
+            deleted += 1
+
+    # เก็บไฟล์สื่อที่ยังไม่ขึ้นทะเบียนด้วย แต่จำกัดทั้งโฟลเดอร์และนามสกุลชัดเจน
+    # เพื่อไม่ลบ PDF/เอกสารอื่นที่อาจอยู่ใน Download.
+    roots = ("/sdcard/DCIM", "/sdcard/Pictures", "/sdcard/Movies", "/sdcard/Download")
+    extensions = ("jpg", "jpeg", "png", "webp", "gif", "heic", "mp4", "mov", "mkv", "webm")
+    for root in roots:
+        sh("mkdir", "-p", root)
+        for extension in extensions:
+            sh("find", root, "-type", "f", "-iname", f"*.{extension}", "-delete")
+
+    ghosts = []
+    for uri in stores:
+        left = sh("content", "query", "--uri", uri, "--projection", "_id:_data")
+        if re.search(r"(?:^|[, ])_id=\d+", left, flags=re.M):
+            ghosts.append(uri)
+    if ghosts:
+        raise RuntimeError("ล้างไฟล์แล้วแต่ MediaStore ยังมีรูปหรือวิดีโอค้าง")
+    return f"ล้างรูป/วิดีโอและ MediaStore แล้ว {deleted} รายการ"
+
+
+def _clip_sender(serial: str, item_id: str, run: dict, target: str = ""):
     """ส่งคลิปของงานนี้เข้ามือถือ ให้เป็นวิดีโอใบล่าสุดในแกลเลอรี
 
     ผู้ใช้สั่ง 26 ส.ค. 2026: *"ให้เตรียมคลิปเข้าเครื่องเลยตั้งแต่กดเริ่มงาน"*
@@ -1688,18 +2102,29 @@ def _clip_sender(serial: str, item_id: str, run: dict):
     ของ Android รู้จักไฟล์ก็ต่อเมื่อถูกสแกน ถ้าสแกนไม่ติดไฟล์จะอยู่ในเครื่อง
     แต่ไม่โผล่ในตัวเลือกคลิป ซึ่งอาการเหมือน "ไม่ได้ส่ง" ทุกประการ
 
-    **ไม่ลบคลิปเก่าทิ้ง** ของในเครื่องเป็นของผู้ใช้ ที่นี่แค่ทำให้ของเราใหม่กว่า
+    ปกติไม่ลบคลิปอื่นของผู้ใช้ แต่สำหรับ Facebook Reels และ TikTok จะล้างเฉพาะ
+    คลิปของระบบใต้ ``Movies/autopost`` ก่อนรับใบใหม่ เพื่อไม่ให้หน้าเลือกคลิป
+    หยิบใบเก่าซ้ำ
     """
     videos = list(run.get("videos") or [])
     if not videos:
         return None                      # งานยังไม่มีคลิป — ไม่มีอะไรให้ส่ง
-    local = clip_store.file_path(DATA_DIR, item_id, videos[0])
+    stored_video = str(videos[0])
+    # ผูกชื่อคลิปกับรหัสทั้งจากคิวและ run.json ก่อนแตะมือถือ ถ้าสองแหล่งชี้
+    # คนละใบต้องหยุดทันที ไม่ส่ง clip.mp4 ชื่อกลางเข้าไปให้ Facebook เดาเอง.
+    name = publish_media.expected_phone_video_name(
+        item_id, str(run.get("item_id") or ""), stored_video,
+    )
+    local = clip_store.file_path(DATA_DIR, item_id, stored_video)
 
     def work() -> str:
         if not local.is_file():
             raise RuntimeError(f"ไม่พบไฟล์คลิปในเครื่องคอม: {local}")
+        cleared = ""
+        if target in {"facebook_reels", "tiktok"}:
+            cleared = _clear_facebook_post_media(serial)
+            append_log("publish", f"[{target}] {cleared}")
         size = local.stat().st_size
-        name = f"{item_id}-{local.name}"
         remote = f"{PHONE_POST_REMOTE_DIR}/{name}"
 
         def sh(*args: str) -> str:
@@ -1718,26 +2143,37 @@ def _clip_sender(serial: str, item_id: str, run: dict):
                     "ส่งคลิปเข้ามือถือไม่สำเร็จ: "
                     + pushed.stderr.decode("utf-8", errors="replace")[:150])
         sh("touch", remote)
+        # ชื่อถูกแต่ bytes เป็นคลิปอื่นก็ห้ามผ่าน Facebook เช่นเดียวกับ TikTok.
+        if target in {"facebook_reels", "tiktok"}:
+            local_hash = hashlib.sha256(local.read_bytes()).hexdigest()
+            remote_hash = sh("sha256sum", remote).strip().split(maxsplit=1)[0]
+            if remote_hash.lower() != local_hash.lower():
+                raise RuntimeError(
+                    "คลิปในมือถือไม่ตรงกับไฟล์ของใบงาน (SHA-256 ไม่ตรง) — "
+                    "หยุดก่อนเพื่อไม่ให้โพสต์คลิปผิดใบ")
         sh("content", "call", "--uri", "content://media",
            "--method", "scan_file", "--arg", remote)
         time.sleep(1.5)
 
-        # ยืนยันกับระบบแกลเลอรีเอง ไม่ใช่เชื่อว่าสแกนติด
-        #
-        # **ห้ามใส่ LIMIT ในค่า --sort** Android ปฏิเสธด้วย "Invalid token LIMIT"
-        # (เจอจริง 26 ส.ค. 2026 บน REDMI 15C) ต้องดึงมาทั้งหมดแล้วอ่านแถวแรกเอง
-        rows = [line for line in sh(
+        # ยืนยันชื่อแบบ exact และต้องมีวิดีโอใน MediaStore เพียงใบเดียวก่อนเปิด
+        # Facebook. แค่เป็น "ใบล่าสุด" ไม่พอ เพราะ Facebook เคยเรียง gallery
+        # คนละแบบแล้วแตะคลิปเก่าซ้ำ 42 ใบติด แม้ MediaStore แถวแรกจะเป็นใบใหม่.
+        rows_raw = sh(
             "content", "query", "--uri", "content://media/external/video/media",
-            "--projection", "_display_name", "--sort", "'date_added DESC'",
-        ).splitlines() if line.startswith("Row:")]
-        first = rows[0] if rows else ""
-        if name not in first:
-            raise RuntimeError(
-                f"ส่งคลิปเข้าเครื่องแล้วแต่แกลเลอรียังไม่เห็นเป็นใบล่าสุด "
-                f"(ใบล่าสุดตอนนี้: {first.strip()[:120] or 'อ่านไม่ได้'}) — "
-                "ถ้าเดินต่อจะไปหยิบคลิปผิดใบมาโพสต์")
+            "--projection", "_display_name:_data", "--sort", "'date_added DESC'",
+        )
+        remote_files = [
+            value.strip()
+            for value in sh("ls", "-1A", PHONE_POST_REMOTE_DIR).splitlines()
+            if value.strip()
+        ]
+        identity = publish_media.validate_phone_video_inventory(
+            item_id, name, remote_files, rows_raw, PHONE_POST_REMOTE_DIR,
+        )
         mb = size / 1048576
-        return (f"คลิปอยู่ในเครื่องแล้วและเป็นใบล่าสุด: {name} ({mb:.1f} MB)"
+        return ((cleared + " · ") if cleared else "") + (
+                f"{identity} · คลิปอยู่ในเครื่องแล้วและเป็นใบล่าสุด: "
+                f"{name} ({mb:.1f} MB)"
                 + (" — มีอยู่ก่อนแล้ว ไม่ได้ส่งซ้ำ" if again else ""))
     return work
 
@@ -1755,23 +2191,85 @@ def _clip_sender(serial: str, item_id: str, run: dict):
 # เกาะ `context.report(step, ok, message)` ซึ่งถูกเรียกหลังจบ**ทุกขั้น**อยู่แล้ว
 # ไม่ต้องไปแก้ตัวเดินผัง และไม่เพิ่มงานให้มือถือแม้แต่คำสั่งเดียว
 #
-# **เก็บในหน่วยความจำ ไม่เขียนไฟล์** — เป็นข้อมูลสดที่มีค่าเฉพาะตอนกำลังทำ
-# ส่วนผลสรุปถาวรอยู่ใน `publish.<ปลายทาง>.status` และ `publish.log` อยู่แล้ว
-# เขียนไฟล์เพิ่มจะได้สมุดเล่มที่สามที่วันหนึ่งจะไม่ตรงกับสองเล่มแรก
+# เก็บ snapshot เล็ก ๆ ลงไฟล์ด้วยเพื่อให้หน้าเว็บยังตอบได้หลังรีสตาร์ต; ผลการ
+# โพสต์จริงยังยึด `publish.<ปลายทาง>.status` เป็นแหล่งจริง ไฟล์นี้เป็นเพียง
+# สถานะ UI ล่าสุด 12 ใบและห้ามใช้ตัดสินว่าโพสต์สำเร็จ.
 PROGRESS_KEEP = 12          # เก็บคลิปล่าสุดกี่ใบ (ที่จบแล้วก็ยังดูย้อนได้)
 PROGRESS_LINES = 40         # เก็บบรรทัดต่อคลิปกี่บรรทัด
+PROGRESS_FILE = DATA_DIR / "publish_progress.json"
 _progress_lock = threading.Lock()
-_progress: dict[str, dict] = {}
 
 
-def _progress_start(item_id: str, target: str, serial: str, total: int) -> None:
+def _restore_progress() -> dict[str, dict]:
+    """กู้ progress ล่าสุดหลังรีสตาร์ต เพื่อให้กล่องหน้าเว็บไม่กลับเป็นว่าง."""
+    saved = studio_shared.read_json(PROGRESS_FILE, {})
+    rows = saved.get("clips") if isinstance(saved, dict) else []
+    restored: dict[str, dict] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        item_id = str(row.get("item_id") or "").strip()
+        if not item_id:
+            continue
+        clean = dict(row)
+        clean["lines"] = list(clean.get("lines") or [])[-PROGRESS_LINES:]
+        # โปรเซสเก่าตายระหว่าง running = ห้ามแสดงว่ากำลังทำทั้งที่ไม่มี worker.
+        if clean.get("status") == "running":
+            clean["status"] = "failed"
+            clean["ok"] = False
+            clean["ended"] = _now_text()
+            clean["ended_at"] = datetime.now().isoformat(timespec="seconds")
+            clean["now"] = "เซิร์ฟเวอร์รีสตาร์ตระหว่างขั้นนี้ — ใบงานหยุดไว้แล้ว"
+        elif clean.get("status") in {"failed", "stopped"}:
+            # ซ่อม snapshot จากรุ่นก่อนที่ผลขั้น 6=true อาจค้างคู่กับ failed.
+            clean["ok"] = False
+        elif clean.get("status") == "done":
+            clean["ok"] = True
+        restored[item_id] = clean
+    return restored
+
+
+_progress: dict[str, dict] = _restore_progress()
+
+
+def _progress_save_locked() -> None:
+    """บันทึก snapshot ขณะผู้เรียกถือ `_progress_lock`; เขียนแบบ atomic."""
+    try:
+        studio_shared.write_json_atomic(
+            PROGRESS_FILE,
+            {"updated_at": datetime.now().isoformat(timespec="seconds"),
+             "clips": list(_progress.values())},
+        )
+    except OSError as error:
+        append_log("publish", f"บันทึก progress งานโพสต์ไม่ได้: {error}")
+
+
+def _progress_start(item_id: str, target: str, serial: str, total: int,
+                    initial_step: int = 0, *, preserve_completed: bool = False) -> None:
     if not item_id:
         return
+    try:
+        run = clip_store.load_run(DATA_DIR, item_id) or {}
+        item_name = str(run.get("name") or "").strip()[:180]
+    except Exception:                                           # noqa: BLE001
+        # ชื่อเป็นข้อมูลประกอบ กล่องสถานะยังต้องทำงานได้แม้ไฟล์ใบงานอ่านไม่ได้
+        item_name = ""
     with _progress_lock:
+        previous = _progress.get(item_id) or {}
+        completed_lines = []
+        if preserve_completed:
+            # Resume ต้องคงหลักฐานเฉพาะขั้นที่ผ่านก่อนจุดล้มไว้ และทิ้งบรรทัด
+            # failure เดิมออก เมื่อรอบใหม่รายงานผล ขั้นที่เห็นจึงเป็นเลขเดิมพอดี
+            # ไม่ย้อนกลับไป 1 และไม่สะสม failure ซ้ำทุกครั้งที่กด Resume.
+            completed_lines = [
+                dict(line) for line in (previous.get("lines") or [])
+                if line.get("ok") and int(line.get("no") or 0) <= int(initial_step)
+            ][-PROGRESS_LINES:]
         _progress[item_id] = {
             "item_id": item_id, "target": target, "serial": serial,
+            "name": item_name,
             "device": device_book.label(serial),
-            "total": total, "step": 0, "ok": None,
+            "total": total, "step": max(0, int(initial_step)), "ok": None,
             "status": "running", "now": "กำลังเริ่ม…",
             # **ส่งเวลาแบบเต็มไปด้วย ไม่ใช่มีแต่ชั่วโมง:นาที:วินาที**
             #
@@ -1783,7 +2281,7 @@ def _progress_start(item_id: str, target: str, serial: str, total: int) -> None:
             "started": _now_text(), "ended": "",
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "ended_at": "",
-            "lines": [],
+            "lines": completed_lines,
         }
         # เก่าเกินก็ทิ้ง — ไม่ให้โตไม่รู้จบ
         while len(_progress) > PROGRESS_KEEP:
@@ -1791,9 +2289,11 @@ def _progress_start(item_id: str, target: str, serial: str, total: int) -> None:
             if oldest == item_id:
                 break
             _progress.pop(oldest, None)
+        _progress_save_locked()
 
 
-def _progress_step(item_id: str, name: str, ok: bool, message: str) -> None:
+def _progress_step(item_id: str, step_id: str, name: str,
+                   ok: bool, message: str) -> None:
     with _progress_lock:
         row = _progress.get(item_id)
         if not row:
@@ -1804,22 +2304,177 @@ def _progress_step(item_id: str, name: str, ok: bool, message: str) -> None:
         row["lines"].append({
             "at": _now_text(),
             "at_full": datetime.now().isoformat(timespec="seconds"),
-            "no": row["step"], "name": name,
+            "no": row["step"], "id": str(step_id or ""), "name": name,
             "ok": bool(ok), "message": str(message)[:200],
         })
         del row["lines"][:-PROGRESS_LINES]
+        _progress_save_locked()
 
 
-def _progress_end(item_id: str, ok: bool, detail: str = "") -> None:
+def _progress_at(item_id: str, number: int, step_id: str, name: str,
+                 ok: bool | None = None, message: str = "") -> None:
+    """ตั้งขั้นแบบมีเลขแน่นอน ใช้กับ flow หาสินค้า TikTok 1–7."""
     with _progress_lock:
         row = _progress.get(item_id)
         if not row:
             return
-        row["status"] = "done" if ok else "failed"
+        row["step"] = max(0, int(number))
+        row["now"] = str(name or "กำลังทำ…")
+        if ok is not None:
+            row["ok"] = bool(ok)
+            row["lines"].append({
+                "at": _now_text(),
+                "at_full": datetime.now().isoformat(timespec="seconds"),
+                "no": int(number), "id": str(step_id or ""), "name": str(name or ""),
+                "ok": bool(ok), "message": str(message or "")[:200],
+            })
+            del row["lines"][:-PROGRESS_LINES]
+        _progress_save_locked()
+
+
+def _progress_end(item_id: str, ok: bool, detail: str = "", *, stopped: bool = False) -> None:
+    with _progress_lock:
+        row = _progress.get(item_id)
+        if not row:
+            return
+        # ผลสรุปต้องชนะค่าของขั้นก่อนหน้าเสมอ เช่น link ขั้น 6 ผ่าน แต่ขั้น 7
+        # ล้มเหลวโดยโยน exception ก่อน report(False); มิฉะนั้น API จะตอบ
+        # status=failed แต่ ok=true ซึ่งทำให้หน้าจอและผู้ตรวจเข้าใจผิด.
+        row["ok"] = bool(ok)
+        row["status"] = "stopped" if stopped else ("done" if ok else "failed")
         row["ended"] = _now_text()
         row["ended_at"] = datetime.now().isoformat(timespec="seconds")
-        row["now"] = ("ลงเรียบร้อยแล้ว" if ok
+        row["now"] = ((detail or "หยุดแล้ว — ใบงานกลับเป็นคิวที่ 1")[:160]
+                      if stopped else ((detail or "ลงเรียบร้อยแล้ว")[:160] if ok
                       else (detail or "หยุดกลางคัน")[:160])
+                      )
+        _progress_save_locked()
+
+
+_UNCERTAIN_POST_STEPS = {"post", "share", "confirm_post"}
+
+
+def _progress_controls(row: dict) -> dict:
+    """บอกหน้าเว็บว่ารายการล่าสุด Resume/Reset ได้แค่ไหน
+
+    การตัดสินอยู่ฝั่งเซิร์ฟเวอร์เพราะ TikTok มีจุดกู้หน้าจอเฉพาะ และขั้นที่แตะ
+    โพสต์ไปแล้วห้าม retry เด็ดขาด แม้ตัวตรวจผลจะไม่ทันเห็นแผงสำเร็จก็ตาม.
+    """
+    controls = {
+        "can_resume": False, "can_reset": False,
+        "resume_step": 1, "resume_mode": "",
+        "reason": "ใช้ได้เมื่อรายการล่าสุดหยุดกลางคัน",
+    }
+    if row.get("status") == "running":
+        controls["reason"] = "งานกำลังทำอยู่"
+        return controls
+    if row.get("status") == "stopped":
+        controls["can_reset"] = True
+        controls["reason"] = "Reset จะล้างเฉพาะสถานะกล่องให้กลับเป็นว่าง"
+        return controls
+    if row.get("status") != "failed":
+        controls["reason"] = "งานล่าสุดจบแล้ว — ไม่เริ่มซ้ำเพื่อกันโพสต์ซ้ำ"
+        return controls
+
+    lines = list(row.get("lines") or [])
+    failed = next((line for line in reversed(lines) if not line.get("ok")), {})
+    failed_id = str(failed.get("id") or "").strip()
+    failed_name = str(failed.get("name") or "").casefold()
+    successful_ids = {
+        str(line.get("id") or "").strip()
+        for line in lines if line.get("ok")
+    }
+    touched_post = bool(successful_ids & _UNCERTAIN_POST_STEPS)
+    failed_at_post = (failed_id in _UNCERTAIN_POST_STEPS
+                      or "ยืนยันผลโพสต์" in failed_name
+                      or failed_name in {"โพสต์", "กดโพสต์", "กดแชร์เลย"})
+    # Reset รุ่นใหม่ล้างเฉพาะกล่องสถานะ ไม่เดิน flow และไม่แตะมือถือ จึงกดได้
+    # แม้ผลหลังแตะ Post ไม่แน่ชัด; ด่านห้าม retry ยังใช้กับ Resume เหมือนเดิม.
+    controls["can_reset"] = True
+    if touched_post or failed_at_post:
+        controls["reason"] = (
+            "ขั้นโพสต์ถูกแตะแล้วแต่ผลไม่แน่ชัด — Resume ถูกปิด; Reset ล้างเฉพาะสถานะ"
+        )
+        return controls
+
+    controls["resume_step"] = max(1, int(failed.get("no") or row.get("step") or 1))
+    if row.get("target") != "tiktok":
+        controls["can_resume"] = True
+        controls["reason"] = f"Resume จะลองขั้น {controls['resume_step']} ที่หยุดอีกครั้ง"
+        return controls
+
+    # TikTok รุ่นใหม่รับเลขและรหัสขั้นที่ล้มโดยตรง ตัวบอทจะตรวจ prerequisite
+    # ของหน้าจอในขั้นนั้นก่อนแตะ ไม่ย้อนกลับไปส่งคลิป/ค้นสินค้าใหม่ทั้ง flow.
+    mode = ""
+    exact_steps = {
+        "wake", "send_clip", "open_product", "promotion", "create_from_product",
+        "anchor_name", "pick_clip", "editor", "hashtags", "cover",
+        "hashtag_commit", "audience", "anchor_chip",
+    }
+    if failed_id in exact_steps and row.get("total") == tiktok_publish_bot.TOTAL_STEPS:
+        mode = "exact_step"
+        controls["resume_step_id"] = failed_id
+    elif failed_id in {"human_verification", "verify_product", "promotion", "showcase"}:
+        mode = "current_product"
+    elif failed_id in {"profile", "send_clip", "open_upload", "pick_clip", "editor",
+                       "resume_profile"} and "showcase" in successful_ids:
+        mode = "profile_ready"
+    if mode:
+        controls["can_resume"] = True
+        controls["resume_mode"] = mode
+        controls["reason"] = (
+            f"Resume จะทำต่อจากขั้น {controls['resume_step']} ที่ค้าง"
+            if mode == "exact_step"
+            else "Resume จะตรวจหน้าจอ TikTok ปัจจุบันก่อนเดินต่อ"
+        )
+    else:
+        controls["reason"] = (
+            "จุดที่หยุดยังไม่มีกู้หน้าจอที่ปลอดภัย — Reset ล้างเฉพาะสถานะกล่อง"
+        )
+    return controls
+
+
+def _clear_publish_progress(target: str, expected_item_id: str = "") -> list[str]:
+    """ล้าง snapshot UI ของปลายทางโดยไม่แตะคิว ใบงาน สวิตช์ หรือมือถือ."""
+    with _progress_lock:
+        rows = [row for row in _progress.values() if row.get("target") == target]
+        if any(row.get("status") == "running" for row in rows):
+            raise RuntimeError("ยังมีใบงานกำลังทำ — กด Stop และรอให้หยุดก่อน")
+        if expected_item_id and rows:
+            latest = max(
+                rows,
+                key=lambda row: row.get("started_at") or row.get("started") or "",
+            )
+            if str(latest.get("item_id") or "") != expected_item_id:
+                raise LookupError("สถานะบนหน้าจอเก่าแล้ว กรุณารีเฟรชก่อน")
+        removed = [
+            item_id for item_id, row in list(_progress.items())
+            if row.get("target") == target
+        ]
+        for item_id in removed:
+            _progress.pop(item_id, None)
+        _progress_save_locked()
+    return removed
+
+
+def _publish_progress_reset_result(target: str, expected_item_id: str = "") -> dict:
+    """ตรวจ active จริงก่อนล้าง เพื่อไม่ให้หน้าเว็บแสดงว่างทั้งที่มือถือทำงาน."""
+    with _publish_active_lock:
+        active = _publish_active.get(target)
+        link_active = _tiktok_link_active if target == "tiktok" else None
+    if active or link_active:
+        raise RuntimeError("ยังมีใบงานกำลังทำ — กด Stop และรอให้หยุดก่อน")
+    removed = _clear_publish_progress(target, expected_item_id)
+    append_log(
+        "publish",
+        f"[{target}] Reset กล่องสถานะเป็นว่าง · ล้าง progress {len(removed)} รายการ "
+        "(ไม่แตะคิวและมือถือ)",
+    )
+    return {
+        "ok": True, "target": target, "idle": True,
+        "cleared": len(removed),
+        "message": "รีเซ็ตสถานะแล้ว — ตอนนี้ว่าง ไม่มีใบงานกำลังทำ",
+    }
 
 
 @app.get("/api/publish/progress")
@@ -1830,15 +2485,93 @@ async def publish_progress(item_id: str = "") -> dict:
     """
     with _progress_lock:
         rows = [dict(v, lines=list(v["lines"])) for v in _progress.values()]
-    rows.sort(key=lambda r: r["started"], reverse=True)
+    for row in rows:
+        row["controls"] = _progress_controls(row)
+    rows.sort(key=lambda r: r.get("started_at") or r.get("started") or "", reverse=True)
     if item_id:
         rows = [r for r in rows if r["item_id"] == item_id]
     return {
         "ok": True,
         "clips": rows,
-        "note": ("เก็บในหน่วยความจำ — รีสตาร์ตเซิร์ฟเวอร์แล้วหาย "
-                 "ผลถาวรดูที่สถานะการลงของใบงาน"),
+        "note": ("บันทึกไว้ใน data/publish_progress.json — "
+                 "รีสตาร์ตเซิร์ฟเวอร์แล้วยังเห็นสถานะล่าสุด"),
     }
+
+
+@app.post("/api/publish/progress/reset")
+async def publish_progress_reset(request: Request) -> dict:
+    """ปุ่ม Reset ของกล่องโพสต์: กลับเป็นว่าง โดยไม่เริ่มงานหรือแก้คิวจริง."""
+    payload = await request.json() if await request.body() else {}
+    target = _clean_target(str((payload or {}).get("target") or ""))
+    item_id = str((payload or {}).get("item_id") or "").strip()
+    try:
+        return _publish_progress_reset_result(target, item_id)
+    except (RuntimeError, LookupError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/publish/stop")
+async def publish_stop_now(request: Request) -> dict:
+    """หยุดปลายทางทันทีที่จุดปลอดภัย ปิด auto และคืนใบปัจจุบันไว้หัวคิว.
+
+    ถ้าแตะ Post ไปแล้วจะไม่ฆ่า thread เพราะผลอาจขึ้นจริงแล้ว; ระบบจะตรวจและ
+    บันทึกใบนี้ให้จบ แต่ auto ถูกปิดทันทีและจะไม่เริ่มใบถัดไป.
+    """
+    payload = await request.json() if await request.body() else {}
+    target = _clean_target(str((payload or {}).get("target") or ""))
+
+    with _publish_active_lock:
+        active = _publish_active.get(target)
+        snapshot = dict(active) if active else None
+        if active and not active.get("irreversible"):
+            active["stop"].set()
+        link_active = _tiktok_link_active if target == "tiktok" else None
+        link_snapshot = dict(link_active) if link_active else None
+        if link_active:
+            link_active["stop"].set()
+
+    # ปิด auto แม้ตอนว่าง: ปุ่มจึงกดได้ตลอดและมีผลชัดเจนทุกครั้ง.
+    await asyncio.to_thread(_disable_publish_auto, target)
+
+    if not snapshot and not link_snapshot:
+        append_log("publish", f"[{target}] Stop — ปิดอัตโนมัติแล้ว ตอนนี้ไม่มีใบกำลังทำ")
+        return {"ok": True, "target": target, "active": False,
+                "stopped": True, "requeued_front": False,
+                "message": "ปิดอัตโนมัติแล้ว — ตอนนี้ไม่มีใบงานกำลังทำ"}
+
+    item_id = str((snapshot or link_snapshot or {}).get("item_id") or "")
+    if snapshot and snapshot.get("irreversible"):
+        append_log("publish", f"[{target}] Stop หลังแตะ Post ใบ {item_id} — ตรวจผลใบนี้ต่อ")
+        return {"ok": True, "target": target, "active": True,
+                "stopped": False, "finishing_current": True,
+                "requeued_front": False, "item_id": item_id,
+                "message": ("ปิดอัตโนมัติแล้ว — ใบโพสต์นี้แตะโพสต์ไปแล้ว "
+                            "ระบบจะตรวจผลให้จบเพื่อกันโพสต์ซ้ำ และจะไม่เริ่มใบถัดไป"
+                            + ("; งานหาสินค้าที่จับจออยู่กำลังหยุด" if link_snapshot else ""))}
+
+    queue_saved = True
+    try:
+        if snapshot and item_id:
+            await asyncio.to_thread(publish_stop.pin, DATA_DIR, target, item_id)
+    except Exception as error:                                  # noqa: BLE001
+        queue_saved = False
+        append_log("publish", f"[{target}] Stop ใบ {item_id} แต่บันทึกหัวคิวไม่ได้: {error}")
+    if snapshot:
+        with _progress_lock:
+            row = _progress.get(item_id)
+            if row and row.get("status") == "running":
+                row["stop_requested"] = True
+                row["now"] = "ได้รับคำสั่ง Stop — กำลังหยุดที่จุดปลอดภัย"
+    append_log("publish", f"[{target}] Stop ใบ {item_id} — "
+               + ("คืนเป็นคิวที่ 1" if queue_saved else "สั่งหยุดแล้วแต่บันทึกหัวคิวไม่ได้"))
+    return {"ok": queue_saved, "target": target, "active": True,
+            "stopped": True, "requeued_front": queue_saved,
+            "item_id": item_id,
+            "message": (("กำลังหยุดใบงานและคืนเป็นคิวที่ 1 แล้ว"
+                         if snapshot else
+                         "กำลังหยุดการหาสินค้า TikTok — ใบเดิมรอเป็นคิวที่ 1")
+                        if queue_saved else
+                        "สั่งหยุดแล้ว แต่บันทึกให้กลับคิวที่ 1 ไม่สำเร็จ — ดู log")}
 
 
 def _shot_after_step(serial: str, target: str, item_id: str):
@@ -1859,7 +2592,8 @@ def _shot_after_step(serial: str, target: str, item_id: str):
         # จดความคืบหน้าก่อนเสมอ — การเก็บภาพใช้เวลาหลายวินาที ถ้าจดทีหลัง
         # หน้าเว็บจะเห็นช้ากว่าความจริงทุกขั้น และถ้าการเก็บภาพพัง
         # ความคืบหน้าจะหายไปด้วยทั้งที่คนละเรื่องกัน
-        _progress_step(item_id, getattr(step, "name", ""), ok, message)
+        _progress_step(item_id, getattr(step, "id", ""),
+                       getattr(step, "name", ""), ok, message)
         mark = "ผ่าน" if ok else "ไม่ผ่าน"
         try:
             xml = run_adb("-s", serial, "shell", "uiautomator", "dump",
@@ -1886,8 +2620,41 @@ def _shot_after_step(serial: str, target: str, item_id: str):
     return shot
 
 
+def _capture_publish_failure(serial: str, target: str, item_id: str,
+                             step: str, reason: str) -> str:
+    """เก็บ PNG ไว้ในใบงานและจดพาธ ก่อนปล่อยตัวอัตโนมัติข้ามใบ."""
+    saved = ""
+    try:
+        folder = clip_store.target_dir(DATA_DIR, item_id)
+        evidence_dir = folder / "publish-failures"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_step = re.sub(r"[^A-Za-z0-9_.-]", "_", str(step or "unknown"))[:60]
+        path = evidence_dir / f"{stamp}-{target}-{safe_step}.png"
+        png = run_adb("-s", serial, "exec-out", "screencap", "-p", timeout=60).stdout
+        if png.startswith(b"\x89PNG"):
+            path.write_bytes(png)
+            saved = str(path.relative_to(folder)).replace("\\", "/")
+    except Exception as error:                                  # noqa: BLE001
+        append_log("publish", f"[{target}] แคปจอใบ {item_id} ไม่สำเร็จ: {error}")
+    try:
+        clip_store.record_publish_failure(
+            DATA_DIR, item_id, target, step, reason, saved,
+        )
+    except Exception as error:                                  # noqa: BLE001
+        append_log("publish", f"[{target}] จดเหตุที่หยุดใบ {item_id} ไม่สำเร็จ: {error}")
+    append_log(
+        "publish",
+        f"[{target}] หยุดใบ {item_id} ที่ {step}: {reason}"
+        + (f" · ภาพ {saved}" if saved else " · แคปภาพไม่ได้"),
+    )
+    return saved
+
+
 def _build_context(
-    serial: str, target: str, item_id: str, report
+    serial: str, target: str, item_id: str, report,
+    stop: callable = lambda: False,
+    begin_irreversible: callable = lambda: True,
 ) -> "publish_flow.RunContext":
     """ประกอบบริบทการรันจากงานจริงในคิว — แคปชัน ลิงก์ และแท็กมาจาก run.json"""
     run = clip_store.load_run(DATA_DIR, item_id) if item_id else {}
@@ -1909,7 +2676,10 @@ def _build_context(
         set_clipboard=lambda text, paste=True: scrcpy_control.set_clipboard(
             ADB, serial, text, paste),
         run_adb=lambda *args: run_adb("-s", serial, *args, timeout=25).stdout,
-        caption=(run or {}).get("caption") or clip_store.build_caption(run or {}),
+        # งาน TikTok repost เก็บคำบรรยายที่ดึงมาใน tiktok_caption ส่วนใบงานสินค้า
+        # ปกติเก็บใน caption — อ่านตามลำดับนี้เพื่อให้ TikTok ได้ข้อความของใบเดียวกัน
+        caption=((run or {}).get("caption") or (run or {}).get("tiktok_caption")
+                 or clip_store.build_caption(run or {})),
         # ต้องเป็นลิงก์ที่ผู้ใช้ส่งมาทาง Telegram เท่านั้น — ลิงก์ที่ระบบแปลงเอง
         # ไม่มีรหัสผู้แนะนำ โพสต์ไปก็ไม่ได้ค่าคอม
         link=(run or {}).get("affiliate_url") or "",
@@ -1926,11 +2696,13 @@ def _build_context(
         hashtags=list(plan.get("tags") or (run or {}).get("hashtags") or []),
         log=lambda message: append_log("publish", message),
         report=report,
+        stop=stop,
+        begin_irreversible=begin_irreversible,
         # เตรียมของก่อนแตะจอขั้นแรก (ผู้ใช้สั่ง 26 ส.ค. 2026) — อยู่นอกผัง
         # เพราะขั้นในผังถูกลบได้จากหน้าเว็บ ถ้าลบขั้นส่งคลิปทิ้ง ผังจะยังเดินจนจบ
         # แล้วโพสต์คลิปของสินค้าอื่น ซึ่งถอนไม่ได้
         wake_screen=_wake_for_publish(serial),
-        send_clip=_clip_sender(serial, item_id, run or {}) if item_id else None,
+        send_clip=_clip_sender(serial, item_id, run or {}, target) if item_id else None,
     )
 
 
@@ -2009,6 +2781,24 @@ async def publish_flow_run(request: Request) -> dict:
     target = _clean_target(payload.get("target"))
     item_id = str(payload.get("item_id", "")).strip()
     only = payload.get("only")
+    stop_before_post = bool(payload.get("stop_before_post"))
+    resume_current_product = bool(payload.get("resume_current_product"))
+    resume_anchor_ready = bool(payload.get("resume_anchor_ready"))
+    resume_editor_ready = bool(payload.get("resume_editor_ready"))
+    resume_audience_ready = bool(payload.get("resume_audience_ready"))
+    resume_profile_ready = bool(payload.get("resume_profile_ready"))
+    resume_step_id = ""
+    resume_requested = bool(payload.get("resume"))
+    reset_requested = bool(payload.get("reset"))
+    if resume_requested and reset_requested:
+        raise HTTPException(status_code=400, detail="เลือก Resume หรือ Reset อย่างใดอย่างหนึ่ง")
+    # รองรับหน้าเว็บรุ่นเก่าที่ยังส่ง reset มาที่ route เดินผัง: ความหมายใหม่คือ
+    # ล้างกล่องสถานะเท่านั้น ห้ามไหลลงไปเริ่มใบเดิมหรือแตะมือถือเด็ดขาด.
+    if reset_requested:
+        try:
+            return _publish_progress_reset_result(target, item_id)
+        except (RuntimeError, LookupError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
     # ---- รันต่อจากขั้นที่ค้าง (เจ้าของสั่ง 30 ส.ค. 2569) --------------------
     #
     # *"ตอนนี้ลง shopee หยุดกลางคัน เพิ่มปุ่ม resume หน่อยให้รันต่อ"*
@@ -2025,12 +2815,58 @@ async def publish_flow_run(request: Request) -> dict:
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="start ต้องเป็นเลขขั้น")
 
+    # ปุ่มในกล่องสถานะส่งเพียง action มา เซิร์ฟเวอร์เป็นผู้หาเลขขั้น/โหมดกู้เอง
+    # เพื่อไม่ให้หน้าเว็บเดาว่ามือถือค้างอยู่หน้าไหน. ต้องยืนยันว่าเป็นรายการล้ม
+    # ล่าสุดของใบงาน/ปลายทาง/เครื่องเดียวกันก่อนทุกครั้ง กันปุ่มเก่าจากแท็บที่ค้าง.
+    if resume_requested:
+        if not item_id or not serial:
+            raise HTTPException(status_code=400, detail="คำสั่งนี้ต้องระบุใบงานและมือถือ")
+        with _progress_lock:
+            source = _progress.get(item_id)
+            saved = (dict(source, lines=list(source.get("lines") or []))
+                     if source else None)
+        if (not saved or saved.get("target") != target
+                or saved.get("serial") != serial):
+            raise HTTPException(status_code=409, detail="สถานะบนหน้าจอเก่าแล้ว กรุณารีเฟรชก่อน")
+        controls = _progress_controls(saved)
+        if not controls["can_resume"]:
+            raise HTTPException(status_code=409, detail=controls["reason"])
+
+        # ล้าง flag ที่ caller อาจค้างมาจากคำสั่งก่อน แล้วตั้งโหมด Resume ใหม่.
+        resume_current_product = False
+        resume_anchor_ready = False
+        resume_editor_ready = False
+        resume_audience_ready = False
+        resume_profile_ready = False
+        stop_before_post = False
+        start = int(controls["resume_step"])
+        if target == "tiktok":
+            mode = controls.get("resume_mode")
+            resume_current_product = mode == "current_product"
+            resume_profile_ready = mode == "profile_ready"
+            resume_step_id = (str(controls.get("resume_step_id") or "").strip()
+                              if mode == "exact_step" else "")
+            if not (resume_current_product or resume_profile_ready or resume_step_id):
+                raise HTTPException(status_code=409, detail=controls["reason"])
+        append_log(
+            "publish",
+            f"[{target}] เจ้าของสั่ง Resume ใบ {item_id} จากขั้น {start}",
+        )
+
     # ด่านลำดับการลง — Shopee Video → Facebook Reels → TikTok ห่างกันอย่างน้อย 1 วัน
     #
     # ตรวจ **ก่อน** จับล็อกและก่อนแตะมือถือ เพราะถ้าปล่อยให้เดินผังไปแล้วค่อยรู้
     # ว่าผิดลำดับ = โพสต์ขึ้นจริงไปแล้ว ถอนไม่ได้ (ต้องไปลบเองในแอป)
     # ไม่ตรวจตอนสั่งเดินทีละขั้น (`only`) เพราะนั่นคือการไล่เทรนผัง ไม่ใช่โพสต์จริง
     if item_id and not only:
+        # ด่านกันโพสต์ซ้ำระดับสุดท้าย: ตรวจทุกกองและทุกสำเนาก่อนแตะมือถือ.
+        # ตัวเลือกคิว 8877 ตรวจเรื่องนี้อยู่แล้ว แต่ API นี้อาจถูกเรียกตรงจาก
+        # หน้าเว็บ/Telegram หรือสถานะอาจเปลี่ยนหลังเลือกคิว จึงต้องกั้นซ้ำตรง
+        # จุด irreversible ด้วย. ใช้ร่วมกันครบ Shopee/Facebook/TikTok.
+        if clip_store.posted_copy(DATA_DIR, item_id, target):
+            why = f"{publish_order.NAMES[target]} ลงไปแล้ว ไม่ต้องลงซ้ำ"
+            append_log("publish", f"[{target}] ไม่ได้เดินผัง — {why} (พบจากทุกสำเนา)")
+            raise HTTPException(status_code=409, detail=why)
         run = clip_store.load_run(DATA_DIR, item_id) or {}
         ok, why = publish_order.check(run, target)
         if not ok:
@@ -2093,6 +2929,7 @@ async def publish_flow_run(request: Request) -> dict:
 
     if not _publish_run_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="มีงานโพสต์รันอยู่แล้ว รอให้จบก่อน")
+    active_state = _publish_register(target, serial, item_id)
 
     def work() -> dict:
         # ---- กดบัตรคิวจอก่อนแตะเครื่อง (กติกาข้อ 9 ของโปรเจกต์) ----------
@@ -2122,16 +2959,27 @@ async def publish_flow_run(request: Request) -> dict:
                 # จดตั้งแต่ก่อนแตะจอขั้นแรก — ถ้าไปจดทีหลังจะมีช่องว่างที่
                 # รีสตาร์ตแทรกเข้ามาได้พอดี ซึ่งคือเคสที่เกิดจริงเมื่อ 15:38
                 try:
-                    total = len(_flow_store(serial).sequence(target))
+                    total = (tiktok_publish_bot.TOTAL_STEPS
+                             if target == "tiktok" and not only
+                             and tiktok_publish_bot.supports(serial)
+                             else len(_flow_store(serial).sequence(target)))
                 except Exception:                              # noqa: BLE001
                     total = 0
                 _busy_mark(busy_key, what=f"{what} ({item_id or 'ไม่ระบุใบงาน'})",
                            serial=serial, target=target, item_id=item_id,
                            step=0, steps=total)
                 if not only:
-                    _progress_start(item_id, target, serial, total)
-                context = _build_context(serial, target, item_id,
-                                         _shot_after_step(serial, target, item_id))
+                    initial_step = start - 1 if resume_requested else 0
+                    _progress_start(
+                        item_id, target, serial, total, initial_step,
+                        preserve_completed=resume_requested,
+                    )
+                context = _build_context(
+                    serial, target, item_id,
+                    _shot_after_step(serial, target, item_id),
+                    stop=active_state["stop"].is_set,
+                    begin_irreversible=lambda: _publish_begin_irreversible(active_state),
+                )
                 if only:
                     number = int(only)
                     # ทดลองทีละขั้น = กำลังพิสูจน์ว่าพิกัดที่เทรนไว้ถูกจริง
@@ -2141,12 +2989,40 @@ async def publish_flow_run(request: Request) -> dict:
                     context.settle_jitter = 0.0
                     return publish_flow.run_flow(
                         context, start_at=number, stop_after=number)
-                return publish_flow.run_flow(context, start_at=start)
+                if target == "tiktok" and tiktok_publish_bot.supports(serial):
+                    run = clip_store.load_run(DATA_DIR, item_id) or {}
+                    result = tiktok_publish_bot.run(
+                        context, run, stop_before_post=stop_before_post,
+                        resume_current_product=resume_current_product,
+                        resume_anchor_ready=resume_anchor_ready,
+                        resume_editor_ready=resume_editor_ready,
+                        resume_audience_ready=resume_audience_ready,
+                        resume_profile_ready=resume_profile_ready,
+                        resume_step_id=resume_step_id,
+                        resume_step_no=start if resume_requested else 0)
+                    if not result.get("ok") and not result.get("stopped"):
+                        failed = next((row for row in reversed(result.get("results") or [])
+                                       if not row.get("ok")), {})
+                        step_id = str(failed.get("step") or f"step-{result.get('done', 0) + 1}")
+                        reason = str(failed.get("message") or result.get("error")
+                                     or "TikTok หยุดกลางขั้น")
+                        result["failure_screenshot"] = _capture_publish_failure(
+                            serial, target, item_id, step_id, reason,
+                        )
+                    return result
+                result = publish_flow.run_flow(context, start_at=start)
+                if start > 1:
+                    # run_flow นับเฉพาะช่วงที่รอบนี้เดิน แต่หน้าเว็บต้องรายงาน
+                    # ตำแหน่งในผังเต็ม และข้อความผิดพลาดถาวรต้องเป็นเลขจริง.
+                    result["done"] = min(result["total"], result["done"] + start - 1)
+                    result["resumed_from"] = start
+                return result
         finally:
             # คืนคีย์บอร์ดเดิมเสมอ แม้ผังจะล้มกลางคัน — ทิ้งไว้ที่
             # ADBKeyboard เจ้าของหยิบมือถือขึ้นมาจะพิมพ์อะไรไม่ได้เลย
             adb_restore_keyboard(serial)
             _busy_clear(busy_key)
+            _publish_unregister(target, active_state)
             _publish_run_lock.release()
 
     try:
@@ -2162,8 +3038,10 @@ async def publish_flow_run(request: Request) -> dict:
             _progress_end(item_id, False, f"{type(error).__name__}: {error}")
         raise
     if not only:
-        _progress_end(item_id, bool(result.get("ok")),
-                      str(result.get("error") or ""))
+        _progress_end(
+            item_id, bool(result.get("ok")), str(result.get("error") or ""),
+            stopped=bool(result.get("stopped")),
+        )
     # โฆษณาที่ปิดไประหว่างทางต้องขึ้น log ด้วย — ถ้าตัวเลขนี้ค่อยๆ เพิ่ม แปลว่า
     # แอปเริ่มยิงโฆษณาถี่ขึ้น ควรรู้ตั้งแต่ก่อนที่ผังจะพังเอง ไม่ใช่ปิดเงียบๆ
     ads = result.get("ads_closed") or []
@@ -2183,18 +3061,72 @@ async def publish_flow_run(request: Request) -> dict:
     #
     # ไม่บันทึกเมื่อสั่งเดินทีละขั้น (`only`) เพราะนั่นคือการไล่เทรนผัง ไม่ใช่โพสต์จริง
     # บันทึกไปจะกลายเป็นประวัติเท็จซึ่งแย่กว่าไม่มีประวัติ
-    if item_id and not only:
-        note = ("" if result["ok"]
-                else f"เดินผังไม่จบ หยุดที่ขั้น {result['done']}/{result['total']}")
+    auto_skip = False
+    auto_skip_note = ""
+    posted_recorded = False
+    if (item_id and not only and not result.get("awaiting_post_approval")
+            and not result.get("stopped")):
+        failed = next((row for row in reversed(result.get("results") or [])
+                       if not row.get("ok")), {})
+        no_product = (
+            target == "shopee_video"
+            and failed.get("step") == "product_pick"
+            and "ไม่พบสินค้า" in str(failed.get("message") or "")
+        )
+        if result["ok"]:
+            note = ""
+        elif no_product:
+            auto_skip = True
+            auto_skip_note = (
+                "ไม่พบสินค้าใน Shopee หลังนำเข้าลิงก์ — "
+                "ค้างไว้ที่ Shopee Video และข้ามใบนี้อัตโนมัติ"
+            )
+            note = auto_skip_note
+        else:
+            note = f"เดินผังไม่จบ หยุดที่ขั้น {result['done']}/{result['total']}"
         try:
             # จดบัญชีที่ลงไปด้วย — โควตา 70/วันนับต่อบัญชี ไม่ใช่ต่อเครื่อง
             await asyncio.to_thread(
                 clip_store.mark_posted, DATA_DIR, item_id, target, "", note,
-                device_book.account_for(serial, target))
+                device_book.account_for(serial, target), auto_skip)
+            posted_recorded = True
         except clip_store.ClipStoreError as error:
             append_log("publish", f"[{target}] บันทึกผลการโพสต์ไม่ได้: {error}")
 
-    return {"ok": True, **result}
+    # ปลดหัวคิวเฉพาะเมื่อใบนี้ขึ้นจริงและบันทึกสถานะสำเร็จแล้ว. ถ้าบันทึกไม่ได้
+    # ต้องคง pin ไว้และให้ hard-stop ด้านล่างกันการโพสต์ซ้ำตามกติกาเดิม.
+    if result.get("ok") and posted_recorded:
+        try:
+            await asyncio.to_thread(publish_stop.clear, DATA_DIR, target, item_id)
+        except Exception as error:                              # noqa: BLE001
+            append_log("publish", f"[{target}] ปลดหัวคิวใบ {item_id} ไม่ได้: {error}")
+
+    # TikTok: บันทึกใบงานก่อน แล้วค่อยล้างสื่อเสมอ ถ้าโปรเซสตายระหว่างล้าง
+    # ใบงานจะไม่ย้อนกลับมาให้ตัวอัตโนมัติโพสต์ซ้ำ. การล้างล้มก็ปิดเฉพาะ TikTok
+    # อัตโนมัติ แต่ผลโพสต์ยังเป็นสำเร็จเพราะคลิปขึ้นไปแล้ว.
+    if (item_id and not only and target == "tiktok" and result.get("ok")
+            and not result.get("awaiting_post_approval")):
+        if not posted_recorded:
+            result["automation_stop"] = {
+                "code": "tiktok_state_write_failed", "auto_key": "tiktok_publish",
+                "reason": "โพสต์สำเร็จแต่บันทึกสถานะใบงานไม่ได้ — หยุดเพื่อกันโพสต์ซ้ำ",
+                "retry": False,
+            }
+        try:
+            cleaned = await asyncio.to_thread(_clear_tiktok_all_shared_media, serial)
+            result["cleanup"] = cleaned
+            append_log("publish", f"[tiktok] {cleaned}")
+        except Exception as error:                               # noqa: BLE001
+            warning = f"โพสต์สำเร็จ แต่ล้างสื่อใน REDMI 15C ไม่สำเร็จ: {error}"
+            result["cleanup_warning"] = warning
+            result.setdefault("automation_stop", {
+                "code": "tiktok_cleanup_failed", "auto_key": "tiktok_publish",
+                "reason": warning, "retry": False,
+            })
+            append_log("publish", f"[tiktok] {warning}")
+
+    return {"ok": True, **result,
+            "auto_skip": auto_skip, "auto_skip_note": auto_skip_note}
 
 
 # ---------------------------------------------------------------- จอมือถือ (A)
@@ -2251,17 +3183,19 @@ def _flow_summary(serial: str) -> dict:
     ดูแต่จำนวนขั้นจึงเห็นทุกเครื่องพร้อมหมด ทั้งที่กดจริงแล้วล้มตั้งแต่ขั้นแรก
     """
     out: dict = {}
-    for target in ("shopee_video", "facebook_reels"):
+    for target in ("shopee_video", "facebook_reels", "tiktok"):
         try:
             store = _flow_store(serial)
             points = len(store.positions(target))
             steps = len(store.sequence(target))
         except Exception:               # ปลายทางที่เครื่องนี้ไม่มีผัง
             continue
+        dedicated = target == "tiktok" and tiktok_publish_bot.supports(serial)
         out[target] = {
             "points": points,
-            "steps": steps,
-            "trained": points > 0,
+            "steps": tiktok_publish_bot.TOTAL_STEPS if dedicated else steps,
+            "trained": dedicated or points > 0,
+            "dedicated_bot": dedicated,
         }
     return out
 
@@ -2534,11 +3468,34 @@ def adb_use_thai_keyboard(serial: str) -> bool:
     return ok
 
 
+def ime_can_type(name: str) -> bool:
+    """คีย์บอร์ดตัวนี้ **พิมพ์ตัวอักษรได้จริง** ไหม
+
+    ถามคำถามให้ตรงกับสิ่งที่ต้องการ — ไม่ใช่ถามว่า "ไม่ใช่ ADBKeyboard ใช่ไหม"
+    ซึ่งตอบว่าใช่ได้ทั้งตอนเป็นแป้นพิมพ์จริงและตอนเป็นไมโครโฟน (ข้อ 2.3.1)
+    """
+    if not name or ADB_KEYBOARD_IME in name:
+        return False
+    return not any(hint in name.lower() for hint in SKIP_IME_HINTS)
+
+
 def adb_restore_keyboard(serial: str) -> None:
-    """คืนคีย์บอร์ดเดิมให้เจ้าของเครื่อง — เรียกเมื่อจบงานเสมอ"""
+    """คืนคีย์บอร์ดเดิมให้เจ้าของเครื่อง — เรียกเมื่อจบงานเสมอ
+
+    **ของเดิมที่พิมพ์ไม่ได้ก็ห้ามคืน** (11 ก.ย. 2569) ถ้าตอนเริ่มงานเครื่องค้าง
+    อยู่ที่คีย์บอร์ดเสียงพูด การ "คืนค่าเดิม" จะตั้งกลับไปเป็นเสียงอีก —
+    วนแบบนี้ทุกรอบจนกว่าจะมีคนไปตั้งด้วยมือ ซึ่งเป็นเหตุที่เจ้าของถามว่า
+    "ทำไมเวลาโพสต์ต้องแตะปุ่มพูด"
+    """
     before = _ime_before.pop(serial, "")
-    if not before or before == ADB_KEYBOARD_IME:
-        return
+    if not ime_can_type(before):
+        # หาแป้นพิมพ์จริงในเครื่องแทน — ไม่มีก็ปล่อยไว้แล้วฟ้อง ดีกว่าตั้งของที่พิมพ์ไม่ได้
+        before = adb_normal_ime(serial)
+        if not before:
+            append_log("publish", "⚠️ หาแป้นพิมพ์จริงในเครื่องไม่เจอ — "
+                                  "ยังค้างที่ ADBKeyboard ตั้งเองที่ "
+                                  "ตั้งค่า > ภาษาและการป้อนข้อมูล")
+            return
     try:
         run_adb("-s", serial, "shell", "ime", "set", before, timeout=15)
         append_log("publish", f"คืนคีย์บอร์ดเดิมให้เครื่องแล้ว ({before.split('/')[0]})")
@@ -2568,7 +3525,36 @@ def adb_use_keyboard(serial: str) -> bool:
 
 
 # คีย์บอร์ดที่สลับไปแล้วผู้ใช้พิมพ์เองไม่ได้ — ข้ามตอนหาตัวสำรอง
-SKIP_IME_HINTS = ("autofill", "kdeconnect", "remotekeyboard")
+#
+# ---- ทำไมต้องมีคีย์บอร์ดเสียงพูดในรายการนี้ (11 ก.ย. 2569) -------------------
+#
+# เจ้าของส่งภาพมาถามว่า **"ทำไมเวลาโพสต์ต้องแตะปุ่มพูด"** — ภาพเป็นหน้าคอมเมนต์
+# Facebook ที่มีแผงไมโครโฟนของ Google ขึ้นมาแทนแป้นพิมพ์
+#
+# คีย์บอร์ดเสียงพูดของ Google อยู่ในรายการ `ime list -s` เหมือนคีย์บอร์ดทั่วไป
+# ทุกประการ แต่กดช่องพิมพ์แล้วขึ้น **ไมโครโฟน ไม่ใช่แป้นพิมพ์** เจ้าของจึงต้อง
+# แตะปุ่มพูดทุกครั้งที่จะพิมพ์เอง
+#
+# ตัวหาคีย์บอร์ดสำรองคืน **ตัวแรกในรายการ** ที่ไม่ใช่ ADBKeyboard บนเครื่อง
+# `DATCW8GQUOCUWK9P` ตัวแรกคือคีย์บอร์ดเสียงพูดพอดี (วัดจริง)
+#
+#     1. com.google.android.tts/…voiceime.VoiceInputMethodService   ← หยิบตัวนี้
+#     2. com.google.android.inputmethod.latin/…LatinIME             ← ตัวที่ควรได้
+#     3. com.android.adbkeyboard/.AdbIME
+#
+# นับจากบันทึกจริง: คืนเป็นคีย์บอร์ดเสียง **61 ครั้ง** จาก 306 ครั้ง (1 ใน 5)
+#
+# **และมันลามเอง** — รอบถัดไปอ่านค่าปัจจุบันได้เป็นคีย์บอร์ดเสียง ก็จำไว้เป็น
+# "ของเดิม" แล้วคืนเป็นเสียงอีก วนแบบนี้จนกว่าจะมีคนไปตั้งกลับด้วยมือ
+#
+# รากจริงคือ **ถามผิดคำถาม** — ถามว่า "ตัวแรกที่ไม่ใช่ ADBKeyboard" แทนที่จะถาม
+# ว่า "ตัวที่พิมพ์ตัวอักษรได้จริง" ซึ่งตอบว่าใช่ได้ทั้งตอนถูกและตอนผิด (ข้อ 2.3.1)
+SKIP_IME_HINTS = (
+    "autofill", "kdeconnect", "remotekeyboard",
+    # คีย์บอร์ดเสียงพูด — ตรวจสี่คำเพราะชื่อเต็มยาวและต่างรุ่นตั้งไม่เหมือนกัน
+    # (ชื่อจริงมีครบทั้งสี่คำ ส่วน Gboard ไม่มีสักคำ — ตรวจแล้วไม่ชนกัน)
+    "voiceime", "voiceinput", "speech", "googletts",
+)
 
 
 def adb_normal_ime(serial: str) -> str:
@@ -2796,11 +3782,13 @@ def _websocket_is_allowed(websocket: WebSocket) -> bool:
     ด่านนี้จึงกันได้แค่ "ความเร็ว" ไม่ได้กัน "สิทธิ์" — เป็นด่านที่ทำร้ายเจ้าของ
     โดยไม่กันใครเลย ใบเดียวกับหน้าเว็บ (gate_remote_devices) คือใบที่ถูกต้อง
     """
-    if _websocket_is_local(websocket):
+    if _websocket_is_local(websocket) or access_control.is_tailscale_request(websocket):
         return True
-    token = websocket.cookies.get(
-        access_control.ACCESS_COOKIE, ""
-    ) or websocket.headers.get(access_control.ACCESS_TOKEN_HEADER, "")
+    token = (
+        websocket.query_params.get("token", "")
+        or websocket.cookies.get(access_control.ACCESS_COOKIE, "")
+        or websocket.headers.get(access_control.ACCESS_TOKEN_HEADER, "")
+    )
     record = access_store.find_by_token(token)
     return bool(record and record.get("status") == "approved")
 
@@ -2839,8 +3827,8 @@ async def phone_touch(request: Request) -> dict:
     serial = await asyncio.to_thread(
         clean_serial, str(payload.get("serial", "")), True
     )
-    width = int(payload.get("source_width", 0))
-    height = int(payload.get("source_height", 0))
+    width = int(payload.get("source_width") or payload.get("width") or 0)
+    height = int(payload.get("source_height") or payload.get("height") or 0)
     if not width or not height:
         raise HTTPException(status_code=400, detail="ต้องส่งขนาดภาพต้นทางมาด้วย")
     x, y = await asyncio.to_thread(
@@ -2881,6 +3869,123 @@ async def phone_touch(request: Request) -> dict:
         return {"ok": True, "supported": True, "realtime": False}
 
     return await asyncio.to_thread(send)
+
+
+# ------------------------------------------------------------- Camera Injection API
+IRIUN_EXE = r"C:\Program Files (x86)\Iriun Webcam\IriunWebcam.exe"
+LDCONSOLE_EXE = r"C:\LDPlayer\LDPlayer14\ldconsole.exe"
+LDPLAYER_DIR = r"C:\LDPlayer\LDPlayer14"
+
+
+@app.get("/api/camera-injection/status")
+async def camera_injection_status() -> dict:
+    """ตรวจสถานะความพร้อมของระบบ Camera Injection (Iriun + LDPlayer + ADB)"""
+    iriun_running = False
+    ldplayer_running = False
+    try:
+        res = await asyncio.to_thread(
+            subprocess.run, ["tasklist", "/FI", "IMAGENAME eq IriunWebcam.exe"],
+            capture_output=True, text=True, creationflags=0x08000000
+        )
+        iriun_running = "IriunWebcam.exe" in (res.stdout or "")
+    except Exception:
+        pass
+    try:
+        res = await asyncio.to_thread(
+            subprocess.run, ["tasklist", "/FI", "IMAGENAME eq dnplayer.exe"],
+            capture_output=True, text=True, creationflags=0x08000000
+        )
+        ldplayer_running = "dnplayer.exe" in (res.stdout or "")
+    except Exception:
+        pass
+
+    adb_connected = False
+    emu_serial = ""
+    try:
+        devs = await asyncio.to_thread(list_devices)
+        for d in devs:
+            s = d.get("serial", "")
+            if "127.0.0.1" in s or "5555" in s or "emulator-" in s:
+                adb_connected = True
+                emu_serial = s
+                break
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "iriun_installed": os.path.exists(IRIUN_EXE),
+        "iriun_running": iriun_running,
+        "ldplayer_installed": os.path.exists(LDCONSOLE_EXE),
+        "ldplayer_running": ldplayer_running,
+        "adb_connected": adb_connected,
+        "emulator_serial": emu_serial,
+    }
+
+
+@app.post("/api/camera-injection/launch")
+async def camera_injection_launch() -> dict:
+    """สั่งเปิด Iriun Webcam + LDPlayer โหมดมือถือ + เชื่อมต่อ ADB ให้อัตโนมัติ"""
+    # 1. เปิด Iriun Webcam ถ้ายังไม่รัน
+    if os.path.exists(IRIUN_EXE):
+        try:
+            res = await asyncio.to_thread(
+                subprocess.run, ["tasklist", "/FI", "IMAGENAME eq IriunWebcam.exe"],
+                capture_output=True, text=True, creationflags=0x08000000
+            )
+            if "IriunWebcam.exe" not in (res.stdout or ""):
+                subprocess.Popen([IRIUN_EXE], creationflags=0x00000008 | 0x00000200)
+        except Exception:
+            pass
+
+    # 2. ปรับขนาด LDPlayer ให้อยู่ในโหมด Phone 720x1280 (เหมาะกับ TikTok / Shopee / FB)
+    if os.path.exists(LDCONSOLE_EXE):
+        try:
+            await asyncio.to_thread(
+                subprocess.run, [
+                    LDCONSOLE_EXE, "modify", "--index", "0",
+                    "--resolution", "720,1280,320", "--cpu", "4", "--memory", "4096"
+                ], capture_output=True, text=True, creationflags=0x08000000
+            )
+            # สั่งเปิด LDPlayer (Instance 0)
+            await asyncio.to_thread(
+                subprocess.run, [LDCONSOLE_EXE, "launch", "--index", "0"],
+                capture_output=True, text=True, creationflags=0x08000000
+            )
+        except Exception as err:
+            append_log("publish", f"เปิด LDPlayer ไม่สำเร็จ: {err}")
+
+    # 3. เชื่อมต่อ ADB กับ LDPlayer เบื้องหลัง
+    def _bg_connect():
+        for _ in range(8):
+            time.sleep(3)
+            try:
+                run_adb("connect", "127.0.0.1:5555", timeout=5)
+                devs = list_devices()
+                if any("127.0.0.1" in d["serial"] or "5555" in d["serial"] or "emulator-" in d["serial"] for d in devs):
+                    break
+            except Exception:
+                pass
+
+    threading.Thread(target=_bg_connect, daemon=True).start()
+    return {"ok": True, "message": "ส่งคำสั่งเปิด Iriun และ LDPlayer เรียบร้อยแล้ว"}
+
+
+@app.post("/api/camera-injection/test-camera")
+async def camera_injection_test() -> dict:
+    """สั่งเปิดแอปกล้องบน LDPlayer เพื่อทดสอบภาพที่ส่งมาจากมือถือรีโมท"""
+    devs = await asyncio.to_thread(list_devices)
+    emu = next((d["serial"] for d in devs if "127.0.0.1" in d["serial"] or "5555" in d["serial"] or "emulator-" in d["serial"]), None)
+    if not emu:
+        await asyncio.to_thread(run_adb, "connect", "127.0.0.1:5555", timeout=5)
+        devs = await asyncio.to_thread(list_devices)
+        emu = next((d["serial"] for d in devs if "127.0.0.1" in d["serial"] or "5555" in d["serial"] or "emulator-" in d["serial"]), None)
+    if not emu:
+        raise HTTPException(status_code=400, detail="ยังไม่พบ LDPlayer ในระบบ ADB (127.0.0.1:5555) กรุณาเปิด LDPlayer ก่อน")
+
+    # สั่งเปิดกล้อง
+    run_adb("-s", emu, "shell", "am", "start", "-a", "android.media.action.STILL_IMAGE_CAMERA")
+    return {"ok": True, "serial": emu, "message": f"สั่งเปิดแอปกล้องบน {emu} เรียบร้อย"}
 
 
 @app.post("/api/phone/key")
@@ -3674,6 +4779,15 @@ def _read_phone_health(serial: str, *, force: bool = False) -> dict:
     return data
 
 
+def _publish_needs_phone_state(serial: str) -> bool:
+    """A stopped draft still owns its media and app state until resumed/reset."""
+    with _progress_lock:
+        rows = [row for row in _progress.values() if row.get("serial") == serial
+                and row.get("total", 0) > 7]
+        latest = max(rows, key=lambda row: row.get("started_at") or "", default={})
+        return latest.get("status") in {"running", "failed", "stopped"}
+
+
 def _clean_phone_when_free(serial: str) -> None:
     """เคลียร์เครื่องหนึ่งเครื่อง — **ต่อคิวปกติ รองานที่ทำอยู่ให้จบก่อน**"""
     import phone_queue                                          # noqa: PLC0415
@@ -3694,6 +4808,10 @@ def _clean_phone_when_free(serial: str) -> None:
         with phone_queue.slot(serial, owner="ตัวเฝ้าหน่วยความจำ",
                               task="เคลียร์แรม/เนื้อที่", lane="ดูแลเครื่อง",
                               timeout=PHONE_CLEAN_WAIT, priority=True):
+            if _publish_needs_phone_state(serial):
+                _phone_cleaned_at[serial] = time.time()
+                append_log("publish", f"พักการล้าง {label} — ใบงานยังต้องใช้ไฟล์และหน้าจอเดิมเพื่อ Resume")
+                return
             before = _read_phone_health(serial, force=True)
             fb_phone_clean.clean(serial, adb=ADB,
                                  log=lambda text: append_log("publish", text))
@@ -4685,7 +5803,16 @@ async def wifi_disconnect(request: Request) -> dict:
 # เครื่องหลัก (localhost) มีสิทธิ์เต็มเสมอ · เครื่องอื่นในวง LAN ต้องรออนุมัติ
 # หน้าที่เปิดได้โดยไม่ต้องอนุมัติมีแค่หน้าถามสถานะกับหน้า /mobile เท่านั้น
 
-PUBLIC_PATHS = {"/mobile", "/send-link", "/api/access/status", "/api/system"}
+PUBLIC_PATHS = {
+    "/mobile",
+    "/send-link",
+    "/remote",
+    "/manifest-remote.json",
+    "/sw-remote.js",
+    "/api/access/status",
+    "/api/access/quick-approve",
+    "/api/system",
+}
 
 
 @app.middleware("http")
@@ -4693,13 +5820,16 @@ async def gate_remote_devices(request: Request, call_next):
     path = request.url.path
     if (
         access_control.is_local_request(request)
+        or access_control.is_tailscale_request(request)
         or path in PUBLIC_PATHS
         or path.startswith("/static/")
     ):
         return await call_next(request)
 
-    token = request.cookies.get(access_control.ACCESS_COOKIE, "") or request.headers.get(
-        access_control.ACCESS_TOKEN_HEADER, ""
+    token = (
+        request.query_params.get("token", "")
+        or request.cookies.get(access_control.ACCESS_COOKIE, "")
+        or request.headers.get(access_control.ACCESS_TOKEN_HEADER, "")
     )
     record = access_store.find_by_token(token)
     if record is None or record.get("status") != "approved":
@@ -4744,14 +5874,47 @@ async def mobile_page() -> FileResponse:
     )
 
 
+@app.get("/remote")
+async def remote_page() -> Response:
+    """ศูนย์ควบคุมและรีโมทหน้าจอมือถือ (PWA) สำหรับมือถือและแท็บเล็ต"""
+    html = (WEB_DIR / "remote.html").read_text(encoding="utf-8")
+    return Response(
+        content=html.replace("__VERSION__", _compute_version()),
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store, must-revalidate"},
+    )
+
+
+@app.get("/manifest-remote.json")
+async def remote_manifest() -> FileResponse:
+    return FileResponse(
+        WEB_DIR / "manifest-remote.json",
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/sw-remote.js")
+async def remote_service_worker() -> FileResponse:
+    return FileResponse(
+        WEB_DIR / "sw-remote.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+
 @app.get("/api/access/status")
 async def access_status(request: Request) -> JSONResponse:
     """มือถือถามว่า 'ฉันได้รับอนุญาตหรือยัง' — เครื่องใหม่จะถูกขึ้นทะเบียนอัตโนมัติ"""
     ip = access_control.client_ip(request)
+    is_admin = access_control.is_local_request(request) or access_control.is_tailscale_request(request)
     if access_control.is_local_request(request):
         return JSONResponse({
             "role": "admin", "status": "approved", "device": "เครื่องหลัก",
             "ip": ip, "mobile_url": mobile_url(),
+            "tailscale_url": access_control.tailscale_url(),
+            "can_approve": True,
         })
 
     user_agent = request.headers.get("user-agent", "")
@@ -4771,6 +5934,11 @@ async def access_status(request: Request) -> JSONResponse:
         "status": record.get("status", "pending"),
         "device": record.get("device"),
         "ip": ip,
+        "id": record.get("id"),
+        "is_tailscale": access_control.is_tailscale_request(request),
+        "can_approve": is_admin,
+        "mobile_url": mobile_url(),
+        "tailscale_url": access_control.tailscale_url(),
     }
     # ส่งโทเคนกลับให้เก็บใน localStorage ด้วย เพราะบางเบราว์เซอร์บนมือถือทิ้งคุกกี้
     # ถ้าไม่มีทางสำรอง ทุกครั้งที่ถามสถานะจะกลายเป็นเครื่องใหม่และไม่มีวันได้รับอนุมัติ
@@ -4787,16 +5955,22 @@ async def access_status(request: Request) -> JSONResponse:
 
 
 def require_admin(request: Request) -> None:
-    if not access_control.is_local_request(request):
+    if not (access_control.is_local_request(request) or access_control.is_tailscale_request(request)):
         raise HTTPException(
-            status_code=403, detail="จัดการสิทธิ์ได้จากเครื่องหลักเท่านั้น"
+            status_code=403, detail="จัดการสิทธิ์ได้จากเครื่องหลักหรือผ่านเส้นทาง Tailscale เท่านั้น"
         )
 
 
 @app.get("/api/access/devices")
 async def access_devices(request: Request) -> dict:
     require_admin(request)
-    return {"ok": True, "devices": access_store.listing(), "mobile_url": mobile_url()}
+    return {
+        "ok": True,
+        "devices": access_store.listing(),
+        "mobile_url": mobile_url(),
+        "tailscale_url": access_control.tailscale_url(),
+        "tailscale_remote_url": f"{access_control.tailscale_url()}/remote",
+    }
 
 
 @app.delete("/api/access/devices/revoked")
@@ -4808,6 +5982,28 @@ async def purge_revoked(request: Request) -> dict:
     """
     require_admin(request)
     return {"ok": True, "removed": access_store.purge_revoked()}
+
+
+@app.post("/api/access/quick-approve")
+async def quick_approve_self(request: Request) -> dict:
+    """อนุมัติอุปกรณ์ตนเองทันทีหากเปิดผ่านเส้นทาง Tailscale (route tail)"""
+    require_admin(request)
+    token = request.cookies.get(access_control.ACCESS_COOKIE, "") or request.headers.get(
+        access_control.ACCESS_TOKEN_HEADER, ""
+    )
+    record = access_store.find_by_token(token)
+    if record is None:
+        ip = access_control.client_ip(request)
+        for r in reversed(list(access_store.devices.values())):
+            if r.get("ip") == ip and r.get("status") == "pending":
+                record = r
+                break
+    if record is None:
+        raise HTTPException(status_code=404, detail="ไม่พบอุปกรณ์ที่รอการอนุมัติ")
+
+    updated = access_store.set_status(record["id"], "approved")
+    append_log("input", f"อนุมัติอุปกรณ์ผ่าน Tailscale: {record['device']} ({record['ip']})")
+    return {"ok": True, "device": access_control.public_device(updated)}
 
 
 @app.post("/api/access/devices/{device_id}/approve")
@@ -5951,6 +7147,7 @@ async def telegram_list_bots() -> dict:
             "id": bot["id"],
             "name": bot.get("name", bot["id"]),
             "role": bot.get("role", "facebook"),
+            "account": bot.get("account", ""),
             "chat_id": bot.get("chat_id", ""),
             "token_saved": bool(extra_bot_token(bot["id"])),
             "watching": bot["id"] in _extra_watchers,
@@ -6005,6 +7202,9 @@ async def telegram_add_bot(request: Request) -> dict:
         "role": role,
         "username": info.get("username", existing.get("username", "")),
         "chat_id": str(payload.get("chat_id", existing.get("chat_id", ""))).strip(),
+        # บอทโพสต์หนึ่งตัวดูแลหนึ่งบัญชี ชื่อนี้ต้องตรงกับทะเบียนมือถือเป๊ะ
+        # เพื่อให้คำสั่งจาก Telegram ไปยังเครื่องที่ล็อกอินบัญชีนั้นจริง ๆ
+        "account": str(payload.get("account", existing.get("account", ""))).strip()[:60],
     })
     if token:
         BOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -6339,11 +7539,14 @@ def _fb_serial(serial: str = "", *, allow_default: bool = True) -> str:
         if account:
             try:
                 serial = device_book.device_for_account(account)
-            except device_book.DeviceError:
-                # บัญชีนี้ยังไม่ได้ผูกกับเครื่องไหน — ตกไปใช้ทางเดิมข้างล่าง
-                # แต่ต้องบอกให้รู้ ไม่ใช่เงียบแล้วไปลงเครื่องที่เดาเอา
-                append_log("publish", f"⚠️ บัญชี {account} ยังไม่ได้ผูกกับมือถือ "
-                                      "เครื่องไหน — จะใช้เครื่องตัวหลักแทน")
+            except device_book.DeviceError as error:
+                # ห้ามถอยไปเครื่องตัวหลักเมื่อรู้อยู่แล้วว่างานเป็นของบัญชีใด
+                # โพสต์ไม่เริ่มยังสั่งใหม่ได้ แต่โพสต์ลงบัญชีผิดเรียกคืนไม่ได้
+                raise fb_auto_post.AutoPostError(
+                    f"บัญชี {account} ยังไม่ได้ผูกกับมือถือที่ใช้โพสต์ — "
+                    "ยกเลิกเพื่อป้องกันการโพสต์ผิดเครื่อง\n"
+                    f"{error}"
+                ) from error
     try:
         picked = device_book.resolve(serial, lane="post", allow_default=allow_default)
     except device_book.DeviceError as error:
@@ -6501,6 +7704,7 @@ FB_STATUS_LABEL = {
     fb_auto_post.STATUS_RUNNING: "กำลังโพสต์…",
     fb_auto_post.STATUS_DONE: "โพสต์เสร็จแล้ว",
     fb_auto_post.STATUS_FAILED: "ล้มเหลว",
+    fb_auto_post.STATUS_STOPPED: "หยุดไว้ — กด Resume เพื่อทำกลุ่มที่เหลือ",
     fb_auto_post.STATUS_CANCELLED: "ยกเลิกแล้ว",
 }
 
@@ -6520,6 +7724,8 @@ def _fb_card(job: dict) -> tuple[str, dict | None]:
         f"⏰ เวลาโพสต์: {_fb_when_text(job.get('run_at', '')) or '— กดเอง (/schedule)'}",
         f"สถานะ: {FB_STATUS_LABEL.get(job['status'], job['status'])}",
     ]
+    if job.get("saved"):
+        lines.append("💾 เก็บโพสต์นี้ไว้แล้ว · เรียกดูด้วย /recall")
 
     results = job.get("results") or []
     if results:
@@ -6564,6 +7770,10 @@ def _fb_card(job: dict) -> tuple[str, dict | None]:
         },
         {"text": "⬜ ไม่เลือกเลย", "callback_data": f"fb:none:{job['id']}"},
     ])
+    rows.append([{
+        "text": "✅ เก็บโพสต์แล้ว" if job.get("saved") else "💾 เก็บโพสต์",
+        "callback_data": f"fb:sv:{job['id']}",
+    }])
     ready = job["status"] == fb_auto_post.STATUS_READY and selected
     rows.append([
         {
@@ -6614,6 +7824,8 @@ def _fb_new_job(chat_id: str, **fields) -> dict:
             continue
         if old.get("run_at"):
             continue                 # ตั้งเวลาไว้แล้ว = ไม่ใช่ร่าง อย่าไปยุ่ง
+        if old.get("saved"):
+            continue                 # เก็บไว้ใน /recall = ไม่ใช่ร่างค้าง อย่าไปแตะ
         fb_jobs.update(old["id"], status=fb_auto_post.STATUS_CANCELLED)
         append_log("publish", f"[{old['id']}] ปิดร่างเก่าเพราะเริ่มงานใหม่")
         # บอกเฉพาะร่างที่มีเนื้อจริง — ร่างเปล่าไม่ต้องกวนผู้ใช้
@@ -6640,7 +7852,23 @@ def _fb_cancel_job(job_id: str) -> str:
     job = fb_jobs.get(job_id)
     if job is None:
         return "ไม่พบงานนี้"
-    fb_jobs.update(job_id, status=fb_auto_post.STATUS_CANCELLED)
+    updates = {"status": fb_auto_post.STATUS_CANCELLED}
+    if job.get("saved"):
+        updates["saved"] = False
+    fb_jobs.update(job_id, **updates)
+
+    # ถ้างานนี้ถูกเปิด/เรียกกลับมาจาก /recall (recalled_from) แล้วผู้ใช้กดยกเลิก
+    # ให้ปลดโพสต์ต้นทางออกจากคลัง /recall ด้วย ไม่ให้ค้างอยู่ในรายการ
+    source_id = job.get("recalled_from")
+    if source_id:
+        source_job = fb_jobs.get(source_id)
+        if source_job and source_job.get("saved"):
+            fb_jobs.update(source_id, saved=False)
+            append_log(
+                "publish",
+                f"[{job_id}] ยกเลิกงานที่เรียกมาจาก {source_id} — ปลดออกจากคลัง /recall แล้ว",
+            )
+
     # หยุดงานนี้ไม่ว่ามันไปรันอยู่บนเครื่องไหน — ของเดิมถามตัวรันตัวเดียวของระบบ
     # ซึ่งพอมีหลายเครื่องจะตอบว่า "ไม่ได้ทำงานนี้อยู่" แล้วมือถือก็โพสต์ต่อเงียบๆ
     stopped = fb_runner.stop_job(job_id)
@@ -6751,6 +7979,110 @@ def _fb_clone_job(job_id: str, chat_id: str) -> tuple[dict | None, str]:
         f"(รูป {len(images)} ใบ · คอมเมนต์ {len(comments)} ข้อความ)",
     )
     return fresh, ""
+
+
+RECALL_LIMIT = 12
+
+
+def _fb_recall_job(job_id: str, chat_id: str) -> tuple[dict | None, str]:
+    """เรียกโพสต์ที่เก็บไว้กลับมาเป็นงานใหม่ รวมถึงโพสต์ที่ยังไม่มีรูป"""
+    source = fb_jobs.get(job_id)
+    if source is None or not source.get("saved"):
+        return None, f"ไม่พบโพสต์ที่เก็บไว้ {job_id}"
+
+    caption = (source.get("caption") or "").strip()
+    old_shots = [p for p in (source.get("images") or [source.get("image", "")]) if p]
+    if not caption and not any(Path(p).is_file() for p in old_shots):
+        return None, f"โพสต์ {job_id} ไม่มีทั้งแคปชันและรูป เรียกกลับไม่ได้"
+
+    fresh = _fb_new_job(chat_id, caption=caption)
+    new_id = fresh["id"]
+    images = []
+    for order, path in enumerate(old_shots[:facebook_group_post.MAX_PHOTOS], 1):
+        copied = _fb_copy_asset(path, FB_POST_DIR / f"{new_id}-{order}.jpg")
+        if copied:
+            images.append(copied)
+
+    comments = _fb_comments(source)
+    comment_shots = []
+    for order, path in enumerate(_fb_comment_images(source), 1):
+        comment_shots.append(
+            _fb_copy_asset(path, FB_POST_DIR / f"{new_id}-c{order}.jpg") if path else ""
+        )
+
+    wanted = [g for g in (source.get("groups") or []) if fb_groups.get(g)]
+    status = (
+        fb_auto_post.STATUS_READY if caption and images
+        else fb_auto_post.STATUS_WAIT_IMAGE if caption
+        else fb_auto_post.STATUS_WAIT_CAPTION
+    )
+    changes = {
+        "image": images[0] if images else "", "images": images,
+        "comments": comments, "comment": comments[0] if comments else "",
+        "comment_images": comment_shots, "status": status,
+        "recalled_from": job_id,
+    }
+    if wanted:
+        changes["groups"] = wanted[:fb_auto_post.MAX_GROUPS_PER_POST]
+        changes["set"] = source.get("set", "")
+    fresh = fb_jobs.update(new_id, **changes) or fresh
+    append_log(
+        "publish",
+        f"เรียกโพสต์ที่เก็บไว้ {job_id} กลับมาเป็น {new_id} "
+        f"(รูป {len(images)} ใบ · คอมเมนต์ {len(comments)} ข้อความ)",
+    )
+    return fresh, ""
+
+
+def _fb_recall_card() -> tuple[str, dict | None]:
+    """รายการโพสต์ที่ผู้ใช้ตั้งใจกดเก็บไว้ ไม่ปนกับประวัติโพสต์ทั่วไป"""
+    items = fb_jobs.saved_listing()[:RECALL_LIMIT]
+    if not items:
+        return (
+            "ยังไม่มีโพสต์ที่เก็บไว้ — กด <b>💾 เก็บโพสต์</b> "
+            "บนการ์ดงานก่อน"
+        ), None
+
+    lines = ["🗂 <b>โพสต์ที่เก็บไว้</b> — กดชื่อเพื่อเรียกกลับ", ""]
+    rows = []
+    for order, job in enumerate(items, 1):
+        caption = (job.get("caption") or "").strip()
+        head = caption.splitlines()[0][:45] if caption else "(ยังไม่มีแคปชัน)"
+        images = [
+            p for p in (job.get("images") or [job.get("image", "")])
+            if p and Path(p).is_file()
+        ]
+        talk = len(_fb_comments(job))
+        saved_at = (job.get("saved_at") or job.get("created_at") or "")[5:16].replace("T", " ")
+        lines.append(
+            f"<b>{order}.</b> {telegram_bot._escape(head)}\n"
+            f"    <code>{job['id']}</code> · {saved_at} · 🖼{len(images)} · 💬{talk}"
+        )
+        row = [{
+            "text": f"↩️ {order}. {head[:24]}",
+            "callback_data": f"fb:rc:{job['id']}",
+        }]
+        if images:
+            row.append({
+                "text": f"📷{len(images)}",
+                "callback_data": f"fb:ri:{job['id']}",
+            })
+        row.append({
+            "text": "🗑",
+            "callback_data": f"fb:rx:{job['id']}",
+        })
+        rows.append(row)
+    lines += ["", "กดชื่อเพื่อสร้าง<b>งานใหม่</b> หรือกด 🗑 เพื่อลบออกจากคลัง"]
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def _fb_present_recalled_job(job: dict) -> dict:
+    """ส่งงานที่เรียกกลับเข้าเส้นทางเดียวกับรูป/แคปชันที่เพิ่งรับจาก Telegram"""
+    job = _fb_show_card(job)
+    # งานที่มีแคปชัน+รูปครบต้องเคารพ auto_start เหมือนงานที่เพิ่งส่งใหม่
+    # ส่วนงานที่ยังขาดอย่างใดอย่างหนึ่งจะรอรับข้อความ/รูปต่อผ่าน _telegram_* ตามปกติ
+    _fb_maybe_auto_start(job)
+    return job
 
 
 def _fb_repost_card() -> tuple[str, dict | None]:
@@ -6992,6 +8324,7 @@ FB_HELP = (
     "• /name &lt;รหัสกลุ่ม&gt; &lt;ชื่อ&gt; — ตั้งชื่อกลุ่ม\n\n"
     "<b>ดูผลงาน</b>\n"
     "• /queue — ดูคิวงานที่รอโพสต์\n"
+    "• /recall — เรียกดูโพสต์ที่กด 💾 เก็บโพสต์ ไว้\n"
     "• /repost — ทำโพสต์เก่าซ้ำ (เด้งรายการให้กดเลือก ลอกแคปชัน/รูป/คอมเมนต์มาครบ)\n"
     "• /status — เช็คสถานะ 4 อย่าง: โพสต์ · ถูกใจ · คอมเมนต์ · ถูกใจคอมเมนต์\n"
     "• /sets — ดูชุดกลุ่ม (มีเลขกำกับไว้อ้างอิง)\n"
@@ -8059,6 +9392,11 @@ def _fb_followup_delay(results: list[dict]) -> float:
     return AUTO_FOLLOWUP_DELAY if visible else AUTO_FOLLOWUP_SLOW_DELAY
 
 
+def _fb_auto_followup_enabled(serial: str) -> bool:
+    """เปิดรอบตามเก็บอัตโนมัติของเครื่องนี้หรือไม่ (/followup เองไม่เกี่ยว)."""
+    return bool(device_book.setting(serial, "auto_followup", True))
+
+
 def _fb_auto_followup(job_id: str, delay: float = AUTO_FOLLOWUP_DELAY,
                       serial: str = "") -> None:
     """ต่อสายไป "หาโพสต์จากแจ้งเตือน" ทันทีที่รอบโพสต์จบ
@@ -8995,6 +10333,9 @@ def _phone_clean_run(now: datetime | None = None, force: bool = False) -> str:
             # queue=False — ล้างเครื่องตอนเที่ยงคืนเป็นงานจร ไม่ว่างก็ข้าม
             with studio_shared.phone_lock(serial, timeout=3.0, poll=0.5,
                                           label=PHONE_CLEAN_OWNER, queue=False):
+                if _publish_needs_phone_state(serial):
+                    skipped.append(device_book.label(serial))
+                    continue
                 report = fb_phone_clean.clean(
                     serial, adb=ADB,
                     log=lambda line: append_log("publish", line),
@@ -9721,6 +11062,19 @@ def _telegram_command(chat_id: str, text: str) -> bool:
         _, reply = claude_enqueue(chat_id, label, note)
         _fb_say(chat_id, reply)
         return True
+    if command == "/recall":
+        target = argument.strip()
+        if not target:
+            message, keyboard = _fb_recall_card()
+            _fb_say(chat_id, message, keyboard)
+            return True
+        job, problem = _fb_recall_job(target, chat_id)
+        if job is None:
+            _fb_say(chat_id, problem)
+            return True
+        _fb_present_recalled_job(job)
+        _fb_say(chat_id, f"↩️ เรียกโพสต์ {target} → งานใหม่ <b>{job['id']}</b>")
+        return True
     if command == "/repost":
         # ไม่ระบุรหัส = เด้งรายการให้กดเลือก (ไม่เดาให้ — ทำซ้ำผิดโพสต์แก้คืนยาก)
         target = argument.strip()
@@ -9943,6 +11297,29 @@ def _telegram_callback(chat_id: str, data: str, callback: dict) -> str:
         _fb_show_card(job)
         return f"ทำซ้ำเป็นงาน {job['id']} แล้ว"
 
+    if action == "rc":
+        job, problem = _fb_recall_job(rest, chat_id)
+        if job is None:
+            return problem[:180]
+        _fb_present_recalled_job(job)
+        return f"เรียกกลับเป็นงาน {job['id']} แล้ว"
+
+    if action == "rx":
+        target_job = fb_jobs.get(rest)
+        if target_job and target_job.get("saved"):
+            fb_jobs.update(rest, saved=False)
+            append_log("publish", f"[{rest}] ผู้ใช้กดลบออกจากคลัง /recall")
+            message, keyboard = _fb_recall_card()
+            msg = callback.get("message") or {}
+            token, _ = _fb_telegram()
+            if token and msg.get("message_id"):
+                try:
+                    telegram_bot.edit_message(token, chat_id, msg["message_id"], message, keyboard)
+                except telegram_bot.TelegramError:
+                    pass
+            return "ลบออกจาก /recall แล้ว"
+        return "ไม่พบโพสต์นี้ในคลังแล้ว"
+
     if action == "pick":
         return _fb_apply_pick(chat_id, rest)
     if action == "pickx":
@@ -9964,7 +11341,7 @@ def _telegram_callback(chat_id: str, data: str, callback: dict) -> str:
         return "ไม่พบงานนี้แล้ว"
     # "x" (ยกเลิก) ต้องผ่านด่านนี้ด้วย — งานที่กำลังโพสต์อยู่ไม่ได้อยู่ใน
     # OPEN_STATUSES ถ้าตีกลับตรงนี้ ปุ่มยกเลิกจะใช้ไม่ได้ตอนที่จำเป็นที่สุด
-    if job["status"] not in fb_auto_post.OPEN_STATUSES and action not in ("go", "x"):
+    if job["status"] not in fb_auto_post.OPEN_STATUSES and action not in ("go", "x", "sv"):
         return "งานนี้ปิดไปแล้ว"
 
     note = ""
@@ -9986,6 +11363,18 @@ def _telegram_callback(chat_id: str, data: str, callback: dict) -> str:
     elif action == "none":
         job = fb_jobs.update(job_id, groups=[]) or job
         note = "ล้างการเลือกแล้ว"
+    elif action == "sv":
+        if job.get("saved"):
+            note = "โพสต์นี้เก็บไว้แล้ว — ดูได้ที่ /recall"
+        elif not (job.get("caption") or job.get("image") or job.get("images")):
+            return "ยังไม่มีแคปชันหรือรูปให้เก็บ"
+        else:
+            job = fb_jobs.update(
+                job_id, saved=True,
+                saved_at=datetime.now().isoformat(timespec="seconds"),
+            ) or job
+            append_log("publish", f"[{job_id}] เก็บโพสต์ไว้เรียกด้วย /recall")
+            note = "เก็บโพสต์แล้ว — ดูได้ที่ /recall"
     elif action == "x":
         note = _fb_cancel_job(job_id)
         job = fb_jobs.get(job_id) or job
@@ -10025,7 +11414,48 @@ def _fb_warn_comment_quota(job: dict, groups: list[str], serial: str = "") -> st
     return note
 
 
-def _fb_run_job(job_id: str, queued: bool = False) -> str:
+def _fb_pending_groups(job: dict) -> list[str]:
+    """กลุ่มที่ยังโพสต์ไม่สำเร็จ เรียงตามลำดับเดิมของใบงาน
+
+    ใช้ ``posted is True`` เป็นหลักฐานเดียวว่ากลุ่มนั้นจบแล้ว ข้อผิดพลาดหรือ
+    รายการที่ถูกข้ามเพราะกด Stop ต้องกลับมาทำต่อได้ แต่กลุ่มที่โพสต์สำเร็จแล้ว
+    ห้ามถูกส่งซ้ำเมื่อกด Resume
+    """
+    posted = {
+        str(row.get("group_id") or "")
+        for row in (job.get("results") or [])
+        if row.get("posted") is True
+    }
+    return [
+        group_id for group_id in dict.fromkeys(job.get("groups") or [])
+        if group_id and str(group_id) not in posted
+    ]
+
+
+def _fb_merge_run_results(job: dict, fresh: list[dict]) -> list[dict]:
+    """รวมผลรอบ Resume เข้ากับผลเดิม โดยหนึ่งกลุ่มมีผลเพียงแถวเดียว."""
+    by_group: dict[str, dict] = {}
+    for row in [*(job.get("results") or []), *(fresh or [])]:
+        group_id = str(row.get("group_id") or "")
+        if not group_id:
+            continue
+        old = by_group.get(group_id, {})
+        # ค่ารอบใหม่อัปเดตรายละเอียดได้ แต่ห้ามลด posted=True ที่ยืนยันแล้ว
+        merged = {**old, **row}
+        if old.get("posted") is True:
+            merged["posted"] = True
+        if merged.get("posted") is True:
+            merged.pop("error", None)
+        by_group[group_id] = merged
+    ordered = []
+    for group_id in dict.fromkeys(job.get("groups") or []):
+        if str(group_id) in by_group:
+            ordered.append(by_group.pop(str(group_id)))
+    ordered.extend(by_group.values())
+    return ordered
+
+
+def _fb_run_job(job_id: str, queued: bool = False, resume: bool = False) -> str:
     """ตรวจความพร้อมแล้วสั่งรัน — คืนข้อความบอกผลการสั่ง (ว่าง = เริ่มแล้ว)"""
     job = fb_jobs.get(job_id)
     if job is None:
@@ -10044,9 +11474,13 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
     if not images:
         return "ยังไม่มีรูป หรือไฟล์รูปหาย"
     image = images if len(images) > 1 else images[0]
-    groups = [g for g in (job.get("groups") or []) if g]
+    previous_results = list(job.get("results") or []) if resume else []
+    groups = _fb_pending_groups(job) if resume else [g for g in (job.get("groups") or []) if g]
     if not groups:
-        return "ยังไม่ได้เลือกกลุ่มสักกลุ่ม"
+        return (
+            "ทุกกลุ่มในใบงานนี้โพสต์สำเร็จแล้ว — ไม่มีงานเหลือให้ Resume"
+            if resume else "ยังไม่ได้เลือกกลุ่มสักกลุ่ม"
+        )
     # เตือนเรื่องโควตาคอมเมนต์ **ก่อนออกตัว** ไม่ใช่ไปตันทีละกลุ่มกลางทาง
     _fb_warn_comment_quota(job, groups, serial)
     if len(groups) > fb_auto_post.MAX_GROUPS_PER_POST:
@@ -10098,17 +11532,36 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
         _fb_say(chat_id, step + fb_auto_post.result_line(entry, fb_groups.label))
 
     def on_done(results: list[dict], error: str) -> None:
-        status = fb_auto_post.STATUS_FAILED if error else fb_auto_post.STATUS_DONE
+        latest = fb_jobs.get(job_id) or job
+        merged_results = _fb_merge_run_results(
+            {**job, "results": previous_results}, results,
+        ) if resume else results
+        stopped = (
+            latest.get("status") in {
+                fb_auto_post.STATUS_STOPPED, fb_auto_post.STATUS_CANCELLED,
+            }
+            or fb_runner.for_device(serial).stop_flag.is_set()
+        )
+        status = (
+            latest.get("status")
+            if latest.get("status") in {
+                fb_auto_post.STATUS_STOPPED, fb_auto_post.STATUS_CANCELLED,
+            }
+            else (fb_auto_post.STATUS_FAILED if error else fb_auto_post.STATUS_DONE)
+        )
         current = fb_jobs.update(
-            job_id, status=status, results=results,
+            job_id, status=status, results=merged_results,
             finished_at=datetime.now().isoformat(timespec="seconds"),
         )
         if current:
             _fb_show_card(current)
-        summary = fb_auto_post.summarize(results, fb_groups.label)
-        posted = sum(1 for r in results if r.get("posted"))
-        chain = bool(posted) and not fb_runner.for_device(serial).stop_flag.is_set()
-        delay = _fb_followup_delay(results)
+        summary = fb_auto_post.summarize(merged_results, fb_groups.label)
+        posted = sum(1 for r in merged_results if r.get("posted"))
+        # รอบตามเก็บอัตโนมัติแยกจาก /followup ที่เจ้าของสั่งเองโดยตั้งใจ
+        # อ่านค่าของเครื่องนั้นเพื่อให้หลายบัญชีเลือกพฤติกรรมต่างกันได้ในอนาคต
+        auto_followup = _fb_auto_followup_enabled(serial)
+        chain = bool(posted) and not stopped and auto_followup
+        delay = _fb_followup_delay(merged_results)
         held = delay > AUTO_FOLLOWUP_DELAY      # ไม่เห็นโพสต์เลย = รออนุมัติ
         _fb_say(chat_id, f"🏁 <b>งาน {job_id} จบแล้ว</b>\n{summary}" + (
             f"\n\n⚠️ {telegram_bot._escape(error)}" if error else ""
@@ -10183,11 +11636,25 @@ def _fb_run_job(job_id: str, queued: bool = False) -> str:
     except fb_auto_post.AutoPostError as error:
         return str(error)
 
+    started_at = job.get("started_at") or datetime.now().isoformat(timespec="seconds")
     fb_jobs.update(
-        job_id, status=fb_auto_post.STATUS_RUNNING, results=[], serial=serial,
-        started_at=datetime.now().isoformat(timespec="seconds"),
+        job_id, status=fb_auto_post.STATUS_RUNNING,
+        results=previous_results if resume else [], serial=serial,
+        started_at=started_at, finished_at=None, ui_reset=False,
+        resumed_at=(datetime.now().isoformat(timespec="seconds") if resume else None),
     )
-    append_log("publish", f"[{job_id}] เริ่มโพสต์ {len(groups)} กลุ่ม ด้วย {serial}")
+    action = "Resume" if resume else "เริ่มโพสต์"
+    skipped = len((job.get("groups") or [])) - len(groups)
+    append_log(
+        "publish",
+        f"[{job_id}] {action} {len(groups)} กลุ่ม ด้วย {serial}"
+        + (f" · ข้ามกลุ่มที่โพสต์แล้ว {skipped}" if resume and skipped else ""),
+    )
+    fb_jobs.append_log(
+        job_id,
+        f"{action} — เหลือ {len(groups)}/{len(job.get('groups') or groups)} กลุ่ม"
+        + (f" · ข้ามที่สำเร็จแล้ว {skipped}" if resume and skipped else ""),
+    )
     _fb_say(
         chat_id,
         f"🚀 <b>เริ่มโพสต์ {len(groups)} กลุ่ม</b>\n"
@@ -10228,6 +11695,8 @@ async def fb_list_groups() -> dict:
         "gap_min": settings.get("gap_min", 15),
         "gap_max": settings.get("gap_max", 20),
         "auto_start": bool(settings.get("auto_start")),
+        # ปิดได้เฉพาะรอบที่ต่อท้ายอัตโนมัติ — /followup ที่เจ้าของสั่งเองยังใช้ได้
+        "auto_followup": bool(settings.get("auto_followup", True)),
         # ค่าตั้งต้นเปิด — ไม่ได้ตั้งไว้ต้องแปลว่า "เปิด" ไม่ใช่ "ปิด"
         "phone_clean": bool(settings.get("phone_clean", True)),
         "screen_saver": bool(settings.get("screen_saver", True)),
@@ -10408,7 +11877,7 @@ async def fb_save_settings(request: Request) -> dict:
         changes["gap_min"] = max(5, int(payload.get("gap_min") or 15))
     if "gap_max" in payload:
         changes["gap_max"] = max(5, int(payload.get("gap_max") or 20))
-    for key in ("auto_start", "phone_clean", "screen_saver"):
+    for key in ("auto_start", "auto_followup", "phone_clean", "screen_saver"):
         if key in payload:
             changes[key] = bool(payload[key])
 
@@ -10446,20 +11915,277 @@ async def fb_save_settings(request: Request) -> dict:
 
 @app.get("/api/fb/jobs")
 async def fb_list_jobs() -> dict:
-    jobs = fb_jobs.listing()[:10]
+    all_jobs = fb_jobs.listing()
+    jobs = all_jobs[:10]
+    running_on = fb_runner.running()
+    running_ids = set(running_on.values())
+
+    def view(job: dict) -> dict:
+        pending = _fb_pending_groups(job)
+        results = job.get("results") or []
+        return {
+            **job,
+            "has_image": bool(job.get("image")) and Path(job["image"]).is_file(),
+            "group_names": [fb_groups.label(g) for g in (job.get("groups") or [])],
+            "pending_groups": pending,
+            "posted_count": sum(1 for row in results if row.get("posted") is True),
+            "latest_step": (job.get("log") or [""])[-1],
+            "controls": {
+                "can_resume": (
+                    job.get("status") in {
+                        fb_auto_post.STATUS_READY,
+                        fb_auto_post.STATUS_STOPPED,
+                        fb_auto_post.STATUS_FAILED,
+                        fb_auto_post.STATUS_CANCELLED,
+                    }
+                    and bool(pending)
+                    and job.get("id") not in running_ids
+                ),
+                "can_reset": job.get("id") not in running_ids,
+                # Stop ตั้งใจให้กดได้ตลอด แม้ตอนว่าง endpoint จะตอบแบบ idempotent
+                "can_stop": True,
+            },
+        }
+
+    # งานที่กำลังใช้มือถือมีสิทธิ์สูงสุดเสมอ แม้เคยกด Reset กล่องไว้ ส่วนตอนว่าง
+    # ให้แสดงงานล่าสุดใบเดียว; Reset ใบนั้นแล้วกล่องต้องว่าง ไม่ไหลย้อนเอางานเก่า
+    # มาแสดงแทนจนผู้ใช้เข้าใจผิดว่าเป็นงานปัจจุบัน
+    control = next((job for job in all_jobs if job.get("id") in running_ids), None)
+    if control is None and all_jobs and not all_jobs[0].get("ui_reset"):
+        control = all_jobs[0]
     return {
         "ok": True,
-        "running": fb_runner.any_busy(),
-        "running_on": fb_runner.running(),
-        "jobs": [
-            {
-                **job,
-                "has_image": bool(job.get("image")) and Path(job["image"]).is_file(),
-                "group_names": [fb_groups.label(g) for g in (job.get("groups") or [])],
-            }
-            for job in jobs
-        ],
+        "running": bool(running_on),
+        "running_on": running_on,
+        "control_job": view(control) if control else None,
+        "jobs": [view(job) for job in jobs],
     }
+
+
+FB_WEB_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+FB_WEB_IMAGE_MAX_BYTES = 15 * 1024 * 1024
+
+
+async def _fb_read_web_image(upload: UploadFile | None, label: str):
+    """อ่านรูปจากฟอร์มเว็บพร้อมด่านชนิด/ขนาด คืน ``(suffix, bytes)`` หรือ None."""
+    if upload is None or not upload.filename:
+        return None
+    suffix = Path(upload.filename).suffix.lower()
+    if suffix not in FB_WEB_IMAGE_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label}: รองรับเฉพาะ JPG, PNG และ WebP",
+        )
+    content = await upload.read()
+    await upload.close()
+    if not content:
+        raise HTTPException(status_code=400, detail=f"{label}: ไฟล์ว่าง")
+    if len(content) > FB_WEB_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"{label}: ไฟล์ใหญ่เกิน 15 MB")
+    return suffix, content
+
+
+def _fb_web_target(serial: str) -> tuple[str, str]:
+    """คืน (serial, account) ที่หน้าเว็บระบุ โดยห้ามถอยไปเครื่องอื่น."""
+    try:
+        clean = device_book.resolve(serial, lane="post", allow_default=False)
+    except device_book.DeviceError as error:
+        raise fb_auto_post.AutoPostError(str(error)) from error
+    if clean not in device_book.enabled_serials("post"):
+        raise fb_auto_post.AutoPostError(
+            f"มือถือ {device_book.label(clean)} ยังไม่ได้เปิดสายงานโพสต์ Facebook"
+        )
+    account = device_book.account(clean)
+    if not account:
+        raise fb_auto_post.AutoPostError(
+            f"มือถือ {device_book.label(clean)} ยังไม่ได้ผูกชื่อบัญชี Facebook"
+        )
+    return clean, account
+
+
+def _fb_create_web_job_data(
+    *, serial: str, caption: str, group_ids: list[str], comments: list[str],
+    post_assets: list[tuple[str, bytes]],
+    comment_assets: list[tuple[str, bytes] | None],
+) -> tuple[dict, str]:
+    """สร้างงานช่องทางเว็บลง store เดียวกับ Telegram และบันทึกรูปอย่างปลอดภัย."""
+    clean, account = _fb_web_target(serial)
+    text = str(caption or "").strip()
+    if not text:
+        raise fb_auto_post.AutoPostError("ต้องใส่แคปชันก่อน")
+    if not post_assets:
+        raise fb_auto_post.AutoPostError("ต้องเลือกรูปโพสต์อย่างน้อย 1 ใบ")
+    if len(post_assets) > facebook_group_post.MAX_PHOTOS:
+        raise fb_auto_post.AutoPostError(
+            f"รูปโพสต์ใส่ได้สูงสุด {facebook_group_post.MAX_PHOTOS} ใบ"
+        )
+
+    picked = list(dict.fromkeys(str(g or "").strip() for g in group_ids if str(g or "").strip()))
+    if not picked:
+        raise fb_auto_post.AutoPostError("ต้องเลือกกลุ่มอย่างน้อย 1 กลุ่ม")
+    if len(picked) > fb_auto_post.MAX_GROUPS_PER_POST:
+        raise fb_auto_post.AutoPostError(
+            f"เลือกกลุ่มได้สูงสุด {fb_auto_post.MAX_GROUPS_PER_POST} กลุ่มต่อโพสต์"
+        )
+
+    clean_comments = [str(value or "").strip() for value in comments]
+    clean_comments = clean_comments[:facebook_group_post.MAX_COMMENTS]
+    while len(clean_comments) < facebook_group_post.MAX_COMMENTS:
+        clean_comments.append("")
+    assets = list(comment_assets[:facebook_group_post.MAX_COMMENTS])
+    while len(assets) < facebook_group_post.MAX_COMMENTS:
+        assets.append(None)
+    for index, asset in enumerate(assets):
+        if asset and not clean_comments[index]:
+            raise fb_auto_post.AutoPostError(
+                f"รูปคอมเมนต์ช่อง {index + 1} ต้องมีข้อความคอมเมนต์ด้วย"
+            )
+
+    written: list[Path] = []
+    job: dict | None = None
+    with fb_auto_post.use_account(account):
+        registered = {g["group_id"] for g in fb_groups.listing()}
+        unknown = [g for g in picked if g not in registered]
+        if unknown:
+            raise fb_auto_post.AutoPostError(
+                "มีกลุ่มที่ไม่ได้อยู่ในทะเบียนของบัญชีนี้: " + " · ".join(unknown)
+            )
+        _token, chat_id = _account_channel(account)
+        job = fb_jobs.add(
+            caption=text[:5000], comments=[], comment="", groups=picked,
+            source="web", chat_id=chat_id, serial=clean,
+            status=fb_auto_post.STATUS_READY,
+        )
+        try:
+            images = []
+            for order, (suffix, content) in enumerate(post_assets, 1):
+                target = FB_POST_DIR / f"{job['id']}-{order}{suffix}"
+                target.write_bytes(content)
+                written.append(target)
+                images.append(str(target))
+
+            kept_comments: list[str] = []
+            comment_images: list[str] = []
+            for index, value in enumerate(clean_comments):
+                if not value:
+                    continue
+                kept_comments.append(value[:2000])
+                asset = assets[index]
+                if asset:
+                    suffix, content = asset
+                    target = FB_POST_DIR / f"{job['id']}-c{len(kept_comments)}{suffix}"
+                    target.write_bytes(content)
+                    written.append(target)
+                    comment_images.append(str(target))
+                else:
+                    comment_images.append("")
+
+            job = fb_jobs.update(
+                job["id"], image=images[0], images=images,
+                comment=kept_comments[0] if kept_comments else "",
+                comments=kept_comments, comment_images=comment_images,
+            ) or job
+        except Exception:
+            for path in written:
+                path.unlink(missing_ok=True)
+            fb_jobs.update(job["id"], status=fb_auto_post.STATUS_CANCELLED)
+            raise
+    return job, account
+
+
+@app.post("/api/fb/jobs")
+async def fb_create_web_job(
+    serial: str = Form(...), caption: str = Form(...), groups: str = Form("[]"),
+    comment_1: str = Form(""), comment_2: str = Form(""),
+    run_now: str = Form("false"),
+    post_images: list[UploadFile] = File(...),
+    comment_image_1: UploadFile | None = File(None),
+    comment_image_2: UploadFile | None = File(None),
+) -> dict:
+    """ช่องทางเว็บสำหรับสร้างงานครบชุด; Telegram เดิมไม่ถูกเปลี่ยนทางเข้า."""
+    try:
+        parsed_groups = json.loads(groups)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="รายการกลุ่มไม่ถูกต้อง") from error
+    if not isinstance(parsed_groups, list):
+        raise HTTPException(status_code=400, detail="รายการกลุ่มต้องเป็น list")
+
+    if len(post_images) > facebook_group_post.MAX_PHOTOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"รูปโพสต์ใส่ได้สูงสุด {facebook_group_post.MAX_PHOTOS} ใบ",
+        )
+    post_assets = []
+    for order, upload in enumerate(post_images, 1):
+        asset = await _fb_read_web_image(upload, f"รูปโพสต์ใบที่ {order}")
+        if asset:
+            post_assets.append(asset)
+    comment_assets = [
+        await _fb_read_web_image(comment_image_1, "รูปคอมเมนต์ช่อง 1"),
+        await _fb_read_web_image(comment_image_2, "รูปคอมเมนต์ช่อง 2"),
+    ]
+    try:
+        job, account = await asyncio.to_thread(
+            _fb_create_web_job_data,
+            serial=serial, caption=caption, group_ids=parsed_groups,
+            comments=[comment_1, comment_2], post_assets=post_assets,
+            comment_assets=comment_assets,
+        )
+    except fb_auto_post.AutoPostError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    wants_start = run_now.lower() == "true"
+    started = False
+    note = ""
+    if wants_start:
+        def start_scoped() -> str:
+            with fb_auto_post.use_account(account):
+                return _fb_run_job(job["id"])
+        note = await asyncio.to_thread(start_scoped)
+        started = not note
+    append_log(
+        "publish",
+        f"[{job['id']}] รับงานจากหน้าเว็บ — รูป {len(post_assets)} ใบ · "
+        f"คอมเมนต์ {sum(bool(x.strip()) for x in (comment_1, comment_2))} ช่อง · "
+        f"{len(parsed_groups)} กลุ่ม" + (
+            " · เริ่มโพสต์แล้ว" if started else (f" · ยังเริ่มไม่ได้: {note}" if note else "")
+        ),
+    )
+    return {
+        "ok": True, "job_id": job["id"], "started": started,
+        "message": (
+            f"สร้างงาน {job['id']} และเริ่มโพสต์แล้ว" if started else (
+                f"สร้างงาน {job['id']} ไว้แล้ว แต่ยังเริ่มไม่ได้ — {note}"
+                if note else f"สร้างงาน {job['id']} พร้อมโพสต์แล้ว"
+            )
+        ),
+    }
+
+
+def _fb_job_media_path(job: dict, kind: str, index: int) -> Path:
+    if kind == "post":
+        items = job.get("images") or ([job.get("image")] if job.get("image") else [])
+    elif kind == "comment":
+        items = job.get("comment_images") or []
+    else:
+        raise HTTPException(status_code=404, detail="ไม่พบชนิดรูป")
+    if index < 0 or index >= len(items) or not items[index]:
+        raise HTTPException(status_code=404, detail="ไม่พบรูปช่องนี้")
+    path = Path(items[index])
+    if path.parent.resolve() != FB_POST_DIR.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail="ไม่พบไฟล์รูป")
+    return path
+
+
+@app.get("/api/fb/jobs/{job_id}/media/{kind}/{index}")
+async def fb_job_media(job_id: str, kind: str, index: int) -> FileResponse:
+    job = fb_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+    return FileResponse(
+        _fb_job_media_path(job, kind, index),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/fb/jobs/{job_id}/image")
@@ -10481,6 +12207,66 @@ async def fb_run(job_id: str) -> dict:
     if note:
         raise HTTPException(status_code=400, detail=note)
     return {"ok": True, "message": "เริ่มโพสต์แล้ว — ดูความคืบหน้าที่ log"}
+
+
+@app.post("/api/fb/jobs/{job_id}/resume")
+async def fb_resume(job_id: str) -> dict:
+    """ทำต่อเฉพาะกลุ่มที่ยังไม่มีผล ``posted=True`` เพื่อกันโพสต์ซ้ำ."""
+    job = fb_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+    if fb_runner.job_running(job_id):
+        raise HTTPException(status_code=409, detail="งานนี้ยังหยุดไม่สนิท — รอให้มือถือหยุดก่อน")
+    pending_count = len(_fb_pending_groups(job))
+    if not pending_count:
+        raise HTTPException(status_code=400, detail="ทุกกลุ่มโพสต์สำเร็จแล้ว ไม่มีงานเหลือให้ Resume")
+    fb_jobs.update(job_id, ui_reset=False)
+    note = await asyncio.to_thread(_fb_run_job, job_id, False, True)
+    if note:
+        raise HTTPException(status_code=400, detail=note)
+    return {
+        "ok": True,
+        "message": f"Resume งาน {job_id} แล้ว — ทำเฉพาะ {pending_count} กลุ่มที่ยังไม่สำเร็จ",
+    }
+
+
+@app.post("/api/fb/jobs/{job_id}/stop")
+async def fb_stop(job_id: str) -> dict:
+    """หยุดสายโพสต์ที่จุดปลอดภัย และเก็บผลเดิมไว้ให้ Resume ได้."""
+    job = fb_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+    serial = fb_runner.job_running(job_id)
+    if serial:
+        fb_jobs.update(job_id, status=fb_auto_post.STATUS_STOPPED, ui_reset=False)
+        fb_jobs.append_log(job_id, "ผู้ใช้กด Stop — กำลังหยุดที่จุดปลอดภัย")
+        fb_runner.stop_job(job_id)
+        append_log("publish", f"[{job_id}] Stop จากหน้า Group Facebook — รอจบกลุ่มปัจจุบัน")
+        return {"ok": True, "message": "รับคำสั่ง Stop แล้ว — จะหยุดที่จุดปลอดภัย"}
+    if job.get("status") == fb_auto_post.STATUS_READY:
+        fb_jobs.update(job_id, status=fb_auto_post.STATUS_STOPPED, ui_reset=False)
+        fb_jobs.append_log(job_id, "ผู้ใช้กด Stop ก่อนเริ่มงาน")
+        append_log("publish", f"[{job_id}] Stop ก่อนเริ่มจากหน้า Group Facebook")
+        return {"ok": True, "message": "หยุดงานที่รอไว้แล้ว — กด Resume เมื่อต้องการทำต่อ"}
+    if job.get("status") == fb_auto_post.STATUS_STOPPED:
+        return {"ok": True, "message": "สายโพสต์งานนี้หยุดอยู่แล้ว"}
+    return {"ok": True, "message": "ตอนนี้ไม่มีงาน Facebook Group กำลังทำ"}
+
+
+@app.post("/api/fb/jobs/{job_id}/reset")
+async def fb_reset(job_id: str) -> dict:
+    """ล้างเฉพาะกล่องสถานะหน้าเว็บให้ว่าง ไม่ลบงาน/ผลและไม่แตะมือถือ."""
+    job = fb_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+    if fb_runner.job_running(job_id):
+        raise HTTPException(status_code=409, detail="ยังมีงานกำลังทำ — กด Stop และรอให้หยุดก่อน")
+    fb_jobs.update(job_id, ui_reset=True)
+    append_log("publish", f"[{job_id}] Reset กล่องสถานะ Group Facebook เป็นว่าง")
+    return {
+        "ok": True,
+        "message": "Reset แล้ว — กล่องสถานะว่าง งานและผลเดิมยังอยู่ในประวัติ",
+    }
 
 
 @app.post("/api/fb/jobs/{job_id}/cancel")

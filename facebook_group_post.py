@@ -22,6 +22,7 @@ import re
 import subprocess
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 import fb_comment_guard
@@ -33,7 +34,19 @@ FB_PACKAGE = "com.facebook.katana"
 REMOTE_DIR = "/sdcard/Pictures/pipeline"
 ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
 # คีย์บอร์ดที่สลับไปแล้วผู้ใช้พิมพ์เองไม่ได้ — ข้ามตอนหาตัวสำรอง
-SKIP_IME_HINTS = ("autofill", "kdeconnect", "remotekeyboard")
+#
+# **คีย์บอร์ดเสียงพูดต้องอยู่ในรายการนี้ด้วย** (11 ก.ย. 2569) มันอยู่ใน
+# `ime list -s` เหมือนคีย์บอร์ดทั่วไป แต่กดช่องพิมพ์แล้วขึ้นไมโครโฟน
+# ไม่ใช่แป้นพิมพ์ — เจ้าของต้องแตะปุ่มพูดทุกครั้งที่จะพิมพ์เอง
+#
+# บนเครื่อง DATCW8GQUOCUWK9P คีย์บอร์ดเสียงเป็นตัวแรกของรายการพอดี
+# ตัวหาคีย์บอร์ดสำรองซึ่งคืน "ตัวแรกที่ไม่ใช่ ADBKeyboard" จึงหยิบตัวนั้น
+# วัดจากบันทึกจริง: เกิด 61 ครั้งจาก 306 ครั้ง และลามเองทุกรอบถัดไป
+# (เหตุผลเต็มอยู่ที่ app.py จุดเดียวกัน)
+SKIP_IME_HINTS = (
+    "autofill", "kdeconnect", "remotekeyboard",
+    "voiceime", "voiceinput", "speech", "googletts",
+)
 
 MIN_GAP_SECONDS = 5.0
 # ระยะห่างแบบสุ่มระหว่างกลุ่ม — เว้นเท่ากันเป๊ะทุกครั้งเป็นรูปแบบที่ระบบกันสแปม
@@ -42,7 +55,92 @@ DEFAULT_GAP_RANGE = (15.0, 20.0)
 UI_TIMEOUT = 25.0
 # จำนวนรอบเปิดกลุ่ม — แต่ละรอบ force-stop แล้วเปิดใหม่ รอช่องเขียนโพสต์ 30 วินาที
 OPEN_GROUP_TRIES = 3
-STEP_SETTLE = 1.5
+
+# ทุกปุ่มยังถูกหาใหม่จาก UI จริงเหมือนเดิม แต่ไม่แตะจุดกึ่งกลางเดิมเป๊ะทุกครั้ง.
+# รัศมี 5 px เล็กพอสำหรับปุ่ม Facebook ที่ใช้งานจริงบนจอ 720 px และกันขอบจอ
+# ซ้ำอีกชั้นใน `_jitter_tap_point`.
+TAP_JITTER_PX = 5
+TAP_SETTLE_RANGE = (1.15, 1.95)
+
+# จังหวะพิมพ์แคปชันผ่าน ADBKeyboard — ส่งทีละหน่วยอักษรแทนการยัดทั้งย่อหน้า
+# ในครั้งเดียว. ช่วงแรกใช้กับตัวอักษรทั่วไป ส่วนช่วงหลังใช้หลังเว้นวรรค/วรรคตอน
+# ซึ่งตามธรรมชาติจะหยุดนานกว่าเล็กน้อย.
+TYPE_DELAY_RANGE = (0.05, 0.16)
+TYPE_PAUSE_RANGE = (0.16, 0.42)
+
+
+def _jitter_tap_point(
+    point: tuple[int, int], screen: tuple[int, int], radius: int = TAP_JITTER_PX,
+) -> tuple[int, int]:
+    """เยื้องจุดแตะภายในวงเล็ก ๆ และไม่ปล่อยให้หลุดขอบจอ."""
+    x, y = int(point[0]), int(point[1])
+    width, height = max(2, int(screen[0])), max(2, int(screen[1]))
+    radius = max(0, int(radius))
+    if radius:
+        # จำกัดเป็นวงกลมแทนสี่เหลี่ยม และพยายามไม่คืนจุดกึ่งกลางเดิม.
+        for _ in range(12):
+            dx = random.randint(-radius, radius)
+            dy = random.randint(-radius, radius)
+            if not (0 < dx * dx + dy * dy <= radius * radius):
+                continue
+            moved = (
+                max(1, min(width - 1, x + dx)),
+                max(1, min(height - 1, y + dy)),
+            )
+            if moved != (x, y):
+                return moved
+    return max(1, min(width - 1, x)), max(1, min(height - 1, y))
+
+
+def _typing_units(text: str) -> list[str]:
+    """แบ่งข้อความเป็นหน่วยที่ทยอยส่งได้โดยไม่ผ่าอีโมจิหรืออักษรประกอบ.
+
+    หนึ่ง code point ไม่ได้เท่ากับหนึ่งตัวที่คนเห็นเสมอ: ``❤️`` มี variation
+    selector, ``👍🏻`` มีสีผิว, ธงประกอบจาก regional indicator สองตัว และอีโมจิ
+    ครอบครัวเชื่อมหลายตัวด้วย ZWJ. ภาษาไทยก็มีสระ/วรรณยุกต์แบบ combining mark.
+    ถ้าส่งส่วนประกอบเหล่านี้แยก broadcast แอปบางรุ่นจัดเคอร์เซอร์ผิดตำแหน่งได้.
+    """
+    units: list[str] = []
+    index = 0
+    size = len(text)
+
+    def regional(char: str) -> bool:
+        return 0x1F1E6 <= ord(char) <= 0x1F1FF
+
+    def extension(char: str) -> bool:
+        code = ord(char)
+        return (
+            unicodedata.category(char).startswith("M")
+            or 0xFE00 <= code <= 0xFE0F          # variation selectors
+            or 0xE0100 <= code <= 0xE01EF
+            or 0x1F3FB <= code <= 0x1F3FF       # emoji skin tones
+            or 0xE0020 <= code <= 0xE007F       # emoji tag sequences
+        )
+
+    while index < size:
+        unit = text[index]
+        index += 1
+
+        # ธงประเทศเป็น regional indicator สองตัว ต้องส่งเป็นคู่เดียวกัน.
+        if regional(unit) and index < size and regional(text[index]):
+            unit += text[index]
+            index += 1
+
+        while index < size:
+            char = text[index]
+            if extension(char):
+                unit += char
+                index += 1
+                continue
+            # ZWJ รวมอีโมจิที่ตามมาเป็นรูปเดียว และรอบถัดไปจะเก็บสีผิว/
+            # variation selector ของตัวนั้นต่อให้ครบเอง.
+            if char == "\u200d" and index + 1 < size:
+                unit += char + text[index + 1]
+                index += 2
+                continue
+            break
+        units.append(unit)
+    return units
 
 # ข้อความบนปุ่มที่ต้องกด — ใส่ทั้งไทยและอังกฤษเพราะแอปสลับภาษาตามเครื่อง
 # เรียงจากเจาะจงสุดไปกว้างสุด ตัว find จะเลือกตัวที่ตรงที่สุดก่อน
@@ -397,8 +495,9 @@ class Phone:
         raise PostError(f"หาปุ่มไม่เจอภายในเวลา: {texts[0]}{extra}")
 
     def tap(self, point: tuple[int, int]) -> None:
-        self.run("shell", "input", "tap", str(point[0]), str(point[1]))
-        time.sleep(STEP_SETTLE)
+        hit = _jitter_tap_point(point, self.size)
+        self.run("shell", "input", "tap", str(hit[0]), str(hit[1]))
+        time.sleep(random.uniform(*TAP_SETTLE_RANGE))
 
     def open_group(self, group_id: str) -> None:
         """เปิดหน้ากลุ่มให้แน่ใจว่าไปถึงจริง
@@ -502,6 +601,17 @@ class Phone:
 
     # ------------------------------------------------------------ พิมพ์ไทย
 
+    @staticmethod
+    def ime_can_type(name: str) -> bool:
+        """คีย์บอร์ดตัวนี้ **พิมพ์ตัวอักษรได้จริง** ไหม
+
+        ถามให้ตรงกับสิ่งที่ต้องการ ไม่ใช่ถามว่า "ไม่ใช่ ADBKeyboard ใช่ไหม"
+        ซึ่งตอบว่าใช่ได้ทั้งตอนเป็นแป้นพิมพ์จริงและตอนเป็นไมโครโฟน (ข้อ 2.3.1)
+        """
+        if not name or ADB_KEYBOARD_IME in name:
+            return False
+        return not any(hint in name.lower() for hint in SKIP_IME_HINTS)
+
     def normal_keyboard(self) -> str:
         """คีย์บอร์ดปกติตัวแรกที่ **เปิดใช้อยู่** (ไม่นับ ADBKeyboard)
 
@@ -530,7 +640,11 @@ class Phone:
         # ค้างเป็น ADBKeyboard อยู่แล้วจากรอบก่อนที่คืนค่าไม่สำเร็จ
         # ถ้าจำค่านี้ไว้ "คืนค่า" จะกลายเป็นการตั้งกลับไปเป็น ADBKeyboard เหมือนเดิม
         # แล้วมือถือจะพิมพ์เองไม่ได้ตลอดไป (เจอจริง — ผู้ใช้ต้องมาถามว่าปิดยังไง)
-        if not original or original == ADB_KEYBOARD_IME:
+        #
+        # **คีย์บอร์ดเสียงพูดก็นับเป็น "พิมพ์เองไม่ได้" เหมือนกัน** (11 ก.ย. 2569)
+        # ถ้าจำไว้แล้วคืนกลับ เครื่องจะวนอยู่ที่ไมโครโฟนทุกรอบ จนกว่าจะมีคน
+        # ไปตั้งด้วยมือ — เจ้าของถามเองว่า "ทำไมเวลาโพสต์ต้องแตะปุ่มพูด"
+        if not self.ime_can_type(original):
             original = self.normal_keyboard()
         self.shell(f"ime enable {ADB_KEYBOARD_IME}")
         self.shell(f"ime set {ADB_KEYBOARD_IME}")
@@ -543,22 +657,34 @@ class Phone:
         เดิมแค่ยิงคำสั่งแล้วบอกว่า "คืนแล้ว" โดยไม่ตรวจ พอคืนไม่สำเร็จ log จึงบอกว่า
         เรียบร้อยทั้งที่มือถือยังค้างที่ ADBKeyboard พิมพ์เองไม่ได้
         """
-        target = original if original and original != ADB_KEYBOARD_IME else self.normal_keyboard()
+        target = original if self.ime_can_type(original) else self.normal_keyboard()
         if not target:
-            self.log("  หาคีย์บอร์ดปกติในเครื่องไม่เจอ — ยังค้างที่ ADBKeyboard")
+            self.log("  หาแป้นพิมพ์จริงในเครื่องไม่เจอ — ยังค้างที่ ADBKeyboard")
             return
         self.shell(f"ime set {target}")
         time.sleep(1.0)
         now = self.shell("settings get secure default_input_method").strip()
-        if now == ADB_KEYBOARD_IME:
-            self.log(f"  คืนคีย์บอร์ดไม่สำเร็จ — ยังเป็น ADBKeyboard (ตั้งใจตั้งเป็น {target})")
+        # **ตรวจว่าได้แป้นพิมพ์จริง ไม่ใช่แค่ "ไม่ใช่ ADBKeyboard"** — คีย์บอร์ด
+        # เสียงพูดผ่านด่านเดิมได้สบาย แล้ว log ก็บอกว่าคืนเรียบร้อยทั้งที่
+        # เจ้าของยังพิมพ์เองไม่ได้ ต้องแตะปุ่มไมค์ทุกครั้ง (11 ก.ย. 2569)
+        if not self.ime_can_type(now):
+            self.log(f"  ⚠️ คืนคีย์บอร์ดแล้วยังพิมพ์เองไม่ได้ — ตอนนี้เป็น {now} "
+                     f"(ตั้งใจตั้งเป็น {target})")
         else:
             self.log(f"  คืนคีย์บอร์ดเป็น {now} แล้ว")
 
     def type_text(self, text: str) -> None:
-        """ส่งข้อความเป็น base64 — รองรับไทย/อีโมจิ ไม่ติดปัญหา quote ในเชลล์"""
-        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-        self.shell(f'am broadcast -a ADB_INPUT_B64 --es msg "{encoded}"')
+        """ทยอยส่งข้อความผ่าน ADBKeyboard พร้อมจังหวะสุ่ม.
+
+        ส่งเป็นหน่วยอักษรที่สมบูรณ์ ไม่ใช่ยัดแคปชันทั้งก้อน และไม่ผ่าอีโมจิ
+        ประกอบหรือสระ/วรรณยุกต์ไทยกลางชุด. แต่ละหน่วยยังเข้ารหัส base64 เหมือนเดิม
+        จึงรองรับไทย อีโมจิ เครื่องหมายคำพูด และขึ้นบรรทัดใหม่ครบ.
+        """
+        for unit in _typing_units(text):
+            encoded = base64.b64encode(unit.encode("utf-8")).decode("ascii")
+            self.shell(f'am broadcast -a ADB_INPUT_B64 --es msg "{encoded}"')
+            slower = unit.isspace() or unit[-1:] in ".,!?;:…。！？ฯ"
+            time.sleep(random.uniform(*(TYPE_PAUSE_RANGE if slower else TYPE_DELAY_RANGE)))
         time.sleep(1.0)
 
     # -------------------------------------------------------------- รูปภาพ

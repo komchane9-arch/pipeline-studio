@@ -1233,25 +1233,61 @@ function autoToggle(bucket) {
   return button;
 }
 
-/** ปุ่ม "👁 ดู Chrome" ใต้กอง — กางหรือหุบแถบ Chrome ของสายเจนคลิป
+/** ปุ่ม Chrome ใต้กอง — **สองแบบ ไม่ใช่แบบเดียว**
+ *
+ *  กอง Clip  สวิตช์กาง/หุบแถบเครดิต เพราะบานที่เจนคลิปอยู่ในแถบนั้นอยู่แล้ว
+ *  กองอื่น   ปุ่มเปิดตรงๆ เพราะ **ไม่ได้อยู่ในแถบเครดิตเลย**
  *
  *  เจ้าของสั่ง 13 ก.ย. 2569: *"ทำเป็นฟังก์ชั่นเด้งขึ้นมา พอกดดู chrome ค่อยเด้ง
- *  แถบ chrome ขึ้นมา ไม่ต้องโชว์ตลอด"* — แถบกินความสูงทั้งแถวโดยที่ส่วนใหญ่
- *  ไม่ได้ดู และการรู้ว่าบานไหนเปิดอยู่ต้องไล่ดูโปรเซสทั้งเครื่อง
- *  **ดึงไว้ตอนไม่มีใครดูคือเปลืองเปล่า** จึงดึงเฉพาะตอนกางเท่านั้น
+ *  แถบ chrome ขึ้นมา ไม่ต้องโชว์ตลอด"* — ตอนแรกผมเปลี่ยนปุ่มนี้เป็นสวิตช์**ทุกกอง**
+ *  ซึ่งทำให้เปิด Chrome ของ Shopee กับ ChatGPT ไม่ได้อีกเลย
+ *
+ *  ยืนยันจากของจริง 13 ก.ย.: แถบเครดิตมีแต่บัญชี Flow 7 ใบ (komchan*9)
+ *  ส่วนสองบานนั้นเป็นคนละโปรไฟล์ ไม่อยู่ในแถบ
+ *      ดึง Link (Shopee)     flow_browser_profile3
+ *      Storyboard (ChatGPT)  flow_browser_profile
+ *  และสองบานนี้แหละคือบานที่ต้องให้คนเข้าไปดูบ่อยที่สุด — Shopee ขึ้นจิ๊กซอว์
+ *  ให้เลื่อนซึ่งระบบทำแทนไม่ได้ · ChatGPT หลุดล็อกอินหรือโควตารูปหมด
+ *
+ *  **ปุ่มชื่อเดียวกันที่ทำคนละอย่างในหน้าเดียวคือกับดัก** จึงตั้งชื่อต่างกันด้วย
  */
-function browserViewButton() {
+function browserViewButton(browser, key) {
+  if (key === "clip") {
+    const toggle = el("button", {
+      type: "button",
+      className: "board-browser" + (chromeOpen ? " is-on" : ""),
+      textContent: chromeOpen ? "👁 ซ่อน Chrome" : "👁 ดู Chrome",
+      title: chromeOpen
+        ? "หุบแถบ Chrome ของสายเจนคลิป"
+        : "กางแถบ Chrome ของสายเจนคลิป — ดูเครดิตและเปิดทีละบัญชี",
+    });
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();     // ห้ามทะลุไปโดนกล่อง ไม่งั้นกองที่เลือกเปลี่ยนตาม
+      setChromeOpen(!chromeOpen);
+    });
+    return toggle;
+  }
+
   const button = el("button", {
     type: "button",
-    className: "board-browser" + (chromeOpen ? " is-on" : ""),
-    textContent: chromeOpen ? "👁 ซ่อน Chrome" : "👁 ดู Chrome",
-    title: chromeOpen
-      ? "หุบแถบ Chrome ของสายเจนคลิป"
-      : "กางแถบ Chrome ของสายเจนคลิป — ดูเครดิตและเปิดทีละบัญชี",
+    className: "board-browser",
+    textContent: "🖥 เปิด Chrome",
+    title: `เปิดหรือยก ${browser.label} ขึ้นมาบนจอ`,
   });
-  button.addEventListener("click", (event) => {
-    event.stopPropagation();       // ห้ามทะลุไปโดนกล่อง ไม่งั้นกองที่เลือกเปลี่ยนตาม
-    setChromeOpen(!chromeOpen);
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    button.disabled = true;
+    try {
+      const out = await api(`${CLIP_API}/api/browser/show`, {
+        method: "POST",
+        body: JSON.stringify({ stage: browser.stage }),
+      });
+      $("#storyNote").textContent = out.message;
+    } catch (error) {
+      $("#storyNote").textContent = `เปิด ${browser.label} ไม่สำเร็จ — ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
   });
   return button;
 }
@@ -1711,7 +1747,7 @@ function paintBoard() {
     const cell = el("div", { className: "board-cell" });
     if (bucket.auto) cell.append(autoToggle(bucket));
     cell.append(button);
-    if (bucket.browser) cell.append(browserViewButton(bucket.browser));
+    if (bucket.browser) cell.append(browserViewButton(bucket.browser, bucket.key));
     // กอง TikTok ไม่มี browser มาจาก API (เป็นคนละชุดโปรไฟล์กับสายเจนคลิป)
     // จึงต้องวางปุ่มเอง — ผูกกับรหัสกอง ไม่ใช่ลำดับ สลับลำดับแล้วยังถูก
     if (bucket.key === "tiktok") cell.append(tiktokViewButton());

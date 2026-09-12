@@ -117,6 +117,11 @@ def rows() -> list[dict]:
                            if isinstance(credits, int) else None),
             "checked_at": row.get("checked_at") or "",
             "stale": bool(row.get("stale")),
+            # เหตุผลส่งเฉพาะแถวที่มีปัญหา — แถวที่ปกติ note เป็นคำว่า "ผ่าน"
+            # ซึ่งถ้าส่งไปด้วย หน้าเว็บจะขึ้นข้อความเตือนใต้ทุกแถวที่ยังดีอยู่
+            # แล้วคนจะเลิกมองแถบเตือนภายในไม่กี่วัน (กติกา 2.3)
+            "note": (str(row.get("note") or "")
+                     if (row.get("stale") or credits is None) else ""),
             "running": chrome_view.profile_running(folder),
         })
     out.sort(key=lambda r: (-1 if r["credits"] is None else -int(r["credits"]),
@@ -245,7 +250,7 @@ def read_now(profile: str | Path, log=print) -> dict:
         return {"ok": False, "profile": folder.name,
                 "why": f"{type(error).__name__}: {str(error)[:90]}"}
 
-    save(folder.name, credits, account=email, note=why[:80])
+    save(folder.name, credits, account=email, note=why[:200])
     if credits is None:
         log(f"   {folder.name}: อ่านเครดิตไม่ได้ — {why or 'ไม่ทราบสาเหตุ'}")
         return {"ok": False, "profile": folder.name, "credits": None,

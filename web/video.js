@@ -1445,6 +1445,192 @@ async function loadChromes() {
   paintChromes();
 }
 
+/* ====================== 🎵 Chrome ของ TikTok 7 ช่อง — ซ่อนไว้ กดแล้วค่อยเด้ง
+ *
+ * เจ้าของสั่ง 13 ก.ย. 2569: *"ตรง tiktok ก็ทำเหมือนกัน เพิ่มตรงดู chrome
+ * พอกดดู chrome ค่อยให้มี chrome เด้งขึ้นมา"* — สเปคจากสายคลิป
+ * `SPEC-ช่อง-chrome-tiktok.md` (ea2d511) ตามขั้นตอนข้อ 7.1.1
+ *
+ *   GET  {CLIP_API}/api/tiktok/chromes             ทั้ง 7 ช่อง
+ *   POST {CLIP_API}/api/tiktok/chromes/open        {slot} เปิดช่องนั้นไปล็อกอิน
+ *   POST {CLIP_API}/api/tiktok/chromes/refresh     {slot} ช่องเดียว · {} ทุกช่อง (76 วิ)
+ *
+ * ## สี่ข้อที่พลาดง่ายมาก
+ *
+ * 1. **"ยังไม่ได้ล็อกอิน" ไม่ใช่ความผิดพลาด** เป็นสถานะตั้งต้นปกติของทุกช่อง
+ *    ตอนนี้ทั้ง 7 ช่องยังไม่ได้ล็อกอิน ถ้าขึ้นแดงหมดทั้งแผง มันจะกลายเป็น
+ *    แถบที่ไม่มีใครสนใจภายในไม่กี่วัน แล้ววันที่พังจริงก็จะไม่มีใครเห็น
+ *
+ * 2. **"ยังไม่เคยตรวจ" กับ "ตรวจแล้วไม่ผ่าน" ห้ามหน้าตาเหมือนกัน**
+ *    (กติกาข้อ 2.3.1 ข้อ 4) — อย่างแรก `checked_at` ว่าง อย่างหลัง `stale` จริง
+ *    สองอย่างนี้แก้คนละทาง ถ้าแสดงเหมือนกันจะไล่ผิดทาง
+ *
+ * 3. **ห้ามทำช่องให้พิมพ์ไอดีเอง** ไอดีต้องมาจากการอ่านหน้า TikTok จริงเท่านั้น
+ *    พิมพ์เองได้เมื่อไร วันหนึ่งโปรไฟล์กับไอดีจะไม่ตรงกัน แล้วคลิปขึ้นผิดช่อง
+ *    ซึ่ง**ถอนคืนไม่ได้**
+ *
+ * 4. **ไม่ดึงตอนแถบหุบ** และดึงซ้ำทุก 5 วินาที**เฉพาะตอนมีช่องเปิดค้างอยู่**
+ *    เพราะการรู้ว่าหน้าต่างเปิดไหมต้องไล่ดูโปรเซสทั้งเครื่อง
+ */
+const TIKTOK_OPEN_KEY = "tiktokChromeOpen";
+let ttData = null;            // null = ยังไม่เคยดึง · {} ว่าง = ดึงแล้วไม่มีช่อง
+let ttBusy = false;
+let ttTimer = null;
+let ttOpen = false;
+try { ttOpen = localStorage.getItem(TIKTOK_OPEN_KEY) === "1"; } catch { /* โหมดส่วนตัว */ }
+
+function ttBox() {
+  let node = $("#tiktokChromes");
+  if (!node) {
+    node = el("div", { className: "clip-chromes", id: "tiktokChromes" });
+    chromeBox().after(node);
+  }
+  return node;
+}
+
+function setTiktokOpen(open) {
+  ttOpen = Boolean(open);
+  try { localStorage.setItem(TIKTOK_OPEN_KEY, ttOpen ? "1" : "0"); } catch { /* โหมดส่วนตัว */ }
+  if (ttOpen) loadTiktok();
+  else { stopTiktokWatch(); paintTiktok(); }
+  paintBoard();
+}
+
+/** ปุ่ม "👁 ดู Chrome" ใต้กอง TikTok — กองนี้ไม่มี browser จาก API จึงต้องวางเอง */
+function tiktokViewButton() {
+  const button = el("button", {
+    type: "button",
+    className: "board-browser" + (ttOpen ? " is-on" : ""),
+    textContent: ttOpen ? "👁 ซ่อน Chrome" : "👁 ดู Chrome",
+    title: ttOpen ? "หุบแถบช่อง TikTok" : "กางแถบช่อง TikTok ทั้ง 7 ช่อง",
+  });
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setTiktokOpen(!ttOpen);
+  });
+  return button;
+}
+
+/** ดึงซ้ำเฉพาะตอนมีหน้าต่างเปิดค้าง — เจ้าของปิดหน้าต่างเองได้ตลอดเวลา
+ *  ส่วนไอดีเปลี่ยนเฉพาะตอนกดปุ่ม จึงไม่ต้องถามซ้ำถ้าไม่มีอะไรเปิดอยู่ */
+function tuneTiktokWatch() {
+  const anyOpen = (ttData?.chromes || []).some((row) => row.running);
+  if (ttOpen && anyOpen) {
+    if (!ttTimer) ttTimer = window.setInterval(loadTiktok, 5000);
+  } else {
+    stopTiktokWatch();
+  }
+}
+
+function stopTiktokWatch() {
+  if (ttTimer) { window.clearInterval(ttTimer); ttTimer = null; }
+}
+
+async function ttSend(path, body, button, saying) {
+  if (ttBusy) return;
+  ttBusy = true;
+  const note = $("#storyNote");
+  if (note && saying) note.textContent = saying;
+  if (button) button.disabled = true;
+  try {
+    const out = await api(`${CLIP_API}/api/tiktok/chromes/${path}`, {
+      method: "POST", body: JSON.stringify(body || {}),
+    });
+    // **เอา message มาแสดงตรงๆ ห้ามย่อ** มันบอกวิธีทำงานทั้งรอบให้เจ้าของ
+    if (note && out.message) note.textContent = out.message;
+    if (out.chromes) ttData = out;
+  } catch (error) {
+    if (note) note.textContent = error.message;
+  } finally {
+    ttBusy = false;
+    if (button) button.disabled = false;
+    await loadTiktok();
+  }
+}
+
+function ttCard(row) {
+  const card = el("div", { className: "cb-card tt-card" + (row.running ? " is-on" : "") });
+  const main = el("button", { type: "button", className: "cb-open" });
+  main.append(el("span", { className: "cb-acct",
+    textContent: `ช่อง ${row.slot}` + (row.running ? " · เปิดอยู่" : "") }));
+
+  // สี่สถานะ แยกกันชัดเจนตามตารางในสเปค — **ห้ามยุบรวม**
+  if (row.handle) {
+    main.append(el("span", { className: "cb-credit", textContent: row.handle }));
+    if (row.stale) {
+      main.append(el("span", { className: "cb-why",
+        textContent: `ตรวจรอบล่าสุดไม่ผ่าน — ${row.note || "ไม่ทราบสาเหตุ"}` }));
+    } else if (row.checked_at) {
+      main.append(el("span", { className: "cb-left", textContent: `ตรวจล่าสุด ${row.checked_at}` }));
+    }
+  } else if (!row.checked_at) {
+    // ยังไม่เคยไปอ่านเลย — คนละเรื่องกับอ่านแล้วไม่เจอ
+    main.append(el("span", { className: "cb-credit is-unknown", textContent: "— ยังไม่ได้ล็อกอิน —" }));
+  } else {
+    main.append(el("span", { className: "cb-credit is-unknown", textContent: "ยังอ่านไอดีไม่ได้" }));
+    if (row.note) main.append(el("span", { className: "cb-why", textContent: row.note }));
+  }
+
+  main.title = row.running
+    ? `ยกหน้าต่างช่อง ${row.slot} ขึ้นมา`
+    : `เปิด Chrome ช่อง ${row.slot} เพื่อล็อกอิน TikTok`;
+  main.addEventListener("click", () => ttSend("open", { slot: row.slot }, main,
+    row.running ? `กำลังยกหน้าต่างช่อง ${row.slot} ขึ้นมา…` : `กำลังเปิด Chrome ช่อง ${row.slot}…`));
+
+  const one = el("button", { type: "button", className: "cb-one",
+    textContent: "🔄", title: `อ่านไอดีของช่อง ${row.slot} ใหม่` });
+  one.addEventListener("click", () => ttSend("refresh", { slot: row.slot }, one,
+    `กำลังอ่านไอดีช่อง ${row.slot}…`));
+
+  card.append(main, one);
+  return card;
+}
+
+function paintTiktok() {
+  const box = ttBox();
+  if (!ttOpen || ttData === null) { box.replaceChildren(); return; }
+
+  // ยิงไม่ถึงเซิร์ฟเวอร์ — **ห้ามขึ้นว่า 0 ช่อง** เพราะ 7 ช่องยังอยู่ครบ
+  // แค่เราอ่านไม่ได้ (กติกาข้อ 2.3.1 — "ตรวจไม่ได้" ไม่ใช่ "ตรวจแล้วว่าง")
+  if (ttData.unreachable) {
+    box.replaceChildren(el("p", { className: "cb-note",
+      textContent: `ยังอ่านสถานะช่อง Chrome ไม่ได้ — ${ttData.unreachable}` }));
+    return;
+  }
+
+  const rows = ttData.chromes || [];
+  const head = el("div", { className: "cb-head" });
+  head.append(el("b", { textContent: "ช่อง TikTok" }));
+  const ready = rows.filter((r) => r.ready).length;
+  head.append(el("span", { className: ready ? "cb-total" : "cb-total is-none",
+    textContent: `ล็อกอินแล้ว ${ready} จาก ${rows.length || 7} ช่อง` }));
+  const all = el("button", { type: "button", className: "cb-all",
+    textContent: ttBusy ? "กำลังอ่าน…" : "🔄 อ่านไอดีทุกช่อง",
+    title: "เปิดทีละช่องเพื่ออ่านไอดีจริง — ใช้เวลาราว 76 วินาที" });
+  all.disabled = ttBusy;
+  all.addEventListener("click", () => ttSend("refresh", {}, all,
+    "กำลังไล่อ่านไอดีทีละช่อง… ใช้เวลาราว 76 วินาที"));
+  head.append(all);
+
+  const list = el("div", { className: "cb-list" });
+  if (!rows.length) list.append(el("p", { className: "cb-empty", textContent: "ยังไม่มีช่อง TikTok ในระบบ" }));
+  else rows.forEach((row) => list.append(ttCard(row)));
+
+  const parts = [head, list];
+  if (ttData.note) parts.push(el("p", { className: "cb-note", textContent: ttData.note }));
+  box.replaceChildren(...parts);
+}
+
+async function loadTiktok() {
+  try {
+    ttData = await api(`${CLIP_API}/api/tiktok/chromes`);
+  } catch (error) {
+    ttData = { unreachable: error.message };
+  }
+  paintTiktok();
+  tuneTiktokWatch();
+}
+
 /** โควตาโพสต์ใต้กล่อง — "โพสต์วันนี้ 1/70"
  *
  *  ⚠️ **ต้องมีคำว่า "โพสต์วันนี้" กำกับเสมอ** เพราะตัวเลขในวงเล็บบนกล่อง
@@ -1468,8 +1654,17 @@ function paintBoard() {
   const list = $("#storyQueueList");
   if (!boardData) { box.replaceChildren(); return; }
 
-  // **ไม่ดึงรายชื่อ Chrome ที่นี่** — paintBoard ถูกเรียกทุก 6 วินาที และแถบนี้
-  // ตั้งต้นเป็นหุบ ดึงเฉพาะตอนคนกดกางเท่านั้น (ดู setChromeOpen)
+  /* **ไม่ดึงรายชื่อ Chrome ทุกรอบที่นี่** — paintBoard ถูกเรียกทุก 6 วินาที
+   * และแถบตั้งต้นเป็นหุบ ดึงเฉพาะตอนคนกดกาง (ดู setChromeOpen)
+   *
+   * แต่ต้องดึง **หนึ่งครั้ง** ถ้าคราวก่อนปิดหน้าไปตอนแถบกางค้างอยู่
+   *
+   * เจอจริงตอนเทส 13 ก.ย. 2569: กางแถบไว้แล้วรีเฟรชหน้า → ปุ่มขึ้นว่า
+   * "ซ่อน Chrome" (อ่านค่าที่จำไว้ถูก) **แต่แถบว่างเปล่า** เพราะไม่มีใคร
+   * สั่งวาด — ป้ายบอกสถานะขัดกับของจริงบนจอ ซึ่งผิดกติกาข้อ 2.3.1
+   */
+  if (chromeOpen && chromeData === null) loadChromes();
+  if (ttOpen && ttData === null) loadTiktok();
   const buckets = boardData.buckets || [];
 
   // ยังไม่เคยเลือก หรือกองที่เลือกไว้หายไป → ไปกองแรกที่มีงานค้าง
@@ -1517,6 +1712,9 @@ function paintBoard() {
     if (bucket.auto) cell.append(autoToggle(bucket));
     cell.append(button);
     if (bucket.browser) cell.append(browserViewButton(bucket.browser));
+    // กอง TikTok ไม่มี browser มาจาก API (เป็นคนละชุดโปรไฟล์กับสายเจนคลิป)
+    // จึงต้องวางปุ่มเอง — ผูกกับรหัสกอง ไม่ใช่ลำดับ สลับลำดับแล้วยังถูก
+    if (bucket.key === "tiktok") cell.append(tiktokViewButton());
     if (bucket.quota) cell.append(quotaLine(bucket));
     if (PUBLISH_BOARD_KEYS.has(bucket.key)) cell.append(publishLiveBox(bucket));
     button.addEventListener("click", () => {

@@ -3417,3 +3417,8 @@ body.typing-through {
 }
 /* ปุ่ม "ดู Chrome" ตอนกางอยู่ ต้องดูออกว่ากดค้างไว้ ไม่ใช่ปุ่มธรรมดา */
 .board-browser.is-on { border-color: var(--ok); color: var(--ok-ink); font-weight: 600; }
+
+/* ช่อง TikTok — การ์ดกว้างกว่าของ Flow เพราะมีเหตุผลยาวๆ ต่อท้าย */
+.tt-card .cb-open { min-width: 150px; max-width: 260px; }
+/* ยังไม่มีช่องไหนล็อกอิน = เรื่องปกติของวันแรก ไม่ใช่ของพัง จึงไม่ใช้สีแดง */
+.cb-total.is-none { color: var(--ink-3); font-weight: 400; }

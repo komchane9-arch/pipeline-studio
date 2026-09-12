@@ -9825,7 +9825,7 @@ async def _show_all_clip_browsers() -> dict:
             status_code=409,
             detail=f"{spec['label']}: {result.get('reason') or 'เปิดหน้าต่างไม่ได้'}")
     minutes = int(BROWSER_VIEW_IDLE_MAX_SECONDS // 60)
-    note = (f"ไม่มี Chrome ของสายเจนคลิปเปิดอยู่เลย — เปิด{spec['label']}ให้แล้ว "
+    note = (f"ไม่มี Chrome ของสายเจนคลิปเปิดอยู่เลย — เปิดขั้น \"{spec['label']}\" ให้แล้ว "
             f"ปิดหน้าต่างเมื่อดูเสร็จเพื่อคืนโปรไฟล์ให้บอท "
             f"(ถ้าไม่ปิด ระบบจะปิดเองใน {minutes} นาที)")
     _clip_log(note)
@@ -10021,11 +10021,14 @@ async def browser_show(request: Request) -> dict:
     _clip_log(f"เรียกดู Chrome ขั้น {spec['label']} — PID {result.get('pid')}")
     opened = bool(result.get("launched"))
     return {"ok": True, "stage": stage, **result,
-            "message": ((f"เปิด Chrome ที่ใช้{spec['label']}แล้ว — "
+            # ครอบชื่อขั้นด้วยเครื่องหมายคำพูดเสมอ — ชื่อขั้นมีทั้งไทยล้วนและ
+            # ไทยปนอังกฤษ ("ดึง Link") ถ้าต่อคำไทยชนท้ายตรงๆ จะได้ "Linkแล้ว"
+            # ซึ่งอ่านสะดุด ส่วนชื่อไทยล้วนมองไม่เห็นปัญหา เลยหลุดมาได้
+            "message": ((f"เปิด Chrome ของขั้น \"{spec['label']}\" แล้ว — "
                          "ปิดหน้าต่างเมื่อดูเสร็จเพื่อคืนโปรไฟล์ให้บอท "
                          f"(ถ้าไม่ปิด ระบบจะปิดเองใน {int(BROWSER_VIEW_IDLE_MAX_SECONDS // 60)} นาที)")
                         if opened else
-                        f"ยก Chrome ที่ใช้{spec['label']}ขึ้นมาด้านหน้าแล้ว")}
+                        f"ยก Chrome ของขั้น \"{spec['label']}\" ขึ้นมาด้านหน้าแล้ว")}
 
 
 @app.get("/api/auto-approve")

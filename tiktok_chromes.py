@@ -517,7 +517,17 @@ if __name__ == "__main__":
     if arg == "พิสูจน์":
         raise SystemExit(0 if prove_reader().get("ok") else 1)
     if arg == "อ่าน":
-        print(refresh_all())
+        got = refresh_all()
+        print("")
+        print(f"อ่านไอดีได้ {len(got['done'])} จาก {got['total']} ช่อง")
+        groups = (("ยังไม่ได้ล็อกอิน", got["empty"]),
+                  ("ข้ามเพราะเปิดค้างอยู่", got["skipped"]),
+                  ("⚠️ ล็อกอินแล้วแต่อ่านไม่ออก — ต้องแก้โค้ด", got["failed"]))
+        for name, group in groups:
+            if group:
+                who = ", ".join(str(r.get("profile")) for r in group)
+                print(f"   {name} {len(group)} ช่อง: {who}")
+        raise SystemExit(1 if got["failed"] else 0)
     elif arg == "เปิด" and len(sys.argv) > 2:
         import chrome_view
         folder = profile_dir(int(sys.argv[2]))

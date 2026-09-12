@@ -53,7 +53,14 @@ def is_tiktok_foreground(value: str) -> bool:
     return str(value or "").split("/", 1)[0] == TIKTOK_PACKAGE
 
 
-SHOP_CHIPS = ("MALL", "Mall", "LIVE", "จัดส่งวันเดียวกัน")
+# ชิปกรองบนแท็บร้านค้า — **เทียบแบบไม่สนตัวพิมพ์ใหญ่เล็ก**
+# ตัวอ่านภาพคืนตัวพิมพ์เล็กเสมอ ("MALL" บนจอ -> "mall") ของเดิมเทียบตรงตัว
+# จึงไม่เจอสักชิป ทั้งที่หน้าจอถูกต้องทุกประการ (เจอจริง 11 ก.ย. 16:48
+# ใบงาน 29708428217 — ภาพตอนล้มเห็นสินค้าขึ้นครบ 4 ใบพร้อมราคา)
+SHOP_CHIPS = ("MALL", "LIVE", "TopChoice", "จัดส่งวันเดียวกัน")
+# แถวเรียงลำดับ **มีเฉพาะแท็บร้านค้า** แท็บ "ดีที่สุด" ไม่มี และตัวอ่านภาพ
+# อ่านสามคำนี้ออกครบทุกคำ จึงใช้เป็นหลักฐานสำรองเมื่อชิปอ่านไม่ออก
+SHOP_SORTS = ("ตรงกันมากที่สุด", "สินค้าขายดี", "มีคะแนนสูงสุด")
 # ราคาที่ตัวอ่านภาพคืนมาจริง: "B173.00" · "邮193.85" · "฿217.50" — สัญลักษณ์บาท
 # ถูกอ่านเพี้ยนไปหลายแบบ จึงรับทุกแบบ และยอมรับกรณีไม่มีสัญลักษณ์นำหน้าด้วย
 PRICE_RE = re.compile(r"(?:฿|B|邮)?\s?\d[\d,]*\.\d{2}")
@@ -79,7 +86,10 @@ def shop_results_visible(xml: str) -> bool:
     ไม่ใช่โครงเปล่าที่ยังไม่มีของ
     """
     plain = html.unescape(xml or "")
-    if any(chip in plain for chip in SHOP_CHIPS) and len(PRICE_RE.findall(plain)) >= 2:
+    low = plain.casefold()
+    marks = (any(chip.casefold() in low for chip in SHOP_CHIPS)
+             or any(word in plain for word in SHOP_SORTS))
+    if marks and len(PRICE_RE.findall(plain)) >= 2:
         return True
     if "ร้านค้า" not in plain:
         return False

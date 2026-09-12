@@ -3359,3 +3359,61 @@ body.typing-through {
   flex: 1 1 160px; color: var(--ink-2); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* ============ 🖥 Chrome ของสายเจนคลิป (11 ก.ย. 2569) */
+/* เจ้าของสั่ง "โชว์ chrome ทุก chrome กดเข้าได้แต่ละหน้า พร้อมเครดิต"
+   เครดิตคือตัวที่ใช้ตัดสินว่าเจนต่อได้อีกกี่ใบ จึงต้องอ่านง่ายที่สุดในแผงนี้ */
+
+.clip-chromes { margin: 6px 0 10px; }
+.cb-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 6px; font-size: 12px;
+}
+.cb-total { color: var(--ok-ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.cb-all {
+  margin-left: auto; font-size: 11px; padding: 3px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  cursor: pointer;
+}
+.cb-all:disabled { opacity: 0.55; cursor: default; }
+
+.cb-list { display: flex; gap: 6px; flex-wrap: wrap; }
+.cb-card {
+  display: flex; align-items: stretch;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); overflow: hidden;
+}
+/* บานที่เปิดค้างอยู่ต้องแยกออกจากบานที่ปิด — ไม่งั้นกดซ้ำแล้วงงว่าเปิดไปหรือยัง */
+.cb-card.is-on { border-color: var(--ok); }
+.cb-open {
+  display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+  padding: 6px 10px; border: 0; background: none; color: var(--ink);
+  cursor: pointer; text-align: left; font-size: 11px; line-height: 1.45;
+}
+.cb-open:hover { background: var(--shade); }
+.cb-open:disabled { opacity: 0.55; cursor: default; }
+.cb-acct { font-weight: 600; overflow-wrap: anywhere; }
+.cb-credit {
+  font-size: 13px; font-weight: 700; color: var(--ok-ink);
+  font-variant-numeric: tabular-nums;
+}
+/* "ยังไม่เคยวัด" ต้องไม่หน้าตาเหมือนตัวเลข ไม่งั้นอ่านผ่านๆ แล้วนึกว่าเป็นค่าจริง */
+.cb-credit.is-unknown { font-size: 11px; font-weight: 400; color: var(--ink-3); }
+.cb-left { color: var(--ink-3); }
+.cb-one {
+  border: 0; border-left: 1px solid var(--line); background: none;
+  color: var(--ink-3); cursor: pointer; padding: 0 8px; font-size: 11px;
+}
+.cb-one:hover { background: var(--shade); }
+.cb-one:disabled { opacity: 0.4; cursor: default; }
+/* กำลังไล่เปิดโครมอ่านเครดิต — หรี่ทั้งแผงให้รู้ว่าตัวเลขกำลังจะเปลี่ยน */
+.clip-chromes.is-busy .cb-list { opacity: 0.55; }
+.cb-empty, .cb-note { margin: 6px 0 0; font-size: 10.5px; color: var(--ink-3); line-height: 1.5; }
+
+/* เหตุผลที่อ่านเครดิตไม่ได้ — ต้องอ่านออกแต่ไม่แย่งสายตาไปจากตัวเลข */
+.cb-why {
+  color: var(--warn-ink); max-width: 210px;
+  overflow-wrap: anywhere; line-height: 1.4;
+}
+/* ปุ่ม "ดู Chrome" ตอนกางอยู่ ต้องดูออกว่ากดค้างไว้ ไม่ใช่ปุ่มธรรมดา */
+.board-browser.is-on { border-color: var(--ok); color: var(--ok-ink); font-weight: 600; }

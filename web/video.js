@@ -1233,30 +1233,216 @@ function autoToggle(bucket) {
   return button;
 }
 
-/** ยก Chrome ของ worker ขั้นนี้ขึ้นหน้าจอ — server เป็นผู้จับคู่ profile จริง. */
-function browserViewButton(browser) {
+/** ปุ่ม "👁 ดู Chrome" ใต้กอง — กางหรือหุบแถบ Chrome ของสายเจนคลิป
+ *
+ *  เจ้าของสั่ง 13 ก.ย. 2569: *"ทำเป็นฟังก์ชั่นเด้งขึ้นมา พอกดดู chrome ค่อยเด้ง
+ *  แถบ chrome ขึ้นมา ไม่ต้องโชว์ตลอด"* — แถบกินความสูงทั้งแถวโดยที่ส่วนใหญ่
+ *  ไม่ได้ดู และการรู้ว่าบานไหนเปิดอยู่ต้องไล่ดูโปรเซสทั้งเครื่อง
+ *  **ดึงไว้ตอนไม่มีใครดูคือเปลืองเปล่า** จึงดึงเฉพาะตอนกางเท่านั้น
+ */
+function browserViewButton() {
   const button = el("button", {
     type: "button",
-    className: "board-browser",
-    textContent: "👁 ดู Chrome",
-    title: `เปิดหรือเรียกดู ${browser.label}`,
+    className: "board-browser" + (chromeOpen ? " is-on" : ""),
+    textContent: chromeOpen ? "👁 ซ่อน Chrome" : "👁 ดู Chrome",
+    title: chromeOpen
+      ? "หุบแถบ Chrome ของสายเจนคลิป"
+      : "กางแถบ Chrome ของสายเจนคลิป — ดูเครดิตและเปิดทีละบัญชี",
   });
-  button.addEventListener("click", async (event) => {
-    event.stopPropagation();
-    button.disabled = true;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();       // ห้ามทะลุไปโดนกล่อง ไม่งั้นกองที่เลือกเปลี่ยนตาม
+    setChromeOpen(!chromeOpen);
+  });
+  return button;
+}
+
+/* ====================== 🖥 Chrome ของสายเจนคลิป — เปิดทีละบัญชี + เครดิต
+ *
+ * เจ้าของสั่ง 11 ก.ย. 2569: *"โชว์ chrome ทุก chrome แล้วผมสามารถกดเข้าได้
+ * แต่ละหน้า แต่ละ log in รวมดึงอัพเดตเครดิตไว้ มีปุ่มรีเฟรชคอยอัพเดตเครดิตให้ด้วย"*
+ * สเปคมาจากสายคลิป (ฝั่งงาน commit fcbb7a6) ตามขั้นตอนข้อ 7.1.1
+ *
+ * ## ที่อยู่ที่ใช้ (พอร์ตสายคลิป)
+ *   GET  {CLIP_API}/api/flow/chromes            รายชื่อบาน + เครดิต + ใครเปิดอยู่
+ *   POST {CLIP_API}/api/browser/show            {profile} → ยกบานนั้นขึ้นหน้าจอ
+ *   POST {CLIP_API}/api/flow/credits/refresh    {} ทุกบาน · {profile} บานเดียว
+ *
+ * ## สามข้อที่ห้ามทำพลาด
+ *
+ * 1. **เครดิตเป็น `null` ได้ และ `null` ไม่ใช่ 0** — แปลว่า "ยังอ่านไม่ได้"
+ *    ถ้าวาดเป็น 0 เจ้าของจะนึกว่าบัญชีนั้นเครดิตหมดแล้วสลับหนีทั้งที่ยังเต็ม
+ *    (กติกาข้อ 2.3.1 ข้อ 4 — "ยังไม่ได้ตรวจ" ต้องหน้าตาต่างจาก "ตรวจแล้วได้ศูนย์")
+ *
+ * 2. **ชื่อโฟลเดอร์กับชื่อบัญชีไม่ตรงกัน** เช่นโฟลเดอร์ komchanc9 เป็นบัญชี
+ *    komchand9@gmail.com (ผลจากการซ่อมตอนล็อกอินสลับหน้าต่าง 10 ก.ย.)
+ *    **โชว์อีเมลเป็นหลัก** เพราะเป็นสิ่งที่เจ้าของเข้าใจ ส่วนชื่อโฟลเดอร์ใช้ส่งกลับ
+ *
+ * 3. **ไม่ตั้งตัวดึงเป็นรอบ** เครดิตเปลี่ยนเฉพาะตอนกดปุ่มหรือปิดโครมเท่านั้น
+ *    ดึงตอนเปิดแท็บครั้งเดียว แล้วดึงใหม่หลังกดปุ่มก็พอ
+ */
+let chromeData = null;        // null = ยังไม่เคยดึง (ต่างจาก [] ที่แปลว่าไม่มีบาน)
+let chromeBusy = false;       // กำลังอ่านเครดิตอยู่ — กันกดซ้ำ
+
+// กาง/หุบ — ตั้งต้นเป็น "หุบ" ตามที่เจ้าของสั่ง แล้วจำค่าที่เลือกไว้ในเครื่อง
+const CHROME_OPEN_KEY = "clipChromeOpen";
+let chromeOpen = false;
+try { chromeOpen = localStorage.getItem(CHROME_OPEN_KEY) === "1"; } catch { /* โหมดส่วนตัว */ }
+
+function setChromeOpen(open) {
+  chromeOpen = Boolean(open);
+  try { localStorage.setItem(CHROME_OPEN_KEY, chromeOpen ? "1" : "0"); } catch { /* โหมดส่วนตัว */ }
+  // **ดึงข้อมูลตอนกางเท่านั้น** และดึงใหม่ทุกครั้งที่กาง เพราะระหว่างที่หุบอยู่
+  // เครดิตหรือบานที่เปิดค้างอาจเปลี่ยนไปแล้ว ของที่ค้างในมือถือเป็นของเก่า
+  if (chromeOpen) loadChromes();
+  else paintChromes();
+  paintBoard();                    // ป้ายบนปุ่มต้องเปลี่ยนตามทันที
+}
+
+function chromeBox() {
+  let node = $("#clipChromes");
+  if (!node) {
+    node = el("div", { className: "clip-chromes", id: "clipChromes" });
+    boardBox().after(node);
+  }
+  return node;
+}
+
+function chromeCard(row) {
+  const card = el("div", {
+    className: "cb-card" + (row.running ? " is-on" : ""),
+  });
+  const open = el("button", { type: "button", className: "cb-open" });
+  // อีเมลขึ้นก่อน เพราะเป็นสิ่งที่เจ้าของจำได้ ส่วนชื่อโฟลเดอร์เป็นเรื่องของเครื่อง
+  open.append(el("span", { className: "cb-acct",
+    textContent: (row.running ? "🟢 " : "") + (row.account || row.label || row.profile) }));
+
+  // **แยก "ยังไม่เคยวัด" ออกจาก "วัดแล้วได้ศูนย์"** สองอย่างนี้ห้ามหน้าตาเหมือนกัน
+  const known = typeof row.credits === "number";
+  const credit = el("span", {
+    className: "cb-credit" + (known ? "" : " is-unknown"),
+    textContent: known
+      ? `${row.credits} หน่วย${row.stale ? " (เลขเก่า)" : ""}`
+      : "ยังไม่เคยวัด",
+  });
+  open.append(credit);
+  if (known) {
+    open.append(el("span", { className: "cb-left",
+      textContent: `เจนได้อีก ${row.clips_left ?? 0} คลิป` }));
+  }
+  // เหตุผลที่อ่านเครดิตไม่ได้ — เช่น "บัญชีถูกลงชื่อออกจากโปรไฟล์นี้ ต้องล็อกอิน
+  // ใหม่ครั้งเดียว" ซึ่งบอกได้เลยว่าต้องทำอะไร ต่างจากเลขเปล่าๆ ที่บอกแค่ว่าผิด
+  //
+  // ⚠️ ตรวจแล้ว 13 ก.ย. 2569: `/api/flow/chromes` **ยังไม่ส่ง `note` มา**
+  // (flow_credits.rows() ไม่มีคีย์นี้ — `why` มีเฉพาะตอนกดรีเฟรช) เขียนรับไว้
+  // ล่วงหน้าให้ ถ้าฝั่งงานใส่มาเมื่อไรก็ขึ้นเอง ไม่มีก็ไม่มีอะไรงอก
+  if (row.note) open.append(el("span", { className: "cb-why", textContent: row.note }));
+  open.title = `เปิด Chrome ของ ${row.account || row.profile}`
+    + (row.note ? ` · ${row.note}` : "")
+    + (row.checked_at ? ` · อ่านเครดิตล่าสุด ${row.checked_at}` : "");
+
+  open.addEventListener("click", async () => {
+    open.disabled = true;
+    const was = open.title;
     try {
       const out = await api(`${CLIP_API}/api/browser/show`, {
         method: "POST",
-        body: JSON.stringify({ stage: browser.stage }),
+        body: JSON.stringify({ profile: row.profile }),
       });
       $("#storyNote").textContent = out.message;
+      await loadChromes();          // เปิดแล้วสถานะ "กำลังเปิดอยู่" เปลี่ยน ต้องวาดใหม่
     } catch (error) {
-      $("#storyNote").textContent = `เรียกดู Chrome ไม่สำเร็จ — ${error.message}`;
+      $("#storyNote").textContent = `เปิด Chrome ไม่สำเร็จ — ${error.message}`;
     } finally {
-      button.disabled = false;
+      open.disabled = false;
+      open.title = was;
     }
   });
-  return button;
+
+  // ปุ่มอ่านเครดิตเฉพาะบานนี้ — เร็วกว่าไล่ทุกบานหลายเท่า (30-40 วิ เทียบ 2-4 นาที)
+  const one = el("button", { type: "button", className: "cb-one",
+    textContent: "🔄", title: "อ่านเครดิตเฉพาะบัญชีนี้ (ราว 30-40 วินาที)" });
+  one.addEventListener("click", () => refreshCredits(row.profile, one));
+
+  card.append(open, one);
+  return card;
+}
+
+async function refreshCredits(profile, button) {
+  if (chromeBusy) return;         // ยิงซ้อนกันแล้วโครมจะแย่งกันเปิด
+  chromeBusy = true;
+  const note = $("#storyNote");
+  if (note) {
+    note.textContent = profile
+      ? `กำลังเปิด Chrome อ่านเครดิตของ ${profile}… อาจใช้เวลา 30-40 วินาที`
+      : "กำลังเปิด Chrome อ่านเครดิตทีละบาน… อาจใช้เวลา 2-4 นาที";
+  }
+  chromeBox().classList.add("is-busy");
+  if (button) button.disabled = true;
+  try {
+    const out = await api(`${CLIP_API}/api/flow/credits/refresh`, {
+      method: "POST",
+      body: JSON.stringify(profile ? { profile } : {}),
+    });
+    // คำตอบมีชุดใหม่มาแล้ว วาดทับได้เลย ไม่ต้องยิง GET ซ้ำ
+    if (out.chromes) chromeData = out;
+    if (note) note.textContent = out.message || "อ่านเครดิตเสร็จแล้ว";
+  } catch (error) {
+    // **ห้ามเขียนให้เข้าใจว่าบัญชีมีปัญหา** อ่านเครดิตไม่ได้ ไม่ได้แปลว่าใช้งานไม่ได้
+    if (note) note.textContent = `ดูเครดิตไม่ได้ตอนนี้ — ยังใช้งานบัญชีได้ตามปกติ (${error.message})`;
+  } finally {
+    chromeBusy = false;
+    chromeBox().classList.remove("is-busy");
+    if (button) button.disabled = false;
+    paintChromes();
+  }
+}
+
+function paintChromes() {
+  const box = chromeBox();
+  // หุบอยู่ = ไม่วาดอะไรเลย ไม่ใช่วาดแล้วซ่อนด้วย CSS — ของที่ไม่มีใครดู
+  // ไม่ควรอยู่ในหน้า และรูปในนั้นจะได้ไม่ถูกโหลดทิ้ง
+  if (!chromeOpen || chromeData === null) { box.replaceChildren(); return; }
+  const rows = chromeData.chromes || [];
+
+  const head = el("div", { className: "cb-head" });
+  head.append(el("b", { textContent: "Chrome ของสายเจนคลิป" }));
+  // รวมเครดิตทั้งหมด — ตัวที่เจ้าของใช้ตัดสินว่าเจนต่อได้อีกกี่ใบ จึงต้องเด่นสุด
+  const per = chromeData.credits_per_clip || 0;
+  const total = chromeData.credits_total;
+  if (typeof total === "number") {
+    head.append(el("span", { className: "cb-total",
+      textContent: `รวม ${total} หน่วย` + (per ? ` · เจนได้อีกราว ${Math.floor(total / per)} คลิป` : "") }));
+  }
+  const all = el("button", { type: "button", className: "cb-all",
+    textContent: chromeBusy ? "กำลังอ่าน…" : "🔄 อัปเดตเครดิตทุกบัญชี",
+    title: "เปิด Chrome ทีละบานเพื่ออ่านเครดิตจริง — ใช้เวลาราว 2-4 นาที" });
+  all.disabled = chromeBusy;
+  all.addEventListener("click", () => refreshCredits("", all));
+  head.append(all);
+
+  const list = el("div", { className: "cb-list" });
+  if (!rows.length) {
+    list.append(el("p", { className: "cb-empty",
+      textContent: "ยังไม่มีโปรไฟล์ Chrome ของสายเจนคลิป" }));
+  } else {
+    rows.forEach((row) => list.append(chromeCard(row)));
+  }
+
+  const parts = [head, list];
+  if (chromeData.note) {
+    parts.push(el("p", { className: "cb-note", textContent: chromeData.note }));
+  }
+  box.replaceChildren(...parts);
+}
+
+async function loadChromes() {
+  try {
+    chromeData = await api(`${CLIP_API}/api/flow/chromes`);
+  } catch (error) {
+    // อ่านรายชื่อไม่ได้ ≠ บัญชีมีปัญหา — เขียนให้ชัดว่าคนละเรื่อง
+    chromeData = { chromes: [], note: `ดูเครดิตไม่ได้ตอนนี้ — ยังใช้งานบัญชีได้ตามปกติ (${error.message})` };
+  }
+  paintChromes();
 }
 
 /** โควตาโพสต์ใต้กล่อง — "โพสต์วันนี้ 1/70"
@@ -1281,6 +1467,9 @@ function paintBoard() {
   const box = boardBox();
   const list = $("#storyQueueList");
   if (!boardData) { box.replaceChildren(); return; }
+
+  // **ไม่ดึงรายชื่อ Chrome ที่นี่** — paintBoard ถูกเรียกทุก 6 วินาที และแถบนี้
+  // ตั้งต้นเป็นหุบ ดึงเฉพาะตอนคนกดกางเท่านั้น (ดู setChromeOpen)
   const buckets = boardData.buckets || [];
 
   // ยังไม่เคยเลือก หรือกองที่เลือกไว้หายไป → ไปกองแรกที่มีงานค้าง

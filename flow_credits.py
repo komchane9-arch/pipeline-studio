@@ -138,22 +138,25 @@ def _profiles() -> list[tuple[Path, str, str]]:
         seen.add(key)
         found.append((Path(folder), label, account))
 
+    emails: dict[str, str] = {}
     try:
         import flow_accounts
-        emails = {}
-        try:
-            for row in flow_accounts.board():
-                folder = flow_accounts.profile_dir_of(row.get("email", ""))
-                emails[Path(folder).name] = row.get("email", "")
-        except Exception:                                      # noqa: BLE001
-            pass
+        # ของเดิมวนบน board() ซึ่งคืน dict ไม่ใช่รายการแถว การวนจึงได้ชื่อคีย์
+        # เป็นข้อความ แล้ว .get พัง — และ except ข้างในกลืนเงียบ ผลคือแผง
+        # **ตกไปใช้อีเมลที่จำไว้เก่า** โดยไม่มีใครรู้ว่าตัวอ่านสดไม่เคยทำงานเลย
+        # (เจอ 13 ก.ย. 2569 หลังเปลี่ยนชื่อโฟลเดอร์ให้ตรงอีเมล แล้วคอลัมน์
+        # อีเมลยังขึ้นของเก่าทั้งแถว)
+        for mail in flow_accounts.emails():
+            emails[Path(flow_accounts.profile_dir_of(mail)).name] = mail
         base = getattr(flow_accounts, "PROFILES_DIR", None)
         if base and Path(base).is_dir():
             for item in sorted(Path(base).iterdir()):
                 if item.is_dir():
                     add(item, item.name, emails.get(item.name, ""))
-    except Exception:                                          # noqa: BLE001
-        pass
+    except Exception as error:                                 # noqa: BLE001
+        # ห้ามเงียบ — ไม่รู้ว่าบัญชีไหนคู่กับโฟลเดอร์ไหน คือเรื่องใหญ่
+        print(f"[เครดิต Flow] อ่านทะเบียนบัญชีไม่ได้: "
+              f"{type(error).__name__}: {error}")
 
     # ช่องเจนคลิปที่อาจไม่ได้อยู่ในโฟลเดอร์รายบัญชี
     try:
@@ -221,6 +224,20 @@ def read_now(profile: str | Path, log=print) -> dict:
                     credits = got.get("credits")
                     seen = str(got.get("seen") or "")
                     why = str(got.get("why") or "")
+                    if credits is None:
+                        # เก็บภาพ + ผังหน้าไว้ **ก่อนปิด** ปิดแล้วแคปไม่ได้อีก
+                        # (กติกา 2.6.1) ของเดิมล้มแล้วเหลือแต่ประโยคเดียวว่า
+                        # "ยังเข้า Flow ไม่สำเร็จ" ซึ่งไล่ต่อไม่ได้เลยว่า
+                        # หน้าจริงขึ้นอะไร ต้องให้คนล็อกอินใหม่หรือแค่โหลดช้า
+                        try:
+                            import evidence                    # noqa: PLC0415
+                            evidence.shot(
+                                page, f"อ่านเครดิต Flow ไม่ได้ {folder.name}",
+                                tag="flow",
+                                note=f"บัญชี: {email or '(ไม่รู้)'} · เหตุผล: {why} "
+                                     f"· เห็นบนหน้า: {seen[:80]} · ที่อยู่: {page.url}")
+                        except Exception as snap:              # noqa: BLE001
+                            log(f"   (เก็บภาพหน้าไม่ได้: {type(snap).__name__})")
                 finally:
                     browser.close()
     except Exception as error:                                 # noqa: BLE001

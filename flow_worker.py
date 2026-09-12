@@ -37,6 +37,7 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+import flow_accounts
 import gemini_quota
 
 # Windows ตั้ง stdout เป็น cp1252 เมื่อไม่ได้ต่อกับ console (เช่นเขียนลงไฟล์ log)
@@ -66,7 +67,13 @@ PROFILE_DIR = DATA_DIR / "flow_browser_profile"
 #
 # ⚠️ ใครแตะ Flow ต้องใช้ **สองตัวนี้คู่กันเสมอ** — โฟลเดอร์กับชื่อล็อก
 # ใช้ผิดคู่ = Chrome สองตัวเปิดโปรไฟล์เดียวกัน งานตายกลางคัน
-FLOW_GEN_PROFILE = DATA_DIR / "flow_gen_profile"
+# 13 ก.ย. 2569 ย้ายมาอยู่รวมกับบัญชีอื่น และตั้งชื่อตามอีเมลจริง
+# ของเดิมชื่อ data/flow_gen_profile ซึ่งไม่บอกว่าเป็นบัญชีไหน — เจ้าของ
+# เห็นแผงแล้วนับได้ 6 บัญชีทั้งที่มี 7 เพราะใบนี้อยู่นอกกอง
+# ชื่อคิดจากอีเมลด้วยตัวเดียวกับที่บัญชีอื่นใช้ จะได้ไม่มีสองแหล่งความจริง
+FLOW_GEN_ACCOUNT = "komchane9@gmail.com"
+FLOW_GEN_PROFILE = (DATA_DIR / "flow_profiles"
+                    / flow_accounts.profile_slug(FLOW_GEN_ACCOUNT))
 FLOW_LOCK = "flow-gen"
 
 # ---- ที่นั่งของช่องที่ 2 ขึ้นไป (เจ้าของสั่ง 30 ส.ค. 2569) -------------------

@@ -89,10 +89,69 @@ FLOW_HOSTS = ("labs.google", "flow.google")
 BUSY_HOSTS = ("accounts.google.com",)
 
 
+# หน้าโฆษณาของ Flow — **อยู่โดเมนเดียวกับแอป แต่ยังไม่ได้เข้าแอป**
+#
+# เจอ 13 ก.ย. 2569: ตัวอ่านเครดิต 3 ใบจอดอยู่ที่ flow.google.com/about
+# แล้วตอบว่า "ยังเข้า Flow ไม่สำเร็จ" ซ้ำๆ เพราะ on_flow() ถามแค่ว่า
+# "อยู่โดเมน flow.google หรือเปล่า" ซึ่ง **ตอบใช่ทั้งตอนอยู่ในแอปและตอน
+# อยู่หน้าโฆษณา** พอตอบใช่ ตัวตรวจก็ไม่สั่งเปิดแอป แล้วนั่งอ่านเครดิต
+# จากหน้าที่ไม่มีเครดิตอยู่เลย — ตรงตามกติกา 2.3.1 ที่ห้ามถามคำถามที่
+# ตอบเหมือนกันทั้งตอนสำเร็จและตอนล้ม
+# วัดของจริง 13 ก.ย.: เปิด labs.google/fx/tools/flow แล้วถูกส่งมาที่
+# https://flow.google.com/ ซึ่งเป็นหน้าขายของ มีปุ่ม "Create with Google Flow"
+# ส่วนแอปจริงอยู่ลึกกว่านั้น จึงดูที่ "เส้นทางในเว็บ" ไม่ใช่แค่ชื่อโดเมน
+MARKETING_HOSTS = ("flow.google",)
+MARKETING_PATHS = ("", "/", "/about")
+
+
+def on_marketing_page(page) -> bool:
+    """อยู่หน้าขายของของ Flow ไหม — อยู่ = ยังไม่ได้เข้าแอป"""
+    from urllib.parse import urlparse                          # noqa: PLC0415
+    try:
+        parts = urlparse(page.url or "")
+    except Exception:                                          # noqa: BLE001
+        return False
+    if not any(host in (parts.netloc or "") for host in MARKETING_HOSTS):
+        return False
+    path = (parts.path or "").rstrip("/")
+    return path in MARKETING_PATHS or path.endswith("/about")
+
+
 def on_flow(page) -> bool:
-    """หน้านี้เป็นหน้า Flow แล้วหรือยัง (รับทั้งสองชื่อ)"""
+    """อยู่เว็บ Flow แล้วหรือยัง (รับทั้งสองชื่อ)
+
+    ⚠️ **ตอบว่าใช่ไม่ได้แปลว่าเข้าแอปแล้ว** — วัดจริง 13 ก.ย. 2569:
+    ที่อยู่ https://flow.google.com/ เป็นได้ทั้งหน้าขายของ (ตอนไม่ได้ล็อกอิน)
+    และตัวแอป (ตอนล็อกอินแล้ว) ที่อยู่เดียวกันเป๊ะ **จึงตัดสินจากที่อยู่ไม่ได้**
+    ตัวที่บอกได้จริงคือเลขเครดิตกับชื่อบัญชีบนหน้า ซึ่งมีเฉพาะตอนเข้าแอปได้
+    """
     url = (page.url or "")
     return any(host in url for host in FLOW_HOSTS)
+
+
+def leave_marketing_page(page, log=print) -> bool:
+    """อยู่หน้าโฆษณาอยู่ ให้กดปุ่มเข้าแอป — คืน True เมื่อเข้าแอปได้แล้ว
+
+    กดปุ่มบนหน้าแทนการยิง URL ตรง เพราะปุ่มพาไปหน้าที่ Google ตั้งใจให้ไป
+    ซึ่งต่างกันตามบัญชีและภูมิภาค ส่วนการเดา URL เองเคยพาไปหน้าโฆษณาซ้ำ
+    """
+    labels = ("Create with Google Flow", "Start creating", "Try Flow",
+              "เริ่มสร้าง", "ลองใช้")
+    for label in labels:
+        try:
+            button = page.get_by_role("link", name=label).first
+            if not button.count():
+                button = page.get_by_role("button", name=label).first
+            if not button.count():
+                continue
+            button.click(timeout=15_000)
+            page.wait_for_load_state("domcontentloaded", timeout=60_000)
+            time.sleep(7)
+            log(f"   กดปุ่มเข้าแอป Flow แล้ว ({label})")
+            return True
+        except Exception:                                      # noqa: BLE001
+            continue
+    return False
 
 
 def busy_signing_in(page) -> bool:
@@ -284,18 +343,33 @@ def profile_check(page, email: str, log=print) -> dict:
                 "why": f"เปิดหน้า Flow ไม่ได้: {error}"[:160]}
 
     if busy_signing_in(page):
+        # แยก "บัญชีถูกลงชื่อออก" ออกจาก "โค้ดมีปัญหา" — คนละทางแก้กันคนละเรื่อง
+        # (วัดจริง 13 ก.ย.: หน้าเลือกบัญชีเขียนว่า Signed out ใต้อีเมลนั้นเลย)
         return {"ok": False, "credits": None, "seen": "",
-                "why": "Flow เด้งไปหน้าล็อกอิน — ยังไม่ได้เข้าบัญชี"}
+                "why": "บัญชีถูกลงชื่อออกจากโปรไฟล์นี้ — ต้องล็อกอินใหม่ "
+                       "ครั้งเดียว แล้วระบบสลับเองได้ตลอด"}
 
     # ให้โอกาสหลายรอบ **ไม่ใช่ยิงครั้งเดียวแล้วตัดสิน** — เปิด 7 หน้าต่างพร้อมกัน
     # ทำให้แต่ละหน้าโหลดช้ากว่าเปิดใบเดียวมาก ตัดสินเร็วไปจะได้ "ไม่ผ่าน" ทั้งที่
     # แค่ยังโหลดไม่เสร็จ (แยก "ยังไม่ได้ตรวจ" ออกจาก "ตรวจแล้วไม่ผ่าน")
     credits, seen = None, ""
+    knocked = False
     for round_no in range(4):
         credits = _credits_now(page)
         seen = account_on_page(page)
         if credits is not None and seen:
             break
+        # อ่านไม่ได้และหน้ามีปุ่มชวนเข้าแอปอยู่ = ยังอยู่หน้าขายของ ให้กดเข้าไป
+        # ทำหลังอ่านไม่ได้เท่านั้น **ห้ามกดก่อน** เพราะใบที่เข้าแอปได้อยู่แล้ว
+        # จะถูกพากลับออกไปหน้าขายของโดยไม่จำเป็น (เจอจริงตอนแก้รอบแรก
+        # ใบที่เคยอ่านได้ 50 หน่วยกลับอ่านไม่ได้)
+        if not knocked and credits is None:
+            knocked = True
+            if leave_marketing_page(page, log) and busy_signing_in(page):
+                return {"ok": False, "credits": None, "seen": "",
+                        "why": "บัญชีถูกลงชื่อออกจากโปรไฟล์นี้ — ต้องล็อกอินใหม่ "
+                               "ครั้งเดียว แล้วระบบสลับเองได้ตลอด"}
+            continue
         if round_no < 3:
             time.sleep(5)
     if credits is None:

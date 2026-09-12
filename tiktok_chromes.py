@@ -329,21 +329,34 @@ def _where_names_live(page) -> str:
 
 
 def refresh_all(log=print) -> dict:
-    """ไล่อ่านไอดีทุกช่อง — ข้ามช่องที่เปิดค้างอยู่พร้อมบอกเหตุผล"""
+    """ไล่อ่านไอดีทุกช่อง — แยกผลเป็น 4 กอง เพราะแต่ละกองแก้คนละทาง
+
+    ``done``      อ่านไอดีได้
+    ``empty``     ยังไม่ได้ล็อกอิน — **เรื่องปกติ** ไม่ใช่ความผิดพลาด
+    ``skipped``   ข้ามเพราะหน้าต่างเปิดค้างอยู่ ปิดแล้วค่อยกดใหม่
+    ``failed``    ล็อกอินแล้วแต่อ่านไม่ออก หรือมีอะไรพัง — **อันนี้ต้องแก้โค้ด**
+
+    ห้ามยุบ ``empty`` รวมกับ ``failed`` ช่องว่างเป็นสถานะตั้งต้นของทุกช่อง
+    ถ้านับเป็นความล้มเหลว หน้าเว็บจะขึ้นแดงทั้งแผงตั้งแต่วันแรกที่เปิดใช้
+    แล้วคนจะเลิกสนใจแถบเตือน จนวันที่พังจริงก็ไม่มีใครดู (กติกา 2.3)
+    """
     ensure_profiles()
-    done, failed, skipped = [], [], []
+    done, empty, failed, skipped = [], [], [], []
     log(f"ไล่อ่านไอดี TikTok {HOW_MANY} ช่อง")
     for slot in range(1, HOW_MANY + 1):
         folder = profile_dir(slot)
         got = read_identity(folder, log=log)
+        why = str(got.get("why") or "")
         if got.get("ok"):
             done.append(got)
-        elif "เปิดอยู่" in str(got.get("why") or ""):
+        elif "เปิดอยู่" in why:
             skipped.append(got)
+        elif why.startswith("ยังไม่ได้ล็อกอิน"):
+            empty.append(got)
         else:
             failed.append(got)
-    return {"ok": bool(done), "done": done, "failed": failed,
-            "skipped": skipped, "total": HOW_MANY}
+    return {"ok": True, "done": done, "empty": empty, "failed": failed,
+            "skipped": skipped, "total": HOW_MANY, "found": len(done)}
 
 
 def prove_reader(log=print) -> dict:
@@ -371,7 +384,10 @@ def prove_reader(log=print) -> dict:
 
     want = "@komchan.shop"
     out = {"ok": False, "steps": []}
-    folder = profile_dir(HOW_MANY)          # ใช้ช่องสุดท้าย ไม่ไปชนช่องที่ใช้จริง
+    # ใช้โฟลเดอร์แยกต่างหาก **ห้ามใช้ช่องจริง** — วันที่เจ้าของล็อกอินครบแล้ว
+    # การตรวจตัวอ่านจะไปเปิดโปรไฟล์ที่มีบัญชีอยู่ ซึ่งไม่มีเหตุผลต้องไปยุ่งเลย
+    # (ชื่อขึ้นต้นด้วย _ จึงไม่ถูกนับเป็นช่อง เพราะช่องชื่อ tiktok1..7)
+    folder = PROFILES_DIR / "_ตรวจตัวอ่าน"
     folder.mkdir(parents=True, exist_ok=True)
     with shared.browser_lock(timeout=120, profile=f"tiktok-{folder.name}",
                              label="พิสูจน์ตัวอ่านไอดี TikTok"):
@@ -456,8 +472,11 @@ def prove_reader(log=print) -> dict:
                 temp_dir = Path(tempfile.mkdtemp(prefix="tiktok-prove-"))
                 try:
                     STATE_FILE = temp_dir / "tiktok_chromes.json"
-                    save(folder.name, handle3, note="พิสูจน์การจด")
-                    row = next(r for r in rows() if r["profile"] == folder.name)
+                    # จดในชื่อช่องจริง เพื่อให้เดินผ่านเส้นทางเดียวกับตอนใช้งาน
+                    # แต่แฟ้มเป็นของชั่วคราว ข้อมูลจริงจึงไม่ถูกแตะ
+                    slot_name = profile_dir(1).name
+                    save(slot_name, handle3, note="พิสูจน์การจด")
+                    row = next(r for r in rows() if r["profile"] == slot_name)
                     step4 = bool(row["handle"] == want and row["ready"]
                                  and not row["stale"] and row["checked_at"])
                     out["steps"].append(
@@ -470,8 +489,8 @@ def prove_reader(log=print) -> dict:
                     # รอบถัดไปอ่านไม่ได้ ต้อง **ไม่ลบไอดีเดิมทิ้ง** แต่ติดธงว่าเก่า
                     # ถ้าลบทิ้ง วันที่เน็ตสะดุดครั้งเดียว ช่องที่ล็อกอินไว้แล้ว
                     # จะกลายเป็น "ยังไม่ได้ล็อกอิน" ทั้งที่ยังล็อกอินอยู่
-                    save(folder.name, None, note="อ่านไม่ได้รอบนี้")
-                    row2 = next(r for r in rows() if r["profile"] == folder.name)
+                    save(slot_name, None, note="อ่านไม่ได้รอบนี้")
+                    row2 = next(r for r in rows() if r["profile"] == slot_name)
                     step5 = bool(row2["handle"] == want and row2["stale"])
                     out["steps"].append(
                         {"ชื่อ": "รอบถัดไปอ่านไม่ได้ ต้องเก็บไอดีเดิมไว้และติดธงว่าเก่า",

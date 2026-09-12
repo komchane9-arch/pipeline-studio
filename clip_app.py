@@ -9919,19 +9919,24 @@ async def tiktok_chromes_refresh(request: Request) -> dict:
         got = await asyncio.to_thread(tiktok_chromes.read_identity,
                                       tiktok_chromes.profile_dir(slot), _clip_log)
         rows = await asyncio.to_thread(tiktok_chromes.rows)
-        return {"ok": bool(got.get("ok")), "result": got, "chromes": rows,
+        # ok = "ตรวจให้แล้ว" ไม่ใช่ "เจอบัญชี" — ช่องที่ยังไม่ได้ล็อกอินเป็น
+        # สถานะตั้งต้นปกติของทุกช่อง ถ้าตอบว่าล้มเหลว หน้าเว็บจะขึ้นแดง
+        # ทั้งที่ไม่มีอะไรเสีย แล้วคนจะเลิกสนใจแถบเตือน (กติกา 2.3)
+        return {"ok": True, "found": bool(got.get("ok")), "result": got,
+                "chromes": rows,
                 "message": (f"ช่อง {slot}: {got.get('handle')}" if got.get("ok")
                             else f"ช่อง {slot}: {got.get('why') or 'อ่านไม่ได้'}")}
 
     got = await asyncio.to_thread(tiktok_chromes.refresh_all, _clip_log)
     rows = await asyncio.to_thread(tiktok_chromes.rows)
-    parts = [f"อ่านไอดีได้ {len(got['done'])} ช่อง"]
+    parts = [f"อ่านไอดีได้ {len(got['done'])} จาก {got['total']} ช่อง"]
+    if got["empty"]:
+        parts.append(f"ยังไม่ได้ล็อกอิน {len(got['empty'])} ช่อง")
     if got["skipped"]:
         parts.append(f"ข้ามเพราะเปิดค้างอยู่ {len(got['skipped'])} ช่อง")
     if got["failed"]:
-        parts.append(f"ยังไม่ได้ล็อกอิน/อ่านไม่ได้ {len(got['failed'])} ช่อง")
-    return {"ok": bool(got["done"]), **got, "chromes": rows,
-            "message": " · ".join(parts)}
+        parts.append(f"⚠️ ล็อกอินแล้วแต่อ่านไม่ออก {len(got['failed'])} ช่อง")
+    return {**got, "chromes": rows, "message": " · ".join(parts)}
 
 
 @app.get("/api/flow/chromes")

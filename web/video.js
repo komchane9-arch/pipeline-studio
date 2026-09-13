@@ -949,19 +949,21 @@ function appendPublishControls(box, clip, target) {
   const controls = clip?.controls || {};
   const resume = el("button", {
     type: "button", className: "board-live-control is-resume",
-    textContent: "▶ Resume", disabled: !controls.can_resume,
+    // ป้ายไทยสั้นกว่าและตรงกติกาข้อ 5.2 — "Resume" 8 ตัวอักษรไม่พอในช่อง
+    // กว้าง 35px ตอนกระดานมี 7 กอง (วัดจริง 13 ก.ย. 2569 ตกขอบทุกความกว้าง)
+    textContent: "▶ ทำต่อ", disabled: !controls.can_resume,
     title: controls.can_resume ? "ทำต่อจากขั้นที่หยุด" : (controls.reason || "ยังไม่มีงานที่ทำต่อได้"),
   });
   const reset = el("button", {
     type: "button", className: "board-live-control is-reset",
-    textContent: "↺ Reset", disabled: !controls.can_reset,
+    textContent: "↺ รีเซ็ต", disabled: !controls.can_reset,
     title: controls.can_reset
       ? "ล้างสถานะกล่องนี้ให้กลับเป็น ตอนนี้ว่าง — ไม่เริ่มงานและไม่แตะมือถือ"
       : (controls.reason || "ยังไม่มีสถานะที่ล้างได้"),
   });
   const stop = el("button", {
     type: "button", className: "board-live-control is-stop",
-    textContent: "■ Stop", disabled: false,
+    textContent: "■ หยุด", disabled: false,
     title: "หยุดการทำงาน ปิดอัตโนมัติ และคืนใบที่ค้างเป็นคิวที่ 1",
   });
   const buttons = [resume, reset];

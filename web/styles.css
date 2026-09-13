@@ -2531,7 +2531,19 @@ body.typing-through {
      ช่องไหนไม่มีสวิตช์ แถวที่ 1 ก็ว่างไว้เฉยๆ ไม่มีอะไรเลื่อนขึ้นมาแทน
      ข้อดีอีกอย่างคือไม่ต้องใส่ช่องเปล่าหลอกๆ ในโค้ดฝั่ง JS */
   display: grid;
-  grid-template-rows: 1.85rem minmax(0, 1fr) 1.05rem auto;
+  /* **ต้องกำหนดคอลัมน์เดียวไว้ด้วย** ไม่งั้นวันที่มีของสองชิ้นตกไปอยู่แถว
+     เดียวกัน ตารางจะงอกคอลัมน์ที่สองขึ้นมาเอง แล้ว**บีบทุกชิ้นในช่องนั้น
+     เหลือครึ่งเดียว** รวมถึงแถวอื่นที่ไม่เกี่ยวด้วย
+
+     เกิดจริง 13 ก.ย. 2569: กอง TikTok ได้ปุ่ม "ดู Chrome" เพิ่มมา ซึ่งอยู่
+     แถวเดียวกับโควตาที่มีอยู่แล้ว ผลคือสวิตช์อัตโนมัติของกองนั้นเหลือ 66px
+     (กองอื่น 136px) ป้ายเลยขาดกลาง — เจ้าของส่งรูปมาว่า "จัดให้มันดีๆ หน่อย"
+     ตอนแรกผมไล่หาที่ตัวป้ายกับตัวปุ่ม ทั้งที่ต้นเหตุอยู่ที่โครงตาราง
+
+     แยกปุ่ม Chrome กับโควตาเป็นคนละแถว ช่องที่มีแค่อย่างเดียวก็เว้นแถวว่างไว้
+     กล่องขั้นตอนของทุกกองจึงยังอยู่ระดับเดียวกันเหมือนเดิม */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 2.7rem minmax(0, 1fr) 1.05rem 1.05rem auto;
   gap: 4px;
   flex: 1 1 0;              /* ยืดเท่ากันเมื่อที่พอ — ท่าเดียวกับ .board-tab เดิม */
   /* **ต้องแคบพอให้ 6 ช่องอยู่แถวเดียวกันได้** — วัดจริง 28 ส.ค. 2569 บนพื้นที่
@@ -2548,9 +2560,9 @@ body.typing-through {
    ตัดบรรทัด ช่องที่ตกไปอยู่ลำพังจะไม่มีเพื่อนให้ยืดตาม แล้วเตี้ยกว่าเพื่อน
    (วัดจริงที่จอ 700px: สูง 44 ขณะที่แถวบนสูง 82) — ใส่ความสูงขั้นต่ำกันไว้ */
 .board-cell > .board-tab   { grid-row: 2; width: 100%; height: 100%; min-height: 5rem; }
-.board-cell > .board-browser { grid-row: 3; }
-.board-cell > .board-quota { grid-row: 3; }
-.board-cell > .board-live  { grid-row: 4; }
+.board-cell > .board-browser { grid-row: 3; grid-column: 1; }
+.board-cell > .board-quota { grid-row: 4; grid-column: 1; }
+.board-cell > .board-live  { grid-row: 5; grid-column: 1; }
 
 /* สถานะงานโพสต์สดใต้ Shopee/Facebook/TikTok — กล่องเล็กแต่ต้องอ่านได้ครบว่า
    ปลายทางกำลังทำใบไหนและถึงขั้นใด ชื่อยาวตัดสองบรรทัดแต่ title ยังดูเต็มได้ */
@@ -2592,7 +2604,11 @@ body.typing-through {
 .board-live-time { margin-top: auto; font-variant-numeric: tabular-nums; }
 .board-live-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  /* **ห้ามบังคับ 3 คอลัมน์ตายตัว** — พอกระดานมี 7 กอง ช่องเหลือ 136px
+     แบ่งสามแล้วได้ปุ่มละ 35px ซึ่งป้ายตกขอบทุกความกว้าง (วัดจริง 13 ก.ย. 2569
+     ที่ 1000 · 860 · 720px ตกขอบทั้งสามค่า) ให้มันตัดลงบรรทัดใหม่แทนการบีบ
+     — ปุ่มที่อ่านไม่ออกแย่กว่าปุ่มที่อยู่คนละบรรทัด */
+  grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
   gap: 5px;
   margin-top: auto;
   padding-top: 3px;
@@ -2603,10 +2619,13 @@ body.typing-through {
   border: 1px solid color-mix(in srgb, var(--live-stage) 50%, var(--line));
   border-radius: 7px;
   background: color-mix(in srgb, var(--live-stage) 10%, var(--panel));
-  color: var(--ink-1);
+  /* เดิมเขียน var(--ink-1) ซึ่ง **ไม่มีนิยามอยู่จริงทั้งไฟล์** สีจึงตกไปเป็น
+     สีที่สืบทอดมา ไม่ได้ตั้งใจ — ใช้ตัวแปรที่มีจริง */
+  color: var(--ink);
   font-size: 10px;
   font-weight: 700;
   line-height: 1.1;
+  white-space: nowrap;
   cursor: pointer;
 }
 .board-live-control.is-reset { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
@@ -2641,9 +2660,16 @@ body.typing-through {
   background: var(--panel);
   color: var(--ink-2);
   cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* **ตัดสองบรรทัดแทนการตัดด้วยจุดไข่ปลา** — ป้ายยาวขึ้นหลังเพิ่มเลข "พัก"
+     เมื่อ 13 ก.ย. 2569 ("☑ อัตโนมัติ · พร้อม 2 · พัก 17" ต้องการ 180px
+     แต่ช่องกว้าง 136px) จุดไข่ปลากินเลขที่เป็นสาระของปุ่มไปพอดี
+     แถวที่ 1 ของตารางสูงคงที่เท่ากันทุกช่อง กล่องข้างล่างจึงยังเรียงตรงกัน */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 .board-auto:hover:not(:disabled) { border-color: var(--ink-3); }
 .board-auto:disabled { opacity: 0.55; cursor: progress; }

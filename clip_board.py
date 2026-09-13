@@ -50,6 +50,10 @@ CLIP = "clip"
 SHOPEE = "shopee_video"
 REELS = "facebook_reels"
 TIKTOK = "tiktok"
+# กองปลายทางที่ **เดินต่อไม่ได้** — หาสินค้าเดียวกันใน TikTok Shop ไม่เจอ
+# เจ้าของสั่ง 13 ก.ย. 2569: *"เพิ่มช่องหน่อย อีกช่องว่าไม่มีสินค้าใน tiktok
+# แล้วใบงานไหนไม่มีให้ย้ายไปช่องนั้น"*
+NO_SHOP = "tiktok_no_shop"
 FIX = "fix"
 
 # ขั้นในคิวที่ยังไม่ถึงมือคน — งานกำลังเดินอยู่ ยังไม่ต้องตัดสินใจอะไร
@@ -129,7 +133,7 @@ FIX_OTHER = ("other", "❓ อื่นๆ", "ขั้นที่ระบบ�
 # บอกว่าว่าง ส่วน /waitclip กลับมีใบนั้นอยู่)
 BOARD_KEY_FIX_GROUP = {
     LINK: "link", STORY: "storyboard", CLIP: "clip",
-    SHOPEE: "post", REELS: "post", TIKTOK: "post",
+    SHOPEE: "post", REELS: "post", TIKTOK: "post", NO_SHOP: "post",
 }
 
 
@@ -225,6 +229,8 @@ BOARD = (
     (SHOPEE, "🛍️ Shopee Video",    "อนุมัติคลิปแล้ว รอลง Shopee Video"),
     (REELS,  "💙 Facebook Reels",  "ลง Shopee แล้ว รอลง Facebook Reels"),
     (TIKTOK, "🎵 TikTok",          "ลง Facebook แล้ว รอลง TikTok"),
+    (NO_SHOP, "🚫 ไม่มีสินค้าใน TikTok",
+     "หาสินค้าเดียวกันใน TikTok Shop ไม่เจอ — ลงไม่ได้จนกว่าร้านจะมีของ"),
 )
 
 # **ไม่มีกอง "รอแก้" แยกต่างหากแล้ว** (ผู้ใช้สั่งแก้ 27 ส.ค. 2026)
@@ -234,6 +240,26 @@ NO_TARGET: set[str] = set()
 
 # ปลายทางของกองที่ 4-6 → ชื่อที่ `publish_order` ใช้
 POST_TARGET = {SHOPEE: "shopee_video", REELS: "facebook_reels", TIKTOK: "tiktok"}
+
+
+def tiktok_product_missing(run: dict | None) -> str:
+    """หาสินค้าเดียวกันใน TikTok Shop ไม่เจอหรือเปล่า — คืนเหตุผล ว่าง = เจอ/ยังไม่ได้หา
+
+    **ดูของที่มีเฉพาะตอนหาไม่เจอ** คือ ``matched_rank == 0`` ซึ่งแปลว่าตัวดูรูป
+    เทียบผลค้นหาทุกอันแล้วไม่มีอันไหนเป็นสินค้าตัวเดียวกัน — ต่างจาก
+    ``matched_rank`` ที่ยังไม่มีค่า ซึ่งแปลว่า **ยังไม่ได้หา** (กติกา 2.3.1)
+
+    ใบพวกนี้เดินต่อไม่ได้เลยไม่ว่าจะลองอีกกี่รอบ เพราะ TikTok Shop ไม่มีของขาย
+    วัดจริง 13 ก.ย. 2569: 53 ใบจาก 78 ใบที่เคยหา · เหตุผลที่จดไว้เป็นการเทียบ
+    ของจริง เช่น "เป้าหมายเป็นเคสมือถือลาย Hello Kitty แต่ผลค้นหาสี่อันแรก
+    เป็นเคสลายอื่น"
+    """
+    link = (run or {}).get("tiktok_product_link") or {}
+    if not link or link.get("showcase_added"):
+        return ""
+    if link.get("matched_rank") != 0:
+        return ""                      # ยังไม่ได้หา หรือหาเจอแล้ว
+    return str(link.get("reason") or "").strip() or "หาสินค้าเดียวกันใน TikTok Shop ไม่เจอ"
 
 
 def active_auto_skip_target(run: dict | None) -> str:
@@ -302,6 +328,8 @@ def bucket_of(job: dict, run: dict | None = None) -> tuple[str, str]:
     key = bucket_of_run(run)
     if not key:
         return "", ""                       # ลงครบทั้งสามที่แล้ว
+    if key == NO_SHOP:
+        return key, tiktok_product_missing(run) or "หาสินค้าใน TikTok Shop ไม่เจอ"
     if key not in POST_TARGET:
         # ของยังไม่ครบ — ยังอยู่ขั้นต้นน้ำ ถึงใบงานในคิวจะบอกว่าจบแล้วก็ตาม
         return key, "ใบงานในคิวจบแล้ว แต่ของยังไม่ครบ"
@@ -329,6 +357,11 @@ def bucket_of_run(run: dict) -> str:
         target = publish_order.next_target(run)
         for key, name in POST_TARGET.items():
             if name == target:
+                # ถึงคิว TikTok แล้วแต่หาสินค้าใน TikTok Shop ไม่เจอ = เดินต่อไม่ได้
+                # ย้ายไปกองของมันเอง จะได้ไม่ไปปนกับใบที่รอลงจริงแล้วทำให้
+                # ตัวเลขบนหัวกองบอกว่ามีของรอลงเยอะกว่าความจริง
+                if key == TIKTOK and tiktok_product_missing(run):
+                    return NO_SHOP
                 return key
         return ""
     if not (run.get("images") or []):
@@ -451,6 +484,9 @@ FOLDER_OF_BUCKET = {
     SHOPEE: "clips",
     REELS: "clipsfb",
     TIKTOK: "clipstiktok",
+    # กองนี้เป็นเรื่องการ **จัดหน้ากระดาน** ล้วนๆ ใช้โฟลเดอร์เดียวกับ TikTok
+    # เพื่อไม่ให้ต้องย้ายไฟล์จริงเพียงเพราะเปลี่ยนวิธีแสดงผล
+    NO_SHOP: "clipstiktok",
 }
 
 # ใบที่พักไว้ — ต้นน้ำทั้งสามขั้นรวมเป็น waitstory ตามที่ผู้ใช้ตั้งชื่อมา
@@ -459,6 +495,7 @@ PARKED_FOLDER_OF_BUCKET = {
     SHOPEE: "waitclips",
     REELS: "waitclipsfb",
     TIKTOK: "waitclipstiktok",
+    NO_SHOP: "waitclipstiktok",
 }
 
 # โฟลเดอร์ของงานที่ยังทำอยู่ (ยังไม่มีคลิปพร้อมลง) และงานที่ลงครบสามที่แล้ว
@@ -615,7 +652,7 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
             if not item_id or item_id in already:
                 continue
             key = bucket_of_run(run)
-            if key not in (SHOPEE, REELS, TIKTOK):
+            if key not in (SHOPEE, REELS, TIKTOK, NO_SHOP):
                 continue          # ขั้นต้นน้ำยังอยู่ในคิว ไม่ต้องเติมจากไฟล์
             # ป้องกันสำเนาโฟลเดอร์ `-ซ้ำ-` ของ item เดียวกันเพิ่มสองแถวบน
             # กระดาน ขณะที่ตัว Auto รวมเป็นหนึ่งคิวอยู่แล้ว. ต้องจดทันทีในลูป;
@@ -724,4 +761,7 @@ def refill_hint(key: str, counts: dict[str, int]) -> str:
         return "ลง Shopee Video ก่อน แล้วเว้น 1 วันปฏิทินถึงจะลง Facebook ได้"
     if key == TIKTOK:
         return "ลง Facebook Reels ก่อน แล้วเว้น 1 วันปฏิทินถึงจะลง TikTok ได้"
+    if key == NO_SHOP:
+        return ("กองนี้ไม่ต้องเติม — เป็นใบที่ TikTok Shop ไม่มีของขาย "
+                "รอจนร้านมีของแล้วค่อยกดหาใหม่")
     return ""

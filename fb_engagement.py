@@ -176,8 +176,50 @@ def open_db() -> sqlite3.Connection:
 
 # --------------------------------------------------------- โพสต์ที่ต้องตามเก็บ
 
+def _captions_by_link(account: str) -> dict[str, str]:
+    """แคปชันของ **ใบงานที่สร้างลิงก์นั้นจริง** — จับคู่ ลิงก์ → แคปชัน
+
+    **บั๊กที่ทำให้ตัวเก็บพังเงียบ 11 วัน** (เจอ 13 ก.ย. 2569)
+
+    ``read_post`` ยืนยันว่าเปิดถูกโพสต์ด้วยการเทียบแคปชัน แต่ของเดิมส่ง
+    ``_caption_of(account)`` ไปเทียบ ซึ่งคืน **แคปชันของใบงานล่าสุดใบเดียว**
+    แล้วเอาไปเทียบกับ **ทุกกลุ่ม** ทั้งที่ลิงก์ของแต่ละกลุ่มมาจากใบงานคนละใบ
+    คนละแคปชันกัน
+
+    ผลคือเทียบไม่ตรงสักกลุ่ม แล้วรายงานว่า "เข้าถึงหน้าโพสต์แล้วแต่หากล่อง
+    โพสต์ไม่เจอ" ซึ่งอ่านแล้วเหมือนหน้าเว็บมีปัญหา ไม่เหมือนเทียบผิดตัว
+    — ไล่หาสาเหตุผิดทางไปหลายชั่วโมง
+
+    วัดจริงตอนเจอ: ทั้ง 6 กลุ่มลิงก์มาจากใบ p194009409 แคปชัน
+    "อาหารมื้อละ 20 เดี๋ยวนี้หายากแล้ว…" แต่ระบบเอาแคปชันของใบใหม่กว่า
+    ("ช่วงลดนน ของถูกๆ…") ไปเทียบทุกกลุ่ม
+
+    ไล่จาก ``results[].link`` ของทุกใบงาน ซึ่งเป็นที่ที่ตัวโพสต์จดลิงก์จริงไว้
+    """
+    try:
+        raw = (shared.account_dir(account) / "fb_jobs.json").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        rows = json.loads(raw)
+    except ValueError:
+        return {}
+    if isinstance(rows, dict):
+        rows = rows.get("jobs") or []
+    out: dict[str, str] = {}
+    for job in rows:
+        caption = (job.get("caption") or "").strip()
+        if not caption:
+            continue
+        for result in (job.get("results") or []):
+            link = str(result.get("link") or "").strip()
+            if link:
+                out[link] = caption          # ใบใหม่กว่าทับใบเก่าที่ลิงก์ซ้ำกัน
+    return out
+
+
 def _caption_of(account: str) -> str:
-    """แคปชันของงานล่าสุดของบัญชีนั้น — ใช้ยืนยันว่าเปิดถูกโพสต์"""
+    """แคปชันของงานล่าสุดของบัญชีนั้น — ใช้เป็นทางถอยเมื่อจับคู่ลิงก์ไม่ได้"""
     try:
         rows = json.loads((shared.account_dir(account) / "fb_jobs.json")
                           .read_text(encoding="utf-8"))
@@ -206,12 +248,16 @@ def our_posts() -> list[dict]:
                 encoding="utf-8")
         except OSError:
             continue
+        by_link = _captions_by_link(account)
+        fallback = _caption_of(account)
         for group in json.loads(raw):
             link = (group.get("last_link") or "").strip()
             if link:
                 out.append({
                     "post_url": link,
-                    "caption": _caption_of(account),
+                    # แคปชันของใบที่สร้างลิงก์นี้จริง — จับคู่ไม่ได้ค่อยถอยไปใช้
+                    # ของใบล่าสุด (ซึ่งอาจไม่ตรง แต่ดีกว่าไม่มีอะไรให้เทียบเลย)
+                    "caption": by_link.get(link) or fallback,
                     "group_id": group.get("group_id", ""),
                     "group_name": group.get("name", ""),
                     "account": account,

@@ -7,6 +7,7 @@ import { loadGroupHealth } from "./groups.js";
 import { loadPrompts, openPrompts } from "./prompts.js";
 import { loadBoard } from "./board.js";
 import { loadFbControl, watchFbControl } from "./fbcontrol.js";
+import { loadEngage, wireEngage } from "./engage.js";
 import { fillGems, fillInput, fillRelease, loadClips, loadJobQueue, loadStoryRuns } from "./video.js";
 
 // เวอร์ชันที่หน้านี้ "ควรคู่กับ" เซิร์ฟเวอร์ = อ่านจาก ?v= ของตัวเองอัตโนมัติ
@@ -73,6 +74,10 @@ hooks.reloadConfig = () => reloadConfig();
     // แผงคุมบอทสายโพสต์ — ดูสดทุก 5 วิเฉพาะตอนแท็บเปิดอยู่ (ดู fbcontrol.js)
     await loadFbControl();
     watchFbControl();
+    // ตอบคอมเมนต์ — อ่านจากฐานข้อมูลที่บอทเก็บไว้ ไม่ได้แตะ Facebook
+    // จึงดึงครั้งเดียวตอนเปิดหน้าพอ เปลี่ยนเฉพาะตอนบอทเก็บรอบใหม่หรือคนกดโหลด
+    wireEngage();
+    await loadEngage();
     document.querySelector("#fcReload")?.addEventListener("click", loadFbControl);
     await pollLogs();
     // ไว้ท้ายสุด — อ่านจำนวนมือถือจาก dropdown ที่ loadDevices เติมไว้แล้ว

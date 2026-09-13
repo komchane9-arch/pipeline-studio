@@ -3427,3 +3427,57 @@ body.typing-through {
 .tt-card .cb-open { min-width: 150px; max-width: 260px; }
 /* ยังไม่มีช่องไหนล็อกอิน = เรื่องปกติของวันแรก ไม่ใช่ของพัง จึงไม่ใช้สีแดง */
 .cb-total.is-none { color: var(--ink-3); font-weight: 400; }
+
+/* ============ 💬 ตอบคอมเมนต์ — โพสต์อยู่บน คอมเมนต์อยู่ใต้ (13 ก.ย. 2569) */
+/* เจ้าของสั่งให้ "ทำคล้ายๆ กับโครงสร้างเฟสบุ๊ค โพสต์ - คอมเมนต์ใต้โพสต์"
+   จึงเยื้องคอมเมนต์เข้ามาและขีดเส้นตั้งด้านซ้ายให้เห็นว่าอยู่ใต้โพสต์ไหน */
+
+.eg-list { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 4px; }
+.eg-post {
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; background: var(--panel); color: var(--ink);
+}
+.eg-p-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.eg-p-group { font-size: 13px; overflow-wrap: anywhere; }
+.eg-p-link { margin-left: auto; color: var(--link); text-decoration: none; white-space: nowrap; font-size: 11px; }
+.eg-p-link:hover { text-decoration: underline; }
+.eg-p-stat { margin: 3px 0 0; font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+.eg-tag { font-size: 10.5px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+.eg-wait { background: var(--warn-chip); color: var(--warn-ink); font-weight: 700; }
+.eg-draft { background: var(--info-chip); color: var(--info-ink); }
+.eg-done { background: var(--shade); color: var(--ink-3); }
+
+/* เยื้องเข้ามา + เส้นตั้ง = "อันนี้อยู่ใต้โพสต์ข้างบน" แบบเดียวกับที่ Facebook ทำ */
+.eg-comments { margin: 8px 0 0 4px; padding-left: 10px; border-left: 2px solid var(--line); }
+.eg-comment { padding: 7px 0; border-top: 1px solid var(--line); }
+.eg-comment:first-child { border-top: 0; }
+/* คอมเมนต์ของเราเองจางลง — เป็นบริบท ไม่ใช่ของที่ต้องทำอะไรต่อ */
+.eg-comment.is-ours { opacity: 0.62; }
+.eg-c-head { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; font-size: 11px; }
+.eg-c-who { font-size: 12px; color: var(--ink); }
+.eg-c-when, .eg-c-to { color: var(--ink-3); }
+.eg-c-body {
+  margin: 2px 0 0; font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+.eg-reply { margin: 6px 0 2px; }
+.eg-input {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px;
+  background: var(--panel-deep); color: var(--ink);
+  font: inherit; font-size: 12px; line-height: 1.55;
+}
+.eg-input:disabled { opacity: 0.6; }
+.eg-reply-foot { display: flex; align-items: center; gap: 9px; margin-top: 5px; flex-wrap: wrap; }
+.eg-save {
+  font-size: 11px; padding: 3px 14px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--ok); background: var(--panel); color: var(--ok-ink);
+}
+.eg-save:disabled { opacity: 0.5; cursor: default; }
+/* **ต้องอ่านออกว่ายังไม่ได้ส่ง** ไม่งั้นเห็นข้อความในช่องแล้วนึกว่าตอบไปแล้ว */
+.eg-note { font-size: 10.5px; color: var(--warn-ink); overflow-wrap: anywhere; }
+.eg-note.is-sent { color: var(--ok-ink); }
+.eg-note.is-bad { color: var(--bad-ink); font-weight: 700; }
+.eg-empty { margin: 6px 0; font-size: 11.5px; color: var(--ink-3); }

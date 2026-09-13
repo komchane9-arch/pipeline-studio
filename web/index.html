@@ -292,6 +292,27 @@
             <summary>งานที่ทำจบไปแล้ว</summary>
             <div id="fcHistory" class="fc-history"></div>
           </details>
+
+          <hr class="bd-split">
+          <!-- ตอบคอมเมนต์ — วางแบบเดียวกับ Facebook คือโพสต์อยู่บน คอมเมนต์อยู่ใต้
+               (เจ้าของสั่ง 13 ก.ย. 2569 "ทำคล้ายๆ กับโครงสร้างเฟสบุ๊ค
+               โพสต์ - คอมเมนต์ใต้โพสต์") -->
+          <div class="row">
+            <h2>ตอบคอมเมนต์</h2>
+            <button id="egAll" class="ghost" type="button">ดูทุกโพสต์</button>
+            <button id="egReload" class="ghost" type="button">🔄 โหลดใหม่</button>
+          </div>
+          <p class="note">
+            พิมพ์คำตอบเก็บไว้ที่นี่ก่อน — <b>ยังไม่ส่งขึ้น Facebook ทันที</b>
+            บอทจะเปิดโพสต์นั้นในมือถือ หาคนจากชื่อที่บันทึกไว้
+            แล้วพิมพ์ตอบจริงบนแอปให้อีกที
+          </p>
+          <p class="note fc-top">
+            <span id="egNote" aria-live="polite"></span>
+            <span id="egStamp" class="fc-stamp"></span>
+          </p>
+          <div id="egList" class="eg-list"></div>
+
           <hr class="bd-split">
           <!-- พับกล่องสร้างโพสต์ (เจ้าของสั่ง 11 ก.ย. 2569 "สร้างโพสต์
                facebook group หุบ แล้วทำเป็น drop down") — เปิดหน้านี้มาเพื่อดู

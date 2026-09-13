@@ -12007,6 +12007,54 @@ async def fb_followup(request: Request) -> dict:
     return {"ok": True, "note": note}
 
 
+@app.get("/api/fb/engage/threads")
+async def fb_engage_threads(pending: int = 1, limit: int = 40) -> dict:
+    """โพสต์ของเราพร้อมคอมเมนต์ใต้โพสต์ — สำหรับหน้าตอบคอมเมนต์บนเว็บ
+
+    **เจ้าของสั่ง 13 ก.ย. 2569** — *"ช่องพิมพ์อยู่บนหน้าเว็บ ทำคล้ายๆ กับ
+    โครงสร้างเฟสบุ๊ค โพสต์ - คอมเมนต์ใต้โพสต์"*
+
+    `pending=1` (ค่าตั้งต้น) = เอาเฉพาะโพสต์ที่ยังมีคอมเมนต์ค้างให้ตอบ
+    `pending=0` = ทุกโพสต์ที่เก็บคอมเมนต์มาแล้ว
+
+    ข้อมูลมาจาก `fb_engagement.db` ซึ่งบอทเก็บไว้อยู่แล้ว **เส้นนี้ไม่ไปแตะ
+    Facebook เลย** จึงเร็วและเรียกซ้ำได้ตามใจ
+    """
+    import fb_engagement                                        # noqa: PLC0415
+    # นำเข้าตรงนี้เหมือนที่อื่นในไฟล์ — ตัวนี้เปิดฐานข้อมูลตอนนำเข้า ถ้าดึงไว้
+    # ตั้งแต่หัวไฟล์ เซิร์ฟเวอร์จะเปิดไฟล์ค้างไว้ทั้งที่ยังไม่มีใครเรียกใช้
+    rows = await asyncio.to_thread(
+        fb_engagement.threads, max(1, min(int(limit), 200)), bool(pending))
+    return {
+        "ok": True,
+        "posts": rows,
+        "pending_total": sum(p["pending"] for p in rows),
+        "drafted_total": sum(p["drafted"] for p in rows),
+        "at": datetime.now().strftime("%H:%M:%S"),
+    }
+
+
+@app.post("/api/fb/engage/reply")
+async def fb_engage_reply(request: Request) -> dict:
+    """เก็บคำตอบที่เจ้าของพิมพ์ไว้ — **ยังไม่ส่งขึ้น Facebook**
+
+    body `{"comment_key": "...", "text": "..."}` · ส่ง text ว่าง = ลบคำตอบทิ้ง
+
+    ตัวพิมพ์จริงเป็นคนละขั้น (บอทกดจอมือถือตามกติกาข้อ 2.7) เส้นนี้แค่จดไว้
+    **ห้ามตั้งธง "ตอบแล้ว" ตรงนี้** เพราะยังไม่มีอะไรขึ้นหน้า Facebook เลย
+    """
+    import fb_engagement                                        # noqa: PLC0415
+    payload = await request.json() if await request.body() else {}
+    try:
+        out = await asyncio.to_thread(
+            fb_engagement.save_reply,
+            str((payload or {}).get("comment_key") or ""),
+            str((payload or {}).get("text") or ""))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, **out}
+
+
 @app.post("/api/fb/settings")
 async def fb_save_settings(request: Request) -> dict:
     """บันทึกค่าตั้งสายโพสต์ — ส่ง `serial` มาด้วย = บันทึกให้เครื่องนั้นเครื่องเดียว

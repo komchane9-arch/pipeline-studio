@@ -73,8 +73,15 @@ DB_FILE = shared.DATA_DIR / "fb_engagement.db"
 LOG_FILE = shared.DATA_DIR / "logs" / "fb_engagement.log"
 
 # โปรไฟล์เบราว์เซอร์ที่ใช้เก็บข้อมูล — คนละบัญชีกับที่ใช้โพสต์
-# เจ้าของเลือกชื่อ Bot11 ให้ต่อจากฟาร์มเดิม (28 ส.ค. 2569)
-COLLECTOR_PROFILE = "Bot11"
+#
+# 28 ส.ค. 2569 เจ้าของเลือก Bot11 ให้ต่อจากฟาร์มเดิม
+# 13 ก.ย. 2569 เจ้าของสั่งเปลี่ยนเป็น **Bot10** ("ใช้ bot10")
+#
+# ⚠️ เปลี่ยนชื่อตรงนี้อย่างเดียวไม่พอ — โปรไฟล์ใหม่ **ต้องล็อกอินบัญชีที่เป็น
+# สมาชิกกลุ่มนั้นไว้แล้ว** ถ้าไม่ได้ล็อกอิน ตัวเก็บจะอ่านไม่เห็นโพสต์เลยและ
+# รายงานว่า "เข้าไม่ถึง" ทุกกลุ่ม ซึ่งหน้าตาเหมือนกลุ่มตายไปหมด
+# ทุกครั้งที่เปลี่ยนโปรไฟล์ ต้องรันเก็บจริงหนึ่งรอบแล้วดูว่าได้ยอดกลับมาไหม
+COLLECTOR_PROFILE = "Bot10"
 
 # บัญชีที่ตามเก็บ — ว่าง = ทุกบัญชีที่มีลิงก์โพสต์เก็บไว้
 #
@@ -130,10 +137,28 @@ def log(message: str) -> None:
         pass
 
 
+# ช่องที่เพิ่มทีหลัง — `CREATE TABLE IF NOT EXISTS` ไม่เติมให้กับตารางที่มีอยู่แล้ว
+# ต้องไล่เติมเอง ไม่งั้นเครื่องที่มีฐานข้อมูลเก่าจะพังตอนอ่านช่องใหม่
+_EXTRA_COLUMNS = {
+    "my_comment": {
+        # คำตอบที่เจ้าของพิมพ์ไว้บนหน้าเว็บ — ยังไม่ได้ส่ง รอบอทเอาไปพิมพ์บนมือถือ
+        "reply_draft": "TEXT",
+        "reply_saved_at": "TEXT",      # พิมพ์เก็บไว้เมื่อไร
+        "reply_sent_at": "TEXT",       # บอทพิมพ์ลง Facebook จริงเมื่อไร ("" = ยังไม่ส่ง)
+    },
+}
+
+
 def open_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    for table, columns in _EXTRA_COLUMNS.items():
+        have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, kind in columns.items():
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+        conn.commit()
     # WAL + รอคิวนาน — บทเรียนจาก fb_posts.db ที่โดน "database is locked" 28 ครั้ง
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
@@ -822,6 +847,111 @@ def unanswered(limit: int = 20) -> list[dict]:
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+def threads(limit: int = 40, only_pending: bool = True) -> list[dict]:
+    """โพสต์พร้อมคอมเมนต์ใต้โพสต์ — เรียงแบบเดียวกับที่เห็นบน Facebook
+
+    **เจ้าของสั่ง 13 ก.ย. 2569** — *"ช่องพิมพ์อยู่บนหน้าเว็บ ทำคล้ายๆ กับ
+    โครงสร้างเฟสบุ๊ค โพสต์ - คอมเมนต์ใต้โพสต์"*
+
+    ต่างจาก ``unanswered()`` ตรงที่ตัวนั้นคืนคอมเมนต์เดี่ยวๆ เรียงตามเวลา ซึ่ง
+    เหมาะกับการแจ้งเตือนใน Telegram แต่พออ่านบนหน้าเว็บจะไม่เห็นว่าคอมเมนต์ไหน
+    อยู่โพสต์ไหน และคนเดียวกันคอมเมนต์ในหลายกลุ่มจะดูเหมือนคนละคน
+
+    ``only_pending`` จริง = เอาเฉพาะโพสต์ที่ยังมีคอมเมนต์ค้างให้ตอบ
+    โพสต์ที่ตอบครบแล้วไม่ต้องมากินที่ — แต่ **คอมเมนต์ที่ตอบแล้วในโพสต์นั้น
+    ยังส่งไปด้วย** เพราะต้องเห็นบริบททั้งกระทู้ถึงจะตอบได้ถูก
+    """
+    conn = open_db()
+    try:
+        posts = conn.execute(
+            """SELECT post_url,
+                      MAX(group_name) AS group_name,
+                      MAX(account)    AS account,
+                      MAX(reactions)  AS reactions,
+                      MAX(comments)   AS comments,
+                      MAX(shares)     AS shares,
+                      MAX(checked_at) AS checked_at
+                 FROM my_post
+                WHERE TRIM(post_url) <> ''
+                GROUP BY post_url
+                ORDER BY MAX(checked_at) DESC""").fetchall()
+
+        rows = conn.execute(
+            """SELECT comment_key, post_url, seq, author, body, when_text,
+                      reply_to, is_ours, answered,
+                      COALESCE(reply_draft, '')   AS reply_draft,
+                      COALESCE(reply_saved_at,'') AS reply_saved_at,
+                      COALESCE(reply_sent_at, '') AS reply_sent_at,
+                      first_seen
+                 FROM my_comment
+                WHERE TRIM(body) <> ''
+                ORDER BY post_url, seq""").fetchall()
+    finally:
+        conn.close()
+
+    by_post: dict[str, list[dict]] = {}
+    for row in rows:
+        by_post.setdefault(row["post_url"], []).append(dict(row))
+
+    out: list[dict] = []
+    for post in posts:
+        items = by_post.get(post["post_url"], [])
+        # **นับ "ค้าง" จากคอมเมนต์ของคนอื่นที่ยังไม่ได้ตอบเท่านั้น**
+        # คอมเมนต์ของเราเองไม่ใช่ของค้าง และใบที่พิมพ์คำตอบไว้แล้วก็ยังค้างอยู่
+        # จนกว่าบอทจะพิมพ์ลง Facebook จริง (ดู reply_sent_at)
+        pending = [c for c in items
+                   if not c["is_ours"] and not c["answered"] and not c["reply_sent_at"]]
+        if only_pending and not pending:
+            continue
+        out.append({
+            **{k: post[k] for k in post.keys()},
+            "pending": len(pending),
+            "drafted": sum(1 for c in items if c["reply_draft"] and not c["reply_sent_at"]),
+            "comments_list": items,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def save_reply(comment_key: str, text: str) -> dict:
+    """เก็บคำตอบที่เจ้าของพิมพ์ไว้ — **ยังไม่ส่ง** รอบอทเอาไปพิมพ์บนมือถือ
+
+    ส่งข้อความว่างมา = ลบคำตอบที่เคยพิมพ์ไว้ทิ้ง
+
+    **ไม่ตั้งธง answered ตรงนี้** เพราะ answered แปลว่า "เห็นคำตอบของเราบน
+    หน้าจริงแล้ว" ซึ่งเป็นคนละเรื่องกับ "พิมพ์เตรียมไว้" — ถ้าตั้งตรงนี้
+    คอมเมนต์จะหายไปจากรายการค้างทั้งที่ยังไม่มีอะไรขึ้น Facebook เลย
+    (กติกาข้อ 2.3.1 — ป้ายสถานะต้องตรงกับความจริง)
+    """
+    key = str(comment_key or "").strip()
+    if not key:
+        raise ValueError("ไม่ได้บอกว่าจะตอบคอมเมนต์ไหน")
+    body = str(text or "").strip()
+    conn = open_db()
+    try:
+        found = conn.execute(
+            "SELECT is_ours, reply_sent_at FROM my_comment WHERE comment_key=?",
+            (key,)).fetchone()
+        if found is None:
+            raise ValueError("ไม่พบคอมเมนต์นี้ — อาจถูกลบไปแล้ว")
+        if found["is_ours"]:
+            raise ValueError("คอมเมนต์นี้เป็นของเราเอง ไม่ต้องตอบ")
+        if found["reply_sent_at"]:
+            raise ValueError("คอมเมนต์นี้ตอบไปแล้วเมื่อ " + found["reply_sent_at"])
+        conn.execute(
+            """UPDATE my_comment
+                  SET reply_draft=?, reply_saved_at=?
+                WHERE comment_key=?""",
+            (body, datetime.now().strftime("%Y-%m-%d %H:%M:%S") if body else "", key))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"comment_key": key, "reply_draft": body,
+            "message": "เก็บคำตอบไว้แล้ว — รอบอทเอาไปพิมพ์บนมือถือ"
+                       if body else "ลบคำตอบที่เตรียมไว้แล้ว"}
+
 
 def check_once() -> dict:
     """เช็คทุกโพสต์หนึ่งรอบ — คืนสรุปเป็น dict"""

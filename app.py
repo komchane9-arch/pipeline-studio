@@ -6414,6 +6414,22 @@ POSTS_COLLECT_SCRIPT = BASE_DIR / "fb_posts_collect.py"
 POSTS_COLLECT_GAP = 60.0            # เช็คทุกกี่วินาที
 POSTS_COLLECT_COOLDOWN = 180.0      # ปลุกบอทตัวเดิมซ้ำได้เร็วสุดแค่ไหน
 POSTS_COLLECT_OFF = DATA_DIR / "posts_collect_keeper.off"   # สร้างไฟล์นี้ = สั่งหยุด
+# รายชื่อบอทที่ **ห้ามปลุก** — บรรทัดละชื่อ (เจ้าของสั่ง 14 ก.ย. 2569)
+#
+# ต่างจาก POSTS_COLLECT_OFF ที่หยุดทั้งระบบ — ตัวนี้ปิดทีละตัว
+# ใช้กับบอทที่ล็อกอินไม่ได้แล้ว ปลุกไปก็เปิด Chrome แล้วตายทันทีทุกรอบ
+# แก้ไฟล์ได้เลยไม่ต้องแก้โค้ดและไม่ต้องรีสตาร์ต
+POSTS_COLLECT_SKIP = DATA_DIR / "posts_collect_skip.txt"
+
+
+def posts_collect_skip() -> set[str]:
+    """ชื่อบอทที่เจ้าของสั่งไม่ให้ปลุก (ตัวพิมพ์เล็ก) — อ่านใหม่ทุกครั้ง"""
+    try:
+        lines = POSTS_COLLECT_SKIP.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    return {line.strip().casefold() for line in lines
+            if line.strip() and not line.lstrip().startswith("#")}
 _posts_collect_woke: dict[str, float] = {}
 
 
@@ -6436,7 +6452,16 @@ def posts_collect_bots() -> list[str]:
     # วัดจริง 21:15-21:36 น.: ตัวตามยอดรอคิวจนครบ 20 นาทีแล้วยังไม่ได้ ต้องข้ามรอบ
     #
     # กันออกตรงนี้ตรงกว่าการให้สองตัวแย่งคิวกัน — คนละหน้าที่ ไม่ควรใช้บัญชีร่วมกัน
-    reserved = set()
+    #
+    # ⚠️ **การยกเว้นตรงนี้ผูกกับ COLLECTOR_PROFILE ซึ่งย้ายได้** — พอ 13 ก.ย. 2569
+    # เจ้าของสั่งย้ายตัวเก็บคอมเมนต์จาก Bot11 ไป Bot10 **Bot11 ก็หลุดจากการยกเว้น
+    # ทันที** แล้วระบบเริ่มปลุกมันทุก 3 นาที ทั้งที่บัญชีในนั้นโดน Facebook
+    # ตั้งด่านยืนยันตัวตนจนล็อกอินไม่ได้ — เปิด Chrome แล้วตายทุกรอบ เขียน log
+    # รกและกินเครื่องเปล่า
+    #
+    # จึงเพิ่มรายชื่อ "ห้ามปลุก" ที่เจ้าของคุมเองได้ (posts_collect_skip.txt)
+    # ไม่ผูกกับค่าอื่นที่ย้ายได้อีก
+    reserved = set(posts_collect_skip())
     try:
         import fb_engagement                                    # noqa: PLC0415
         reserved.add(fb_engagement.COLLECTOR_PROFILE.casefold())

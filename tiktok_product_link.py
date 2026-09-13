@@ -324,11 +324,30 @@ def analyze_four(
         "Never invent a model or specification. Compatible phone/laptop names are not the "
         "product's own model. A listing offering multiple variants can include the target, "
         "but do not assume an unshown variant is available. Explain concrete visible evidence. "
-        "Brand, product type, model code, size, and variant must agree. A similar product "
-        "with a different model code or size is NOT a match. Return one JSON object only:\n"
+        # ---- เกณฑ์ตัดสินสองชั้น (เจ้าของสั่ง 13 ก.ย. 2569) ------------------
+        #
+        # ของเดิมบังคับให้ตรงครบห้าอย่าง (ยี่ห้อ · ชนิด · รหัสรุ่น · ขนาด · ตัวเลือก)
+        # ขาดข้อเดียวตอบว่าไม่ตรงทันที — เข้มเกินจริง เจ้าของเปิดภาพหลักฐานเองแล้ว
+        # เห็นว่าใบ TCL 55Q7D Pro ผลอันดับ 1 คือสินค้าตัวเดียวกันเป๊ะ แต่ AI ตอบ
+        # ไม่ตรงเพราะชื่อประกาศเขียน QLED ส่วนใบงานเขียน LED
+        #
+        # ชั้นที่ 1  **รหัสรุ่นตรง = เอาเลย** รหัสรุ่นเป็นตัวชี้ที่ชัดที่สุด ถ้าตรง
+        #            ก็คือสินค้าตัวเดียวกัน ไม่ต้องไปติดคำโฆษณารอบๆ
+        # ชั้นที่ 2  รหัสรุ่นไม่ตรงหรืออ่านไม่ออก -> ดูอีกสี่อย่าง และ
+        #            **ต้องตรงครบทั้งสี่** ยี่ห้อ · ชนิดสินค้า · ขนาด · ตัวเลือก
+        "Decide in two stages.\n"
+        "STAGE 1 - model code: if a listing shows the SAME model code as the target, "
+        "that listing IS the product. Choose it and answer confidence high, even when "
+        "marketing words around the code differ (for example LED vs QLED, Pro vs PRO, "
+        "or extra words such as New or 2025).\n"
+        "STAGE 2 - only when no listing shows a matching model code, or the code is "
+        "not readable: then brand, product type, size and variant must ALL FOUR agree. "
+        "If all four agree, choose that listing and answer confidence medium. "
+        "If even one of the four disagrees, it is NOT a match.\n"
+        "Never treat a guessed model code as readable. Return one JSON object only:\n"
         '{"match":0,"confidence":"high|medium|low","reason":"short Thai reason",'
         '"titles":["","","",""]}\n'
-        "match must be 1,2,3,4 only for an exact/clearly same product; use 0 when none match."
+        "match must be 1,2,3,4 for the chosen listing; use 0 when neither stage matches."
     )
     blob = base64.b64encode(collage.read_bytes()).decode("ascii")
     ensure_ollama()
@@ -909,8 +928,16 @@ def confident_rank(vision: dict, reference_check: dict) -> int:
         rank = int((vision or {}).get("match") or 0)
     except (TypeError, ValueError):
         return 0
+    # **รับทั้งสองชั้นตามที่เจ้าของสั่ง 13 ก.ย. 2569**
+    #   high    = ชั้นที่ 1 รหัสรุ่นตรง -> เลือกเลย
+    #   medium  = ชั้นที่ 2 ยี่ห้อ · ชนิด · ขนาด · ตัวเลือก ตรงครบทั้งสี่ -> เลือกได้
+    # ของเดิมรับเฉพาะ high ถ้าไม่แก้ตรงนี้ ชั้นที่ 2 จะไม่มีวันถูกเลือกเลย
+    # แม้คำสั่งจะบอกให้เลือก — คำสั่งกับตัวกรองต้องตรงกัน ไม่งั้นแก้แล้วเหมือนไม่ได้แก้
+    #
+    # ด่านที่กันการกดผิดตัวยังอยู่ครบ: หลังกดต้องเปิดหน้าสินค้าแล้วอ่านชื่อจริง
+    # กลับมาเทียบกับใบงาน ถ้าไม่มีคำตรงกันสักคำ งานจะล้มก่อนเพิ่มโชว์เคส
     return (rank if rank in (1, 2, 3, 4)
-            and str((vision or {}).get("confidence") or "").lower() == "high"
+            and str((vision or {}).get("confidence") or "").lower() in {"high", "medium"}
             and not (reference_check or {}).get("reference_review") else 0)
 
 

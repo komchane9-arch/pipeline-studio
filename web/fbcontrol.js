@@ -368,7 +368,11 @@ function paintCard(entry, job) {
 
   // ---- สถานะที่ขัดกันเอง ต้องดังขึ้นมา ไม่ใช่ปล่อยให้ดูปกติ
   let alert = "";
-  if (job.stopping) {
+  // ใบที่ถูกเรียกไปโพสต์เป็นใบอื่นแล้ว — ต้องบอกให้ชัด ไม่งั้นเห็น "0/6 กลุ่ม"
+  // แล้วนึกว่ายังไม่ได้ลง แล้วสั่งลงซ้ำ ซึ่งถอนคืนไม่ได้
+  if (job.posted_via) {
+    alert = `✅ ใบนี้ถูกเรียกไปโพสต์เป็นใบ ${job.posted_via} แล้ว — ไม่ต้องโพสต์ซ้ำ`;
+  } else if (job.stopping) {
     alert = "⏸️ สั่งหยุดแล้ว — มือถือกำลังทำกลุ่มปัจจุบันให้จบก่อน "
       + "(วัดจริงใช้เวลาราว 1 นาที) ไม่ต้องกดซ้ำ";
   } else if (job.orphan) {
@@ -435,8 +439,11 @@ function paintHistory(rows) {
     const line = el("div", "fc-past");
     line.append(el("span", "fc-past-when", clockText(job.finished_at) || "—"));
     line.append(el("span", "fc-past-badge", `${look.icon} ${look.label}`));
+    // ต้นฉบับที่ถูกเรียกไปใช้ ไม่ได้โพสต์เองจริงๆ — เขียน "0/6 กลุ่ม" จะอ่าน
+    // เหมือนล้มเหลว ทั้งที่เนื้อหาขึ้นครบแล้วผ่านใบอื่น
     line.append(el("span", "fc-past-text",
-      `${job.posted_count}/${job.total} กลุ่ม · ${(job.caption || "").replace(/\s+/g, " ")}`));
+      (job.posted_via ? `เรียกไปโพสต์เป็นใบ ${job.posted_via}` : `${job.posted_count}/${job.total} กลุ่ม`)
+      + ` · ${(job.caption || "").replace(/\s+/g, " ")}`));
     (job.links || []).forEach((link, index) => {
       const open = document.createElement("a");
       open.className = "fc-q-link";

@@ -1954,6 +1954,85 @@ def _wake_for_publish(serial: str):
     return work
 
 
+def _clear_other_job_clips(serial: str, keep: str) -> str:
+    """ลบ **เฉพาะคลิปของใบอื่น** ใน ``Movies/autopost`` — ไม่แตะรูปเลยสักใบ
+
+    **เหตุการณ์ที่ทำให้ต้องมีตัวนี้** 13 ก.ย. 2569 เวลา 00:42–01:06 สาย
+    Shopee Video ล้ม **17 ครั้งติดกัน** ด้วยเหตุผลเดียวกันทุกครั้ง
+
+        PublishMediaIdentityError: คลิปใน /sdcard/Movies/autopost ไม่ตรงกับ
+        ใบงาน 54711892603 — ต้องมี 54711892603-clip.mp4 ใบเดียว
+        แต่พบ 51854992106-clip.mp4, 54711892603-clip.mp4
+
+    คลิปของใบ 51854992106 ค้างมาตั้งแต่ 11 ก.ย. ทั้งที่ลงสำเร็จไปแล้ว
+    ปิดสายไป 23 นาที และมีอีก 4 ใบรอต่อคิวอยู่ข้างหลัง
+
+    **รากเหง้า — คนล้างกับคนตรวจใช้กติกาคนละชุด**
+        ล้างก่อนส่ง   ``_clear_facebook_post_media``  เฉพาะ facebook_reels · tiktok
+        ตรวจก่อนเปิดแอป ``validate_phone_video_inventory``  **ทุกปลายทาง**
+
+    Shopee Video จึงเป็นปลายทางเดียวที่ถูกตรวจด้วยกติกาที่ไม่มีใครเตรียมทาง
+    ให้ผ่าน และเป็น**ตัวแรกของลำดับ** (Shopee → Facebook → TikTok ตามข้อ 2.8)
+    ตายที่นี่คือตายทั้งสาย
+
+    ที่ผ่านมามันดูเหมือนปกติเพราะ ``fb_phone_clean`` (ตัวล้างหน่วยความจำ) บังเอิญ
+    มาเก็บให้ — วัดจริง 01:15:39 "ลบไฟล์ 1 ใบ · คืนแรม 4998 MB" คือมาตอนแรมเต็ม
+    **ไม่ใช่ของที่รับประกันว่าจะมาทุกรอบ** และตัวนั้นเองก็ถูกสั่งให้พักเมื่อมีใบ
+    ค้างรอ Resume — ของค้างจึงไล่คนที่จะมาเก็บมันออกไปเอง วนกันอยู่อย่างนั้น
+
+    ⚠️ **ทำไมถึงไม่เรียก ``_clear_facebook_post_media`` ให้มันจบๆ ไป**
+
+    เพราะตัวนั้นลบ **รูป** ใน ``/Pictures/pipeline*`` ด้วย ซึ่งเป็นที่ของ
+    ``tiktok_product_link.py:46`` (REMOTE_DIR ของตัวผูกสินค้า TikTok สายคลิป)
+    Facebook Reels จำเป็นต้องลบเพราะหน้าเลือกสื่อของมันรวมรูปกับคลิปไว้ด้วยกัน
+    (เคยหยิบรูปสายชาร์จไปโพสต์ 4 ใน 13 ครั้ง) แต่ **Shopee Video เลือกจากหน้า
+    คลิปอย่างเดียว ไม่มีเหตุผลต้องไปแตะรูปของสายอื่น**
+
+    **ห้ามรวบสามปลายทางให้ใช้ตัวเดียวกันเพราะเห็นว่า "น่าจะเหมือนกัน"** —
+    มันไม่เหมือนกัน และการที่วันนี้บัตรคิวมือถือกันไว้ให้ ไม่ได้แปลว่าพรุ่งนี้
+    ยังกันอยู่ (ทะเบียนมีเครื่องที่ตั้งเป็น "ทุกสาย" รออยู่แล้ว แค่ยังไม่เสียบ)
+    """
+    media_uri = "content://media/external/video/media"
+
+    def sh(*args: str) -> str:
+        done = run_adb("-s", serial, "shell", *args, timeout=60)
+        if done.returncode != 0:
+            detail = (done.stderr or done.stdout).decode("utf-8", errors="replace")[:180]
+            raise RuntimeError(f"ลบคลิปใบเก่าในมือถือไม่สำเร็จ: {detail or 'ADB error'}")
+        return done.stdout.decode("utf-8", errors="replace")
+
+    sh("mkdir", "-p", PHONE_POST_REMOTE_DIR)
+    names = [value.strip() for value in sh("ls", "-1A", PHONE_POST_REMOTE_DIR).splitlines()
+             if value.strip() and value.strip() != keep]
+    if not names:
+        return ""
+
+    # ลบทะเบียนแกลเลอรีก่อน แล้วค่อยลบไฟล์ — ไฟล์หายแต่ทะเบียนค้าง จะได้ภาพย่อ
+    # ที่กดได้แต่เปิดไม่ขึ้น ซึ่งอันตรายกว่าไม่ลบเลย
+    rows = sh("content", "query", "--uri", media_uri,
+              "--projection", "_id:_display_name:_data")
+    for line in rows.splitlines():
+        norm = line.replace("\\", "/")
+        if f"{PHONE_POST_REMOTE_DIR}/" not in norm:
+            continue
+        if not any(f"{PHONE_POST_REMOTE_DIR}/{name}" in norm for name in names):
+            continue          # ของใบปัจจุบัน — ห้ามแตะ
+        found = re.search(r"(?:^|[, ])_id=(\d+)", line)
+        if found:
+            sh("content", "delete", "--uri", media_uri, "--where", f"_id={found.group(1)}")
+    for name in names:
+        sh("rm", "-f", f"{PHONE_POST_REMOTE_DIR}/{name}")
+
+    left = [value.strip() for value in sh("ls", "-1A", PHONE_POST_REMOTE_DIR).splitlines()
+            if value.strip() and value.strip() != keep]
+    if left:
+        # ลบไม่ออกต้องดังตรงนี้ ไม่ใช่ปล่อยให้ไปล้มที่ด่านตรวจซึ่งบอกไม่ได้ว่าทำไม
+        raise RuntimeError(
+            f"ลบคลิปใบเก่าแล้วยังเหลือ {len(left)} ใบ ({', '.join(left[:3])}) — "
+            "หยุดก่อนเพื่อไม่ให้หยิบคลิปผิดใบ")
+    return f"ลบคลิปใบเก่าที่ค้างอยู่ {len(names)} ใบ ({', '.join(names[:3])})"
+
+
 def _clear_facebook_post_media(serial: str) -> str:
     """ล้างเฉพาะคลิปที่ระบบสร้างใน ``Movies/autopost`` พร้อมทะเบียน MediaStore.
 
@@ -2122,8 +2201,15 @@ def _clip_sender(serial: str, item_id: str, run: dict, target: str = ""):
             raise RuntimeError(f"ไม่พบไฟล์คลิปในเครื่องคอม: {local}")
         cleared = ""
         if target in {"facebook_reels", "tiktok"}:
+            # สองตัวนี้ต้องล้างรูปด้วย เพราะหน้าเลือกสื่อรวมรูปกับคลิปไว้ด้วยกัน
             cleared = _clear_facebook_post_media(serial)
             append_log("publish", f"[{target}] {cleared}")
+        else:
+            # ปลายทางอื่น (Shopee Video) เลือกจากหน้าคลิปอย่างเดียว ล้างแค่คลิป
+            # ของใบอื่นพอ **ห้ามไปลบรูปของสายคลิป** (ดูเหตุผลใน _clear_other_job_clips)
+            cleared = _clear_other_job_clips(serial, name)
+            if cleared:
+                append_log("publish", f"[{target}] {cleared}")
         size = local.stat().st_size
         remote = f"{PHONE_POST_REMOTE_DIR}/{name}"
 
@@ -8034,6 +8120,62 @@ def _fb_recall_job(job_id: str, chat_id: str) -> tuple[dict | None, str]:
     return fresh, ""
 
 
+def _fb_release_recall_source(job_id: str, job: dict, posted: int) -> None:
+    """โพสต์ขึ้นแล้ว — ปลดต้นฉบับใน ``/recall`` ออกจากคลังและจากคิวรอโพสต์
+
+    **เจ้าของสั่ง 13 ก.ย. 2569** — *"ตอนผมทำ /recall ใน telegram แล้วกดโพสต์
+    อันนี้ ให้เอาใบงานนั้นออกจาก recall แล้วเอาออกจากหน้าเว็บที่เป็นส่วนของ
+    งานรอโพสต์ด้วย ให้อัปเดตลิงก์กัน"*
+
+    ``/recall`` ไม่ได้เอาใบเดิมไปใช้ แต่ **ก๊อปเป็นใบใหม่** แล้วผูกกลับด้วย
+    ``recalled_from`` ส่วนใบต้นฉบับยังคง ``saved=True`` และสถานะ ``ready``
+    ค้างอยู่เหมือนเดิม — ตอนกดยกเลิกมีคนปลดให้ (ดู ``_fb_cancel_job``)
+    **แต่ตอนโพสต์สำเร็จไม่มีใครปลด**
+
+    วัดของจริงตอนเขียน 13 ก.ย. มีค้างอยู่ **3 ใบพร้อมกัน**
+
+        p199736088 ready/saved  →  p211647506 โพสต์แล้ว 6/6
+        p198672560 ready/saved  →  p223350559 โพสต์แล้ว 6/6
+        p196285306 ready/saved  →  p223306104 โพสต์แล้ว 6/6
+
+    ทั้งสามใบยังโผล่ทั้งใน ``/recall`` และในคิวรอโพสต์บนหน้าเว็บ ทั้งที่เนื้อหา
+    ขึ้นกลุ่มไปครบแล้ว — เรียกมาโพสต์ซ้ำได้ง่ายมาก และ **โพสต์ซ้ำถอนคืนไม่ได้**
+
+    **ยึด "โพสต์ขึ้นจริงกี่กลุ่ม" ไม่ใช่ "สถานะเป็น done ไหม"** (กติกาข้อ 2.3.1)
+    งานที่ล้มทั้งใบ (0 กลุ่ม) ต้องยังอยู่ใน ``/recall`` ให้เรียกมาลองใหม่ได้
+    ส่วนใบที่ขึ้นไปแล้วแม้แต่กลุ่มเดียวถือว่าเนื้อหาออกไปแล้ว ห้ามค้างไว้ให้ซ้ำ
+
+    ไม่แตะ ``results`` ของต้นฉบับ — มันไม่ได้โพสต์เองจริงๆ ผลเป็นของใบใหม่
+    บันทึกไว้ที่ ``posted_via`` แทน เพื่อให้หน้าเว็บบอกได้ว่าไปโผล่ที่ใบไหน
+    """
+    source_id = str(job.get("recalled_from") or "").strip()
+    if not source_id or posted <= 0:
+        return
+    source = fb_jobs.get(source_id)
+    if source is None or source.get("posted_via"):
+        return
+
+    changes: dict = {"posted_via": job_id}
+    if source.get("saved"):
+        changes["saved"] = False
+    # ยังค้างอยู่ในคิวรอโพสต์ = ต้องพาออกจากคิวด้วย ไม่ใช่แค่ออกจากคลัง
+    # ถ้าปลดแค่ saved ใบนี้จะยังนั่งอยู่บนแผงหน้าเว็บว่า "รอโพสต์" ตลอดไป
+    if source.get("status") in fb_auto_post.OPEN_STATUSES:
+        changes["status"] = fb_auto_post.STATUS_DONE
+        changes["finished_at"] = datetime.now().isoformat(timespec="seconds")
+    fb_jobs.update(source_id, **changes)
+    fb_jobs.append_log(
+        source_id,
+        f"เรียกไปโพสต์เป็นใบ {job_id} แล้ว ขึ้น {posted} กลุ่ม "
+        "— ปลดออกจาก /recall และคิวรอโพสต์ ไม่ต้องโพสต์ซ้ำ",
+    )
+    append_log(
+        "publish",
+        f"[{job_id}] โพสต์ขึ้น {posted} กลุ่ม — ปลดต้นฉบับ {source_id} "
+        "ออกจาก /recall และคิวรอโพสต์แล้ว",
+    )
+
+
 def _fb_recall_card() -> tuple[str, dict | None]:
     """รายการโพสต์ที่ผู้ใช้ตั้งใจกดเก็บไว้ ไม่ปนกับประวัติโพสต์ทั่วไป"""
     items = fb_jobs.saved_listing()[:RECALL_LIMIT]
@@ -11573,6 +11715,9 @@ def _fb_run_job(job_id: str, queued: bool = False, resume: bool = False) -> str:
              "แล้วกดถูกใจ/คอมเมนต์ให้เอง") if chain else ""
         ))
         append_log("publish", f"[{job_id}] จบงาน — {status}")
+        # ใบที่เรียกมาจาก /recall — ขึ้นกลุ่มไปแล้วต้องปลดต้นฉบับออกจากคลัง
+        # และจากคิวรอโพสต์ ไม่งั้นเรียกมาโพสต์ซ้ำได้ ซึ่งถอนคืนไม่ได้
+        _fb_release_recall_source(job_id, latest, posted)
         # โพสต์ในฟีดหาโพสต์ตัวเองเจอยาก (ฟีดเรียงตามความเกี่ยวข้อง) ทางแจ้งเตือน
         # แม่นกว่ามาก จึงต่อสายไปทำต่อให้เลย ไม่ต้องรอผู้ใช้พิมพ์ /followup
         # ผู้ใช้สั่งหยุด/ยกเลิกไว้ = ไม่ต่อ
@@ -12033,6 +12178,7 @@ async def fb_jobs_live(history: int = 0) -> dict:
             "latest_step": log[-1] if log else "",
             "tail": log[-14:],
             "device": where.get(job_id, ""),
+            "posted_via": str(job.get("posted_via") or ""),
             "deferred": job_id in _deferred_jobs,
             "stopping": stopping,
             "orphan": status == fb_auto_post.STATUS_RUNNING and not on_phone,
@@ -12057,6 +12203,7 @@ async def fb_jobs_live(history: int = 0) -> dict:
                 "posted_count": sum(1 for r in results if r.get("posted") is True),
                 "total": len(dict.fromkeys(job.get("groups") or [])),
                 "finished_at": job.get("finished_at") or job.get("created_at") or "",
+                "posted_via": str(job.get("posted_via") or ""),
                 "links": [str(r.get("link")) for r in results if r.get("link")][:6],
             })
 

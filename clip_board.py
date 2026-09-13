@@ -242,6 +242,11 @@ NO_TARGET: set[str] = set()
 POST_TARGET = {SHOPEE: "shopee_video", REELS: "facebook_reels", TIKTOK: "tiktok"}
 
 
+def _link_file(layout: str | None, name: str) -> str:
+    """ชื่อไฟล์ภาพรวมผลค้นหา — ว่างเมื่อรอบนั้นไม่ได้เก็บภาพรวมไว้"""
+    return name if layout else ""
+
+
 def tiktok_product_missing(run: dict | None) -> str:
     """หาสินค้าเดียวกันใน TikTok Shop ไม่เจอหรือเปล่า — คืนเหตุผล ว่าง = เจอ/ยังไม่ได้หา
 
@@ -440,6 +445,27 @@ def clip_info(run: dict) -> dict:
         "tiktok_product_name": tiktok_link.get("tiktok_product_name") or "",
         "tiktok_link_rank": tiktok_link.get("selected_rank") or 0,
         "tiktok_link_reason": tiktok_link.get("reason") or "",
+        # ---- หลักฐานที่ใช้ตัดสินว่า "ไม่มีสินค้าใน TikTok" -------------------
+        #
+        # เจ้าของสั่ง 13 ก.ย. 2569: *"ให้เอารายละเอียดที่ AI อ่านมาใส่ในใบงาน
+        # ที่ไม่มีสินค้า พร้อมรูปภาพที่แคปไว้มาเป็นหลักฐานด้วย"*
+        #
+        # การตัดสินนี้ทำให้ใบหายจากสายถาวร คนต้องตรวจย้อนได้ว่าตัดสินจากอะไร
+        # ไม่ใช่เชื่อคำว่า "ไม่เจอ" ลอยๆ (กติกา 2.6.1) — ตรวจแล้ววันที่แนบ
+        # ภาพยังอยู่ครบทั้ง 53 ใบ ไม่มีใบไหนภาพหาย
+        #
+        # ทุกชื่อไฟล์เป็นพาธในโฟลเดอร์งาน โหลดผ่านที่อยู่เดิมได้เลย
+        #   /api/clips/<item_id>/file/<ชื่อไฟล์>
+        "tiktok_link_shot": _link_file(tiktok_link.get("results_layout"),
+                                       "tiktok-link/tiktok-link-four-results.jpg"),
+        "tiktok_link_images": [str(name).replace("\\", "/")
+                               for name in (tiktok_link.get("results_images") or [])],
+        "tiktok_link_reference": str(tiktok_link.get("reference_image") or ""),
+        "tiktok_link_at": tiktok_link.get("updated_at") or "",
+        # คะแนนที่ตัวดูรูปให้กับรูปสินค้าที่เลือกมาเป็นตัวเทียบ — บอกว่ารูปที่
+        # ใช้เทียบดีพอไหม ถ้ารูปตั้งต้นแย่ ผลที่ได้ก็เชื่อไม่ได้เหมือนกัน
+        "tiktok_link_reference_note": str(
+            ((tiktok_link.get("reference_check") or {}).get("what") or "")),
         "publish_auto_skip": bool(active_skip),
         "publish_note": publish_note,
     }

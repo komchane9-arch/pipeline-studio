@@ -193,10 +193,20 @@ function buildCard(jobId) {
   const queue = el("ol", "fc-queue");
   queueBox.append(queueHead, queue);
 
-  // เนื้อหาที่จะโพสต์ — ปิดไว้ก่อน รูปค่อยโหลดตอนกางจริง ไม่งั้นแผงสถานะ
-  // จะลากรูปทุกใบของทุกงานมาโหลดทิ้งตั้งแต่เปิดหน้า
+  /* เนื้อหาที่จะโพสต์ — **ยุบทั้งหมดไว้ในกล่องเดียว** (เจ้าของสั่ง 13 ก.ย. 2569
+   * "ใบงานแต่ละโพสต์ให้ดึงรูป แคปชั่น รวมถึงคอมเมนต์และรูปในคอมเมนต์มาด้วย
+   *  ให้ทำเป็น dropdown เพื่อไม่ให้มันใหญ่เกินไป")
+   *
+   * ของเดิมแคปชันกางเต็มอยู่นอกกล่อง กินความสูงไปหลายบรรทัดต่อใบ พอมีหลายใบ
+   * เรียงกันจะต้องเลื่อนยาวมากกว่าจะเห็นครบ — ย้ายเข้ามาไว้ในนี้ด้วย
+   * เหลือไว้ข้างนอกแค่บรรทัดเดียวพอให้จำได้ว่าใบไหน
+   *
+   * ปิดไว้ก่อน และรูปค่อยโหลดตอนกางจริง ไม่งั้นแผงสถานะจะลากรูปทุกใบของทุกงาน
+   * มาโหลดทิ้งตั้งแต่เปิดหน้า
+   */
   const content = el("details", "fc-content");
-  content.append(el("summary", "", "ดูเนื้อหาที่จะโพสต์"));
+  const contentHead = el("summary", "", "ดูเนื้อหาเต็ม");
+  content.append(contentHead);
   const contentBody = el("div", "fc-content-body");
   content.append(contentBody);
 
@@ -225,7 +235,7 @@ function buildCard(jobId) {
   const entry = {
     root, badge, title, source, caption, meta, times, alert,
     fill, prog, step, idle, feed, queueHead, queue, content,
-    contentBody, buttons, bar, why, job: null,
+    contentBody, contentHead, buttons, bar, why, job: null,
     feedKey: "", queueKey: "", contentKey: "",
   };
 
@@ -245,31 +255,48 @@ function paintContent(entry) {
   entry.contentKey = key;
 
   const parts = [];
+
+  // ---- รูปโพสต์ -------------------------------------------------------
   if (job.images) {
+    parts.push(el("strong", "fc-part", `รูปโพสต์ ${job.images} ใบ`));
     const strip = el("div", "fc-shots");
     for (let i = 0; i < job.images; i += 1) {
       const img = document.createElement("img");
-      img.loading = "lazy";
+      // **ห้ามใส่ loading="lazy" ที่นี่** — รูปถูกสร้างตอนกางกล่องอยู่แล้ว
+      // (ดู paintContent ถูกเรียกจาก toggle) ใส่ lazy ซ้ำแล้วเบราว์เซอร์จะเลื่อน
+      // การโหลดไว้จนกว่ารูปจะเข้ามาในจอ — การ์ดที่อยู่ล่างๆ กางแล้วรูปไม่ขึ้นเลย
+      // วัดจริง 13 ก.ย. 2569: กางแล้วรอ 45 วินาที naturalWidth ยังเป็น 0
+      // ทั้งที่เส้นรูปตอบใน 40 ms
       img.alt = `รูปโพสต์ใบที่ ${i + 1}`;
       img.src = `/api/fb/jobs/${encodeURIComponent(job.id)}/media/post/${i}`;
       strip.append(img);
     }
     parts.push(strip);
   }
+
+  // ---- แคปชันเต็ม -----------------------------------------------------
+  // อยู่ในนี้แทนที่จะกางอยู่นอกการ์ด เพราะยาวหลายบรรทัดและมีทุกใบ
+  if ((job.caption || "").trim()) {
+    parts.push(el("strong", "fc-part", "แคปชัน"));
+    parts.push(el("p", "fc-full-caption", job.caption.trim()));
+  }
+
+  // ---- คอมเมนต์ + รูปในคอมเมนต์ ---------------------------------------
   (job.comment_texts || []).forEach((text, index) => {
     const block = el("div", "fc-comment");
     block.append(el("strong", "", `คอมเมนต์ช่อง ${index + 1}`));
     block.append(el("span", "", text));
+    // รูปในคอมเมนต์เก็บเรียงตามช่อง ช่องที่ไม่มีรูปก็เว้นไว้ในรายการฝั่งเซิร์ฟเวอร์
     if (index < job.comment_images) {
       const img = document.createElement("img");
-      img.loading = "lazy";
       img.alt = `รูปคอมเมนต์ช่อง ${index + 1}`;
       img.src = `/api/fb/jobs/${encodeURIComponent(job.id)}/media/comment/${index}`;
       block.append(img);
     }
     parts.push(block);
   });
-  if (!parts.length) parts.push(el("p", "fc-help", "ใบนี้ยังไม่มีรูปและคอมเมนต์"));
+
+  if (!parts.length) parts.push(el("p", "fc-help", "ใบนี้ยังไม่มีรูป แคปชัน และคอมเมนต์"));
   entry.contentBody.replaceChildren(...parts);
 }
 
@@ -333,7 +360,17 @@ function paintCard(entry, job) {
   setText(entry.badge, `${look.icon} ${look.label}`);
   setText(entry.title, `ใบงาน ${job.id}`);
   setText(entry.source, SOURCE_LOOK[job.source] || "");
-  setText(entry.caption, (job.caption || "(ยังไม่มีแคปชัน)").trim());
+  // เหลือแคปชันไว้ข้างนอกบรรทัดเดียว พอให้จำได้ว่าใบไหน (CSS ตัดให้เอง)
+  setText(entry.caption, (job.caption || "(ยังไม่มีแคปชัน)").replace(/\s+/g, " ").trim());
+  // หัวกล่องบอกว่าข้างในมีอะไรบ้าง จะได้ไม่ต้องกางดูก่อนถึงจะรู้ว่ามีอะไร
+  const inside = [];
+  if (job.images) inside.push(`รูป ${job.images}`);
+  if ((job.caption || "").trim()) inside.push("แคปชัน");
+  if (job.comments) inside.push(`คอมเมนต์ ${job.comments}`);
+  if (job.comment_images) inside.push(`รูปในคอมเมนต์ ${job.comment_images}`);
+  setText(entry.contentHead, inside.length
+    ? `ดูเนื้อหาเต็ม — ${inside.join(" · ")}`
+    : "ใบนี้ยังไม่มีเนื้อหา");
 
   const bits = [`🖼 ${job.images} ใบ`];
   bits.push(job.comments ? `💬 ${job.comments} คอมเมนต์` : "💬 ไม่มีคอมเมนต์");

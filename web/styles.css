@@ -3304,13 +3304,23 @@ body.typing-through {
 .fc-waiting_caption, .fc-waiting_image { border-left-color: var(--info); }
 
 .fc-src { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
-/* แคปชันเต็ม ขึ้นบรรทัดตามที่พิมพ์มา — ตัดกลางแล้วดูไม่ออกว่าใบไหน */
+/* แคปชันนอกกล่อง — **บรรทัดเดียวพอ** (เจ้าของสั่ง 13 ก.ย. 2569 ว่าอย่าให้ใหญ่เกินไป)
+   ตัวเต็มย้ายเข้าไปอยู่ใน dropdown "ดูเนื้อหาเต็ม" แล้ว บรรทัดนี้มีไว้ให้จำได้
+   ว่าการ์ดนี้คือใบไหนโดยไม่ต้องกางดู */
 .fc-caption {
-  margin: 6px 0 0; padding: 6px 9px; border-radius: 6px;
-  background: var(--shade); font-size: 12px; line-height: 1.6;
-  white-space: pre-wrap; overflow-wrap: anywhere;
-  max-height: 96px; overflow-y: auto;
+  margin: 6px 0 0; padding: 5px 9px; border-radius: 6px;
+  background: var(--shade); font-size: 12px; line-height: 1.5;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* แคปชันเต็มในกล่อง — ขึ้นบรรทัดตามที่พิมพ์มาจริง */
+.fc-full-caption {
+  margin: 3px 0 0; padding: 6px 9px; border-radius: 6px;
+  background: var(--shade); font-size: 12px; line-height: 1.65;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* หัวข้อย่อยในกล่อง — บอกว่าก้อนถัดไปคืออะไร */
+.fc-part { display: block; margin: 8px 0 3px; font-size: 11px; color: var(--ink-2); }
+.fc-part:first-child { margin-top: 0; }
 .fc-meta { margin: 5px 0 0; font-size: 11px; color: var(--ink-3); }
 .fc-when {
   margin: 3px 0 0; font-size: 11px; color: var(--ink-2);

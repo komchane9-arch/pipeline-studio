@@ -48,7 +48,9 @@ def main() -> None:
         หาแล้วไม่เจอ = _run(root, "1000000002", {
             "status": "pending_review", "matched_rank": 0, "confidence": "low",
             "showcase_added": False,
-            "reason": "เป้าหมายเป็นเคสลาย Hello Kitty แต่ผลค้นหาเป็นเคสลายอื่น",
+            "search_query": "เคสมือถือลาย Hello Kitty",
+            # เหตุผลดิบของตัวดูรูปเป็นภาษาอังกฤษ — ห้ามเอามาโชว์ตรงๆ
+            "reason": "The TARGET product is a Hello Kitty case, while results are other designs",
         })
         หาเจอแล้ว = _run(root, "1000000003", {
             "status": "showcase_added", "matched_rank": 1, "confidence": "high",
@@ -75,7 +77,12 @@ def main() -> None:
         # เหตุผลต้องติดไปกับใบด้วย ไม่ใช่แค่ย้ายกองเฉยๆ
         key, why = clip_board.bucket_of({"stage": "done"}, หาแล้วไม่เจอ)
         assert key == clip_board.NO_SHOP, key
-        assert "Hello Kitty" in why, f"เหตุผลหายไป: {why!r}"
+        # **ต้องเป็นภาษาไทยที่เจ้าของอ่านรู้เรื่อง** (กติกา 5.2)
+        assert "ไม่เจอสินค้าตัวนี้ใน TikTok Shop" in why, f"เหตุผลไม่ใช่ภาษาคน: {why!r}"
+        assert "TARGET product" not in why, (
+            f"เหตุผลดิบของตัวดูรูปหลุดมาโชว์: {why!r}")
+        # คำที่บอทใช้ค้นต้องติดมาด้วย — ใช้แยก "คำค้นแย่" ออกจาก "ร้านไม่มีของ"
+        assert "Hello Kitty" in why, f"คำค้นหายไป: {why!r}"
 
         # กองใหม่ต้องไม่ไปย้ายไฟล์จริง — ใช้โฟลเดอร์เดียวกับ TikTok
         assert (clip_board.FOLDER_OF_BUCKET[clip_board.NO_SHOP]

@@ -259,7 +259,18 @@ def tiktok_product_missing(run: dict | None) -> str:
         return ""
     if link.get("matched_rank") != 0:
         return ""                      # ยังไม่ได้หา หรือหาเจอแล้ว
-    return str(link.get("reason") or "").strip() or "หาสินค้าเดียวกันใน TikTok Shop ไม่เจอ"
+    # **ต้องเป็นภาษาที่เจ้าของอ่านรู้เรื่อง** (กติกา 5.2) — เหตุผลดิบของตัวดูรูป
+    # เป็นภาษาอังกฤษที่เขียนให้ AI อ่าน ไม่ใช่ให้คนอ่าน เช่น
+    # "The TARGET product is a 55Q7D Pro SQD-Mini LED TV, while the first two..."
+    # ข้อความเต็มยังอยู่ครบในฟิลด์ `tiktok_link_reason` ของแถว กดดูได้
+    #
+    # ใส่ **คำที่บอทใช้ค้นจริง** มาด้วย เพราะบางใบหาไม่เจอเพราะคำค้นยาวเกินไป
+    # ซึ่งแก้ได้ ต่างจากใบที่ร้านไม่มีของจริงซึ่งแก้ไม่ได้ — เห็นคำค้นแล้วแยกออก
+    query = " ".join(str(link.get("search_query") or "").split())
+    if query:
+        return (f"ไม่เจอสินค้าตัวนี้ใน TikTok Shop — ที่ค้นเจอเป็นรุ่นอื่น "
+                f"(ค้นด้วย: {query[:70]}{'…' if len(query) > 70 else ''})")
+    return "ไม่เจอสินค้าตัวนี้ใน TikTok Shop — ที่ค้นเจอเป็นรุ่นอื่น"
 
 
 def active_auto_skip_target(run: dict | None) -> str:

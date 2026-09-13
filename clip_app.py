@@ -8845,6 +8845,74 @@ async def clips_file(item_id: str, name: str) -> FileResponse:
     return FileResponse(path)
 
 
+@app.post("/api/clips/{item_id}/tiktok-link/confirm")
+async def tiktok_link_confirm(item_id: str, request: Request) -> dict:
+    """เจ้าของดูภาพหลักฐานแล้วยืนยันเองว่าผลค้นหาอันดับไหนคือสินค้าตัวเดียวกัน
+
+    **เจ้าของสั่ง 13 ก.ย. 2569** หลังเปิดภาพหลักฐานดูเองแล้วเห็นว่าตัวดูรูปอ่านพลาด
+    — ใบ TCL 55Q7D Pro ผลอันดับ 1 คือสินค้าตัวเดียวกันเป๊ะ (฿23,490) แต่ AI ตอบว่า
+    ไม่ตรงเพราะไปติดคำว่า QLED กับ LED ในชื่อประกาศ ทั้งที่คนมองออกทันที
+
+    **คนแทนที่แค่การตัดสินว่าอันไหนใช่ ไม่ได้ข้ามขั้นตอนใดเลย** ตัวหาสินค้ายังเดิน
+    ครบทุกขั้นเหมือนเดิม รวมทั้งด่านที่เปิดหน้าสินค้าแล้วอ่านชื่อจริงกลับมาเทียบกับ
+    ใบงาน — ถ้าวันที่รันจริงผลค้นหาสลับที่จนอันดับที่ยืนยันไว้กลายเป็นสินค้าคนละตัว
+    ชื่อบนหน้าจะไม่มีคำตรงกับใบงาน แล้วงานจะล้มก่อนถึงขั้นเพิ่มโชว์เคส
+
+    ส่ง ``{"rank": 1}`` ถึง 4 · ส่ง ``{"rank": 0}`` เพื่อยกเลิกการยืนยัน
+    """
+    payload = await request.json() if await request.body() else {}
+    try:
+        rank = int((payload or {}).get("rank"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400,
+                            detail="ต้องบอกอันดับเป็นตัวเลข 1-4 (หรือ 0 เพื่อยกเลิก)")
+    if rank not in (0, 1, 2, 3, 4):
+        raise HTTPException(status_code=400,
+                            detail="เลือกได้เฉพาะอันดับ 1-4 หรือ 0 เพื่อยกเลิก")
+
+    run = await asyncio.to_thread(clip_store.load_run, DATA_DIR, item_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"ไม่พบใบงาน {item_id}")
+    link = dict(run.get("tiktok_product_link") or {})
+    if not link:
+        raise HTTPException(status_code=409,
+                            detail="ใบนี้ยังไม่เคยหาสินค้าใน TikTok จึงยังไม่มีอะไรให้ยืนยัน")
+    if link.get("showcase_added"):
+        raise HTTPException(status_code=409,
+                            detail="ใบนี้เพิ่มสินค้าเข้าโชว์เคสไปแล้ว ไม่ต้องยืนยันซ้ำ")
+
+    when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if rank:
+        link.update({
+            "confirmed_rank": rank,
+            "confirmed_at": when,
+            # ออกจาก pending_review เพื่อให้ตัวหาสินค้าหยิบใบนี้กลับไปทำอีกรอบ
+            # (ดู _auto_tiktok_link_ready ที่ข้ามใบสถานะ pending_review)
+            "status": "confirmed",
+            "label": f"เจ้าของยืนยันอันดับ {rank}",
+            # ออกจากกอง "ไม่มีสินค้าใน TikTok" ทันที เพราะ matched_rank ไม่ใช่ 0 แล้ว
+            "matched_rank": rank,
+            "confidence": "human_confirmed",
+            "reason": f"เจ้าของเปิดภาพหลักฐานแล้วยืนยันเองว่าเป็นอันดับ {rank}",
+            "updated_at": when,
+        })
+        message = (f"จำไว้แล้วว่าอันดับ {rank} คือสินค้าตัวนี้ — "
+                   "รอบหน้าที่หาสินค้า ระบบจะใช้ตามที่เลือกไว้")
+    else:
+        link.update({
+            "confirmed_rank": 0, "confirmed_at": "",
+            "status": "pending_review", "label": "รอตรวจ",
+            "matched_rank": 0, "confidence": "low",
+            "reason": "เจ้าของยกเลิกการยืนยันแล้ว",
+            "updated_at": when,
+        })
+        message = "ยกเลิกการยืนยันแล้ว — ใบนี้กลับไปอยู่กองที่หาสินค้าไม่เจอ"
+
+    await asyncio.to_thread(clip_store.set_tiktok_product_link, DATA_DIR, item_id, link)
+    _clip_log(f"ยืนยันสินค้า TikTok ใบ {item_id}: {message}")
+    return {"ok": True, "item_id": item_id, "rank": rank, "message": message}
+
+
 @app.post("/api/clips/{item_id}/generate")
 async def clips_generate(item_id: str, request: Request) -> dict:
     """สั่งเจนคลิปของสินค้านี้เดี๋ยวนี้ ด้วยคำสั่ง Flow ที่ทำไว้แล้ว

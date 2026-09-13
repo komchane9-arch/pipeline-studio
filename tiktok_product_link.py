@@ -960,6 +960,7 @@ def find_product_link(
     progress: Callable[[int, str, str, bool | None, str], None] = (
         lambda _no, _step, _name, _ok, _message: None
     ),
+    confirmed_rank: int = 0,
 ) -> dict:
     """เดินผังหนึ่งใบถึงเพิ่มโชว์เคส; ชื่อเดิมคงไว้เพื่อไม่ทำลาย API เก่า."""
     reference, reference_check = choose_reference(run, data_dir, log)
@@ -1010,6 +1011,33 @@ def find_product_link(
             if vision.get("analysis_error"):
                 raise TikTokLinkError(str(vision.get("reason") or "โมเดลวิเคราะห์ผลไม่ได้"))
             selected = confident_rank(vision, reference_check)
+            # ---- เจ้าของยืนยันเองว่าอันดับไหนใช่ -> เชื่อคน ไม่เชื่อ AI -------
+            #
+            # เจ้าของสั่ง 13 ก.ย. 2569 หลังเปิดภาพหลักฐานดูเองแล้วเห็นว่า AI
+            # อ่านพลาด — ใบ TCL 55Q7D Pro ผลอันดับ 1 คือสินค้าตัวเดียวกันเป๊ะ
+            # แต่ AI ตอบว่าไม่ตรงเพราะไปติดคำว่า QLED กับ LED ในชื่อประกาศ
+            #
+            # **ยังเดินขั้นที่เหลือครบเหมือนเดิมทุกขั้น** คนแทนที่แค่ "การตัดสินว่า
+            # อันไหนใช่" ไม่ได้ข้ามการเปิดหน้าสินค้าและอ่านชื่อจริงกลับมาเทียบ
+            # ซึ่งเป็นด่านที่กันการกดโดนสินค้าผิดอยู่แล้ว — ถ้าผลค้นหาสลับที่จน
+            # อันดับที่ยืนยันไว้กลายเป็นของคนละตัว ชื่อบนหน้าจะไม่มีคำตรงกับใบงาน
+            # แล้วงานจะล้มก่อนถึงขั้นเพิ่มโชว์เคส
+            # อ่านจากใบงานได้ด้วย ผู้เรียกจึงไม่ต้องแก้อะไรเลย — ตัวเรียกจริง
+            # อยู่ใน app.py ซึ่งเป็นของสายกลาง
+            try:
+                picked = int(confirmed_rank
+                             or (run.get("tiktok_product_link") or {}).get("confirmed_rank")
+                             or 0)
+            except (TypeError, ValueError):
+                picked = 0
+            if picked in (1, 2, 3, 4):
+                log(f"เจ้าของยืนยันเองว่าเป็นอันดับ {picked} "
+                    f"(AI ตอบ {selected or 0}) — ใช้ตามที่เจ้าของเลือก")
+                selected = picked
+                vision = dict(vision or {})
+                vision["confidence"] = "human_confirmed"
+                vision["reason"] = (f"เจ้าของเปิดภาพหลักฐานแล้วยืนยันเองว่าเป็น"
+                                    f"อันดับ {picked}")
             if not selected:
                 # ไม่มีตัวที่ยืนยันได้ = จบแบบรอตรวจ ไม่ใช่ operational error.
                 # ห้ามเปิดอันดับแรกและห้ามคัดลอก URL มาเป็นหลักฐานเท็จ.

@@ -2228,6 +2228,11 @@ button:disabled { opacity: 0.5; }
    เพื่อให้จำได้ว่า "สีม่วง = สตอรีบอร์ด" ไม่ว่าเปิดธีมไหน */
 .board-tab { --stage: var(--ink-3); position: relative; overflow: hidden; }
 .board-tab[data-key="link"]           { --stage: #94a3b8; }  /* เทาฟ้า — เพิ่งเริ่ม */
+/* Picture — ชมพู **จงใจไม่ใช้ม่วงอ่อนคู่กับ Storyboard** ถึงจะเป็นช่วงคิดงาน
+   เหมือนกัน เพราะแถบสีบนหัวกล่องสูงแค่ 3px ม่วงสองเฉดจะแยกด้วยตาไม่ออก
+   และ **ห้ามปล่อยให้ไม่มีสี** ค่าตั้งต้นคือเทา ซึ่งเป็นสีที่จองไว้ให้กองที่
+   ไม่ใช่ขั้นในสายพาน (ที่พัก · ไม่มีสินค้า) — กองนี้เป็นขั้นจริง ต้องดูเป็นขั้น */
+.board-tab[data-key="picture"]        { --stage: #f472b6; }  /* ชมพู — อนุมัติชุดรูป */
 .board-tab[data-key="story"]          { --stage: #a78bfa; }  /* ม่วง — ช่วงคิดงาน */
 .board-tab[data-key="clip"]           { --stage: #fb923c; }  /* ส้ม — ได้ของแล้ว */
 .board-tab[data-key="shopee_video"]   { --stage: #f97362; }  /* ส้มแดง — Shopee */

@@ -1305,10 +1305,25 @@ def find_product_link(
             raise
     else:                                                       # pragma: no cover - กันชนเชิงโครงสร้าง
         raise TikTokLinkError(str(last_error or "ค้นหาลิงก์ไม่สำเร็จ"))
+    # ---- แนบหลักฐานให้เจ้าของยืนยัน (เพิ่ม 14 ก.ย. 2569) --------------------
+    #
+    # *"ให้ทำปกติจนเสร็จเพิ่มเข้าไปในโชว์เคส แล้วเพิ่มขั้นตอนให้ผมคอนเฟิร์ม
+    #   โดยใบงาน และหน้าสินค้าใน tiktok มาแนบ"*
+    #
+    # เก็บที่อยู่ภาพแบบ **สัมพัทธ์กับโฟลเดอร์ใบงาน** เพราะใบงานถูกย้ายกองได้
+    # (park/unpark ย้ายโฟลเดอร์จริง) ถ้าเก็บพาธเต็มไว้ ภาพจะหาไม่เจอทันที
+    proof = evidence / "showcase-confirmed.png"
     return {
         "status": "showcase_added",
-        "label": "เพิ่มโชว์เคสแล้ว",
+        "label": "เพิ่มโชว์เคสแล้ว — รอเจ้าของยืนยัน",
         "showcase_added": True,
+        # ว่าง = ยังไม่ได้ยืนยัน · {"ok": True/False, ...} = ตอบแล้ว
+        # ห้ามใส่ค่าเริ่มต้นเป็น True เด็ดขาด (กติกา 2.3.1)
+        "owner_confirm": {},
+        # ฝั่งใบงาน: รูปสินค้าจาก Shopee ที่ใช้เทียบ (`reference_image` ข้างล่าง)
+        # ฝั่ง TikTok: ภาพหน้าสินค้าจริงตอนเพิ่มเข้าโชว์เคสสำเร็จ
+        "product_page_shot": (str(proof.relative_to(folder)).replace("\\", "/")
+                              if proof.is_file() else ""),
         "tiktok_product_name": product_title,
         "selected_rank": selected,
         "matched_rank": selected,

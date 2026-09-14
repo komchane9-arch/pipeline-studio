@@ -256,7 +256,47 @@ def showcase_prepared(run: dict) -> bool:
     confidence = str(state.get("confidence") or "").lower()
     return bool(state.get("status") == "showcase_added"
                 and state.get("showcase_added")
-                and confidence in {"high", "human_confirmed"})
+                and confidence in {"high", "human_confirmed"}
+                and owner_confirmed(run))
+
+
+def owner_confirmed(run: dict) -> bool:
+    """เจ้าของเปิดดูหลักฐานแล้วยืนยันว่าสินค้าที่ผูกถูกตัวใช่ไหม
+
+    **เจ้าของสั่ง 14 ก.ย. 2569** หลัง TikTok ตีธงใบ 52807075353 ว่าผิดนโยบาย
+    "โปรโมตสินค้าที่ไม่ตรงกับสินค้าจริง" — ตัวดูรูปตัดสินว่าตรงด้วยความมั่นใจสูง
+    เพราะเคสกากเพชรลายคิตตี้หน้าตาเหมือนกัน ทั้งที่คนละร้านคนละรายการ
+
+        *"ขั้นตอนการอ่านและจับคู่ ให้ทำปกติจนเสร็จเพิ่มเข้าไปในโชว์เคส
+          แล้วเพิ่มขั้นตอนให้ผมคอนเฟิร์ม โดยใบงาน และหน้าสินค้าใน tiktok มาแนบ"*
+
+    **ดูของที่มีเฉพาะตอนยืนยันแล้ว** (กติกา 2.3.1) — ไม่มีคำตอบ = ยังไม่ได้ยืนยัน
+    ไม่ใช่ "ยืนยันแล้ว" ใบเก่าที่เพิ่มโชว์เคสไว้ก่อนมีด่านนี้จึงต้องมายืนยันด้วย
+    ซึ่งถูกต้องแล้ว เพราะใบที่โดนตีธงก็เป็นใบเก่าที่ไม่เคยผ่านตาคน
+    """
+    return _owner_answer(run) is True
+
+
+def _owner_answer(run: dict) -> bool | None:
+    """คำตอบของเจ้าของ — True/False/None(ยังไม่ตอบ) และทนข้อมูลเพี้ยน"""
+    state = (run or {}).get("tiktok_product_link")
+    if not isinstance(state, dict):
+        return None
+    mark = state.get("owner_confirm")
+    if not isinstance(mark, dict):
+        return None                 # ค่าเพี้ยน = ยังไม่ได้ตอบ ห้ามนับว่าผ่าน
+    answer = mark.get("ok")
+    return answer if isinstance(answer, bool) else None
+
+
+def owner_confirm_pending(run: dict) -> bool:
+    """ใบนี้เพิ่มโชว์เคสเสร็จแล้วและกำลังรอเจ้าของยืนยันอยู่ใช่ไหม"""
+    state = (run or {}).get("tiktok_product_link") or {}
+    if not isinstance(state, dict):
+        return False
+    if not (state.get("status") == "showcase_added" and state.get("showcase_added")):
+        return False
+    return _owner_answer(run) is None
 
 
 _PRODUCT_STOP_WORDS = {

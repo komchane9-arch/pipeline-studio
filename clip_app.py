@@ -8913,6 +8913,62 @@ async def tiktok_link_confirm(item_id: str, request: Request) -> dict:
     return {"ok": True, "item_id": item_id, "rank": rank, "message": message}
 
 
+@app.post("/api/clips/{item_id}/tiktok-link/owner-confirm")
+async def tiktok_link_owner_confirm(item_id: str, request: Request) -> dict:
+    """เจ้าของดูใบงานคู่กับหน้าสินค้า TikTok แล้วตอบว่าตรงหรือไม่ตรง
+
+    **เจ้าของสั่ง 14 ก.ย. 2569** หลัง TikTok ตีธงใบ 52807075353 ว่าผิดนโยบาย
+    "โปรโมตสินค้าที่ไม่ตรงกับสินค้าจริง" — ตัวดูรูปตัดสินว่าตรงด้วยความมั่นใจสูง
+    เพราะเคสกากเพชรลายคิตตี้หน้าตาเหมือนกัน ทั้งที่คนละร้านคนละรายการ
+
+        *"ขั้นตอนการอ่านและจับคู่ ให้ทำปกติจนเสร็จเพิ่มเข้าไปในโชว์เคส
+          แล้วเพิ่มขั้นตอนให้ผมคอนเฟิร์ม โดยใบงาน และหน้าสินค้าใน tiktok มาแนบ"*
+
+    ส่ง ``{"ok": true}`` = ตรง ปล่อยให้ลงได้
+    ส่ง ``{"ok": false, "why": "เหตุผล"}`` = ไม่ตรง กันไม่ให้ลง
+    ส่ง ``{"ok": null}`` = ล้างคำตอบ กลับไปรอยืนยันใหม่
+
+    **ตอบว่าไม่ตรงไม่ได้ถอดสินค้าออกจากโชว์เคสให้** เพราะการถอดต้องแตะจอจริง
+    และใบนี้อาจกำลังถูกใช้อยู่ — บอกไว้ในข้อความตอบกลับให้ไปถอดเองในแอป
+    """
+    payload = await request.json() if await request.body() else {}
+    answer = (payload or {}).get("ok", "missing")
+    if answer == "missing":
+        raise HTTPException(status_code=400,
+                            detail='ต้องส่ง {"ok": true} หรือ {"ok": false} '
+                                   'หรือ {"ok": null} เพื่อล้างคำตอบ')
+    if answer is not None and not isinstance(answer, bool):
+        raise HTTPException(status_code=400, detail="ok ต้องเป็น true, false หรือ null")
+
+    run = await asyncio.to_thread(clip_store.load_run, DATA_DIR, item_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"ไม่พบใบงาน {item_id}")
+    link = dict(run.get("tiktok_product_link") or {})
+    if not (link.get("status") == "showcase_added" and link.get("showcase_added")):
+        raise HTTPException(
+            status_code=409,
+            detail="ใบนี้ยังไม่ได้เพิ่มสินค้าเข้าโชว์เคส จึงยังไม่ถึงขั้นให้ยืนยัน")
+
+    when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if answer is None:
+        link["owner_confirm"] = {}
+        message = "ล้างคำตอบแล้ว — ใบนี้กลับไปรอยืนยันอีกครั้ง"
+    elif answer:
+        link["owner_confirm"] = {"ok": True, "at": when}
+        message = "ยืนยันแล้ว — ใบนี้พร้อมให้ลง TikTok"
+    else:
+        why = " ".join(str((payload or {}).get("why") or "").split())[:300]
+        link["owner_confirm"] = {"ok": False, "at": when, "why": why}
+        message = ("บันทึกว่าสินค้าไม่ตรงแล้ว — ใบนี้จะไม่ถูกนำไปลง "
+                   "และ**ต้องไปถอดสินค้าออกจากโชว์เคสเองในแอป** "
+                   "เพราะการถอดต้องแตะจอจริง")
+
+    link["updated_at"] = when
+    await asyncio.to_thread(clip_store.set_tiktok_product_link, DATA_DIR, item_id, link)
+    _clip_log(f"เจ้าของยืนยันสินค้า TikTok ใบ {item_id}: {message}")
+    return {"ok": True, "item_id": item_id, "answer": answer, "message": message}
+
+
 @app.post("/api/clips/{item_id}/generate")
 async def clips_generate(item_id: str, request: Request) -> dict:
     """สั่งเจนคลิปของสินค้านี้เดี๋ยวนี้ ด้วยคำสั่ง Flow ที่ทำไว้แล้ว
@@ -9135,11 +9191,77 @@ def _job_card(job: dict, run: dict | None = None) -> dict:
     }
 
 
+from link_library import LinkLibrary
+
+link_library = LinkLibrary(DATA_DIR / "link_library.sqlite3")
+
+
+@app.get("/api/link-library")
+async def link_library_list() -> dict:
+    result = await asyncio.to_thread(link_library.listing, clip_jobs.all())
+    for row in result['items']:
+        row['stage_label'] = clip_queue.STAGE_LABEL.get(row['stage'], '')
+    return result
+
+
+@app.post("/api/link-library/save")
+async def link_library_save(request: Request) -> dict:
+    payload = await request.json()
+    try:
+        return await asyncio.to_thread(link_library.save_links, payload.get('links'), payload.get('shop'))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.post("/api/link-library/shops")
+async def link_library_shop(request: Request) -> dict:
+    payload = await request.json()
+    try:
+        name = await asyncio.to_thread(link_library.add_shop, payload.get("name"))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {"ok": True, "name": name}
+
+
+@app.post("/api/link-library/assign")
+async def link_library_assign(request: Request) -> dict:
+    payload = await request.json()
+    try:
+        await asyncio.to_thread(link_library.assign, str(payload.get("url") or ""), payload.get("shop"))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {"ok": True}
+
+
+@app.get("/api/link-library/images")
+async def link_library_images(url: str) -> dict:
+    def work():
+        records = link_library.listing(clip_jobs.all())
+        row = next((r for r in records["items"] if r["url"] == url), None)
+        if row is None:
+            raise HTTPException(status_code=404, detail="ไม่พบลิงก์นี้")
+        item_id = row["item_id"]
+        run = clip_store.load_run(DATA_DIR, item_id) if item_id else {}
+        images = list(dict.fromkeys((run.get("images") or []) + (run.get("image_pool") or [])))
+        return {"ok": True, "item_id": item_id, "images": images, "name": run.get("name", "")}
+    return await asyncio.to_thread(work)
+
+
 @app.post("/api/jobs")
 async def jobs_add(request: Request) -> dict:
     """วางลิงก์จากหน้าเว็บแล้วต่อคิว — วางหลายลิงก์รวดเดียวได้เหมือนในแชท"""
     payload = await request.json()
     text = str(payload.get("links") or payload.get("link") or "")
+
+    shop = payload.get("shop")
+    try:
+        if shop is not None:
+            shop = link_library.shop_name(shop)
+            if not shop:
+                raise ValueError("กรุณาเลือกร้าน")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    skipped = []
 
     # เช็ค TikTok ก่อน Shopee เสมอ ให้ตรงกับฝั่งแชท (เหตุผลอยู่ที่ TIKTOK_LINK_RE)
     links: list[tuple[str, str]] = []
@@ -9160,8 +9282,17 @@ async def jobs_add(request: Request) -> dict:
         added = []
         with _web_lock:
             waiting = len(clip_jobs.waiting())
+            existing = {_link_key(j.get("link")): j for j in clip_jobs.all()
+                        if j.get("stage") in LINK_TAKEN_STAGES}
             for kind, link in links:
+                previous = existing.get(_link_key(link))
+                if previous:
+                    link_library.record(link, previous["id"], shop)
+                    skipped.append(link)
+                    continue
                 job = clip_jobs.add(link, chat_id)
+                link_library.record(link, job["id"], shop)
+                existing[_link_key(link)] = job
                 clip_jobs.update(job["id"], kind=kind, source="web")
                 added.append(job["id"])
                 _clip_log(f"เข้าคิวจากหน้าเว็บ {job['id']} [{kind}] — {link[:60]}")
@@ -9179,7 +9310,7 @@ async def jobs_add(request: Request) -> dict:
     # ส่งเพดาน "ทำทีละ 8" กลับไปด้วย **ตั้งแต่ตอนรับลิงก์** (กติกา CLAUDE.md 2.7.1)
     # วางลิงก์ 33 ใบแล้วเห็นขยับ 8 ใบ ถ้าไม่บอกตรงนี้ ผู้ใช้จะนึกว่าระบบค้าง
     return {
-        "ok": True, "added": added, "count": len(added),
+        "ok": True, "added": added, "count": len(added), "skipped": len(skipped),
         "waiting": len(clip_jobs.waiting()),
         "load": clip_jobs.load_now(), "load_text": clip_jobs.load_text(),
     }

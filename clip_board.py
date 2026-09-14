@@ -262,6 +262,30 @@ def _link_file(layout: str | None, name: str) -> str:
     return name if layout else ""
 
 
+def tiktok_awaiting_owner(run: dict | None) -> bool:
+    """ใบนี้เพิ่มสินค้าเข้าโชว์เคสแล้วและกำลังรอเจ้าของยืนยันอยู่ใช่ไหม
+
+    ใช้ตัวเดียวกับด่านที่กั้นตอนโพสต์จริง (`tiktok_publish_bot`) **ห้ามเขียน
+    เงื่อนไขซ้ำที่นี่** ไม่งั้นวันหนึ่งหน้าเว็บกับด่านจะตอบไม่ตรงกัน
+    """
+    from tiktok_publish_bot import owner_confirm_pending      # noqa: PLC0415
+
+    return owner_confirm_pending(run or {})
+
+
+def tiktok_confirm_answer(run: dict | None) -> str:
+    """คำตอบของเจ้าของเป็นภาษาคน — ว่าง = ยังไม่ได้ตอบ"""
+    link = (run or {}).get("tiktok_product_link")
+    mark = link.get("owner_confirm") if isinstance(link, dict) else None
+    answer = mark.get("ok") if isinstance(mark, dict) else None
+    if answer is True:
+        return "เจ้าของยืนยันแล้วว่าสินค้าตรง"
+    if answer is False:
+        reason = str(mark.get("why") or "").strip() if isinstance(mark, dict) else ""
+        return f"เจ้าของตอบว่าสินค้าไม่ตรง{' — ' + reason if reason else ''}"
+    return ""
+
+
 def clip_has_no_human(run: dict | None) -> bool:
     """คลิปใบนี้ **ตรวจแล้วและไม่มีมือคนหรือคนในฉากเลย** ใช่ไหม
 
@@ -517,6 +541,20 @@ def clip_info(run: dict) -> dict:
         # ใช้เทียบดีพอไหม ถ้ารูปตั้งต้นแย่ ผลที่ได้ก็เชื่อไม่ได้เหมือนกัน
         "tiktok_link_reference_note": str(
             ((tiktok_link.get("reference_check") or {}).get("what") or "")),
+        # ---- ด่านให้เจ้าของยืนยันหลังเพิ่มโชว์เคส (เพิ่ม 14 ก.ย. 2569) --------
+        #
+        # *"ให้ทำปกติจนเสร็จเพิ่มเข้าไปในโชว์เคส แล้วเพิ่มขั้นตอนให้ผมคอนเฟิร์ม
+        #   โดยใบงาน และหน้าสินค้าใน tiktok มาแนบ"*
+        #
+        # ของที่ต้องเอามาวางคู่กันให้คนตัดสิน
+        #   ฝั่งใบงาน   ชื่อสินค้า (`name`) + รูปที่ใช้เทียบ (`tiktok_link_reference`)
+        #   ฝั่ง TikTok  ชื่อที่อ่านได้จริง + ภาพหน้าสินค้าตอนเพิ่มเข้าโชว์เคส
+        "tiktok_confirm_pending": tiktok_awaiting_owner(run),
+        "tiktok_confirm_answer": tiktok_confirm_answer(run),
+        "tiktok_confirm_at": str((tiktok_link.get("owner_confirm") or {}).get("at") or "")
+        if isinstance(tiktok_link.get("owner_confirm"), dict) else "",
+        "tiktok_product_name": str(tiktok_link.get("tiktok_product_name") or ""),
+        "tiktok_product_page_shot": str(tiktok_link.get("product_page_shot") or ""),
         "publish_auto_skip": bool(active_skip),
         "publish_note": publish_note,
     }

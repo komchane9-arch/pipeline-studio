@@ -8791,20 +8791,11 @@ async def clips_list() -> dict:
         # หน้าเว็บ ทั้งที่ส่งสเปคไปบอกแล้วว่ามี (พลาดแบบเดียวกับ 13 ก.ย. ที่บอก
         # สายกลางให้แสดง `note` ที่ที่อยู่ไม่เคยส่งมา) — ที่อยู่นี้คืน run ดิบ
         # จึงต้องแปะลงบนตัว run เอง
-        link = run.get("tiktok_product_link")
-        link = link if isinstance(link, dict) else {}
-        mark = link.get("owner_confirm")
-        mark = mark if isinstance(mark, dict) else {}
-        run["tiktok_confirm_pending"] = clip_board.tiktok_awaiting_owner(run)
-        run["tiktok_confirm_answer"] = clip_board.tiktok_confirm_answer(run)
-        run["tiktok_confirm_at"] = str(mark.get("at") or "")
-        run["tiktok_product_name"] = str(link.get("tiktok_product_name") or "")
-        run["tiktok_product_page_shot"] = str(link.get("product_page_shot") or "")
-        # ใบเก่าที่ผูกไว้ก่อนมีด่านนี้ไม่มีภาพหน้าสินค้า ให้หน้าเว็บถอยไปใช้
-        # ภาพผลค้นหา 4 อันดับแทน จะได้ยังมีของให้คนดูก่อนตัดสิน
-        run["tiktok_link_shot"] = ("tiktok-link/tiktok-link-four-results.jpg"
-                                   if link.get("results_layout") else "")
-        run["tiktok_link_reference"] = str(link.get("reference_image") or "")
+        # **ใช้ตัวเดียวกับกระดาน ห้ามคิดธงเองซ้ำ** — รอบแรกผมเขียนเงื่อนไขไว้ที่นี่
+        # อีกชุดหนึ่ง ทำให้สองที่อยู่ตอบไม่ตรงกัน (/api/clips บอก 8 ใบ แต่กระดาน
+        # ติดธงแค่ 4 ใบ) สายกลางจับได้ตอนเทสหน้าเว็บจริง — ตัวตรวจสองชุดที่ตอบ
+        # คนละอย่างอันตรายกว่าไม่มีตัวตรวจ (กติกา 2.3.1)
+        run.update(clip_board.confirm_fields(run))
     return {"ok": True, "runs": runs}
 
 

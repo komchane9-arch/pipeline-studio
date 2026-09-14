@@ -262,6 +262,42 @@ def _link_file(layout: str | None, name: str) -> str:
     return name if layout else ""
 
 
+def confirm_fields(run: dict | None) -> dict:
+    """ธงด่านยืนยันสินค้า TikTok — **คิดจากจุดเดียว ใช้ได้ทุกที่อยู่**
+
+    ---- ทำไมต้องแยกออกมา (แก้ 14 ก.ย. 2569 รอบสอง) ------------------------
+
+    รอบแรกผมใส่ธงไว้ใน `clip_info()` อย่างเดียว แต่ `build()` เรียก
+    `clip_info(run)` โดยที่ **`run` เป็น `None`** สำหรับแถวที่มาจากคิว
+    (บรรทัด `run = candidate if active_auto_skip_target(candidate) else None`
+    ซึ่งจงใจไม่อ่าน run.json เพื่อความเร็ว) ธงจึงเป็น false ทั้งที่ข้อมูลอยู่ใน
+    หน่วยความจำแล้วผ่าน `run_by_item`
+
+    ผลจริงที่สายกลางวัดได้: `/api/clips` บอกรอยืนยัน 8 ใบ แต่กระดานติดธงแค่ 4
+    อีก 4 ใบ (15466071713 · 16820466802 · 29708536674 · 4059590733) อยู่บน
+    กระดานจริงแต่กล่องยืนยันไม่ขึ้น **เจ้าของจึงกดยืนยันไม่ได้เลย**
+
+    ตัวตรวจสองชุดที่ตอบไม่ตรงกันอันตรายกว่าไม่มีตัวตรวจ (กติกา 2.3.1) จึงรวม
+    มาไว้ที่นี่ที่เดียว แล้วให้ทั้ง `/api/board` และ `/api/clips` เรียกตัวนี้
+    """
+    run = run if isinstance(run, dict) else {}
+    link = run.get("tiktok_product_link")
+    link = link if isinstance(link, dict) else {}
+    mark = link.get("owner_confirm")
+    mark = mark if isinstance(mark, dict) else {}
+    return {
+        "tiktok_confirm_pending": tiktok_awaiting_owner(run),
+        "tiktok_confirm_answer": tiktok_confirm_answer(run),
+        "tiktok_confirm_at": str(mark.get("at") or ""),
+        "tiktok_product_name": str(link.get("tiktok_product_name") or ""),
+        "tiktok_product_page_shot": str(link.get("product_page_shot") or ""),
+        # ใบเก่าที่ผูกไว้ก่อนมีด่านนี้ไม่มีภาพหน้าสินค้า ให้ถอยไปใช้ภาพผลค้นหา
+        "tiktok_link_shot": _link_file(link.get("results_layout"),
+                                       "tiktok-link/tiktok-link-four-results.jpg"),
+        "tiktok_link_reference": str(link.get("reference_image") or ""),
+    }
+
+
 def tiktok_awaiting_owner(run: dict | None) -> bool:
     """ใบนี้เพิ่มสินค้าเข้าโชว์เคสแล้วและกำลังรอเจ้าของยืนยันอยู่ใช่ไหม
 
@@ -723,6 +759,11 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 "parked": park,
                 "created_at": job.get("created_at") or "",
                 "updated_at": job.get("updated_at") or "",
+                # **ธงด่านยืนยันต้องมีในถังพักด้วย** — ใบที่พักไว้ก็อยู่ในสถานะ
+                # "เพิ่มโชว์เคสแล้ว รอเจ้าของยืนยัน" ได้เหมือนกัน ถ้าไม่ใส่ตรงนี้
+                # /api/board กับ /api/clips จะติดธงไม่ตรงกัน (วัดจริง 14 ก.ย.
+                # 2569: clips 8 ใบ · board 4 ใบ ต่างกัน 4 ใบที่อยู่ในถังพักทั้งหมด)
+                **confirm_fields(candidate),
                 # ใบที่พักไว้ไม่มีปุ่มลง — ต้องเอากลับก่อนถึงจะลงได้
                 "can_publish": [],
             })
@@ -760,6 +801,10 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
             "can_publish": publish_options(run),
             "updated_at": job.get("updated_at") or "",
             **clip_info(run),
+            # ธงด่านยืนยันต้องคิดจาก run จริงเสมอ — `run` ข้างบนเป็น None
+            # สำหรับแถวที่มาจากคิว แต่ `candidate` มีข้อมูลอยู่ในหน่วยความจำแล้ว
+            # จึงไม่ต้องอ่านไฟล์เพิ่มสักไฟล์
+            **confirm_fields(candidate),
         })
 
     # ---- เติมงานที่ **จบจากคิวไปแล้ว** เข้ากองปลายทาง -----------------------
@@ -817,6 +862,7 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 "created_at": run.get("product_at") or "",
                 "can_publish": publish_options(run),
                 **clip_info(run),
+                **confirm_fields(run),
                 "updated_at": run.get("video_at") or run.get("storyboard_at") or "",
             }
             park = run.get("parked") or {}

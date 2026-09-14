@@ -99,6 +99,19 @@ COLLECTOR_PROFILE = "Bot10"
 WATCH_ACCOUNTS: tuple[str, ...] = ("Khao Fang Nichapa",)
 
 CHECK_EVERY_SECONDS = 3600.0      # เจ้าของสั่ง "ทุก 1 ชั่วโมงก่อน"
+
+# ตามเก็บโพสต์ที่ลงตั้งแต่วันนี้เป็นต้นมา — **ทุกใบ ไม่ใช่ใบล่าสุดของกลุ่ม**
+#
+# เจ้าของสั่ง 15 ก.ย. 2569: *"โพสต์ที่โพสต์ไปตั้งแต่วันที่ 12 ให้เก็บคอมเมนต์
+# มาให้หมด"*
+#
+# **ทำไมของเดิมไม่พอ** ของเดิมอ่านจาก `last_link` ของแต่ละกลุ่ม ซึ่งเก็บได้
+# ใบเดียว พอลงโพสต์ใหม่ในกลุ่มเดิม ลิงก์เก่าถูกทับทันที โพสต์เก่าจึงหลุดออก
+# จากสายตาระบบพร้อมกับคอมเมนต์ที่ยังค้างตอบอยู่บนนั้น
+#
+# วัดจริง 15 ก.ย.: คอมเมนต์รอตอบ 9 อัน **อยู่บนโพสต์ที่ยังตามอยู่แค่ 1 อัน**
+# อีก 8 อันลอยอยู่บนโพสต์ที่ไม่มีใครเปิดดูอีกแล้ว = ธง "ตอบแล้ว" ไม่มีวันถูกตั้ง
+WATCH_SINCE = "2026-09-12"
 PAGE_TIMEOUT_MS = 45_000
 BETWEEN_POSTS = (8.0, 16.0)       # พักสุ่มระหว่างโพสต์ — เปิดรัวเสี่ยงโดนจับ
 
@@ -239,6 +252,7 @@ def our_posts() -> list[dict]:
     รวม — ไม่งั้นพอมีบัญชีที่สองจะเก็บของปนกัน
     """
     out: list[dict] = []
+    seen: set[str] = set()
     wanted = {name.strip().lower() for name in WATCH_ACCOUNTS if name.strip()}
     for account in shared.known_accounts():
         if wanted and account.strip().lower() not in wanted:
@@ -248,21 +262,64 @@ def our_posts() -> list[dict]:
                 encoding="utf-8")
         except OSError:
             continue
+        groups = json.loads(raw)
+        names = {str(g.get("group_id") or ""): g.get("name", "") for g in groups}
         by_link = _captions_by_link(account)
         fallback = _caption_of(account)
-        for group in json.loads(raw):
-            link = (group.get("last_link") or "").strip()
-            if link:
-                out.append({
-                    "post_url": link,
-                    # แคปชันของใบที่สร้างลิงก์นี้จริง — จับคู่ไม่ได้ค่อยถอยไปใช้
-                    # ของใบล่าสุด (ซึ่งอาจไม่ตรง แต่ดีกว่าไม่มีอะไรให้เทียบเลย)
-                    "caption": by_link.get(link) or fallback,
-                    "group_id": group.get("group_id", ""),
-                    "group_name": group.get("name", ""),
-                    "account": account,
-                })
+
+        def add(link: str, group_id: str, caption: str) -> None:
+            link = (link or "").strip()
+            if not link or link in seen:
+                return
+            seen.add(link)
+            out.append({
+                "post_url": link,
+                # แคปชันของใบที่สร้างลิงก์นี้จริง — จับคู่ไม่ได้ค่อยถอยไปใช้
+                # ของใบล่าสุด (ซึ่งอาจไม่ตรง แต่ดีกว่าไม่มีอะไรให้เทียบเลย)
+                "caption": caption or by_link.get(link) or fallback,
+                "group_id": group_id,
+                "group_name": names.get(str(group_id), "") or str(group_id),
+                "account": account,
+            })
+
+        # ---- ทุกโพสต์ที่ลงตั้งแต่วันที่เจ้าของกำหนด ----
+        undated = 0
+        for job in _jobs_of(account):
+            when = str(job.get("created_at") or job.get("started_at")
+                       or job.get("finished_at") or "").strip()
+            if not when:
+                # **"ไม่รู้วันที่" ไม่ใช่ "เก่ากว่าเส้น"** ต้องดังไว้ก่อน (ข้อ 2.3.1)
+                undated += 1
+                continue
+            if when[:10] < WATCH_SINCE:
+                continue
+            caption = (job.get("caption") or "").strip()
+            for result in (job.get("results") or []):
+                add(str(result.get("link") or ""),
+                    str(result.get("link_group_id")
+                        or result.get("group_id") or ""), caption)
+        if undated:
+            log(f"⚠️ ใบงานของ {account} ที่ไม่มีวันที่ {undated} ใบ — ข้ามไป "
+                f"ตัดสินไม่ได้ว่าลงก่อนหรือหลัง {WATCH_SINCE}")
+
+        # ---- บวกโพสต์ล่าสุดของแต่ละกลุ่มไว้เสมอ ----
+        # ของเดิมใช้ทางนี้ทางเดียว เก็บไว้เป็นตาข่ายรอง เผื่อใบงานถูกลบทิ้ง
+        # หรือลิงก์ถูกเติมเข้าทะเบียนกลุ่มโดยไม่ผ่านใบงาน
+        for group in groups:
+            add(group.get("last_link", ""), group.get("group_id", ""), "")
     return out
+
+
+def _jobs_of(account: str) -> list[dict]:
+    """ใบงานโพสต์ทั้งหมดของบัญชีนั้น — อ่านไม่ได้ก็คืนลิสต์ว่าง ไม่ทำให้รอบล้ม"""
+    try:
+        rows = json.loads((shared.account_dir(account) / "fb_jobs.json")
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if isinstance(rows, dict):
+        rows = rows.get("jobs") or []
+    return rows if isinstance(rows, list) else []
 
 
 # ----------------------------------------------------------------- อ่านหน้าเว็บ

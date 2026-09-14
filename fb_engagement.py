@@ -431,8 +431,51 @@ def keep_no_body_evidence(page, url: str, landed: str, expect: str,
         return None
 
 
+# ป้ายที่ **มีเฉพาะบนกล่องที่เด้งทับฟีด** และบอกชื่อเจ้าของโพสต์มาด้วย
+# (วัดจากผังหน้าจริง 13 ก.ย. 2569 — กล่องที่เด้งมีป้าย
+#  "การดำเนินการสำหรับโพสต์นี้โดย Khao Fang Nichapa" และหัวกล่องเขียนว่า
+#  "โพสต์ของ Khao Fang Nichapa" ส่วนโพสต์คนอื่นในฟีดข้างหลังไม่มีทั้งสองอย่าง)
+_POPUP_OWNER = re.compile(
+    r"(?:การดำเนินการสำหรับโพสต์นี้โดย|Actions for this post by)\s*(.+)")
+_POPUP_TITLE = re.compile(r"^\s*(?:โพสต์ของ|Post by)\s*(.+)")
+
+
+def popup_owner(node) -> str:
+    """กล่องนี้เป็นกล่องที่เด้งของใคร — ไม่ใช่กล่องที่เด้งก็คืนค่าว่าง
+
+    **ทำไมต้องมี (14 ก.ย. 2569)** เจ้าของเปิดลิงก์เองแล้วเห็นว่าโพสต์
+    **ไม่ได้เปิดเป็นหน้าเดี่ยว** แต่เด้งเป็นกล่องทับหน้าฟีดกลุ่ม แล้วสั่งว่า
+    *"หาวิธีดูจาก pop-up"*
+
+    ของเดิมหากล่องด้วยการจับข้อความแคปชันอย่างเดียว พอแคปชันที่เก็บไว้ไม่ตรงกับ
+    ที่อยู่บนหน้าจอ (แก้โพสต์ · เก็บแคปชันผิดใบ) ก็หาไม่เจอทั้งที่กล่องอยู่ตรงนั้น
+    — เงียบไป 11 วันเพราะเหตุนี้
+
+    ตัวนี้จึงถามของที่ **มีเฉพาะตอนเจอกล่องที่ใช่จริงๆ** (ข้อ 2.3.1)
+    ไม่ใช่ถามว่า "ไม่เจอแคปชันใช่ไหม"
+    """
+    try:
+        if (node.get_attribute("role") or "") != "dialog":
+            return ""
+    except Exception:                       # noqa: BLE001
+        return ""
+    try:
+        for element in node.query_selector_all("[aria-label]"):
+            found = _POPUP_OWNER.search(element.get_attribute("aria-label") or "")
+            if found:
+                return found.group(1).strip()
+    except Exception:                       # noqa: BLE001
+        pass
+    try:
+        first = ((node.inner_text() or "").strip().splitlines() or [""])[0]
+    except Exception:                       # noqa: BLE001
+        return ""
+    found = _POPUP_TITLE.match(first)
+    return found.group(1).strip() if found else ""
+
+
 def read_post(page, url: str, expect: str = "",
-              group_name: str = "") -> dict:
+              group_name: str = "", account: str = "") -> dict:
     """เปิดโพสต์แล้วอ่านยอด + คอมเมนต์
 
     **ไม่กดอะไรที่เปลี่ยนสถานะ** — ไม่ถูกใจ ไม่ตอบ ไม่แชร์ สิ่งเดียวที่กดคือ
@@ -464,6 +507,10 @@ def read_post(page, url: str, expect: str = "",
     # เก็บข้อความที่อ่านได้ไว้ด้วย — ตอนหาไม่เจอจะได้บอกได้ว่า "ไม่มีกล่องเลย"
     # (หน้าไม่โหลด) หรือ "มีกล่องแต่เนื้อหาคนละเรื่อง" (โพสต์ถูกลบ/แคปชันไม่ตรง)
     seen_texts: list[str] = []
+    popup_node = None
+    popup_text = ""
+    found_by = "แคปชัน"
+    want = (account or "").strip().casefold()
     for node in boxes:
         try:
             text = (node.inner_text() or "").strip()
@@ -474,6 +521,16 @@ def read_post(page, url: str, expect: str = "",
             body = text
             holder_node = node
             break
+        # ยังไม่เจอแคปชัน — จำกล่องที่เด้งของบัญชีเราไว้เป็นทางที่สอง
+        if popup_node is None and want:
+            owner = popup_owner(node).casefold()
+            if owner and (want in owner or owner in want):
+                popup_node, popup_text = node, text
+    if not body and popup_node is not None:
+        body, holder_node = popup_text, popup_node
+        found_by = "ชื่อบัญชีบนกล่องที่เด้ง"
+        log(f"   แคปชันที่เก็บไว้ไม่ตรงกับบนหน้าจอ — อ่านจากกล่องที่เด้ง"
+            f"ของ {account} แทน")
     if not body:
         on_post = "/posts/" in landed or "/permalink/" in landed
         # แคปก่อน return เสมอ — ปิดเบราว์เซอร์ไปแล้วแคปไม่ได้อีก (ข้อ 2.6.1 ข้อ 1)
@@ -533,6 +590,18 @@ def read_post(page, url: str, expect: str = "",
     #
     # อ่านโพสต์สำเร็จแล้วแต่ไม่เจอป้ายแชร์ จึงแปลว่า 0 ไม่ใช่ None
     # ถ้าคืน None ต่อไป รายงานจะขึ้น "?" ตลอดกาลทั้งที่ความจริงคือยังไม่มีใครแชร์
+    # เช่นเดียวกับยอดถูกใจ: **ปุ่มกดถูกใจมีอยู่ทุกโพสต์ที่อ่านได้** ส่วนป้ายบอก
+    # จำนวน ("ถูกใจ: 3 คน") โผล่เฉพาะตอนมีคนกดจริง — เห็นปุ่มแต่ไม่เห็นจำนวน
+    # จึงแปลว่า **ศูนย์ ไม่ใช่อ่านไม่ออก** (วัดจากผังหน้าจริง 13 ก.ย. 2569:
+    # โพสต์ที่ยังไม่มีใครกด มีป้าย "ถูกใจ" กับ "แสดงความรู้สึก" แต่ไม่มีตัวเลขเลย)
+    #
+    # ข้อ 2.3.1 ข้อ 4 บังคับให้ "ยังไม่ได้ตรวจ" ต่างจาก "ตรวจแล้วเป็นศูนย์" —
+    # ของเดิมคืน None ทั้งสองกรณี หน้าเว็บจึงขึ้น "?" ให้โพสต์ที่ตรวจเรียบร้อย
+    can_read = any(("ถูกใจ" in x or "แสดงความรู้สึก" in x
+                    or "reaction" in x.lower() or "like" in x.lower())
+                   for x in labels)
+    if counts["reactions"] is None and can_read:
+        counts["reactions"] = 0
     if counts["shares"] is None and counts["reactions"] is not None:
         counts["shares"] = 0
 
@@ -568,7 +637,8 @@ def read_post(page, url: str, expect: str = "",
     except Exception as error:            # อ่านคอมเมนต์ไม่ได้ ต้องไม่ทำให้ยอดหาย
         log(f"   อ่านคอมเมนต์ไม่ได้: {type(error).__name__}: {error}")
 
-    return {"reachable": True, "note": "", **counts, "comments_list": comments}
+    return {"reachable": True, "note": "", "found_by": found_by,
+            **counts, "comments_list": comments}
 
 
 # ------------------------------------------------------- กางของที่ถูกพับ
@@ -1046,7 +1116,8 @@ def check_once() -> dict:
                 try:
                     result = read_post(page, target,
                                        expect=post.get("caption", ""),
-                                       group_name=post.get("group_name", ""))
+                                       group_name=post.get("group_name", ""),
+                                       account=post.get("account", ""))
                 except Exception as error:
                     log(f"  ❌ {label}: {type(error).__name__}: {str(error)[:90]}")
                     continue

@@ -1363,6 +1363,50 @@ class Bot:
     # ยอดเล่นบนตารางคลิปในโปรไฟล์ เช่น "0" "39" "1.2K" — **ตัวเลขล้วน**
     PLAY_COUNT_RE = re.compile(r"^\d+(?:\.\d+)?[KMB]?$")
 
+    # ---- เลขบนหัวโปรไฟล์ไม่ใช่ยอดเล่น (แก้ 14 ก.ย. 2569) --------------------
+    #
+    # ของเดิมกวาด `text="..."` ที่เป็นตัวเลขทั้งจอ จึงเก็บ **กำลังติดตาม 242 ·
+    # ผู้ติดตาม 336** มาปนกับยอดเล่นของคลิป เลขสองตัวนี้ไม่เลื่อนตามคลิปใหม่
+    # การเทียบ "ทุกช่องเลื่อนลงหนึ่ง" จึงไม่มีวันตรงได้เลยแม้โพสต์สำเร็จจริง
+    #
+    # วัดจากใบ 26577901113 เวลา 09:27 (ลงสำเร็จจริง ยืนยันด้วยตาแล้ว):
+    #   ก่อน ['5','242','336','1','0','16'] · หลัง ['5','242','336','0','1','0']
+    #   เทียบทั้งก้อน  -> False  (บอทจึงปิดสวิตช์รอคนมาดู ทั้งที่ขึ้นแล้ว)
+    #   ตัดสามตัวแรก -> ก่อน ['1','0','16'] · หลัง ['0','1','0'] -> **True**
+    #
+    # ตารางคลิปอยู่ใต้แถบแท็บเสมอ ส่วนเลขหัวโปรไฟล์อยู่ครึ่งบน (วัดบนจอ
+    # 720x1600: เลขหัวสูงสุด y=390 · ยอดเล่นแถวแรก y=1100) จึงกรองด้วยตำแหน่ง
+    #
+    # ขอบล่างก็ต้องตัด — **ป้ายแจ้งเตือนกล่องข้อความบนแถบเมนูล่าง** เป็นตัวเลข
+    # เหมือนกันและเปลี่ยนเองตลอดโดยไม่เกี่ยวกับการโพสต์
+    #
+    # พิกัดที่วัดได้จริงจากผังโปรไฟล์ 14 ก.ย. (y หารด้วยความสูงจอ):
+    #   เลขหัวโปรไฟล์   0.076 · 0.219 · 0.220
+    #   ยอดเล่นคลิป      0.683 · 0.683 · 0.884 · 0.884 · 0.884
+    #   ป้ายกล่องข้อความ 0.921
+    TILE_TOP_RATIO = 0.45
+    TILE_BOTTOM_RATIO = 0.90
+
+    def play_counts(self, xml: str) -> tuple[list[str], list[str]]:
+        """แยกยอดเล่นบนตารางคลิป ออกจากเลขบนหัวโปรไฟล์ ด้วยตำแหน่งบนจอ.
+
+        คืน (ยอดเล่นเรียงตามที่เจอ, เลขหัวโปรไฟล์ที่ข้ามไป) — ตัวหลังมีไว้ให้
+        log เห็นว่าข้ามอะไรไปบ้าง ไม่ใช่ตัดทิ้งเงียบๆ
+        """
+        height = self.c.screen[1]
+        floor, ceiling = height * self.TILE_TOP_RATIO, height * self.TILE_BOTTOM_RATIO
+        tiles: list[str] = []
+        outside: list[str] = []
+        for raw in publish_flow.ELEMENT_RE.findall(html.unescape(xml or "")):
+            word = publish_flow._attr(raw, "text").strip()
+            if not word or not self.PLAY_COUNT_RE.match(word):
+                continue
+            box = _bounds(raw)
+            if box is None:
+                continue
+            (tiles if floor <= box[1] < ceiling else outside).append(word)
+        return tiles, outside
+
     def profile_tiles(self, tries: int = 2) -> list[str]:
         """เปิดโปรไฟล์ตัวเอง แล้วอ่าน **ยอดเล่นของคลิปแถวแรกๆ** ออกมาเป็นรายการ
 
@@ -1381,9 +1425,9 @@ class Bot:
                 self.c.run_adb("shell", "input", "tap", "82", "672")     # แท็บวิดีโอ
                 self.c.pause(3.5)
                 xml = self.xml()
-                words = re.findall(r'text="([^"]{1,12})"', html.unescape(xml))
-                tiles = [w.strip() for w in words
-                         if self.PLAY_COUNT_RE.match(w.strip())]
+                tiles, outside = self.play_counts(xml)
+                if outside:
+                    self.c.log(f"  ข้ามตัวเลขที่ไม่ใช่ยอดเล่นคลิป {outside}")
                 if tiles:
                     return tiles
             except Exception as error:                        # noqa: BLE001

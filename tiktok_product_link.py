@@ -913,21 +913,16 @@ class PhoneFlow:
                 if not visual_button and "ข้อมูลโปรโมชั่น" not in promotion_state():
                     raise TikTokLinkError("กดลูกศรสองขีดแล้วไม่พบแผงข้อมูลโปรโมชั่น")
 
-        tapped_visual = False
         tapped = bool(self.read_after_popup(
             "อ่านปุ่มเพิ่มในโชว์เคส",
             lambda: self.tap_text("เพิ่มในโชว์เคส"),
         ))
-        # แม้ tap_text จะกดจาก UI node ได้ แต่ถ้าภาพก่อนกดยืนยันปุ่มแดงไว้แล้ว
-        # ให้ใช้การที่ปุ่ม/แผงหายหลังคลิกเป็นหลักฐานสำเร็จร่วมกันได้ด้วย.
-        if tapped and visual_button:
-            tapped_visual = True
         if not tapped:
             visual_button = visual_button or self.promo_button_from_screen()
             if visual_button:
                 self.log("UI XML อ่านปุ่มไม่ได้ — ยืนยันแถบปุ่มจากภาพจริงแล้วแตะภายในกรอบ")
                 self.tap_actual_bounds(visual_button)
-                tapped = tapped_visual = True
+                tapped = True
         if not tapped:
             # สินค้าที่เคยเพิ่มแล้วอาจแสดงผลสำเร็จอยู่ก่อนเริ่มขั้นนี้.
             current = promotion_state()
@@ -945,10 +940,24 @@ class PhoneFlow:
                         or "เพิ่มในโชว์เคสแล้ว" in current
                         or "สร้างตอนนี้เลย" in current):
                     return True
-                # หลังแตะปุ่ม canvas ปุ่ม ``เพิ่มในโชว์เคส`` จะหาย/เปลี่ยนสถานะ.
-                # ใช้เป็นหลักฐานภาพเฉพาะเมื่อเราเพิ่งยืนยันและแตะปุ่มจริงไปแล้ว.
-                if tapped_visual and self.promo_button_from_screen() is None:
-                    return True
+                # ---- ห้ามใช้ "มองไม่เห็นปุ่มแล้ว" เป็นหลักฐาน (แก้ 14 ก.ย. 2569) --
+                #
+                # ของเดิมมีบรรทัดนี้:
+                #     if tapped_visual and self.promo_button_from_screen() is None:
+                #         return True
+                # ซึ่งถามว่า "ยังเห็นปุ่มแดงอยู่ไหม" — ตอบว่าไม่เห็นได้ทั้งตอน
+                # เพิ่มสำเร็จ **และตอนที่แค่อ่านภาพไม่เจอ** ซึ่งเกิดบ่อยมาก
+                # (กติกาข้อ 2.3.1: ต้องดูของที่มีเฉพาะตอนสำเร็จ)
+                #
+                # วัดจริง 14 ก.ย. 2569 — สามใบที่รายงานว่า "เพิ่มโชว์เคสแล้ว"
+                # แต่หน้าสินค้ายังขึ้นปุ่ม "เพิ่มในโชว์เคส" อยู่ ทุกใบผ่านทางนี้
+                # และทุกใบมี log ``UI XML อ่านปุ่มไม่ได้`` นำหน้า อ่านภาพได้
+                # 29-49 คำทั้งจอ
+                #   08:56 ใบ 47350858748   09:07 ใบ 23645899829
+                #   09:34 ใบ 1795333452
+                #
+                # ผลคือใบถูกทำเครื่องหมายว่าผูกสินค้าแล้ว แล้วไปตายที่ขั้นโพสต์
+                # ด้วยเหตุผลที่ไม่ใช่สาเหตุจริง — เสียรอบละ ~4 นาทีต่อใบ
                 time.sleep(.7)
             return False
 
@@ -961,7 +970,13 @@ class PhoneFlow:
             time.sleep(1.5)
             if wait_success(4):
                 return
-        raise TikTokLinkError("กดเพิ่มในโชว์เคสแล้ว แต่หน้าจอไม่ยืนยันผลสำเร็จ")
+        # บอกด้วยว่าอ่านอะไรได้บ้าง ไม่ใช่แค่ "ไม่ยืนยัน" — ถ้าอ่านได้น้อยคำ
+        # แปลว่าปัญหาคือ *อ่านจอไม่ออก* ไม่ใช่ *เพิ่มไม่สำเร็จ* คนละเรื่องกัน
+        seen = promotion_state()
+        raise TikTokLinkError(
+            "กดเพิ่มในโชว์เคสแล้ว แต่หน้าจอไม่ยืนยันผลสำเร็จ — "
+            f"อ่านจอได้ {len(seen.split())} คำ ไม่พบคำยืนยันสักคำ "
+            "(สำรวจสินค้าสำหรับคุณ · เพิ่มในโชว์เคสแล้ว · สร้างตอนนี้เลย)")
 
 def confident_rank(vision: dict, reference_check: dict) -> int:
     """คืนอันดับที่ยืนยันได้จริง; 0 = ต้องรอคนตรวจและห้ามเลือกอัตโนมัติ."""

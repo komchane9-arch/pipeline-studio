@@ -54,6 +54,14 @@ TIKTOK = "tiktok"
 # เจ้าของสั่ง 13 ก.ย. 2569: *"เพิ่มช่องหน่อย อีกช่องว่าไม่มีสินค้าใน tiktok
 # แล้วใบงานไหนไม่มีให้ย้ายไปช่องนั้น"*
 NO_SHOP = "tiktok_no_shop"
+# กองปิดงาน — คลิปที่ **ไม่มีมือคนและไม่มีคนอยู่ในฉากเลย**
+#
+# เจ้าของสั่ง 14 ก.ย. 2569 หลัง TikTok ตีธงคลิปทีวี TCL ว่าผิดนโยบายคุณภาพ
+# เนื้อหา: *"ไม่ควรพึ่งพาภาพนิ่งเป็นหลัก"* · *"ควรปรากฏตัวบนหน้าจอและสาธิต
+# สินค้า"* — คลิปแบบนี้ลง TikTok แล้วเสี่ยงโดนซ้ำ จึงคัดออกจากกองรอลง
+# *"คลิปไหนที่ไม่มีมือในฉาก หรือไม่มีคนในฉาก ให้เอาออกจากรอลง tiktok
+#   ให้ไปลงอีกช่องนึงเขียนว่า จบงานแล้ว"*
+DONE_NO_HUMAN = "clip_done_no_human"
 FIX = "fix"
 
 # ขั้นในคิวที่ยังไม่ถึงมือคน — งานกำลังเดินอยู่ ยังไม่ต้องตัดสินใจอะไร
@@ -231,6 +239,8 @@ BOARD = (
     (TIKTOK, "🎵 TikTok",          "ลง Facebook แล้ว รอลง TikTok"),
     (NO_SHOP, "🚫 ไม่มีสินค้าใน TikTok",
      "หาสินค้าเดียวกันใน TikTok Shop ไม่เจอ — ลงไม่ได้จนกว่าร้านจะมีของ"),
+    (DONE_NO_HUMAN, "✅ จบงานแล้ว",
+     "ในคลิปไม่มีมือคนและไม่มีคนอยู่ในฉากเลย — TikTok ถือว่าผิดนโยบายคุณภาพเนื้อหา จึงไม่ลงต่อ"),
 )
 
 # **ไม่มีกอง "รอแก้" แยกต่างหากแล้ว** (ผู้ใช้สั่งแก้ 27 ส.ค. 2026)
@@ -241,7 +251,7 @@ BOARD = (
 # กองพวกนี้ต้องส่ง target = 0 ไม่งั้นหน้าเว็บจะขึ้นว่า "(55/10)" ซึ่งอ่านว่า
 # "55 จากสต๊อกที่อยากมี 10" — ชวนให้เข้าใจว่ายังขาดอีก ทั้งที่ความจริงคือ
 # ยิ่งเยอะยิ่งแย่ (สายกลางจับได้ตอนเทสหน้าเว็บจริง 13 ก.ย. 2569)
-NO_TARGET: set[str] = {NO_SHOP}
+NO_TARGET: set[str] = {NO_SHOP, DONE_NO_HUMAN}
 
 # ปลายทางของกองที่ 4-6 → ชื่อที่ `publish_order` ใช้
 POST_TARGET = {SHOPEE: "shopee_video", REELS: "facebook_reels", TIKTOK: "tiktok"}
@@ -250,6 +260,29 @@ POST_TARGET = {SHOPEE: "shopee_video", REELS: "facebook_reels", TIKTOK: "tiktok"
 def _link_file(layout: str | None, name: str) -> str:
     """ชื่อไฟล์ภาพรวมผลค้นหา — ว่างเมื่อรอบนั้นไม่ได้เก็บภาพรวมไว้"""
     return name if layout else ""
+
+
+def clip_has_no_human(run: dict | None) -> bool:
+    """คลิปใบนี้ **ตรวจแล้วและไม่มีมือคนหรือคนในฉากเลย** ใช่ไหม
+
+    **ดูของที่มีเฉพาะตอนตรวจแล้ว** (กติกา 2.3.1) — ไม่มีผลตรวจ = ยังไม่ได้ตรวจ
+    ไม่ใช่ "ไม่มีคน" ใบที่ยังไม่ได้ตรวจต้องอยู่กองเดิมไว้ก่อน ห้ามเหมาเข่ง
+
+    ผลตรวจมาจาก `clip_human_scan.py` ซึ่งใช้ MediaPipe หามือ + YOLO หาคน
+    (วัด 14 ก.ย. 2569: 1.7 วินาที/คลิป · ตรวจด้วยตาเทียบแล้วถูก 4 จาก 4 ใบ)
+    """
+    mark = (run or {}).get("clip_human")
+    if not isinstance(mark, dict) or "has_human" not in mark:
+        return False
+    return not bool(mark.get("has_human"))
+
+
+def clip_no_human_reason(run: dict | None) -> str:
+    """เหตุผลภาษาคนว่าทำไมใบนี้ถึงถูกปิดงาน"""
+    mark = (run or {}).get("clip_human") or {}
+    frames = int(mark.get("frames") or 0)
+    return (f"ตรวจ {frames} เฟรมทั่วคลิปแล้วไม่เจอมือคนหรือคนในฉากเลยสักเฟรม "
+            "— TikTok ถือว่าเป็นเนื้อหาที่พึ่งภาพนิ่ง ลงแล้วเสี่ยงโดนตีธง")
 
 
 def tiktok_product_missing(run: dict | None) -> str:
@@ -358,6 +391,8 @@ def bucket_of(job: dict, run: dict | None = None) -> tuple[str, str]:
     key = bucket_of_run(run)
     if not key:
         return "", ""                       # ลงครบทั้งสามที่แล้ว
+    if key == DONE_NO_HUMAN:
+        return key, clip_no_human_reason(run)
     if key == NO_SHOP:
         return key, tiktok_product_missing(run) or "หาสินค้าใน TikTok Shop ไม่เจอ"
     if key not in POST_TARGET:
@@ -390,6 +425,8 @@ def bucket_of_run(run: dict) -> str:
                 # ถึงคิว TikTok แล้วแต่หาสินค้าใน TikTok Shop ไม่เจอ = เดินต่อไม่ได้
                 # ย้ายไปกองของมันเอง จะได้ไม่ไปปนกับใบที่รอลงจริงแล้วทำให้
                 # ตัวเลขบนหัวกองบอกว่ามีของรอลงเยอะกว่าความจริง
+                if key == TIKTOK and clip_has_no_human(run):
+                    return DONE_NO_HUMAN
                 if key == TIKTOK and tiktok_product_missing(run):
                     return NO_SHOP
                 return key
@@ -835,6 +872,9 @@ def refill_hint(key: str, counts: dict[str, int]) -> str:
         return "ลง Shopee Video ก่อน แล้วเว้น 1 วันปฏิทินถึงจะลง Facebook ได้"
     if key == TIKTOK:
         return "ลง Facebook Reels ก่อน แล้วเว้น 1 วันปฏิทินถึงจะลง TikTok ได้"
+    if key == DONE_NO_HUMAN:
+        return ("กองนี้ไม่ต้องเติม — เป็นใบที่ปิดงานแล้วเพราะในคลิปไม่มีมือคน "
+                "และไม่มีคนอยู่ในฉาก จึงไม่ลง TikTok ต่อ")
     if key == NO_SHOP:
         return ("กองนี้ไม่ต้องเติม — เป็นใบที่ TikTok Shop ไม่มีของขาย "
                 "รอจนร้านมีของแล้วค่อยกดหาใหม่")

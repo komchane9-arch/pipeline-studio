@@ -1541,10 +1541,56 @@ class Bot:
             self.c.log("  ตรวจโปรไฟล์ไม่ได้ — อ่านยอดเล่นไม่ออกสักใบ")
             return False
         self.c.log(f"  ยอดเล่นก่อนโพสต์ {before[:6]} · หลังโพสต์ {after[:6]}")
-        if not before:
+        return self.shifted_by_one(before, after)
+
+    # ยอดเล่นที่ TikTok แสดง: "0" · "39" · "1.2K" · "3.4M"
+    VIEW_RE = re.compile(r"^(\d+(?:\.\d+)?)([KMB]?)$")
+    VIEW_UNIT = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+
+    @classmethod
+    def views(cls, text: str) -> int:
+        """แปลงยอดเล่นเป็นตัวเลข; -1 = อ่านไม่ออก (ห้ามนับว่าเท่ากับอะไร)"""
+        found = cls.VIEW_RE.match(str(text).strip().upper())
+        if not found:
+            return -1
+        return int(float(found.group(1)) * cls.VIEW_UNIT[found.group(2)])
+
+    @classmethod
+    def shifted_by_one(cls, before: list[str], after: list[str]) -> bool:
+        """ของเดิมเลื่อนลงหนึ่งช่องเพราะมีคลิปใหม่แทรกหัวแถวจริงไหม
+
+        ---- ทำไมเทียบเป๊ะอย่างเดียวไม่พอ (แก้ 14 ก.ย. 2569) ----------------
+        ของเดิมบังคับให้ยอดเล่นเดิมตรงกันทุกตัว แต่ **ยอดเล่นเป็นเลขที่วิ่งอยู่**
+        คลิปเก่ามีคนดูเพิ่มระหว่างที่บอทกำลังโพสต์ได้ตลอด
+        วัดจริง 13:51:00 ใบ 41232550306 ซึ่งลงสำเร็จจริง (ยืนยันด้วยตา):
+            ก่อน ['1','0','5','12','1'] · หลัง ['0','1','0','5','14']
+        โครงสร้างเลื่อนถูกต้องทุกช่อง ต่างกันแค่ 12 -> 14 แต่ถูกตัดสินว่าไม่ตรง
+        แล้วต้องปิดสวิตช์รอคนมาดู
+
+        เกณฑ์ใหม่ — ยังต้องเป็น "ของที่มีเฉพาะตอนสำเร็จ" (กติกา 2.3.1)
+          1. ตรงกันทุกช่อง = ผ่านทันที (แน่นอนที่สุด)
+          2. ถ้าไม่ตรงเป๊ะ ต้องครบทั้งสี่ข้อ
+             ยอดเล่นห้ามลดลงสักช่อง (ยอดวิววิ่งขึ้นอย่างเดียว)
+             ต้องมีอย่างน้อยสามช่องให้เทียบ — สองช่องหลักฐานอ่อนเกินไป
+                 (เช่น ก่อน ['0','5'] หลัง ['0','5'] ทั้งที่ไม่ได้ลงอะไรเลย
+                  ก็จะผ่านได้ถ้ายอมให้ต่างหนึ่งช่อง)
+             ช่องที่ไม่ตรงต้องไม่เกินหนึ่งในสาม และอย่างน้อยหนึ่งช่องเสมอ
+             ช่องแรกสุดต้องเป็น 0 = คลิปที่เพิ่งลงยังไม่มีคนดู
+        ทดสอบกับของจริง 3 คู่และเคสลบที่สร้างขึ้น 6 เคส ถูกทั้ง 9
+        """
+        if not before or len(after) < 2:
             return False
-        # ใบใหม่แทรกหัวแถว = ของเดิมใบแรกต้องเลื่อนไปอยู่ช่องที่สอง
-        return len(after) > 1 and after[1:len(before) + 1] == before[:len(after) - 1]
+        pairs = list(zip(after[1:], before))
+        if len(pairs) < 2:
+            return False
+        if all(now == was for now, was in pairs):
+            return True
+        if any(cls.views(now) < cls.views(was) for now, was in pairs):
+            return False
+        if len(pairs) < 3:
+            return False
+        differs = sum(1 for now, was in pairs if now != was)
+        return differs <= max(1, len(pairs) // 3) and cls.views(after[0]) == 0
 
     def success_banner_visible(self) -> bool:
         """เทียบหัวแผงแชร์กับหลักฐานจริง เพราะข้อความสำเร็จไม่ติดใน UI XML."""

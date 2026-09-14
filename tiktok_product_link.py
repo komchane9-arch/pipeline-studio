@@ -648,6 +648,33 @@ class PhoneFlow:
                         self.adb_run("shell", "input", "keyevent", "4", check=False)
                     time.sleep(1.5)
             return True
+        # ---- หน้าดูรูปสินค้าเต็มจอ ไม่ใช่ป๊อปอัป (แก้ 14 ก.ย. 2569) ----------
+        #
+        # หน้านี้พื้นหลัง **ดำสนิท** จึงผ่านด่าน "ฉากหลังถูกหรี่" ข้างล่างเต็มๆ
+        # แล้วไปแตะ (540,1570) ซึ่งบนหน้านี้คือ **กลางรูปสินค้า** ไม่ใช่ปุ่มปิด
+        # — ปิดไม่ลงไม่ว่าจะลองกี่ครั้ง แล้วขั้นที่เรียกมาก็ล้มด้วยเหตุผลที่ไม่ใช่
+        # สาเหตุจริง ("อ่านชื่อสินค้า TikTok ไม่ได้")
+        #
+        # วัดจากภาพตอนล้มจริง ใบ 25108916661 เวลา 09:12:54 (จอ 720x1600):
+        #   จุดที่ใช้วัดความมืดทั้งสี่จุด = 0.0 ทุกจุด → เข้าเงื่อนไขป๊อปอัปเต็มๆ
+        #   จุดที่จะไปแตะ = (360,1047) ซึ่งอยู่กลางรูป
+        #
+        # ปุ่มปิดจริงคือ ✕ มุมซ้ายบน ใช้ปุ่มย้อนกลับแทนได้และปลอดภัยกว่าการ
+        # เดาพิกัด เพราะย้อนจากหน้าดูรูปจะกลับมาหน้าสินค้าเดิม ไม่ได้ออกจากหน้าสินค้า
+        viewer_marks = ("ค้นหาสินค้าที่คล้ายกัน", "search for similar products")
+        if any(mark in screen_text for mark in viewer_marks):
+            self.adb_run("shell", "input", "keyevent", "4", check=False)
+            time.sleep(1.5)
+            later = self.nodes()
+            later_ocr = self.ocr_nodes()
+            if later_ocr:
+                later = later + later_ocr
+            if not any(mark in self._screen_text(later) for mark in viewer_marks):
+                self.log("ปิดหน้าดูรูปสินค้าเต็มจอด้วยปุ่มย้อนกลับแล้ว")
+                return True
+            self.log("⚠️ หน้าดูรูปสินค้าเต็มจอยังไม่ปิด แม้กดย้อนกลับแล้ว")
+            return False
+
         png = self.adb_run("exec-out", "screencap", "-p", timeout=45)
         try:
             image = Image.open(io.BytesIO(png)).convert("RGB")
@@ -661,6 +688,20 @@ class PhoneFlow:
         # โปรโมชันที่พบจริงมีปุ่ม X กลางล่าง; แตะเฉพาะเมื่อฉากหลังถูกหรี่ชัดเจน
         self.tap(540, 1570)
         time.sleep(2)
+        # **ต้องพิสูจน์ว่าปิดลงจริง ไม่ใช่แค่แตะไปแล้ว** (กติกาข้อ 2.3.1 ข้อ 2)
+        # ของเดิมคืน True เสมอ ผู้เรียกจึงไปอ่านซ้ำบนจอที่ยังถูกบังอยู่เหมือนเดิม
+        # แล้วรายงานว่า "อ่านไม่ได้" แทนที่จะบอกว่า "ปิดสิ่งที่บังอยู่ไม่ลง"
+        shot = self.adb_run("exec-out", "screencap", "-p", timeout=45)
+        try:
+            after = Image.open(io.BytesIO(shot)).convert("RGB")
+        except Exception:  # noqa: BLE001 - ตรวจไม่ได้ = ยังไม่รู้ผล ไม่ใช่ปิดสำเร็จ
+            self.log("⚠️ แตะปุ่มปิดแล้วแต่แคปจอมาตรวจไม่ได้ — ยังไม่รู้ว่าปิดลงไหม")
+            return False
+        bright = sum(sum(after.getpixel(point)) / 3 for point in samples) / len(samples)
+        if bright < 100:
+            self.log(f"⚠️ แตะปุ่มปิดป๊อปอัปแล้วแต่ฉากหลังยังมืดอยู่ "
+                     f"(สว่าง {bright:.0f} จากเกณฑ์ 100) — ปิดไม่ลง")
+            return False
         return True
 
     def dismiss_shop_popup(self) -> bool:

@@ -18,6 +18,7 @@ from typing import Callable
 import numpy as np
 from PIL import Image
 
+import evidence
 import publish_flow
 import publish_media
 import tiktok_product_link
@@ -1387,6 +1388,31 @@ class Bot:
     TILE_TOP_RATIO = 0.45
     TILE_BOTTOM_RATIO = 0.90
 
+    def keep_profile_evidence(self, outside: list[str]) -> None:
+        """เก็บภาพ+ผังจอตอนอ่านตารางคลิปไม่ได้ ตามกติกาข้อ 2.6.1
+
+        เจออาการนี้ 3 ครั้งใน 1 วันแล้วยัง **ตอบไม่ได้ว่าจอนั้นเป็นหน้าอะไร**
+        รู้แค่ว่าอ่านเลขหัวโปรไฟล์ได้แต่ตารางว่าง — ขาดภาพจึงไล่ต่อไม่ได้จริง
+
+        การเก็บหลักฐานห้ามทำให้งานล้มหนักขึ้น จึงกลืน exception ทั้งหมด
+        """
+        try:
+            markup = self.xml()
+        except Exception:                                     # noqa: BLE001
+            markup = ""
+        path = evidence.capture(
+            "ตารางคลิปในโปรไฟล์ไม่มียอดเล่นให้อ่าน", tag="publish",
+            note=f"เลขอื่นบนจอที่อ่านได้: {outside}", markup=markup)
+        if path is None:
+            self.c.log("  เก็บหลักฐานหน้าโปรไฟล์ไม่ได้")
+            return
+        try:
+            png = self.c.run_adb("exec-out", "screencap", "-p")
+            path.with_suffix(".png").write_bytes(png)
+            self.c.log(f"  เก็บภาพหน้าโปรไฟล์ไว้แล้ว: {path.stem}.png")
+        except Exception as error:                            # noqa: BLE001
+            self.c.log(f"  เก็บภาพหน้าโปรไฟล์ไม่ได้: {type(error).__name__}")
+
     def play_counts(self, xml: str) -> tuple[list[str], list[str]]:
         """แยกยอดเล่นบนตารางคลิป ออกจากเลขบนหัวโปรไฟล์ ด้วยตำแหน่งบนจอ.
 
@@ -1443,6 +1469,15 @@ class Bot:
                     if time.monotonic() >= deadline:
                         self.c.log("  ตารางคลิปยังไม่ขึ้นยอดเล่นสักใบใน 12 วินาที "
                                    f"(เลขอื่นบนจอที่อ่านได้: {outside or 'ไม่มีเลย'})")
+                        # **แคปไว้ก่อนเดินต่อ** (กติกาข้อ 2.6.1) — ที่ผ่านมาเจอ
+                        # อาการนี้ 3 ครั้งแล้วตอบไม่ได้เลยว่าจอนั้นเป็นหน้าอะไร
+                        # รู้แค่ว่าอ่านหัวโปรไฟล์ได้แต่ตารางว่าง
+                        #
+                        # ทางที่ลองแล้วใช้ไม่ได้ อย่าลองซ้ำ: อ่านยอดเล่นจากภาพ
+                        # (วัด 14 ก.ย. กับภาพโปรไฟล์จริง อ่านได้ 1 จาก 5 ตัว
+                        #  เลขหลักเดียวข้างไอคอนสามเหลี่ยมอ่านไม่ออก) — ถ้าเอา
+                        # รายการที่ไม่ครบไปเทียบ จะได้คำตอบผิดแทนที่จะได้ว่าไม่รู้
+                        self.keep_profile_evidence(outside)
                         break
                     self.c.pause(1.5)
             except Exception as error:                        # noqa: BLE001

@@ -895,7 +895,7 @@ class PhoneFlow:
         self.log(f"คัดลอกชื่อสินค้า TikTok แล้ว: {title[:120]}")
         return title
 
-    def add_current_product_to_showcase(self) -> None:
+    def add_current_product_to_showcase(self, proof: Path | None = None) -> None:
         """เปิดข้อมูลโปรโมชั่นและเพิ่มสินค้าปัจจุบันเข้าโชว์เคสพร้อมตรวจผล.
 
         ปุ่มลูกศรสองขีดไม่มี text/resource-id ให้เกาะ จึงใช้พิกัดที่เทรนจาก
@@ -919,11 +919,32 @@ class PhoneFlow:
                                         for row in self.ocr_nodes())
             return state
 
+        def confirm(where: str, seen: str) -> None:
+            """เก็บหลักฐานว่า **ตัดสินว่าสำเร็จจากอะไร ณ วินาทีนั้น**
+
+            เพิ่ม 14 ก.ย. 2569 — ใบ 54061987716 ถูกรายงานว่าเพิ่มโชว์เคสแล้ว
+            เมื่อ 12:45 แต่ตอน 13:07 หน้าสินค้าตัวเดียวกันยังขึ้นปุ่ม
+            "เพิ่มในโชว์เคส" อยู่ **และตอบไม่ได้ว่าตอนนั้นมันเห็นคำไหน**
+            เพราะไม่มีภาพหรือข้อความเก็บไว้เลย (กติกาข้อ 2.6.1)
+            """
+            if proof is None:
+                return
+            try:
+                self.capture(proof)
+                proof.with_suffix(".txt").write_text(
+                    f"ตัดสินว่าเพิ่มโชว์เคสสำเร็จที่ขั้น: {where}\n"
+                    f"เวลา: {_now()}\n"
+                    f"อ่านข้อความบนจอได้ {len(seen.split())} คำ:\n{seen}\n",
+                    encoding="utf-8")
+            except Exception as error:            # noqa: BLE001
+                self.log(f"เก็บหลักฐานผลเพิ่มโชว์เคสไม่ได้: {type(error).__name__}")
+
         current = promotion_state()
         if ("สร้างตอนนี้เลย" in current
                 or "สำรวจสินค้าสำหรับคุณ" in current
                 or "เพิ่มในโชว์เคสแล้ว" in current):
             # มีเครื่องหมายถูกบนถุงสินค้าและ CTA เปลี่ยนเป็นสร้างวิดีโอแล้ว.
+            confirm("อยู่ในโชว์เคสอยู่แล้วตั้งแต่ก่อนกด", current)
             return
         visual_button = self.promo_button_from_screen()
         if "ข้อมูลโปรโมชั่น" not in current and not visual_button:
@@ -1005,9 +1026,12 @@ class PhoneFlow:
                         f"'{refused}' (ข้อจำกัดของมาร์เก็ตเพลส) "
                         "ลองอีกกี่รอบก็ไม่สำเร็จ ต้องเลือกสินค้าตัวอื่น")
                 current = promotion_state()
-                if ("สำรวจสินค้าสำหรับคุณ" in current
-                        or "เพิ่มในโชว์เคสแล้ว" in current
-                        or "สร้างตอนนี้เลย" in current):
+                hit = next((mark for mark in ("สำรวจสินค้าสำหรับคุณ",
+                                              "เพิ่มในโชว์เคสแล้ว",
+                                              "สร้างตอนนี้เลย")
+                            if mark in current), "")
+                if hit:
+                    confirm(f"หลังกดเพิ่ม — เจอคำว่า '{hit}'", current)
                     return True
                 # ---- ห้ามใช้ "มองไม่เห็นปุ่มแล้ว" เป็นหลักฐาน (แก้ 14 ก.ย. 2569) --
                 #
@@ -1227,7 +1251,8 @@ def find_product_link(
             progress(6, "open_product", "เปิดสินค้าและคัดลอกชื่อเต็ม", True,
                      product_title[:180])
             progress(7, "showcase", "เพิ่มสินค้าเข้าโชว์เคส", None, "")
-            phone.add_current_product_to_showcase()
+            phone.add_current_product_to_showcase(
+                proof=evidence / "showcase-confirmed.png")
             progress(7, "showcase", "เพิ่มสินค้าเข้าโชว์เคส", True,
                      f"เพิ่มอันดับ {selected} แล้ว")
             break

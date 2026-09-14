@@ -2459,6 +2459,11 @@ button:disabled { opacity: 0.5; }
 .board-parked-head + .board-group { margin-top: 6px; border-top: 0; }
 /* เยื้องเข้าให้เห็นว่าอยู่ใต้หัวเรื่อง ไม่ใช่รายการระดับเดียวกับงานที่ยังเดิน */
 .board-parked-item { margin-left: 10px; }
+/* แถวในถังพักที่มีกล่องยืนยัน — ปุ่มเอาออกจากพักลอยอยู่มุมขวาบน
+   จึงเว้นที่ให้เฉพาะสองบรรทัดแรก ไม่ใช่ทั้งแถว ไม่งั้นกล่องยืนยันจะแคบไป 76px */
+.board-parked-item.has-confirm { padding-right: 12px; }
+.board-parked-item.has-confirm > b,
+.board-parked-item.has-confirm > small:first-of-type { padding-right: 76px; }
 
 /* ── ชิปเตือน: ยังไม่พังแต่ใกล้แล้ว ─────────────────────────────────────
 

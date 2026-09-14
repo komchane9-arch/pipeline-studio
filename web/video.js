@@ -1248,6 +1248,24 @@ function parkedRow(item) {
     el("b", { textContent: item.name || item.id }),
     el("small", { textContent: `ค้างที่ ${item.from_label}${why ? ` · ${why}` : ""}` }),
   );
+  /* **ด่านยืนยันสินค้า TikTok ต้องโผล่ในถังพักด้วย**
+   *
+   * เจอจริง 14 ก.ย. 2569: เซิร์ฟเวอร์บอกว่ามีใบรอยืนยัน 8 ใบ แต่หน้าเว็บ
+   * ขึ้นกล่องให้กดแค่ 4 ใบ — อีก 4 ใบอยู่ในถังพักไว้รอแก้ ซึ่งแถวในถังพัก
+   * วาดแค่ชื่อกับปุ่มเอาออกจากพัก **ไม่เคยวาดกล่องยืนยันเลย**
+   *
+   * ผลคือใบพวกนั้นค้างรอเจ้าของตัดสินโดยที่เจ้าของไม่มีทางกดได้ และมองไม่เห็น
+   * ด้วยว่ามีอะไรค้างอยู่ (กติกาข้อ 2.3.1 — ของที่รอคนแต่คนไม่เห็น = รอตลอดไป)
+   */
+  if (item.tiktok_confirm_pending || item.tiktok_confirm_answer) {
+    row.classList.add("has-confirm");
+    row.append(tiktokConfirmBox(item));
+    row.append(el("small", {
+      className: "row-video unknown",
+      textContent: "ℹ ตอบได้เลย แต่ใบนี้ยังลงไม่ได้จนกว่าจะเอาออกจากถังพักก่อน",
+    }));
+  }
+
   const tools = el("span", { className: "story-queue-tools" });
   // **ต้องใช้ `item_id`** ใบที่งานเจนจบไปแล้วไม่มี `id` — ยิงด้วย `id` จะได้
   // `/api/jobs//unpark` ซึ่งกดแล้วเงียบ (เจอจริงตอนทดสอบ 27 ส.ค. 2569)

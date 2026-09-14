@@ -1381,7 +1381,7 @@ function autoToggle(bucket) {
  *
  *  **ปุ่มชื่อเดียวกันที่ทำคนละอย่างในหน้าเดียวคือกับดัก** จึงตั้งชื่อต่างกันด้วย
  */
-function browserViewButton(browser, key) {
+function browserViewButton(browser, key, twins = []) {
   if (key === "clip") {
     const toggle = el("button", {
       type: "button",
@@ -1398,11 +1398,25 @@ function browserViewButton(browser, key) {
     return toggle;
   }
 
+  /* **ป้ายต้องบอกว่าเปิดหน้าต่างไหน ไม่ใช่บอกว่า "เปิด Chrome" เฉยๆ**
+   *
+   * เจอจริง 14 ก.ย. 2569 ตอนสายคลิปเพิ่มกอง Picture: กอง "ดึง Link" กับ
+   * "Picture" มีปุ่ม Chrome คนละปุ่ม **แต่เปิดหน้าต่างเดียวกัน** (รูปสินค้า
+   * โหลดจาก Shopee ด้วยหน้าต่างเดียวกับตอนดึงลิงก์) ถ้าทั้งคู่เขียนว่า
+   * "เปิด Chrome" เหมือนกัน คนกดจะนึกว่ามีสองหน้าต่างให้เลือก แล้วกดสลับ
+   * ไปมาโดยไม่รู้ว่าได้ของเดิม
+   *
+   * เอาชื่อจริงจากเซิร์ฟเวอร์มาใช้ (ตัดคำว่า "Chrome" ออก เพราะมีไอคอนบอกแล้ว
+   * และช่องกว้างแค่ 139px) แล้วบอกตรงๆ ในคำอธิบายว่ากองไหนใช้หน้าต่างร่วมกัน
+   */
+  const short = (browser.label || "").replace(/^Chrome\s*/i, "").trim();
+  const shared = twins.filter((name) => name && name !== browser.label);
   const button = el("button", {
     type: "button",
     className: "board-browser",
-    textContent: "🖥 เปิด Chrome",
-    title: `เปิดหรือยก ${browser.label} ขึ้นมาบนจอ`,
+    textContent: `🖥 ${short || "เปิด Chrome"}`,
+    title: `เปิดหรือยก ${browser.label} ขึ้นมาบนจอ`
+      + (shared.length ? ` — หน้าต่างเดียวกับ ${shared.join(" · ")}` : ""),
   });
   button.addEventListener("click", async (event) => {
     event.stopPropagation();
@@ -1877,7 +1891,15 @@ function paintBoard() {
     const cell = el("div", { className: "board-cell" });
     if (bucket.auto) cell.append(autoToggle(bucket));
     cell.append(button);
-    if (bucket.browser) cell.append(browserViewButton(bucket.browser, bucket.key));
+    if (bucket.browser) {
+      // กองอื่นที่เปิดหน้าต่างเดียวกัน — เอาไปบอกในคำอธิบายของปุ่ม
+      const twins = buckets
+        .filter((other) => other.browser
+          && other.key !== bucket.key
+          && other.browser.stage === bucket.browser.stage)
+        .map((other) => other.browser.label);
+      cell.append(browserViewButton(bucket.browser, bucket.key, twins));
+    }
     // กอง TikTok ไม่มี browser มาจาก API (เป็นคนละชุดโปรไฟล์กับสายเจนคลิป)
     // จึงต้องวางปุ่มเอง — ผูกกับรหัสกอง ไม่ใช่ลำดับ สลับลำดับแล้วยังถูก
     if (bucket.key === "tiktok") cell.append(tiktokViewButton());

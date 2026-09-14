@@ -35,6 +35,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 import clip_pickimg
 import clip_store
+import screen_read
 import scrcpy_control
 
 
@@ -63,6 +64,18 @@ _MODEL_CODE_RE = re.compile(
 
 class TikTokLinkError(RuntimeError):
     """ผังค้นหาลิงก์เดินต่อไม่ได้โดยไม่เสี่ยงเลือกสินค้าผิด"""
+
+
+class TikTokProductRefused(TikTokLinkError):
+    """TikTok ปฏิเสธไม่ให้เพิ่มสินค้าตัวนี้เข้าโชว์เคส — ไม่ใช่ความผิดพลาดของบอท
+
+    เจอจริง 14 ก.ย. 2569 ใบ 2374652255: หลังกดเพิ่มในโชว์เคส TikTok ขึ้นกล่อง
+    **"สินค้าไม่พร้อมจำหน่าย"** พร้อมข้อความว่า *"ไม่สามารถเพิ่มสินค้านี้ได้
+    เนื่องจากข้อจำกัดของมาร์เก็ตเพลส ... โปรดเลือกสินค้าอื่นจากมาร์เก็ตเพลส"*
+
+    ใบแบบนี้ **ลองอีกกี่รอบก็ไม่มีวันสำเร็จ** จึงต้องแยกออกจากความล้มเหลว
+    ทางเทคนิค แล้วส่งไปกอง "ไม่มีสินค้าใน TikTok" ไม่ใช่วนลองใหม่
+    """
 
 
 class TikTokLinkStopped(TikTokLinkError):
@@ -661,15 +674,24 @@ class PhoneFlow:
         #
         # ปุ่มปิดจริงคือ ✕ มุมซ้ายบน ใช้ปุ่มย้อนกลับแทนได้และปลอดภัยกว่าการ
         # เดาพิกัด เพราะย้อนจากหน้าดูรูปจะกลับมาหน้าสินค้าเดิม ไม่ได้ออกจากหน้าสินค้า
-        viewer_marks = ("ค้นหาสินค้าที่คล้ายกัน", "search for similar products")
-        if any(mark in screen_text for mark in viewer_marks):
+        #
+        # **ต้องเทียบแบบยอมให้วรรณยุกต์ตก** (เพิ่ม 14 ก.ย. 2569 รอบสอง) — รอบแรก
+        # เทียบตรงตัวแล้วไม่เจอ เพราะข้อความนี้อ่านมาจากภาพ ซึ่งสระบนล่างกับ
+        # วรรณยุกต์ตกประจำ (ใบ 28486377890 เวลา 12:56 อ่านได้ 41 คำทั้งจอ
+        # ภาพยืนยันว่าคำนี้อยู่บนจอครบทุกตัวอักษร) และใช้คำสั้นลงเป็น
+        # "คล้ายกัน" เพื่อลดโอกาสอ่านตกกลางคำ
+        viewer_marks = ("คล้ายกัน", "similar products")
+        loose_text = screen_read.thai_loose(screen_text)
+        if any(screen_read.thai_loose(mark) in loose_text for mark in viewer_marks):
             self.adb_run("shell", "input", "keyevent", "4", check=False)
             time.sleep(1.5)
             later = self.nodes()
             later_ocr = self.ocr_nodes()
             if later_ocr:
                 later = later + later_ocr
-            if not any(mark in self._screen_text(later) for mark in viewer_marks):
+            later_loose = screen_read.thai_loose(self._screen_text(later))
+            if not any(screen_read.thai_loose(mark) in later_loose
+                       for mark in viewer_marks):
                 self.log("ปิดหน้าดูรูปสินค้าเต็มจอด้วยปุ่มย้อนกลับแล้ว")
                 return True
             self.log("⚠️ หน้าดูรูปสินค้าเต็มจอยังไม่ปิด แม้กดย้อนกลับแล้ว")
@@ -698,11 +720,32 @@ class PhoneFlow:
             self.log("⚠️ แตะปุ่มปิดแล้วแต่แคปจอมาตรวจไม่ได้ — ยังไม่รู้ว่าปิดลงไหม")
             return False
         bright = sum(sum(after.getpixel(point)) / 3 for point in samples) / len(samples)
-        if bright < 100:
-            self.log(f"⚠️ แตะปุ่มปิดป๊อปอัปแล้วแต่ฉากหลังยังมืดอยู่ "
-                     f"(สว่าง {bright:.0f} จากเกณฑ์ 100) — ปิดไม่ลง")
+        if bright >= 100:
+            return True
+        # ---- ตาข่ายสุดท้าย: ปุ่มย้อนกลับ (เพิ่ม 14 ก.ย. 2569 รอบสอง) ----------
+        #
+        # มาถึงตรงนี้แปลว่า **รู้แน่แล้วว่ามีอะไรเต็มจอสีดำบังอยู่** (วัดสองรอบ
+        # ได้ค่าความสว่าง 0) และการแตะจุดที่เดาไว้ไม่ได้ผล หน้าสินค้าปกติไม่มี
+        # ทางมืดขนาดนี้ จึงปลอดภัยที่จะกดย้อนกลับ — ปิดได้ทั้งกล่องซ้อนและ
+        # หน้าดูรูปเต็มจอ ต่างจากการเดาพิกัดปุ่มปิดซึ่งได้ผลแค่หน้าเดียว
+        #
+        # ทำไมไม่ทำตั้งแต่แรก: เพราะบนหน้าสินค้าที่ไม่ได้ถูกบัง การย้อนกลับจะ
+        # พาออกจากหน้าสินค้า — จึงต้องพิสูจน์ว่ามืดจริงก่อนถึงจะกด
+        self.log(f"แตะจุดปิดแล้วฉากหลังยังมืด (สว่าง {bright:.0f}) — ลองปุ่มย้อนกลับ")
+        self.adb_run("shell", "input", "keyevent", "4", check=False)
+        time.sleep(1.8)
+        final = self.adb_run("exec-out", "screencap", "-p", timeout=45)
+        try:
+            last = Image.open(io.BytesIO(final)).convert("RGB")
+        except Exception:  # noqa: BLE001
+            self.log("⚠️ กดย้อนกลับแล้วแต่แคปจอมาตรวจไม่ได้ — ยังไม่รู้ผล")
             return False
-        return True
+        lit = sum(sum(last.getpixel(point)) / 3 for point in samples) / len(samples)
+        if lit >= 100:
+            self.log("ปิดสิ่งที่บังจอด้วยปุ่มย้อนกลับแล้ว")
+            return True
+        self.log(f"⚠️ ปิดสิ่งที่บังจอไม่ลงทั้งแตะปุ่มและย้อนกลับ (สว่าง {lit:.0f})")
+        return False
 
     def dismiss_shop_popup(self) -> bool:
         """ชื่อเดิมสำหรับผู้เรียกเก่า; ใช้ตัวตรวจป๊อปอัปกลางชุดเดียวกัน."""
@@ -932,9 +975,35 @@ class PhoneFlow:
                 return
             raise TikTokLinkError("ไม่พบปุ่มเพิ่มในโชว์เคสของสินค้าที่เลือก")
 
+        def refusal_on_screen() -> str:
+            """TikTok ขึ้นกล่องปฏิเสธสินค้าอยู่ไหม — คืนข้อความบนจอ, ว่าง = ไม่มี
+
+            เทียบแบบยอมให้วรรณยุกต์ตก เพราะข้อความนี้มักอ่านมาจากภาพ
+            """
+            rows = self.nodes()
+            extra = self.ocr_nodes()
+            if extra:
+                rows = rows + extra
+            loose = screen_read.thai_loose(self._screen_text(rows))
+            for mark in ("สินค้าไม่พร้อมจำหน่าย", "ไม่สามารถเพิ่มสินค้านี้ได้",
+                         "โปรดเลือกสินค้าอื่น"):
+                if screen_read.thai_loose(mark) in loose:
+                    return mark
+            return ""
+
         def wait_success(timeout: float = 12) -> bool:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
+                refused = refusal_on_screen()
+                if refused:
+                    # ปิดกล่องก่อน เพื่อไม่ให้ค้างบังใบถัดไป — ปุ่มเดียวคือ "รับทราบ"
+                    if not self.tap_text("รับทราบ", "ตกลง", "ok"):
+                        self.adb_run("shell", "input", "keyevent", "4", check=False)
+                    time.sleep(1.2)
+                    raise TikTokProductRefused(
+                        f"TikTok ไม่ให้เพิ่มสินค้านี้เข้าโชว์เคส — ขึ้นกล่อง "
+                        f"'{refused}' (ข้อจำกัดของมาร์เก็ตเพลส) "
+                        "ลองอีกกี่รอบก็ไม่สำเร็จ ต้องเลือกสินค้าตัวอื่น")
                 current = promotion_state()
                 if ("สำรวจสินค้าสำหรับคุณ" in current
                         or "เพิ่มในโชว์เคสแล้ว" in current
@@ -1164,6 +1233,33 @@ def find_product_link(
             break
         except TikTokLinkStopped:
             raise
+        except TikTokProductRefused as error:
+            # **ไม่ใช่ความล้มเหลวทางเทคนิค** — TikTok บอกเองว่าเพิ่มสินค้านี้ไม่ได้
+            # จบใบแบบ pending_review (ตัวอัตโนมัติจะไม่หยิบกลับมาลองอีก) แล้วให้
+            # กระดานย้ายไปกอง "ไม่มีสินค้าใน TikTok" ผ่านธง blocked_by_tiktok
+            log(f"TikTok ปฏิเสธสินค้าอันดับ {selected}: {error}")
+            progress(7, "showcase", "เพิ่มสินค้าเข้าโชว์เคส", False, str(error))
+            return {
+                "status": "pending_review",
+                "label": "TikTok ไม่ให้เพิ่มสินค้านี้",
+                "showcase_added": False,
+                "blocked_by_tiktok": True,
+                "blocked_reason": str(error)[:400],
+                "tiktok_product_name": product_title,
+                "selected_rank": selected,
+                "matched_rank": selected,
+                "confidence": vision.get("confidence") or "low",
+                "reason": str(vision.get("reason") or "")[:400],
+                "result_titles": vision.get("titles") or [],
+                "search_query": search_query,
+                "reference_image": reference.name,
+                "reference_index": reference_check.get("index") or 1,
+                "reference_check": reference_check,
+                "results_images": [str(first_screen.relative_to(folder)),
+                                   str(second_screen.relative_to(folder))],
+                "results_layout": layout,
+                "updated_at": _now(),
+            }
         except TikTokLinkError as error:
             last_error = error
             raise

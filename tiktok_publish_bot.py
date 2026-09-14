@@ -1424,12 +1424,27 @@ class Bot:
                 self.c.pause(4.0)
                 self.c.run_adb("shell", "input", "tap", "82", "672")     # แท็บวิดีโอ
                 self.c.pause(3.5)
-                xml = self.xml()
-                tiles, outside = self.play_counts(xml)
-                if outside:
-                    self.c.log(f"  ข้ามตัวเลขที่ไม่ใช่ยอดเล่นคลิป {outside}")
-                if tiles:
-                    return tiles
+                # ---- ตารางคลิปโหลดช้ากว่าหัวโปรไฟล์ (แก้ 14 ก.ย. 2569) --------
+                #
+                # ของเดิมอ่านครั้งเดียวแล้วจบ ถ้าตารางยังไม่ขึ้นก็คืนค่าว่าง
+                # ตัวยืนยันผลโพสต์จึงไม่มีของตั้งต้นให้เทียบ แล้วต้องปิดสวิตช์
+                # รอคนมาดู ทั้งที่คลิปขึ้นจริง
+                #
+                # วัดจริง 09:47:32 — **อ่านหัวโปรไฟล์ได้ครบ ['5','242','336','6']
+                # แต่ยอดเล่นว่างเปล่า** แปลว่าหน้าเปิดแล้วแต่ตารางยังไม่วาด
+                # ไม่ใช่อ่านจอไม่ออก จึงต้องรอต่อ ไม่ใช่ยอมแพ้
+                deadline = time.monotonic() + 12.0
+                while True:
+                    tiles, outside = self.play_counts(self.xml())
+                    if tiles:
+                        if outside:
+                            self.c.log(f"  ข้ามตัวเลขที่ไม่ใช่ยอดเล่นคลิป {outside}")
+                        return tiles
+                    if time.monotonic() >= deadline:
+                        self.c.log("  ตารางคลิปยังไม่ขึ้นยอดเล่นสักใบใน 12 วินาที "
+                                   f"(เลขอื่นบนจอที่อ่านได้: {outside or 'ไม่มีเลย'})")
+                        break
+                    self.c.pause(1.5)
             except Exception as error:                        # noqa: BLE001
                 self.c.log(f"  อ่านตารางคลิปในโปรไฟล์ไม่ได้: {type(error).__name__}")
             self.c.pause(2.0)

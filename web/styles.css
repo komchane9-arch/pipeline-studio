@@ -3498,6 +3498,24 @@ body.typing-through {
 .eg-done { background: var(--shade); color: var(--ink-3); }
 
 /* เยื้องเข้ามา + เส้นตั้ง = "อันนี้อยู่ใต้โพสต์ข้างบน" แบบเดียวกับที่ Facebook ทำ */
+/* กล่องเนื้อหาโพสต์ — รูป · แคปชัน · คอมเมนต์ของเราเอง (เจ้าของสั่ง 15 ก.ย. 2569)
+   วางไว้เหนือคอมเมนต์ของคนอื่น เพราะคนอื่นคือของที่ต้องตอบ ต้องอยู่ใกล้มือที่สุด */
+.eg-drop { margin: 7px 0 0; font-size: 11px; }
+.eg-drop > summary { cursor: pointer; color: var(--ink-3); }
+.eg-drop > summary:hover { color: var(--ink); }
+.eg-drop-body { margin-top: 6px; }
+.eg-part { display: block; margin: 8px 0 3px; font-size: 11px; color: var(--ink-2); }
+.eg-part:first-child { margin-top: 0; }
+.eg-shots { display: flex; gap: 6px; flex-wrap: wrap; }
+.eg-shots img {
+  width: 84px; height: 84px; object-fit: cover; cursor: pointer;
+  border-radius: 8px; border: 1px solid var(--line);
+}
+.eg-caption {
+  margin: 3px 0 0; padding: 6px 9px; border-radius: 6px;
+  background: var(--shade); font-size: 12px; line-height: 1.65;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 .eg-comments { margin: 8px 0 0 4px; padding-left: 10px; border-left: 2px solid var(--line); }
 .eg-comment { padding: 7px 0; border-top: 1px solid var(--line); }
 .eg-comment:first-child { border-top: 0; }
@@ -3520,11 +3538,21 @@ body.typing-through {
 }
 .eg-input:disabled { opacity: 0.6; }
 .eg-reply-foot { display: flex; align-items: center; gap: 9px; margin-top: 5px; flex-wrap: wrap; }
-.eg-save {
+/* สองปุ่มใต้คอมเมนต์ (เจ้าของสั่ง 15 ก.ย. 2569)
+   "ตอบกลับ" เป็นเส้นทางหลัก จึงเป็นปุ่มทึบ ส่วน "เพิกเฉย" เป็นทางที่ไม่ทำอะไร
+   จึงเป็นปุ่มจาง — แยกด้วยน้ำหนักไม่ใช่ด้วยสีอย่างเดียว คนตาบอดสีต้องแยกออก */
+.eg-send, .eg-skip {
   font-size: 11px; padding: 3px 14px; border-radius: 999px; cursor: pointer;
-  border: 1px solid var(--ok); background: var(--panel); color: var(--ok-ink);
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink-2);
 }
-.eg-save:disabled { opacity: 0.5; cursor: default; }
+/* ผสมสีเอาจาก --ok กับพื้นกล่อง ไม่ตั้งตัวแปรสีใหม่ — ตัวแปรใหม่ต้องประกาศ
+   สองที่ (ธีมสว่าง + ธีมมืด) ลืมที่ใดที่หนึ่งแล้วสีหายเงียบๆ ในธีมนั้น */
+.eg-send {
+  border-color: var(--ok); color: var(--ok-ink); font-weight: 700;
+  background: color-mix(in srgb, var(--ok) 14%, var(--panel));
+}
+.eg-skip:hover { border-color: var(--ink-3); color: var(--ink); }
+.eg-send:disabled, .eg-skip:disabled { opacity: 0.5; cursor: default; }
 /* **ต้องอ่านออกว่ายังไม่ได้ส่ง** ไม่งั้นเห็นข้อความในช่องแล้วนึกว่าตอบไปแล้ว */
 .eg-note { font-size: 10.5px; color: var(--warn-ink); overflow-wrap: anywhere; }
 .eg-note.is-sent { color: var(--ok-ink); }

@@ -37,6 +37,12 @@ const el = (tag, cls, text) => {
 
 let data = null;
 let onlyPending = true;
+/* กล่องไหนถูกกางไว้ — ต้องจำข้ามการวาดใหม่
+ *
+ * เคยเจอมาแล้วกับแผงงานโพสต์: วาดใหม่ทุกครั้งแล้วกล่องที่กางอยู่หุบเอง
+ * เจ้าของกำลังดูรูปอยู่แล้วมันหุบใส่หน้า = ใช้งานไม่ได้จริง
+ */
+const openDrops = new Set();
 
 function box() {
   return $("#egList");
@@ -67,49 +73,151 @@ function commentRow(item) {
   field.placeholder = `ตอบ ${item.author || "คนนี้"}…`;
   field.value = item.reply_draft || "";
 
-  const save = el("button", "eg-save", "เก็บคำตอบ");
-  save.type = "button";
+  /* **สองปุ่ม เจ้าของสั่ง 15 ก.ย. 2569**
+   *   ตอบกลับ  = สั่งให้บอทไปพิมพ์ตอบตามที่พิมพ์ไว้
+   *   เพิกเฉย  = ไม่ทำอะไรกับคอมเมนต์นี้ และไม่ต้องเอามาโชว์อีก
+   *
+   * ของเดิมมีปุ่มเดียวคือ "เก็บคำตอบ" ซึ่งไม่ได้บอกว่าจะเกิดอะไรต่อ —
+   * พิมพ์แล้วเก็บไว้เฉยๆ แล้วก็ค้างอยู่อย่างนั้น ไม่มีทางบอกระบบว่า
+   * "อันนี้ไม่ตอบ" ได้เลย คอมเมนต์ที่ไม่มีวันตอบจึงค้างอยู่ตลอดกาล
+   */
+  const send = el("button", "eg-send", "↩ ตอบกลับ");
+  send.type = "button";
+  send.title = "สั่งให้บอทไปพิมพ์ตอบคอมเมนต์นี้ตามข้อความที่พิมพ์ไว้";
+  const skip = el("button", "eg-skip", "🚫 เพิกเฉย");
+  skip.type = "button";
+  skip.title = "ไม่ตอบคอมเมนต์นี้ และไม่ต้องเอามาโชว์อีก";
   const note = el("span", "eg-note");
+
+  const lock = (on) => { send.disabled = on; skip.disabled = on; field.disabled = on; };
+
   if (item.reply_sent_at) {
     note.textContent = `ส่งขึ้น Facebook แล้ว ${item.reply_sent_at}`;
     note.classList.add("is-sent");
-    field.disabled = true;
-    save.disabled = true;
+    lock(true);
+  } else if (item.reply_queued_at) {
+    // **สั่งแล้ว ≠ ขึ้นแล้ว** ต้องเขียนให้ชัด ไม่งั้นนึกว่าตอบไปเรียบร้อย
+    note.textContent = `สั่งตอบแล้ว ${item.reply_queued_at} · รอบอทมือถือไปพิมพ์ ยังไม่ขึ้น Facebook`;
+    send.textContent = "↩ สั่งใหม่";
   } else if (item.reply_draft) {
-    // **ต้องเขียนว่ายังไม่ส่ง** ไม่งั้นเห็นข้อความอยู่ในช่องแล้วนึกว่าตอบไปแล้ว
-    note.textContent = `พิมพ์เก็บไว้ ${item.reply_saved_at} · ยังไม่ได้ส่งขึ้น Facebook`;
+    note.textContent = `พิมพ์เก็บไว้ ${item.reply_saved_at} · ยังไม่ได้สั่งตอบ`;
   }
 
-  save.addEventListener("click", async () => {
-    save.disabled = true;
-    const was = save.textContent;
-    save.textContent = "กำลังเก็บ…";
+  /** ยิงคำสั่งหนึ่งครั้ง — ล็อกปุ่มไว้ระหว่างรอ แล้วบอกผลตรงๆ ไม่ว่าสำเร็จหรือไม่ */
+  const fire = async (button, busyText, url, body, done) => {
+    const was = button.textContent;
+    lock(true);
+    button.textContent = busyText;
     try {
-      const out = await api("/api/fb/engage/reply", {
-        method: "POST",
-        body: JSON.stringify({ comment_key: item.comment_key, text: field.value }),
-      });
-      item.reply_draft = out.reply_draft;
-      note.textContent = out.reply_draft
-        ? "เก็บแล้ว · ยังไม่ได้ส่งขึ้น Facebook"
-        : "ลบคำตอบที่เตรียมไว้แล้ว";
+      const out = await api(url, { method: "POST", body: JSON.stringify(body) });
       note.classList.remove("is-bad");
-      paintHead();          // ตัวเลข "พิมพ์ไว้แล้ว" ด้านบนต้องขยับตาม
+      done(out);
     } catch (error) {
-      // เก็บไม่สำเร็จต้องบอก **ห้ามทำเหมือนสำเร็จ** ไม่งั้นคำตอบหายโดยไม่มีใครรู้
-      note.textContent = `เก็บไม่ได้ — ${error.message}`;
+      // **ห้ามทำเหมือนสำเร็จ** ไม่งั้นคำสั่งหายโดยไม่มีใครรู้
+      note.textContent = `ไม่สำเร็จ — ${error.message}`;
       note.classList.add("is-bad");
-    } finally {
-      save.textContent = was;
-      save.disabled = false;
+      button.textContent = was;
+      lock(false);
     }
+  };
+
+  send.addEventListener("click", () => {
+    if (!field.value.trim()) {
+      note.textContent = "ยังไม่ได้พิมพ์คำตอบ — พิมพ์ก่อนแล้วค่อยกดตอบกลับ";
+      note.classList.add("is-bad");
+      field.focus();
+      return;
+    }
+    fire(send, "กำลังสั่ง…", "/api/fb/engage/send",
+      { comment_key: item.comment_key, text: field.value }, (out) => {
+        item.reply_draft = out.reply_draft;
+        item.reply_queued_at = out.reply_queued_at;
+        note.textContent = "สั่งตอบแล้ว · รอบอทมือถือไปพิมพ์ ยังไม่ขึ้น Facebook";
+        send.textContent = "↩ สั่งใหม่";
+        lock(false);
+        paintHead();
+      });
+  });
+
+  skip.addEventListener("click", () => {
+    fire(skip, "กำลังซ่อน…", "/api/fb/engage/ignore",
+      { comment_key: item.comment_key, on: true }, () => {
+        // หายไปจากจอทันที ไม่ต้องรอโหลดใหม่ — กดแล้วต้องเห็นผลเดี๋ยวนั้น
+        item.ignored = 1;
+        const card = row.closest(".eg-post");
+        row.remove();
+        if (card && !card.querySelector(".eg-comment")) {
+          card.querySelector(".eg-comments")?.append(
+            el("p", "eg-empty", "เพิกเฉยครบทุกคอมเมนต์ในโพสต์นี้แล้ว"));
+        }
+        paintHead();
+      });
   });
 
   const foot = el("div", "eg-reply-foot");
-  foot.append(save, note);
+  foot.append(send, skip, note);
   wrap.append(field, foot);
   row.append(wrap);
   return row;
+}
+
+/** กล่องเนื้อหาโพสต์ — รูป · แคปชัน · คอมเมนต์ของเราเอง กดแล้วค่อยกาง
+ *
+ * **เจ้าของสั่ง 15 ก.ย. 2569** — *"หน้าที่โชว์คอมเมนต์ ให้โชว์รูป กับแคปชันด้วย
+ * ทั้งหมดรวมคอมเมนต์ของผมให้ทำเป็น drop down คลิ้กแล้วค่อยโชว์"*
+ *
+ * คอมเมนต์ของเราเอง (ลิงก์สินค้า) ยาวและซ้ำทุกโพสต์ กินที่จนคอมเมนต์ของคนอื่น
+ * ซึ่งเป็นตัวที่ต้องตอบ ถูกดันตกลงไปข้างล่าง — ยุบเข้ากล่องแล้วสิ่งที่ต้องทำ
+ * จะอยู่บนสุดเสมอ
+ */
+function postContent(post) {
+  const ours = (post.comments_list || []).filter((c) => c.is_ours);
+  const shots = Number(post.images) || 0;
+  const caption = (post.caption || "").trim();
+  if (!shots && !caption && !ours.length) return null;
+
+  const drop = document.createElement("details");
+  drop.className = "eg-drop";
+  drop.open = openDrops.has(post.post_url);
+  drop.addEventListener("toggle", () => {
+    if (drop.open) openDrops.add(post.post_url);
+    else openDrops.delete(post.post_url);
+  });
+
+  const inside = [];
+  if (shots) inside.push(`รูป ${shots} ใบ`);
+  if (caption) inside.push("แคปชัน");
+  if (ours.length) inside.push(`คอมเมนต์ของเรา ${ours.length} อัน`);
+  const sum = document.createElement("summary");
+  sum.textContent = `ดูเนื้อหาโพสต์ — ${inside.join(" · ")}`;
+  drop.append(sum);
+
+  const body = el("div", "eg-drop-body");
+  if (shots && post.job_id) {
+    const strip = el("div", "eg-shots");
+    for (let i = 0; i < shots; i += 1) {
+      const img = document.createElement("img");
+      // **ห้ามใส่ loading="lazy"** เคยใส่แล้วรูปไม่โหลดเลยสักใบ เพราะรูปอยู่ใน
+      // กล่องที่ปิดอยู่ เบราว์เซอร์จึงถือว่ายังไม่ต้องโหลด แล้วไม่โหลดอีกเลย
+      img.alt = `รูปโพสต์ใบที่ ${i + 1}`;
+      img.src = `/api/fb/jobs/${encodeURIComponent(post.job_id)}/media/post/${i}`;
+      img.title = "กดเพื่อเปิดรูปเต็ม";
+      img.addEventListener("click", () => window.open(img.src, "_blank", "noreferrer"));
+      strip.append(img);
+    }
+    body.append(el("small", "eg-part", "รูปที่โพสต์"), strip);
+  } else if (shots) {
+    body.append(el("small", "eg-part", `มีรูป ${shots} ใบ แต่ใบงานถูกลบไปแล้ว — เปิดดูไม่ได้`));
+  }
+  if (caption) {
+    body.append(el("small", "eg-part", "แคปชัน"), el("p", "eg-caption", caption));
+  }
+  if (ours.length) {
+    body.append(el("small", "eg-part", `คอมเมนต์ของเราเอง ${ours.length} อัน`));
+    ours.forEach((c) => body.append(commentRow(c)));
+  }
+  drop.append(body);
+  return drop;
 }
 
 function postCard(post) {
@@ -136,10 +244,15 @@ function postCard(post) {
   if (post.checked_at) stat.push(`อ่านล่าสุด ${String(post.checked_at).replace("T", " ").slice(5, 16)}`);
   card.append(el("p", "eg-p-stat", stat.join(" · ")));
 
+  const content = postContent(post);
+  if (content) card.append(content);
+
+  // นอกกล่องเหลือเฉพาะคอมเมนต์ของคนอื่น ซึ่งคือของที่ต้องตอบ
+  const others = (post.comments_list || []).filter((c) => !c.is_ours);
   const list = el("div", "eg-comments");
-  (post.comments_list || []).forEach((item) => list.append(commentRow(item)));
-  if (!(post.comments_list || []).length) {
-    list.append(el("p", "eg-empty", "ยังไม่มีคอมเมนต์ในโพสต์นี้"));
+  others.forEach((item) => list.append(commentRow(item)));
+  if (!others.length) {
+    list.append(el("p", "eg-empty", "ยังไม่มีคอมเมนต์จากคนอื่นในโพสต์นี้"));
   }
   card.append(list);
   return card;
@@ -148,13 +261,23 @@ function postCard(post) {
 function paintHead() {
   const note = $("#egNote");
   if (!note || !data) return;
-  const drafted = (data.posts || []).reduce(
-    (sum, p) => sum + (p.comments_list || []).filter(
-      (c) => c.reply_draft && !c.reply_sent_at).length, 0);
-  note.textContent = data.pending_total
-    ? `💬 มีคอมเมนต์รอตอบ ${data.pending_total} รายการ ใน ${data.posts.length} โพสต์`
-      + (drafted ? ` · พิมพ์คำตอบไว้แล้ว ${drafted} รายการ (ยังไม่ได้ส่ง)` : "")
-    : "✅ ไม่มีคอมเมนต์ค้าง — ตอบครบทุกอันแล้ว";
+  // **นับจากของที่อยู่บนจอจริง ไม่ใช่เลขที่เซิร์ฟเวอร์ส่งมาตอนโหลด**
+  // กดเพิกเฉยแล้วแถวหายไปเดี๋ยวนั้น ถ้ายังโชว์เลขเดิมจะขัดกับสิ่งที่ตาเห็น
+  const live = (data.posts || []).flatMap((p) => (p.comments_list || [])
+    .filter((c) => !c.is_ours && !c.ignored));
+  const pending = live.filter((c) => !c.answered && !c.reply_sent_at && !c.reply_queued_at);
+  const queued = live.filter((c) => c.reply_queued_at && !c.reply_sent_at);
+  const drafted = pending.filter((c) => c.reply_draft);
+  const tail = [
+    queued.length ? `สั่งตอบแล้ว ${queued.length} รายการ (รอบอทไปพิมพ์)` : "",
+    drafted.length ? `พิมพ์ไว้แต่ยังไม่สั่ง ${drafted.length} รายการ` : "",
+  ].filter(Boolean);
+  note.textContent = pending.length
+    ? `💬 มีคอมเมนต์รอตอบ ${pending.length} รายการ ใน ${data.posts.length} โพสต์`
+      + (tail.length ? ` · ${tail.join(" · ")}` : "")
+    : (queued.length
+      ? `⏳ ตัดสินใจครบแล้ว — สั่งตอบไว้ ${queued.length} รายการ รอบอทมือถือไปพิมพ์`
+      : "✅ ไม่มีคอมเมนต์ค้าง — จัดการครบทุกอันแล้ว");
   const stamp = $("#egStamp");
   if (stamp) stamp.textContent = `อัปเดต ${data.at || ""}`;
 }

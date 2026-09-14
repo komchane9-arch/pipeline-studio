@@ -167,6 +167,12 @@ _EXTRA_COLUMNS = {
         "reply_draft": "TEXT",
         "reply_saved_at": "TEXT",      # พิมพ์เก็บไว้เมื่อไร
         "reply_sent_at": "TEXT",       # บอทพิมพ์ลง Facebook จริงเมื่อไร ("" = ยังไม่ส่ง)
+        # เจ้าของกดปุ่ม "ตอบกลับ" แล้ว = สั่งให้บอทไปพิมพ์ตอบ รอคิวอยู่
+        # **ต่างจาก reply_draft** ตรงที่ draft คือพิมพ์ค้างไว้เฉยๆ ยังไม่สั่ง
+        "reply_queued_at": "TEXT",
+        # เจ้าของกดปุ่ม "เพิกเฉย" = ไม่ตอบคอมเมนต์นี้ และไม่ต้องเอามาโชว์อีก
+        "ignored": "INTEGER DEFAULT 0",
+        "ignored_at": "TEXT",
     },
 }
 
@@ -1014,7 +1020,9 @@ def still_worth_watching(conn: sqlite3.Connection, post_url: str) -> tuple[bool,
         owed = conn.execute(
             """SELECT COUNT(*) FROM my_comment
                WHERE post_url = ? AND is_ours = 0 AND answered = 0
-                 AND TRIM(body) <> ''""", (post_url,)).fetchone()[0]
+                 AND TRIM(body) <> ''
+                 AND COALESCE(ignored, 0) = 0
+                 AND COALESCE(reply_queued_at, '') = ''""", (post_url,)).fetchone()[0]
         if owed and not _watched_too_long(rows):
             return True, ""
         if owed:
@@ -1068,10 +1076,47 @@ def unanswered(limit: int = 20) -> list[dict]:
                        ORDER BY p.id DESC LIMIT 1) AS group_name
                FROM my_comment c
                WHERE c.is_ours = 0 AND c.answered = 0 AND TRIM(c.body) <> ''
+                 AND COALESCE(c.ignored, 0) = 0
+                 AND COALESCE(c.reply_queued_at, '') = ''
                ORDER BY c.first_seen DESC LIMIT ?""", (limit,)).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+def _post_meta_by_link() -> dict[str, dict]:
+    """ลิงก์โพสต์ → ของที่อยู่ในใบงานที่สร้างลิงก์นั้น
+
+    เจ้าของสั่ง 15 ก.ย. 2569 — *"หน้าที่โชว์คอมเมนต์ ให้โชว์รูป กับแคปชันด้วย"*
+
+    รูปไม่ได้เก็บอยู่ในแฟ้มคอมเมนต์ (เก็บแต่ข้อความ) จึงต้องย้อนไปหยิบจากใบงาน
+    ที่โพสต์ลิงก์นั้นขึ้นไป แล้วส่ง **รหัสใบงานกับจำนวนรูป** ให้หน้าเว็บ ไม่ใช่
+    ส่งไฟล์รูป — หน้าเว็บมีที่อยู่สำหรับดึงรูปของใบงานอยู่แล้ว
+    (``/api/fb/jobs/<รหัส>/media/post/<ลำดับ>``)
+    """
+    out: dict[str, dict] = {}
+    wanted = {name.strip().lower() for name in WATCH_ACCOUNTS if name.strip()}
+    for account in shared.known_accounts():
+        if wanted and account.strip().lower() not in wanted:
+            continue
+        for job in _jobs_of(account):
+            shots = [x for x in (job.get("images") or [job.get("image", "")]) if x]
+            meta = {
+                "job_id": str(job.get("id") or ""),
+                "caption": (job.get("caption") or "").strip(),
+                "images": len(shots),
+                "comment_images": len([x for x in (job.get("comment_images") or []) if x]),
+            }
+            for result in (job.get("results") or []):
+                link = str(result.get("link") or "").strip()
+                if link:
+                    out[link] = meta
+    return out
+
+
+# ใบงานหาไม่เจอ = **ไม่มีรูปให้ดู ไม่ใช่ "มีศูนย์ใบ"** — ส่งค่าว่างไปตรงๆ
+# แล้วให้หน้าเว็บเป็นคนบอกเอง ดีกว่าแกล้งทำเป็นว่าโพสต์นั้นไม่มีรูป
+_NO_META = {"job_id": "", "caption": "", "images": 0, "comment_images": 0}
+
 
 def threads(limit: int = 40, only_pending: bool = True) -> list[dict]:
     """โพสต์พร้อมคอมเมนต์ใต้โพสต์ — เรียงแบบเดียวกับที่เห็นบน Facebook
@@ -1107,10 +1152,12 @@ def threads(limit: int = 40, only_pending: bool = True) -> list[dict]:
                       reply_to, is_ours, answered,
                       COALESCE(reply_draft, '')   AS reply_draft,
                       COALESCE(reply_saved_at,'') AS reply_saved_at,
-                      COALESCE(reply_sent_at, '') AS reply_sent_at,
+                      COALESCE(reply_sent_at, '')   AS reply_sent_at,
+                      COALESCE(reply_queued_at, '') AS reply_queued_at,
                       first_seen
                  FROM my_comment
                 WHERE TRIM(body) <> ''
+                  AND COALESCE(ignored, 0) = 0
                 ORDER BY post_url, seq""").fetchall()
     finally:
         conn.close()
@@ -1119,20 +1166,35 @@ def threads(limit: int = 40, only_pending: bool = True) -> list[dict]:
     for row in rows:
         by_post.setdefault(row["post_url"], []).append(dict(row))
 
+    meta = _post_meta_by_link()
+
     out: list[dict] = []
     for post in posts:
         items = by_post.get(post["post_url"], [])
         # **นับ "ค้าง" จากคอมเมนต์ของคนอื่นที่ยังไม่ได้ตอบเท่านั้น**
         # คอมเมนต์ของเราเองไม่ใช่ของค้าง และใบที่พิมพ์คำตอบไว้แล้วก็ยังค้างอยู่
         # จนกว่าบอทจะพิมพ์ลง Facebook จริง (ดู reply_sent_at)
+        # **สามสถานะที่ห้ามยุบรวมกัน** (ข้อ 2.3.1)
+        #   ค้าง      = ยังไม่มีใครตัดสินใจอะไรกับมัน  → ต้องทำอะไรสักอย่าง
+        #   สั่งตอบแล้ว = เจ้าของกดตอบกลับแล้ว รอบอทไปพิมพ์ → ไม่ต้องทำอะไรต่อ
+        #   ตอบแล้ว    = เห็นคำตอบบนหน้าจริงแล้ว
+        # ถ้ายุบ "สั่งตอบแล้ว" เข้าไปในค้าง เจ้าของจะกดซ้ำเรื่อยๆ
+        # ถ้ายุบเข้าไปในตอบแล้ว จะนึกว่าขึ้น Facebook ไปแล้วทั้งที่ยังไม่ขึ้น
+        queued = [c for c in items
+                  if not c["is_ours"] and c["reply_queued_at"] and not c["reply_sent_at"]]
         pending = [c for c in items
-                   if not c["is_ours"] and not c["answered"] and not c["reply_sent_at"]]
-        if only_pending and not pending:
+                   if not c["is_ours"] and not c["answered"]
+                   and not c["reply_sent_at"] and not c["reply_queued_at"]]
+        if only_pending and not pending and not queued:
             continue
         out.append({
             **{k: post[k] for k in post.keys()},
+            **meta.get(post["post_url"], _NO_META),
             "pending": len(pending),
-            "drafted": sum(1 for c in items if c["reply_draft"] and not c["reply_sent_at"]),
+            "queued": len(queued),
+            "drafted": sum(1 for c in items
+                           if c["reply_draft"] and not c["reply_sent_at"]
+                           and not c["reply_queued_at"]),
             "comments_list": items,
         })
         if len(out) >= limit:
@@ -1176,6 +1238,67 @@ def save_reply(comment_key: str, text: str) -> dict:
     return {"comment_key": key, "reply_draft": body,
             "message": "เก็บคำตอบไว้แล้ว — รอบอทเอาไปพิมพ์บนมือถือ"
                        if body else "ลบคำตอบที่เตรียมไว้แล้ว"}
+
+
+def queue_reply(comment_key: str, text: str) -> dict:
+    """เจ้าของกด "ตอบกลับ" — เก็บข้อความแล้ว **สั่งคิวให้บอทไปพิมพ์ตอบ**
+
+    เจ้าของสั่ง 15 ก.ย. 2569 — *"1 ตอบกลับ คือ ไปตอบคอมเมนต์นั้น โดยตอบตามที่
+    ผมพิมพ์"*
+
+    **ยังไม่ใช่การส่งขึ้น Facebook** ตัวที่พิมพ์จริงคือบอทมือถือ (ขั้น ③ ตาม
+    กติกาข้อ 2.7 ต้องกดบนจอจริงทุกจุด) ซึ่งยังไม่ได้สร้าง — ตรงนี้จดไว้ว่า
+    "สั่งแล้ว" เฉยๆ ห้ามตั้ง ``reply_sent_at`` เด็ดขาด ไม่งั้นหน้าเว็บจะขึ้นว่า
+    ส่งแล้วทั้งที่ยังไม่มีอะไรขึ้นไปเลย (ข้อ 2.3.1)
+    """
+    key = str(comment_key or "").strip()
+    body = str(text or "").strip()
+    if not key:
+        raise ValueError("ไม่ได้บอกว่าจะตอบคอมเมนต์ไหน")
+    if not body:
+        raise ValueError("ยังไม่ได้พิมพ์คำตอบ — พิมพ์ก่อนแล้วค่อยกดตอบกลับ")
+    save_reply(key, body)                      # ด่านตรวจทั้งหมดอยู่ในตัวนั้นแล้ว
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = open_db()
+    try:
+        conn.execute(
+            "UPDATE my_comment SET reply_queued_at=?, ignored=0 WHERE comment_key=?",
+            (now, key))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"comment_key": key, "reply_draft": body, "reply_queued_at": now,
+            "message": "สั่งตอบแล้ว — รอบอทมือถือไปพิมพ์ตอบให้"}
+
+
+def ignore_comment(comment_key: str, on: bool = True) -> dict:
+    """เจ้าของกด "เพิกเฉย" — ไม่ตอบคอมเมนต์นี้ และไม่ต้องเอามาโชว์อีก
+
+    เจ้าของสั่ง 15 ก.ย. 2569 — *"2 เพิกเฉย ก็คือไม่ต้องทำอะไรกับคอมเมนต์นั้น
+    แล้วก็ไม่ต้องโชว์คอมเมนต์นั้นขึ้นมาอีก"*
+
+    **เก็บไว้ในฐานข้อมูล ไม่ได้ลบทิ้ง** เพราะรอบเก็บถัดไปจะอ่านคอมเมนต์เดิม
+    เจอใหม่ทุกครั้ง ถ้าลบก็จะกลับมาโผล่อีก — และเผื่อวันหลังเปลี่ยนใจ
+    """
+    key = str(comment_key or "").strip()
+    if not key:
+        raise ValueError("ไม่ได้บอกว่าจะเพิกเฉยคอมเมนต์ไหน")
+    conn = open_db()
+    try:
+        found = conn.execute(
+            "SELECT is_ours FROM my_comment WHERE comment_key=?", (key,)).fetchone()
+        if found is None:
+            raise ValueError("ไม่พบคอมเมนต์นี้ — อาจถูกลบไปแล้ว")
+        conn.execute(
+            "UPDATE my_comment SET ignored=?, ignored_at=? WHERE comment_key=?",
+            (1 if on else 0,
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S") if on else "", key))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"comment_key": key, "ignored": bool(on),
+            "message": "เพิกเฉยแล้ว — จะไม่เอาคอมเมนต์นี้มาโชว์อีก" if on
+                       else "เอากลับมาโชว์แล้ว"}
 
 
 def check_once() -> dict:
@@ -1318,6 +1441,8 @@ def pending_comments() -> None:
         LEFT JOIN (SELECT post_url, group_name FROM my_post GROUP BY post_url) p
                ON p.post_url = c.post_url
         WHERE c.is_ours = 0 AND c.answered = 0
+          AND COALESCE(c.ignored, 0) = 0
+          AND COALESCE(c.reply_queued_at, '') = ''
         ORDER BY c.first_seen DESC
         LIMIT 50
     """).fetchall()

@@ -12080,6 +12080,46 @@ async def fb_engage_reply(request: Request) -> dict:
     return {"ok": True, **out}
 
 
+@app.post("/api/fb/engage/send")
+async def fb_engage_send(request: Request) -> dict:
+    """เจ้าของกด "ตอบกลับ" — เก็บข้อความแล้วสั่งคิวให้บอทมือถือไปพิมพ์ตอบ
+
+    body `{"comment_key": "...", "text": "..."}`
+
+    **ยังไม่ใช่การส่งขึ้น Facebook** ตัวพิมพ์จริงคือบอทมือถือ (กติกาข้อ 2.7
+    ต้องกดบนจอจริงทุกจุด) ซึ่งยังไม่ได้สร้าง เส้นนี้จดว่า "สั่งแล้ว" เท่านั้น
+    หน้าเว็บจึงต้องเขียนให้ชัดว่ายังไม่ขึ้น Facebook
+    """
+    import fb_engagement                                        # noqa: PLC0415
+    payload = await request.json() if await request.body() else {}
+    try:
+        out = await asyncio.to_thread(
+            fb_engagement.queue_reply,
+            str((payload or {}).get("comment_key") or ""),
+            str((payload or {}).get("text") or ""))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, **out}
+
+
+@app.post("/api/fb/engage/ignore")
+async def fb_engage_ignore(request: Request) -> dict:
+    """เจ้าของกด "เพิกเฉย" — ไม่ตอบคอมเมนต์นี้ และไม่เอามาโชว์อีก
+
+    body `{"comment_key": "...", "on": true}` · `on` เป็น false = เอากลับมาโชว์
+    """
+    import fb_engagement                                        # noqa: PLC0415
+    payload = await request.json() if await request.body() else {}
+    try:
+        out = await asyncio.to_thread(
+            fb_engagement.ignore_comment,
+            str((payload or {}).get("comment_key") or ""),
+            bool((payload or {}).get("on", True)))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, **out}
+
+
 @app.post("/api/fb/settings")
 async def fb_save_settings(request: Request) -> dict:
     """บันทึกค่าตั้งสายโพสต์ — ส่ง `serial` มาด้วย = บันทึกให้เครื่องนั้นเครื่องเดียว

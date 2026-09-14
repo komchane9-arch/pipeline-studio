@@ -1,6 +1,7 @@
 /* งานฝั่งวิดีโอ: Input ① · GEMS · Release ③ · สตอรีบอร์ด 🎬 */
 
 import { $, CLIP_API, api, config, hooks } from "./core.js";
+import { syncLinkLibrary } from "./link-library.js";
 
 // ============================================================ Input ①
 export function fillInput() {
@@ -679,6 +680,110 @@ function videoLine(job) {
   return line;
 }
 
+/** ด่านให้เจ้าของยืนยันว่าสินค้าที่ระบบผูกไว้ตรงกับใบงานจริงไหม
+ *
+ *  **เจ้าของสั่ง 14 ก.ย. 2569** — *"ขั้นตอนการอ่านและจับคู่ ให้ทำปกติจนเสร็จ
+ *  เพิ่มเข้าไปในโชว์เคส แล้วเพิ่มขั้นตอนให้ผมคอนเฟิร์ม โดยใบงาน และหน้าสินค้า
+ *  ใน tiktok มาแนบ"*
+ *
+ *  **เหตุการณ์ที่ทำให้ต้องมี** — 14 ก.ย. TikTok ตีธงใบ 52807075353 ว่าผิด
+ *  นโยบาย "โปรโมตสินค้าที่ไม่ตรงกับสินค้าจริง" (ลดการมองเห็น + ลบสินค้าออกจาก
+ *  วิดีโอ) เพราะตัวดูรูปตัดสินว่าตรงจาก "เคสกากเพชรลายคิตตี้เหมือนกัน"
+ *  ทั้งที่คนละร้าน และชื่อที่อ่านได้คือ "x300 ultra x3oo pro x300 x3oo"
+ *  ซึ่งไม่ใช่ชื่อสินค้าด้วยซ้ำ
+ *
+ *  วางรูปสองฝั่งคู่กันเพราะ **คนจับผิดจากรูปได้เร็วกว่าอ่านชื่อ** และเน้นชื่อ
+ *  ทั้งสองฝั่งไว้ให้เทียบง่าย
+ */
+function tiktokConfirmBox(job) {
+  const key = job.item_id || job.id;
+  const box = el("div", { className: "tkc" });
+  const answered = job.tiktok_confirm_answer;
+
+  const head = el("div", { className: "tkc-head" });
+  head.append(el("b", {
+    textContent: answered === "ok" ? "✅ ยืนยันแล้วว่าตรง"
+      : answered === "no" ? "❌ ตอบว่าไม่ตรง — จะไม่ลงใบนี้"
+      : "🔎 ยืนยันก่อนลง TikTok",
+  }));
+  if (job.tiktok_confirm_at) {
+    head.append(el("small", { textContent: `ตอบเมื่อ ${job.tiktok_confirm_at}` }));
+  }
+  box.append(head);
+
+  // ---- สองฝั่งคู่กัน: ของในใบงาน กับ ของที่เจอใน TikTok ----
+  const pair = el("div", { className: "tkc-pair" });
+  const side = (title, shot, name, warn) => {
+    const col = el("div", { className: "tkc-side" });
+    col.append(el("small", { className: "tkc-title", textContent: title }));
+    if (shot) {
+      const img = document.createElement("img");
+      img.alt = title;
+      img.src = clipFile(key, shot);
+      img.title = "กดเพื่อเปิดรูปเต็ม";
+      // ขนาดในกล่องดูได้แค่คร่าวๆ — ตอนจะตัดสินจริงต้องซูมดูฉลากกับรายละเอียด
+      img.addEventListener("click", (event) => {
+        event.stopPropagation();        // ห้ามทะลุไปเลือกแถวในรายการ
+        window.open(img.src, "_blank", "noreferrer");
+      });
+      col.append(img);
+    } else {
+      col.append(el("p", { className: "tkc-noshot", textContent: "ไม่มีภาพ" }));
+    }
+    col.append(el("p", {
+      className: "tkc-name" + (warn ? " is-warn" : ""),
+      textContent: name || "(อ่านชื่อไม่ได้)",
+    }));
+    return col;
+  };
+  pair.append(side("ใบงานของเรา", job.tiktok_link_reference, job.name, false));
+  // ใบเก่าที่ผูกไว้ก่อนมีด่านนี้ไม่มีภาพหน้าสินค้า — ถอยไปใช้ภาพผลค้นหา 4 อันดับ
+  pair.append(side("สินค้าใน TikTok",
+    job.tiktok_product_page_shot || job.tiktok_link_shot,
+    job.tiktok_product_name, !job.tiktok_product_name));
+  box.append(pair);
+
+  // **อ่านชื่อไม่ได้ = ใบที่เคยโดนตีธงเป็นแบบนี้พอดี** ต้องเตือนให้ชัด
+  if (!job.tiktok_product_name) {
+    box.append(el("p", { className: "tkc-warn",
+      textContent: "⚠️ อ่านชื่อสินค้าจากหน้า TikTok ไม่ได้ — ควรตอบว่าไม่ตรงไว้ก่อน" }));
+  }
+
+  const note = el("p", { className: "tkc-note" });
+  const bar = el("div", { className: "tkc-buttons" });
+  const send = async (body, button, saying) => {
+    [...bar.children].forEach((b) => { b.disabled = true; });
+    note.textContent = saying;
+    note.className = "tkc-note";
+    try {
+      const out = await api(
+        `${CLIP_API}/api/clips/${encodeURIComponent(key)}/tiktok-link/owner-confirm`,
+        { method: "POST", body: JSON.stringify(body) });
+      note.textContent = out.message || "บันทึกคำตอบแล้ว";
+      loadJobQueue();               // ให้กระดานกับรายการอัปเดตตามทันที
+    } catch (error) {
+      // ตอบไม่สำเร็จต้องบอก **ห้ามทำเหมือนสำเร็จ** ไม่งั้นจะนึกว่ายืนยันไปแล้ว
+      note.textContent = `บันทึกไม่ได้ — ${error.message}`;
+      note.className = "tkc-note is-bad";
+      [...bar.children].forEach((b) => { b.disabled = false; });
+    }
+  };
+  const add = (text, cls, body, saying) => {
+    const button = el("button", { type: "button", className: `tkc-btn ${cls}`,
+      textContent: text });
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      send(body, button, saying);
+    });
+    bar.append(button);
+  };
+  if (answered !== "ok") add("✅ ตรง ลงได้", "is-ok", { ok: true }, "กำลังบันทึกว่าตรง…");
+  if (answered !== "no") add("❌ ไม่ตรง", "is-no", { ok: false }, "กำลังบันทึกว่าไม่ตรง…");
+  if (answered) add("↩ ยกเลิกคำตอบ", "is-undo", { ok: null }, "กำลังล้างคำตอบ…");
+  box.append(bar, note);
+  return box;
+}
+
 function jobRow(job) {
   const row = el("li", { className: `story-queue-item ${STAGE_TONE[job.stage] || ""}` });
   if (job.id === openJobId) row.classList.add("active");
@@ -708,6 +813,11 @@ function jobRow(job) {
       title: [job.tiktok_product_name, job.tiktok_link_reason].filter(Boolean).join(" · ") || label,
     }));
   }
+  // ---- ด่านให้เจ้าของยืนยันสินค้า TikTok ก่อนลงคลิป -------------------
+  if (job.tiktok_confirm_pending || job.tiktok_confirm_answer) {
+    row.append(tiktokConfirmBox(job));
+  }
+
   if (job.publish_auto_skip && job.publish_note) {
     row.append(el("small", {
       className: "row-video unknown",
@@ -1770,6 +1880,7 @@ function paintBoard() {
     return cell;
   }));
 
+  syncLinkLibrary(box, boardPick === "link", () => loadJobQueue());
   const picked = buckets.find((b) => b.key === boardPick);
   // บรรทัดบอกว่าขาดเท่าไรและ**ต้องทำอะไรถึงจะเติมได้** — ตัวเลขเฉยๆ ตอบไม่ได้
   // ว่าต้องทำอะไรต่อ และแต่ละขั้นเติมด้วยวิธีคนละอย่าง

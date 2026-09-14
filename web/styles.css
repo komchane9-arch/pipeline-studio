@@ -2241,6 +2241,9 @@ button:disabled { opacity: 0.5; }
    ขึ้นแดง 55 ใบพร้อมกันจะกลายเป็นแถบที่คนเลิกมองภายในไม่กี่วัน แล้ววันที่พัง
    จริงก็จะไม่มีใครเห็น — ใช้เทาอมม่วงแบบเดียวกับ "ที่พัก" ไม่ใช่ขั้นในสายพาน */
 .board-tab[data-key="tiktok_no_shop"] { --stage: #9ca3af; }
+/* จบงานแล้ว — เขียวเข้ม สีของ "เสร็จเรียบร้อย" ไม่ใช่ขั้นที่ต้องทำอะไรต่อ
+   กองนี้ยิ่งเยอะยิ่งดี ต่างจากกอง "ไม่มีสินค้า" ที่ยิ่งเยอะยิ่งแย่ */
+.board-tab[data-key="clip_done_no_human"] { --stage: #16a34a; }
 
 /* แถบสีบางๆ บนหัวกล่อง — บอกขั้นได้โดยไม่ต้องอ่านตัวหนังสือ */
 .board-tab::before {
@@ -3517,3 +3520,62 @@ body.typing-through {
 .eg-note.is-sent { color: var(--ok-ink); }
 .eg-note.is-bad { color: var(--bad-ink); font-weight: 700; }
 .eg-empty { margin: 6px 0; font-size: 11.5px; color: var(--ink-3); }
+
+/* ============ 🔎 ด่านยืนยันสินค้า TikTok ก่อนลงคลิป (14 ก.ย. 2569) */
+/* เจ้าของสั่งให้แนบใบงานกับหน้าสินค้าใน TikTok มาเทียบกันก่อนอนุมัติ
+   เพราะ 14 ก.ย. TikTok ตีธงว่าโปรโมตสินค้าไม่ตรงกับของจริง */
+
+.tkc {
+  margin: 6px 0 2px; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--warn-chip); background: var(--warn-bg);
+}
+.tkc-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.tkc-head small { color: var(--ink-3); font-size: 10.5px; }
+
+/* **วางซ้อนกัน ไม่ใช่เรียงข้างกัน** — กล่องนี้อยู่ในคอลัมน์รายการงานซึ่งกว้าง
+   300px ตายตัว วัดจริง 14 ก.ย. 2569: วางข้างกันแล้วได้รูปละ **74px**
+   ซึ่งเล็กเกินกว่าจะดูออกว่าสินค้าตรงกันไหม — ซึ่งเป็นเหตุผลเดียวที่กล่องนี้มีอยู่
+
+   ซ้อนกันได้รูปละ ~170px กว่าเท่าตัว และยังเทียบได้เพราะอยู่ติดกันบนล่าง
+   จอกว้างพอค่อยเรียงข้างกัน (ดู media query ท้ายบล็อก) */
+.tkc-pair { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 7px; }
+.tkc-side { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.tkc-title { color: var(--ink-3); font-size: 10.5px; }
+/* กดที่รูปแล้วเปิดเต็มในแท็บใหม่ — ขนาดในกล่องดูได้แค่คร่าวๆ ตอนจะตัดสินจริง
+   ต้องซูมดูฉลากกับรายละเอียดสินค้า */
+.tkc-side img {
+  width: 100%; max-height: 240px; object-fit: contain; cursor: zoom-in;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+}
+.tkc-noshot {
+  margin: 0; padding: 22px 0; text-align: center; font-size: 11px;
+  color: var(--ink-3); border: 1px dashed var(--line); border-radius: 6px;
+}
+/* ชื่อสองฝั่งคือจุดที่คนจับผิดได้เร็วสุด จึงต้องอ่านง่ายที่สุดในกล่องนี้ */
+.tkc-name {
+  margin: 0; font-size: 12px; line-height: 1.5; color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.tkc-name.is-warn { color: var(--bad-ink); font-weight: 700; }
+.tkc-warn { margin: 7px 0 0; font-size: 11px; color: var(--bad-ink); font-weight: 700; }
+
+.tkc-buttons { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.tkc-btn {
+  font-size: 11px; padding: 4px 13px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+.tkc-btn:disabled { opacity: 0.5; cursor: default; }
+.tkc-btn.is-ok { border-color: var(--ok); color: var(--ok-ink); font-weight: 700; }
+.tkc-btn.is-no { border-color: var(--bad); color: var(--bad-ink); font-weight: 700; }
+.tkc-btn.is-undo { border-color: var(--none); color: var(--ink-3); }
+.tkc-note { margin: 6px 0 0; font-size: 10.5px; color: var(--ink-3); }
+.tkc-note.is-bad { color: var(--bad-ink); font-weight: 700; }
+
+/* **ห้ามใช้ media query กับกล่องนี้** — media query วัดความกว้าง "จอ"
+   ไม่ใช่ความกว้าง "คอลัมน์ที่กล่องอยู่" กล่องนี้อยู่ในแถบรายการงานซึ่งกว้าง
+   300px ตายตัวไม่ว่าจอจะกว้างแค่ไหน
+
+   เจอเองตอนทดสอบ 14 ก.ย. 2569: เขียน @media (min-width: 1600px) ให้เรียง
+   ข้างกันตอนจอกว้าง จอจริงกว้าง 1920px เงื่อนไขจึงเข้า แล้วรูปกลับไปเหลือ
+   75px เท่าเดิม ทั้งที่คอลัมน์ยังแคบเหมือนเดิมทุกประการ
+   (บทเรียนเดียวกับที่เคยทำกระดานพังเมื่อ 27 ส.ค. — วัดผิดตัว) */

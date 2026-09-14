@@ -474,6 +474,13 @@ def popup_owner(node) -> str:
     return found.group(1).strip() if found else ""
 
 
+# ข้อความที่ Facebook ขึ้นเมื่อโพสต์ถูกลบ หรือเปลี่ยนคนที่มองเห็นได้
+# เก็บไว้ที่เดียว เพราะทั้งตัวอ่านและตัวตัดสินว่าจะเลิกตามต้องใช้ตัวเดียวกัน
+_GONE_MARKS = ("เนื้อหานี้ไม่พร้อมใช้งาน", "content isn't available",
+               "content isnt available")
+GONE_NOTE = "โพสต์ถูกลบ หรือเปลี่ยนคนที่มองเห็นได้ — Facebook ขึ้นว่าเนื้อหาไม่พร้อมใช้งาน"
+
+
 def read_post(page, url: str, expect: str = "",
               group_name: str = "", account: str = "") -> dict:
     """เปิดโพสต์แล้วอ่านยอด + คอมเมนต์
@@ -532,6 +539,27 @@ def read_post(page, url: str, expect: str = "",
         log(f"   แคปชันที่เก็บไว้ไม่ตรงกับบนหน้าจอ — อ่านจากกล่องที่เด้ง"
             f"ของ {account} แทน")
     if not body:
+        # **"หากล่องไม่เจอ" ไม่ใช่เหตุผล มันคืออาการ** (ข้อ 2.3.1)
+        #
+        # เจอจริง 15 ก.ย. 2569: โพสต์ในกลุ่ม "อยากมีบ้านโว้ย" ถูกลบไป หน้าเว็บ
+        # ขึ้นแผ่นกุญแจว่า "เนื้อหานี้ไม่พร้อมใช้งานในขณะนี้" ซึ่งอ่านแล้วรู้เรื่อง
+        # ทันที **แต่ระบบรายงานว่า "เข้าถึงหน้าโพสต์แล้วแต่หากล่องโพสต์ไม่เจอ"**
+        # เพราะตัวเช็คคำว่า "ไม่พร้อมใช้งาน" ของเดิมอยู่ **หลัง** จุดที่ต้องเจอ
+        # กล่องก่อน — หน้านี้ไม่มีกล่องสักอัน มันจึงไม่เคยได้ทำงาน
+        #
+        # ผลคือสามเรื่องที่ต้องทำคนละอย่างถูกยุบเป็นข้อความเดียว: โพสต์ถูกลบ ·
+        # หน้ายังโหลดไม่เสร็จ · แคปชันที่เก็บไว้ไม่ตรง
+        try:
+            page_text = (page.inner_text("body") or "").lower()
+        except Exception:                        # noqa: BLE001
+            page_text = ""
+        if any(mark.lower() in page_text for mark in _GONE_MARKS):
+            # **ไม่เก็บหลักฐานชุดใหญ่** เพราะไม่มีอะไรให้สืบ หน้าบอกเหตุผลมาแล้ว
+            # และสภาพนี้เกิดซ้ำทุกชั่วโมง เก็บไปก็ดันหลักฐานของจริงที่สายอื่น
+            # ต้องใช้ตกเพดาน 300 ใบ (ผังหน้าใบละราว 5 MB)
+            return {"reachable": False, "note": GONE_NOTE,
+                    "reactions": None, "comments": None, "shares": None,
+                    "comments_list": []}
         on_post = "/posts/" in landed or "/permalink/" in landed
         # แคปก่อน return เสมอ — ปิดเบราว์เซอร์ไปแล้วแคปไม่ได้อีก (ข้อ 2.6.1 ข้อ 1)
         keep_no_body_evidence(page, url=url, landed=landed, expect=expect,
@@ -876,6 +904,21 @@ def still_worth_watching(conn: sqlite3.Connection, post_url: str) -> tuple[bool,
     **ต้องมีประวัติครอบคลุมเกิน 1 วันก่อนถึงจะตัดสินได้** เพิ่งเก็บวันนี้แล้ว
     เห็นว่ายอดเท่าเดิม 2 รอบ ไม่ได้แปลว่าเงียบ — แปลว่ายังดูไม่นานพอ
     """
+    # **โพสต์ที่หายไปแล้วต้องเลิกตาม** (15 ก.ย. 2569)
+    #
+    # ตัวตัดสินข้างล่างดูเฉพาะรอบที่ "อ่านได้" โพสต์ที่ถูกลบจึงไม่มีแถวให้ดูเลย
+    # แล้วตกไปที่ `len(rows) < 2 -> ตามต่อ` = ตามทุกชั่วโมงไปตลอดกาล
+    # ทั้งที่มันไม่มีวันกลับมา
+    #
+    # ต้องเห็นซ้ำ 2 รอบก่อนถึงจะเลิก — รอบเดียวอาจเป็นเน็ตสะดุดหรือหน้าไม่โหลด
+    latest = conn.execute(
+        """SELECT reachable, note FROM my_post
+           WHERE post_url = ? ORDER BY id DESC LIMIT 2""", (post_url,)).fetchall()
+    if (len(latest) == 2
+            and all(not row["reachable"] and (row["note"] or "") == GONE_NOTE
+                    for row in latest)):
+        return False, GONE_NOTE
+
     rows = conn.execute(
         """SELECT reactions, comments, checked_at FROM my_post
            WHERE post_url = ? AND reachable = 1

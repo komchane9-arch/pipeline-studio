@@ -45,6 +45,7 @@ import publish_order
 STOCK_TARGET = 10
 
 LINK = "link"
+PICTURE = "picture"
 STORY = "story"
 CLIP = "clip"
 SHOPEE = "shopee_video"
@@ -68,8 +69,16 @@ FIX = "fix"
 LINK_STAGES = {clip_queue.STAGE_QUEUED, clip_queue.STAGE_COLLECTING}
 
 # ทุกขั้นระหว่าง "ได้ข้อมูลสินค้าแล้ว" ถึง "ได้สตอรีบอร์ด + บทพูดครบ"
+# ---- กอง Picture: รออนุมัติชุดรูป (เจ้าของสั่งแยก 14 ก.ย. 2569) ----------
+#
+# *"หน้า storyboard แยกเป็น 2 อัน  1.Picture = อนุมัติรูปภาพ
+#   2.Storyboard = อนุมัติ storyboard"*
+#
+# เดิมสองงานนี้อยู่กองเดียวกัน ตัวเลขบนหัวกองจึงบอกไม่ได้ว่าค้างเพราะรออนุมัติรูป
+# หรือรออนุมัติสตอรีบอร์ด ทั้งที่เป็นงานคนละอย่างและกดคนละปุ่ม
+PICTURE_STAGES = {clip_queue.STAGE_IMAGE_REVIEW}
+
 STORY_STAGES = {
-    clip_queue.STAGE_IMAGE_REVIEW,
     clip_queue.STAGE_READY_STORYBOARD,
     clip_queue.STAGE_MAKING,
     clip_queue.STAGE_STORYBOARD_REVIEW,
@@ -140,7 +149,7 @@ FIX_OTHER = ("other", "❓ อื่นๆ", "ขั้นที่ระบบ�
 # ทั้งกอง — เจอจริงตอนทดสอบ 27 ส.ค. 2569 (พักใบรอลง Shopee แล้ว /waitclips
 # บอกว่าว่าง ส่วน /waitclip กลับมีใบนั้นอยู่)
 BOARD_KEY_FIX_GROUP = {
-    LINK: "link", STORY: "storyboard", CLIP: "clip",
+    LINK: "link", PICTURE: "storyboard", STORY: "storyboard", CLIP: "clip",
     SHOPEE: "post", REELS: "post", TIKTOK: "post", NO_SHOP: "post",
 }
 
@@ -232,7 +241,8 @@ def parked_by_bucket(rows: list[dict]) -> list[dict]:
 # ฝั่งหน้าเว็บผูกสีกับ **รหัสกอง** (`key`) ซึ่งไม่มีวันเปลี่ยน
 BOARD = (
     (LINK,   "🐣 ดึง Link",        "มีลิงก์แล้ว รอดึงข้อมูลสินค้า"),
-    (STORY,  "🎨 Storyboard",      "ได้ข้อมูลแล้ว รอตรวจรูป · จุดเด่น · สตอรีบอร์ด · บทพูด"),
+    (PICTURE, "🖼️ Picture",        "ได้ข้อมูลสินค้าแล้ว รออนุมัติชุดรูป"),
+    (STORY,  "🎨 Storyboard",      "อนุมัติรูปแล้ว รอทำและอนุมัติสตอรีบอร์ด + บทพูด"),
     (CLIP,   "🎬 Clip",            "รอเจนคลิป หรือมีคลิปแล้วรออนุมัติก่อนโพสต์"),
     (SHOPEE, "🛍️ Shopee Video",    "อนุมัติคลิปแล้ว รอลง Shopee Video"),
     (REELS,  "💙 Facebook Reels",  "ลง Shopee แล้ว รอลง Facebook Reels"),
@@ -432,6 +442,8 @@ def bucket_of(job: dict, run: dict | None = None) -> tuple[str, str]:
                 return key, str(state.get("error") or "ข้ามอัตโนมัติจนกว่าจะแก้ลิงก์")
     if stage in LINK_STAGES:
         return LINK, clip_queue.STAGE_LABEL.get(stage, stage)
+    if stage in PICTURE_STAGES:
+        return PICTURE, clip_queue.STAGE_LABEL.get(stage, stage)
     if stage in STORY_STAGES:
         return STORY, clip_queue.STAGE_LABEL.get(stage, stage)
     if stage in CLIP_STAGES:
@@ -653,7 +665,8 @@ FOLDER_OF_BUCKET = {
 
 # ใบที่พักไว้ — ต้นน้ำทั้งสามขั้นรวมเป็น waitstory ตามที่ผู้ใช้ตั้งชื่อมา
 PARKED_FOLDER_OF_BUCKET = {
-    LINK: "waitstory", STORY: "waitstory", CLIP: "waitstory",
+    LINK: "waitstory", PICTURE: "waitstory", STORY: "waitstory",
+    CLIP: "waitstory",
     SHOPEE: "waitclips",
     REELS: "waitclipsfb",
     TIKTOK: "waitclipstiktok",
@@ -678,7 +691,7 @@ def folder_of_run(run: dict, stage: str = "") -> str:
     """
     if not run:
         return WORKING_FOLDER
-    if stage in LINK_STAGES | STORY_STAGES | CLIP_STAGES:
+    if stage in LINK_STAGES | PICTURE_STAGES | STORY_STAGES | CLIP_STAGES:
         return WORKING_FOLDER           # ยังทำอยู่ในคิว ยังไม่พร้อมลงที่ไหน
     if run.get("parked"):
         came = (run.get("parked") or {}).get("from") or ""
@@ -768,7 +781,7 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 "can_publish": [],
             })
             continue
-        if stage not in LINK_STAGES | STORY_STAGES | CLIP_STAGES:
+        if stage not in LINK_STAGES | PICTURE_STAGES | STORY_STAGES | CLIP_STAGES:
             if stage in {clip_queue.STAGE_FAILED, clip_queue.STAGE_CANCELLED}:
                 continue                    # ของที่ล้มมีที่ของมันเอง
             item_id = job.get("item_id") or ""
@@ -937,7 +950,16 @@ def refill_hint(key: str, counts: dict[str, int]) -> str:
         return ""
     if key == LINK:
         return f"ส่งลิงก์สินค้าเพิ่มอีก {short} ใบ"
+    if key == PICTURE:
+        waiting = counts.get(LINK, 0)
+        if waiting:
+            return f"มีลิงก์รอดึงอยู่ {waiting} ใบ — ระบบกำลังทยอยทำให้"
+        return f"ส่งลิงก์สินค้าเพิ่มอีก {short} ใบ (ต้นน้ำว่าง)"
     if key == STORY:
+        # ต้นน้ำของกองนี้คือ Picture ไม่ใช่ Link แล้ว (แยกกอง 14 ก.ย. 2569)
+        ready = counts.get(PICTURE, 0)
+        if ready:
+            return f"กดอนุมัติชุดรูปอีก {min(short, ready)} ใบ"
         waiting = counts.get(LINK, 0)
         if waiting:
             return f"มีลิงก์รอดึงอยู่ {waiting} ใบ — ระบบกำลังทยอยทำให้"

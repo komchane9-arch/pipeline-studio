@@ -6422,6 +6422,29 @@ POSTS_COLLECT_OFF = DATA_DIR / "posts_collect_keeper.off"   # สร้างไ
 POSTS_COLLECT_SKIP = DATA_DIR / "posts_collect_skip.txt"
 
 
+# สวิตช์หยุดบอททั้งหมด — มีไฟล์นี้อยู่ = ห้ามบอทตัวไหนเริ่มงานเอง
+#
+# **เจ้าของสั่ง 15 ก.ย. 2569** — *"หยุดบอทโพสต์ทั้งหมด อย่าให้ทำอะไรเลยวันนี้"*
+#
+# **ทำไมต้องมีสวิตช์เดียว** ตอนได้คำสั่งนี้ ผมต้องไล่ปิดทีละทาง: สวิตช์เริ่มงานเอง
+# ของมือถือ 4 เครื่อง · สวิตช์อัตโนมัติของกระดานคลิป 6 กอง · รายชื่อห้ามปลุกบอท
+# เก็บข้อมูล · ตัวตามยอดคอมเมนต์ที่ไม่มีสวิตช์เลย — **หลุดทางใดทางหนึ่งก็จบ**
+# และคนสั่งไม่มีทางรู้ว่าปิดครบหรือยัง
+#
+# ตัวนี้จึงเป็นด่านเดียวที่ทุกตัวที่ "เริ่มงานเอง" ต้องผ่าน เนื้อในไฟล์เป็นเหตุผล
+# ที่คนเขียนไว้ เอาไว้โชว์ตอนบอกว่าทำไมไม่ทำงาน — **ลบไฟล์ = กลับมาทำงานทันที
+# ไม่ต้องรีสตาร์ต** เพราะอ่านใหม่ทุกรอบ
+BOTS_PAUSED = DATA_DIR / "bots_paused.txt"
+
+
+def bots_paused() -> str:
+    """หยุดบอทไว้อยู่ไหม — คืนเหตุผลที่เขียนไว้ ("" = ไม่ได้หยุด)"""
+    try:
+        return BOTS_PAUSED.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def posts_collect_skip() -> set[str]:
     """ชื่อบอทที่เจ้าของสั่งไม่ให้ปลุก (ตัวพิมพ์เล็ก) — อ่านใหม่ทุกครั้ง"""
     try:
@@ -6561,9 +6584,17 @@ def ensure_posts_collect() -> list[str]:
 
 def _posts_collect_keeper() -> None:
     """เฝ้าให้มีตัวเก็บข้อมูลทำงานอยู่เสมอตราบใดที่ยังมีกลุ่มค้างในคิว"""
+    told = False
     while True:
         try:
-            ensure_posts_collect()
+            why = bots_paused()
+            if why:
+                if not told:        # บอกครั้งเดียว ไม่ใช่ทุก 3 นาที
+                    append_log("publish", f"⏸ ตัวเก็บข้อมูลหยุดไว้ — {why[:80]}")
+                    told = True
+            else:
+                told = False
+                ensure_posts_collect()
         except Exception as error:                              # noqa: BLE001
             append_log("publish", f"keeper ตัวเก็บข้อมูลผิดพลาด: {error}")
         time.sleep(POSTS_COLLECT_GAP)
@@ -6762,8 +6793,17 @@ def _engagement_keeper() -> None:
     except Exception as error:                          # noqa: BLE001
         append_log("publish", f"เปิดตัวตามยอด engagement ไม่ได้: {error}")
         return
+    told = False
     while True:
         try:
+            why = bots_paused()
+            if why:
+                if not told:
+                    append_log("publish", f"⏸ ตัวตามยอด/เก็บคอมเมนต์หยุดไว้ — {why[:80]}")
+                    told = True
+                time.sleep(fb_engagement.CHECK_EVERY_SECONDS)
+                continue
+            told = False
             # ปักธงขอคิว Chrome ก่อน แล้วรอรอบเก็บโพสต์ที่ค้างอยู่ให้จบ
             # (ไม่ตัดกลางคัน — รอบหนึ่งใช้ราว 12 นาที)
             _chrome_wanted.set()
@@ -8463,6 +8503,10 @@ def _telegram_text(chat_id: str, text: str) -> None:
 
 def _fb_maybe_auto_start(job: dict) -> None:
     if job["status"] != fb_auto_post.STATUS_READY:
+        return
+    why = bots_paused()
+    if why:
+        append_log("publish", f"⏸ ไม่เริ่มงานโพสต์อัตโนมัติ — {why[:80]}")
         return
     if not _fb_settings().get("auto_start"):
         return

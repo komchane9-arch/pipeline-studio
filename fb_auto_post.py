@@ -25,6 +25,7 @@ from typing import Callable
 
 import facebook_group_post
 import fb_preflight
+import fb_screen
 import studio_shared
 
 # รอสิทธิ์ใช้จอมือถือนานสุดกี่วินาทีก่อนยอมแพ้
@@ -49,6 +50,7 @@ STATUS_READY = "ready"                    # ครบแล้ว รอกด�
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
+STATUS_STOPPED = "stopped"                  # ผู้ใช้หยุดไว้ ทำต่อเฉพาะกลุ่มที่เหลือได้
 STATUS_CANCELLED = "cancelled"
 
 OPEN_STATUSES = {STATUS_WAIT_CAPTION, STATUS_WAIT_IMAGE, STATUS_READY}
@@ -109,6 +111,11 @@ def share_link(text: str) -> str:
     return found.group(0) if found else ""
 
 
+# UA ที่ลิงก์โพสต์ยอมตอบ 302 — UA เบราว์เซอร์โดน 400 ทั้งมือถือและคอม
+# (ทดสอบจริง 11 ส.ค.: www/m + chrome/desktop = 400 · curl + facebookexternalhit = 302)
+_BOT_UA = "curl/8.0"
+
+
 def resolve_share_link(link: str, timeout: float = 20.0) -> str:
     """ตามลิงก์ย่อไปหารหัสกลุ่มจริง
 
@@ -137,15 +144,48 @@ def resolve_share_link(link: str, timeout: float = 20.0) -> str:
         found = re.search(r"/groups/(\d{6,})", source or "")
         if found:
             return found.group(1)
+
+    # **ทางเดียวไม่พอ — ลองทางที่ต่างกันจริง** (16 ก.ย. 2569)
+    #
+    # เจอจริง: เจ้าของวางลิงก์กลุ่มที่ 4 แล้วเพิ่มไม่ได้ 3 ครั้งติด ทั้งที่ลิงก์
+    # เปิดในเบราว์เซอร์ได้ปกติ — ของเดิมยิงผ่าน mbasic + UA มือถืออย่างเดียว
+    # ซึ่ง Facebook กำลังทยอยปิด mbasic พอทางนั้นไม่ตอบก็จบเลย
+    #
+    # retry ต้องเปลี่ยนอะไรบางอย่าง ไม่ใช่ยิงของเดิมซ้ำ — เปลี่ยนทั้งโฮสต์และ UA
+    plain = re.sub(r"//(?:mbasic|m|web)\.facebook\.com", "//www.facebook.com",
+                   link, count=1)
+    more = [
+        (plain, _BOT_UA),                       # UA แบบ curl — ตัวที่ยอมตอบ 302
+        (re.sub(r"//(?:www|mbasic|web)\.facebook\.com", "//m.facebook.com",
+                plain, count=1), _BOT_UA),
+    ]
+    tried = 1
+    for url, agent in more:
+        tried += 1
+        opener2 = urllib.request.build_opener(_KeepRedirect)
+        request2 = urllib.request.Request(
+            url, headers={"User-Agent": agent, "Accept-Language": "th,en"})
+        try:
+            with opener2.open(request2, timeout=timeout) as response2:
+                target2 = response2.geturl()
+                body2 = response2.read(200_000).decode("utf-8", "replace")
+        except urllib.error.HTTPError as error2:
+            target2 = error2.headers.get("Location") or ""
+            body2 = ""
+        except OSError:
+            continue
+        for source in (target2, body2):
+            found = re.search(r"/groups/(\d{6,})", source or "")
+            if found:
+                return found.group(1)
+
+    # **ห้ามใส่วงเล็บแหลมในข้อความนี้** Telegram อ่านเป็นแท็ก HTML แล้วทิ้งทั้งข้อความ
+    # ผลคือคนเพิ่มกลุ่มไม่สำเร็จแล้วไม่เห็นเหตุผลอะไรเลย (เจอจริง 16 ก.ย. 2569)
     raise AutoPostError(
-        "ตามลิงก์ย่อไปหารหัสกลุ่มไม่เจอ — เปิดกลุ่มในเบราว์เซอร์แล้วคัดลอกลิงก์"
-        "แบบ facebook.com/groups/<รหัส> มาแทน"
+        f"ตามลิงก์ไปหารหัสกลุ่มไม่เจอ (ลองแล้ว {tried} ทาง) — "
+        "เปิดกลุ่มในเบราว์เซอร์แล้วคัดลอกลิงก์บนแถบที่อยู่มาวางแทน "
+        "ลิงก์ที่ใช้ได้แน่นอนคือแบบ facebook.com/groups/ ตามด้วยตัวเลข"
     )
-
-
-# UA ที่ลิงก์โพสต์ยอมตอบ 302 — UA เบราว์เซอร์โดน 400 ทั้งมือถือและคอม
-# (ทดสอบจริง 11 ส.ค.: www/m + chrome/desktop = 400 · curl + facebookexternalhit = 302)
-_BOT_UA = "curl/8.0"
 
 
 def resolve_post_link(link: str, timeout: float = 20.0) -> tuple[str, str]:
@@ -628,7 +668,7 @@ def _merge_result(old: dict, new: dict) -> dict:
 
 
 def _trim_jobs(items: list[dict]) -> list[dict]:
-    """ตัดงานเก่าให้เหลือ `JOB_LIMIT` — แต่ **งานที่ตรึงไว้ห้ามหลุด**
+    """ตัดงานเก่าให้เหลือ `JOB_LIMIT` — แต่งานที่ตรึง/ผู้ใช้เก็บไว้ห้ามหลุด
 
     งานที่ตารางโพสต์ประจำวันใช้เป็นแม่แบบ (`fb_routine` → `sources`) ถูกอ้างด้วย
     รหัสงานเท่านั้น พอมันถูกตัดตกขอบคิว ตารางจะหาแม่แบบไม่เจอแล้ว**ข้ามเงียบ**
@@ -644,8 +684,11 @@ def _trim_jobs(items: list[dict]) -> list[dict]:
     if len(kept) == len(items):
         return items
     dropped = items[:-JOB_LIMIT]
-    pinned = [job for job in dropped if job.get("pinned")]
-    return pinned + kept if pinned else kept
+    protected = [
+        job for job in dropped
+        if job.get("pinned") or job.get("saved")
+    ]
+    return protected + kept if protected else kept
 
 
 class JobStore:
@@ -673,6 +716,7 @@ class JobStore:
             "message_id": 0,
             "media_group": "",
             "pinned": False,         # ตรึงไว้เป็นแม่แบบ — ห้ามถูกตัดทิ้งตอนคิวเต็ม
+            "saved": False,          # ผู้ใช้กดเก็บไว้เรียกคืนด้วย /recall
             "results": [],
             "log": [],
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -733,6 +777,17 @@ class JobStore:
 
     def listing(self) -> list[dict]:
         return list(reversed(self.store._read()))
+
+    def saved_listing(self) -> list[dict]:
+        """โพสต์ที่ผู้ใช้กดเก็บไว้ เรียงจากรายการที่เก็บล่าสุด (ไม่รวมงานที่ถูกยกเลิก)"""
+        return sorted(
+            (
+                dict(job) for job in self.store._read()
+                if job.get("saved") and job.get("status") != STATUS_CANCELLED
+            ),
+            key=lambda job: job.get("saved_at") or job.get("created_at") or "",
+            reverse=True,
+        )
 
     def latest_active(self, chat_id: str = "") -> dict | None:
         """งานล่าสุดที่ยัง "ทำอยู่" — ยังไม่ได้โพสต์ หรือกำลังโพสต์
@@ -809,7 +864,8 @@ class PostRunner:
         self.stop_flag.set()
         return True
 
-    def _phone(self, serial: str, what: str, adb: str = "adb"):
+    @contextmanager
+    def _phone(self, serial: str, what: str, adb: str = "adb", log=None):
         """ขอสิทธิ์ใช้จอมือถือ **เครื่องนั้น** — กันข้ามโปรเซส ไม่ใช่แค่ในโปรเซสนี้
 
         `PhoneGate` ใน app.py กันได้แค่งานโพสต์กับ Claude CLI ซึ่งอยู่โปรเซส
@@ -833,7 +889,14 @@ class PostRunner:
         ทั้งเครื่อง — เคยเกิดมาแล้ว และจะยิ่งเจ็บถ้าเกิดกลางงานที่โพสต์ไปครึ่งทาง
         """
         fb_preflight.guard(serial, what=what, adb=adb, check_lock=False)
-        return studio_shared.phone_lock(serial, timeout=PHONE_LOCK_WAIT, label=what)
+        with studio_shared.phone_lock(
+            serial, timeout=PHONE_LOCK_WAIT, label=what
+        ):
+            shell = fb_screen.make_shell(serial, adb)
+            with fb_screen.keep_awake_while_working(
+                shell, log=log
+            ):
+                yield
 
     def start(
         self, *, job: dict, adb: str, serial: str, image: Path,
@@ -893,7 +956,7 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"รอบตามเก็บ {self.job_id}", adb):
+            with self._phone(serial, f"รอบตามเก็บ {self.job_id}", adb, on_log):
                 results = facebook_group_post.followup_groups(
                     adb=adb, serial=serial, caption=caption, targets=targets,
                     comment=comment, log=on_log, stop=self.stop_flag.is_set,
@@ -943,7 +1006,7 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"รอบเก็บยอด {self.job_id}", adb):
+            with self._phone(serial, f"รอบเก็บยอด {self.job_id}", adb, on_log):
                 results = facebook_group_post.collect_groups(
                     adb=adb, serial=serial, caption=caption, targets=targets,
                     log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
@@ -988,7 +1051,7 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"รอบแก้รูป {self.job_id}", adb):
+            with self._phone(serial, f"รอบแก้รูป {self.job_id}", adb, on_log):
                 results = facebook_group_post.fix_images_groups(
                     adb=adb, serial=serial, caption=caption, targets=targets,
                     images=images, log=on_log, stop=self.stop_flag.is_set,
@@ -1014,7 +1077,7 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"งานโพสต์ {self.job_id}", adb):
+            with self._phone(serial, f"งานโพสต์ {self.job_id}", adb, on_log):
                 results = facebook_group_post.post_to_groups(
                     adb=adb, serial=serial, image=image, caption=job["caption"],
                     group_ids=job["groups"], gap_range=gap_range,

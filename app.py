@@ -7858,7 +7858,23 @@ def _fb_telegram() -> tuple[str, str]:
 
 
 def _fb_say(chat_id: str, text: str, keyboard: dict | None = None) -> int:
-    """ส่งข้อความเข้าแชท — ส่งไม่ออกต้องไม่ทำให้งานทั้งก้อนล้ม"""
+    """ส่งข้อความเข้าแชท — ส่งไม่ออกต้องไม่ทำให้งานทั้งก้อนล้ม
+
+    **ส่งไม่ออกเพราะรูปแบบผิด ต้องส่งซ้ำแบบข้อความเปล่า** (16 ก.ย. 2569)
+
+    เจอจริง: เจ้าของเพิ่มกลุ่มที่ 4 ไม่สำเร็จ ระบบจึงจะบอกสาเหตุกลับไปว่า
+    *"…คัดลอกลิงก์แบบ facebook.com/groups/<รหัส> มาแทน"* แต่คำว่า `<รหัส>`
+    ถูก Telegram อ่านเป็นแท็ก HTML ที่ไม่รู้จัก แล้วปฏิเสธทั้งข้อความ
+
+        Bad Request: can't parse entities: Unsupported start tag "รหัส"
+
+    ผลคือ **เจ้าของกดเพิ่มกลุ่มแล้วเงียบสนิท** ไม่รู้ว่าพลาดเพราะอะไร
+    ต้องมาถามเอง — ความล้มเหลวที่บอกไม่ได้ แย่กว่าความล้มเหลวเองเสียอีก
+    (กติกาข้อ 2.4: ความล้มเหลวต้องดังพอให้คนรู้)
+
+    ลองซ้ำแบบถอดรูปแบบออก ดีกว่าเงียบ — ข้อความอ่านยากขึ้นนิดหน่อย
+    แต่ยังบอกได้ว่าเกิดอะไรขึ้น
+    """
     token, default_chat = _fb_telegram()
     target = chat_id or default_chat
     if not token or not target:
@@ -7866,8 +7882,19 @@ def _fb_say(chat_id: str, text: str, keyboard: dict | None = None) -> int:
     try:
         return telegram_bot.send_message(token, target, text, keyboard)
     except telegram_bot.TelegramError as error:
-        append_log("publish", f"ส่งข้อความเข้า Telegram ไม่ได้: {error}")
-        return 0
+        if "parse entities" not in str(error):
+            append_log("publish", f"ส่งข้อความเข้า Telegram ไม่ได้: {error}")
+            return 0
+        plain = re.sub(r"<[^>]*>", "", text)      # ถอดแท็กที่ตั้งใจใส่ออกก่อน
+        plain = plain.replace("<", "(").replace(">", ")")
+        try:
+            sent = telegram_bot.send_message(token, target, plain, keyboard)
+            append_log("publish", "ข้อความมีอักขระที่ Telegram อ่านเป็นแท็ก — "
+                                  "ส่งซ้ำแบบข้อความเปล่าแล้ว")
+            return sent
+        except Exception as second:                         # noqa: BLE001
+            append_log("publish", f"ส่งข้อความเข้า Telegram ไม่ได้: {second}")
+            return 0
 
 
 FB_STATUS_LABEL = {

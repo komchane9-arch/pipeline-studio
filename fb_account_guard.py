@@ -39,6 +39,9 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+
+import fb_screen
+from collections import Counter
 from pathlib import Path
 
 # ปุ่มแท็บโปรไฟล์ — Facebook เรียกต่างกันตามภาษาเครื่อง
@@ -62,6 +65,10 @@ class AccountUnreadable(RuntimeError):
     """อ่านชื่อบัญชีจากจอไม่ได้ — ถือว่าไม่ผ่าน ไม่ใช่ปล่อยผ่าน"""
 
 
+class ScreenAsleep(AccountUnreadable):
+    """ปลุกจอไม่ขึ้น จึงยังไม่ได้ตรวจอะไรเลย — คนละเรื่องกับตรวจแล้วอ่านไม่ออก"""
+
+
 def _sh(adb: str, serial: str, *args: str, timeout: float = 90.0):
     return subprocess.run([adb, "-s", serial, *args],
                           capture_output=True, timeout=timeout)
@@ -76,24 +83,63 @@ def _dump(adb: str, serial: str) -> str:
     return xml if "<node" in xml else ""
 
 
-def _tap_profile_tab(adb: str, serial: str, xml: str) -> bool:
-    """กดแท็บโปรไฟล์โดยหาจากผังจอ — คืน True เมื่อกดได้จริง"""
+def _bottom_tabs(xml: str) -> list[tuple[int, int, int, int, str]]:
+    """ช่องแท็บแถวล่างสุด เรียงซ้าย→ขวา — หาจาก**เรขาคณิต** ไม่พึ่งป้าย
+
+    **วัดจริง 16 ก.ย. 2569** Facebook บนเครื่องนี้ไม่ใส่ป้ายให้แถบล่างเลย
+    ในช่วงแรกหลังเปิดแอป (รอ 24 วินาทีแล้วยังไม่มี) การหาแท็บจากคำว่า
+    "โปรไฟล์" จึงล้มเหลวแบบสุ่มขึ้นกับว่าแอปโหลดเสร็จหรือยัง
+
+    แต่**รูปทรงมาก่อนป้ายเสมอ**: แถบล่างคือช่องกดได้ความกว้างเท่ากัน 6 ช่อง
+    เรียงเต็มความกว้างจอ ซึ่งอ่านได้ตั้งแต่วินาทีที่ 2 ทุกครั้ง
+    """
+    height = _screen_height(xml)
+    width = max((int(m) for m in
+                 re.findall(r'bounds="\[\d+,\d+\]\[(\d+),\d+\]"', xml)), default=0)
+    if not height or not width:
+        return []
+    bands: dict[int, list[tuple[int, int, int, int, str]]] = {}
     for node in re.finditer(r"<node[^>]*>", xml):
         chunk = node.group(0)
-        label = " ".join(re.findall(r'(?:content-desc|text)="([^"]*)"', chunk))
-        if not label or not _PROFILE_TAB.search(label):
-            continue
         box = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', chunk)
-        if not box:
+        if not box or 'clickable="true"' not in chunk:
             continue
         x1, y1, x2, y2 = (int(v) for v in box.groups())
-        # แท็บล่างสุดเท่านั้น — คำว่า "โปรไฟล์" โผล่กลางหน้าได้หลายที่
-        if y1 < 0.80 * _screen_height(xml):
+        if y1 < 0.84 * height:
             continue
-        _sh(adb, serial, "shell", "input", "tap",
-            str((x1 + x2) // 2), str((y1 + y2) // 2))
-        return True
-    return False
+        if not (0.10 * width < x2 - x1 < 0.25 * width):
+            continue
+        desc = (re.search(r'content-desc="([^"]*)"', chunk) or [None, ""])[1]
+        bands.setdefault(y1, []).append((x1, x2, y1, y2, desc))
+    if not bands:
+        return []
+    return sorted(bands[max(bands)])
+
+
+def _tap_profile_tab(adb: str, serial: str, xml: str) -> bool:
+    """กดแท็บโปรไฟล์ — คืน True เมื่อกดไปแล้วจริง
+
+    มีป้ายก็ใช้ป้าย (แม่นกว่า) ไม่มีป้ายก็ใช้ช่องขวาสุดของแถบล่าง
+    ซึ่งเป็นแท็บโปรไฟล์เสมอ (`โปรไฟล์, แท็บ 6 จาก 6`)
+
+    **กดผิดช่องไม่อันตราย** เพราะปลายทางยังต้องเจอป้าย "แก้ไขโปรไฟล์"
+    ถึงจะยอมอ่านชื่อ กดผิดจึงได้ผลลัพธ์ "อ่านไม่ออก" ไม่ใช่ชื่อผิด
+    """
+    tabs = _bottom_tabs(xml)
+    if not tabs:
+        return False
+    target = None
+    for x1, x2, y1, y2, desc in tabs:
+        if desc and _PROFILE_TAB.search(desc):
+            target = (x1, x2, y1, y2)
+            break
+    if target is None:
+        x1, x2, y1, y2, _ = tabs[-1]
+        target = (x1, x2, y1, y2)
+    x1, x2, y1, y2 = target
+    _sh(adb, serial, "shell", "input", "tap",
+        str((x1 + x2) // 2), str((y1 + y2) // 2))
+    return True
 
 
 def _screen_height(xml: str) -> int:
@@ -102,52 +148,106 @@ def _screen_height(xml: str) -> int:
     return max(found) if found else 0
 
 
-def read_account(adb: str, serial: str, wait: float = 6.0) -> str:
-    """ชื่อบัญชี Facebook ที่แอปกำลังใช้อยู่บนเครื่องนี้ — อ่านไม่ออกคืนค่าว่าง
+def _wake(adb: str, serial: str, log=None) -> bool:
+    """ปลุกจอ + ปัดหน้าล็อกออก **แล้วยืนยันว่าแตะจอได้จริง**
 
-    เปิดแอปได้ (ข้อ 2.7 ยกเว้นให้เฉพาะตอนเปิดแอป) จากนั้นกดแท็บโปรไฟล์
-    แล้วอ่านชื่อที่หัวหน้า — **ไม่แตะอะไรที่เปลี่ยนสถานะบัญชีเลย**
+    **บทเรียน 16 ก.ย. 2569 — ด่านนี้กันงานจริงของเจ้าของไว้เพราะขาดขั้นนี้**
+    ระบบดับจอมือถือให้เองทุกไม่กี่นาทีตอนไม่มีงาน จอจึงหลับเกือบตลอดเวลา
+    ตัวด่านถูกเรียกจาก `_fb_run_job` ซึ่งเป็นขั้นตรวจความพร้อม **ก่อน**
+    ตัวคุมมือถือจะถูกสร้าง และตัวปลุกจอตัวจริงอยู่ใน `Phone.__init__`
+    ด่านจึงไปอ่านผังจอที่ยังดับอยู่ แล้วตอบ "อ่านไม่ออก" ทุกครั้ง
+
+    วัดจริงบนเครื่อง 7a95129e
+        จอดับ    ผังจอ 10,704 ตัวอักษร  หาแท็บโปรไฟล์ไม่เจอเลย
+        ปลุกแล้ว  ผังจอ 41,311 ตัวอักษร  เจอ `โปรไฟล์, แท็บ 6 จาก 6` ทันที
+
+    ใช้ `fb_screen.wake` ตัวเดียวกับที่ทั้งระบบใช้ ไม่เขียนวิธีปลุกใหม่ซ้อน
+    เพราะตัวนั้น**ยืนยันว่าแตะจอได้จริง** ไม่ใช่สั่งปลุกแล้วเชื่อว่าขึ้น
+    (เคยเขียนเป็น `input keyevent KEYCODE_WAKEUP` แล้วเดินต่อเลย ซึ่งวัดแล้ว
+    ไม่พอ — "สั่งแล้ว" ไม่เท่ากับ "เกิดขึ้นจริง" ข้อ 2.3.1)
     """
-    _sh(adb, serial, "shell", "monkey", "-p", APP,
-        "-c", "android.intent.category.LAUNCHER", "1")
-    time.sleep(wait)
-    xml = _dump(adb, serial)
-    if not xml:
-        return ""
-    if _tap_profile_tab(adb, serial, xml):
-        time.sleep(wait)
-        xml = _dump(adb, serial)
-    # **ต้องพิสูจน์ก่อนว่าอยู่หน้าโปรไฟล์จริง** (ข้อ 2.3.1)
-    #
-    # เจอจริงตอนทดสอบเครื่องที่สอง: กดแท็บไม่ติด ยังค้างอยู่หน้าฟีด แล้วตัวอ่าน
-    # หยิบคำว่า "สร้างสตอรี่" มาเป็นชื่อบัญชี — ได้ตัวตรวจที่ตอบผ่านทั้งที่ยัง
-    # ไม่ผ่าน ซึ่งอันตรายกว่าไม่มีตัวตรวจเลย
-    #
-    # ป้ายนี้ **มีเฉพาะบนหน้าโปรไฟล์ของตัวเองเท่านั้น**
-    #
-    # รอบแรกผมใส่ "เพิ่มลงในสตอรี่" เข้าไปด้วย แล้วยังอ่านผิดอยู่ —
-    # เพราะแถบสตอรี่บนหน้าฟีดก็มีคำนั้น กลายเป็นตัวชี้ที่ตอบว่าใช่ได้ทั้งสองหน้า
-    # ซึ่งคือความผิดพลาดแบบเดียวกับที่ข้อ 2.3.1 เตือนไว้เป๊ะ
+    def shell(cmd: str) -> str:
+        return _sh(adb, serial, "shell", *cmd.split()).stdout.decode("utf-8", "replace")
+
+    return fb_screen.wake(shell, log=log)
+
+
+def _name_near_marker(xml: str) -> str:
+    """ชื่อบัญชีจากหน้าโปรไฟล์ — ต้องเห็นหลักฐานว่าอยู่หน้าโปรไฟล์จริงก่อน
+
+    **ต้องพิสูจน์ก่อนว่าอยู่หน้าโปรไฟล์จริง** (ข้อ 2.3.1) ป้าย "แก้ไขโปรไฟล์"
+    มีเฉพาะบนหน้าโปรไฟล์ของตัวเองเท่านั้น — หน้าฟีดไม่มี หน้าโปรไฟล์คนอื่นไม่มี
+    """
     marker = re.search(r'text="(แก้ไขโปรไฟล์|Edit profile)"', xml)
     if not marker:
         return ""
+    # คำบรรยายรูปโปรไฟล์พ่วงชื่อเจ้าของมาให้ตรงๆ ใช้ก่อนถ้ามี
+    picture = re.search(
+        r'content-desc="(?:รูปโปรไฟล์ของ|Profile picture of)\s+([^"<]{3,60})"',
+        xml, re.IGNORECASE)
+    if picture:
+        return re.sub(r"\s+", " ", picture.group(1)).strip()
     # **ไล่ย้อนขึ้นจากปุ่ม "แก้ไขโปรไฟล์" ไม่ใช่หยิบบรรทัดแรกของจอ**
     #
     # เจอจริงตอนทดสอบเครื่องที่สอง: บรรทัดแรกของผังจอเป็นช่องคอมเมนต์ที่ค้าง
     # จากหน้าก่อน ("แสดงความคิดเห็น…") ตัวอ่านจึงคืนคำนั้นมาเป็นชื่อบัญชี
     # ทั้งที่ชื่อจริงอยู่ถัดลงมา — หยิบตำแหน่งผิด ไม่ใช่หน้าผิด
     #
-    # โครงหน้าโปรไฟล์เรียงแบบนี้เสมอ: ชื่อ → จำนวนเพื่อน/โพสต์ → คำแนะนำตัว
-    # → ปุ่ม ฉะนั้นไล่ย้อนจากปุ่มขึ้นไป เจอข้อความที่เป็นชื่อได้ก่อนตัวอื่น
-    before = re.findall(r'text="([^"]{1,45})"', xml[:marker.start()])
-    for text in reversed(before):
-        clean = text.replace(" ", " ").strip()
+    # โครงหน้าโปรไฟล์เรียงแบบนี้เสมอ: ชื่อ → จำนวนโพสต์ → ปุ่ม
+    # ไล่ย้อนจากปุ่มขึ้นไปจึงเจอชื่อก่อนตัวอื่น
+    for text in reversed(re.findall(r'text="([^"]{1,45})"', xml[:marker.start()])):
+        clean = re.sub(r"\s+", " ", text.replace(" ", " ")).strip()
         if (len(clean) < 3 or clean.isdigit() or _NOT_A_NAME.match(clean)
                 or ":" in clean or "·" in clean
                 or not re.fullmatch(r"[^<>{}\[\]|]{3,45}", clean)):
             continue
         return clean
     return ""
+
+
+def read_account(adb: str, serial: str, wait: float = 6.0) -> str:
+    """ชื่อบัญชี Facebook ที่แอป**กำลังใช้อยู่**บนเครื่องนี้ — อ่านไม่ออกคืนค่าว่าง
+
+    เปิดแอป (ข้อ 2.7 ยกเว้นให้เฉพาะตอนเปิดแอป) แล้ว**กด**แท็บโปรไฟล์
+    ด้วยการแตะจอจริง จากนั้นอ่านชื่อบนหน้าโปรไฟล์
+    — ไม่แตะอะไรที่เปลี่ยนสถานะบัญชีเลย
+
+    ## สองอย่างที่ห้ามใส่กลับเข้ามา (ทั้งคู่วัดแล้วว่าให้ชื่อผิด 16 ก.ย. 2569)
+
+    **1. ห้ามใช้ `fb://profile`** เครื่อง 7a95129e ล็อกอินค้างไว้ 6 บัญชี
+    ลิงก์นี้เปิดหน้าโปรไฟล์ของ **'คมไท รามอญ'** ทั้งที่บัญชีที่ใช้งานอยู่จริง
+    คือ **'Preaw Buchakorn'** (ยืนยันด้วยภาพหน้าจอทั้งสองหน้า) หน้านั้นมีปุ่ม
+    "แก้ไขโปรไฟล์" ครบ จึงผ่านด่านพิสูจน์ทุกอย่าง **แต่เป็นคนละบัญชีกับที่จะโพสต์**
+    — ตัวตรวจที่ตอบผิดแบบนี้อันตรายกว่าไม่มีเลย (ข้อ 2.3)
+
+    **2. ห้ามอ่านชื่อจากหน้าที่ค้างอยู่ก่อนเปิดแอป** เคยมีทางลัดแบบนั้น
+    วัดจริง 3 รอบติดได้ 3 คำตอบ: 'ตัวกรอง' · '' · 'Preaw Buchakorn'
+    คำแรกเป็นป้ายปุ่มบนจอ ไม่ใช่ชื่อคน
+
+    **และห้าม force-stop ก่อนเปิด** วัดแล้วทำให้แถบล่างไม่มีป้ายและกดแท็บไม่ติด
+    นานเกิน 24 วินาที ส่วนเปิดทับของเดิมเจอแถบแท็บตั้งแต่วินาทีที่ 2
+    """
+    if not _wake(adb, serial):
+        raise ScreenAsleep(
+            "ปลุกจอมือถือไม่ขึ้น — ยังไม่ได้ตรวจบัญชีเลยสักนิด "
+            "(จออาจติดหน้าล็อกที่ต้องใส่รหัส)")
+
+    _sh(adb, serial, "shell", "monkey", "-p", APP,
+        "-c", "android.intent.category.LAUNCHER", "1")
+
+    # รอ**จนแถบแท็บโผล่จริง** ไม่ใช่รอเวลาตายตัวแล้วเดาว่าพร้อมแล้ว
+    for _ in range(8):
+        time.sleep(2.0)
+        xml = _dump(adb, serial)
+        if xml and _bottom_tabs(xml):
+            break
+    else:
+        return ""
+
+    if not _tap_profile_tab(adb, serial, xml):
+        return ""
+    time.sleep(wait)
+    return _name_near_marker(_dump(adb, serial))
 
 
 def same_account(a: str, b: str) -> bool:

@@ -43,9 +43,10 @@ const $ = (sel) => document.querySelector(sel);
 
 const STATUS_LOOK = {
   running: { icon: "🟢", label: "กำลังทำงาน" },
+  finishing: { icon: "🔵", label: "กำลังตามเก็บให้ครบ" },
   ready: { icon: "🟡", label: "รอโพสต์" },
   stopped: { icon: "⏸️", label: "หยุดไว้" },
-  done: { icon: "✅", label: "เสร็จแล้ว" },
+  done: { icon: "✅", label: "เสร็จครบทุกขั้น" },
   failed: { icon: "🔴", label: "ล้มเหลว" },
   cancelled: { icon: "⚪", label: "ยกเลิกแล้ว" },
   waiting_caption: { icon: "✏️", label: "รอแคปชัน" },
@@ -55,7 +56,8 @@ const STATUS_LOOK = {
 const SOURCE_LOOK = { telegram: "📨 จาก Telegram", web: "💻 จากหน้าเว็บ" };
 
 const QUEUE_LOOK = {
-  ok: { icon: "✅", label: "โพสต์แล้ว" },
+  ok: { icon: "✅", label: "ครบทุกขั้น" },
+  finish: { icon: "🔵", label: "โพสต์แล้ว · รอตามเก็บ" },
   fail: { icon: "❌", label: "ไม่สำเร็จ" },
   now: { icon: "🔄", label: "กำลังโพสต์" },
   wait: { icon: "⏳", label: "รอคิว" },
@@ -386,13 +388,16 @@ function paintFeed(entry, lines) {
 
 function paintQueue(entry, job) {
   const rows = job.queue || [];
-  const key = rows.map((r) => `${r.state}:${r.name}:${r.link || ""}:${r.error || ""}`)
+  const key = rows.map((r) => `${r.state}:${r.name}:${r.link || ""}:${r.error || ""}:`
+    + `${r.liked}:${r.commented}:${r.comment_liked}:${(r.missing || []).join(",")}`)
     .join("|");
   if (entry.queueKey === key) return;
   entry.queueKey = key;
 
-  const done = rows.filter((r) => r.state === "ok").length;
-  setText(entry.queueHead, `คิวกลุ่ม — ${rows.length} กลุ่ม · โพสต์แล้ว ${done}`);
+  const posted = rows.filter((r) => ["ok", "finish"].includes(r.state)).length;
+  const complete = rows.filter((r) => r.state === "ok").length;
+  setText(entry.queueHead,
+    `คิวกลุ่ม — ${rows.length} กลุ่ม · โพสต์แล้ว ${posted} · ครบทุกขั้น ${complete}`);
   entry.queue.replaceChildren(...rows.map((row) => {
     const look = QUEUE_LOOK[row.state] || QUEUE_LOOK.wait;
     const line = el("li", `fc-q fc-q-${row.state}`);
@@ -401,8 +406,10 @@ function paintQueue(entry, job) {
     const tail = [look.label];
     // ❤️/💬 ติดได้เฉพาะกลุ่มที่โพสต์ขึ้นจริง — กลุ่มที่ล้มแล้วขึ้นหัวใจ
     // อ่านแล้วขัดกันเอง เหมือนบอกว่าล้มแต่ก็กดใจให้โพสต์ที่ไม่มีอยู่
-    if (row.state === "ok" && row.liked) tail.push("❤️");
-    if (row.state === "ok" && row.commented) tail.push("💬");
+    if (["ok", "finish"].includes(row.state) && row.liked) tail.push("❤️โพสต์");
+    if (["ok", "finish"].includes(row.state) && row.commented) tail.push("💬");
+    if (["ok", "finish"].includes(row.state) && row.comment_liked) tail.push("❤️คอมเมนต์");
+    if (row.missing?.length) tail.push(`ขาด ${row.missing.join("/")}`);
     line.append(el("span", "fc-q-state", tail.join(" ")));
     if (row.error) line.append(el("span", "fc-q-err", `— ${row.error}`));
     if (row.link) {
@@ -494,6 +501,15 @@ function paintCard(entry, job) {
       + "กด \"ทำต่อ\" เพื่อเริ่มเฉพาะกลุ่มที่เหลือ";
   } else if (job.deferred) {
     alert = "⏳ ถึงเวลาที่ตั้งไว้แล้ว แต่จอมือถือไม่ว่าง — ระบบจะลองใหม่เองทุก 20 วินาที";
+  } else if (job.blocked_why) {
+    // **ใบที่สั่งไปแล้วแต่ถูกปฏิเสธ ต้องหน้าตาไม่เหมือนใบที่ยังไม่มีใครสั่ง**
+    //
+    // 16 ก.ย. 2569 เจ้าของกด "โพสต์เลย" ใน Telegram แล้วงานไม่เริ่ม
+    // เหตุผลถูกส่งกลับเป็นข้อความเด้งของปุ่มซึ่งโผล่แวบเดียวแล้วหาย
+    // ส่วนการ์ดยังขึ้น "รอโพสต์" เหมือนเดิมทุกอย่าง กว่าจะรู้ว่าติดอะไร
+    // ก็ผ่านไป 2 ชั่วโมงครึ่ง (กติกาข้อ 2.3.1 — ป้ายต้องตรงกับความจริง)
+    alert = `🚫 สั่งเริ่มแล้วแต่ยังไม่ได้เริ่ม${
+      job.blocked_at ? ` (${clockText(job.blocked_at)})` : ""} — ${job.blocked_why}`;
   }
   setText(entry.alert, alert);
   show(entry.alert, Boolean(alert));
@@ -504,7 +520,8 @@ function paintCard(entry, job) {
   setText(entry.prog,
     `โพสต์แล้ว ${job.posted_count}/${job.total} กลุ่ม`
     + (job.failed ? ` · ไม่สำเร็จ ${job.failed}` : "")
-    + (job.pending ? ` · เหลือ ${job.pending}` : ""));
+    + (job.pending_posts ? ` · รอโพสต์ ${job.pending_posts}` : "")
+    + (job.pending_followup ? ` · รอตามเก็บ ${job.pending_followup}` : ""));
 
   setText(entry.step, job.latest_step ? `▸ ${job.latest_step}` : "▸ ยังไม่มีบันทึกขั้นตอน");
 

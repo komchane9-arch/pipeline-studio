@@ -7902,9 +7902,10 @@ FB_STATUS_LABEL = {
     fb_auto_post.STATUS_WAIT_IMAGE: "รอรูป — ส่งรูปที่จะแนบมาได้เลย",
     fb_auto_post.STATUS_READY: "พร้อมโพสต์ — ติ๊กกลุ่มแล้วกด 🚀",
     fb_auto_post.STATUS_RUNNING: "กำลังโพสต์…",
-    fb_auto_post.STATUS_DONE: "โพสต์เสร็จแล้ว",
+    fb_auto_post.STATUS_FINISHING: "โพสต์แล้ว — กำลังเก็บลิงก์/ไลก์/คอมเมนต์ให้ครบ",
+    fb_auto_post.STATUS_DONE: "เสร็จครบทุกขั้นแล้ว",
     fb_auto_post.STATUS_FAILED: "ล้มเหลว",
-    fb_auto_post.STATUS_STOPPED: "หยุดไว้ — กด Resume เพื่อทำกลุ่มที่เหลือ",
+    fb_auto_post.STATUS_STOPPED: "หยุดไว้ — กด Resume เพื่อทำเฉพาะขั้นที่เหลือ",
     fb_auto_post.STATUS_CANCELLED: "ยกเลิกแล้ว",
 }
 
@@ -8052,6 +8053,7 @@ def _fb_cancel_job(job_id: str) -> str:
     job = fb_jobs.get(job_id)
     if job is None:
         return "ไม่พบงานนี้"
+    _fb_cancel_followup_wait(job_id)
     updates = {"status": fb_auto_post.STATUS_CANCELLED}
     if job.get("saved"):
         updates["saved"] = False
@@ -8773,6 +8775,7 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         next((j for j in fb_jobs.listing() if j.get("results")), None)
     if job is None:
         return f"ไม่พบงาน {job_id}" if job_id else "ยังไม่มีงานที่โพสต์ไปแล้ว"
+    _fb_cancel_followup_wait(job["id"])
     serial, note = _fb_gate("followup", job, queued, str(job.get("serial") or ""))
     if note:
         return note
@@ -8783,7 +8786,12 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
     # เพราะไม่เคยต้องอนุมัติ ส่วนฟีดก็จมไปแล้ว — จบด้วยรายงาน "ถูกใจ 0/5"
     # ซึ่งอ่านแล้วเหมือนล้มเหลว ทั้งที่ความจริงคือไม่มีอะไรต้องทำ
     # (เจอจริง 12 ส.ค. งาน p525306924: ครบทั้ง 5 กลุ่มตั้งแต่รอบโพสต์)
-    want_comment = bool(_fb_comments(job))
+    override = comment_override.strip()
+    saved_comments = _fb_comments(job)
+    if not saved_comments and not override:
+        return (f"งาน {job['id']} ยังไม่มีข้อความคอมเมนต์ — ขั้นคอมเมนต์และ"
+                "ไลก์คอมเมนต์เป็นขั้นบังคับ กรุณาใส่ /comment ก่อน Resume")
+    want_comment = True
     # โดนพักคอมเมนต์อยู่ = ตัดงานคอมเมนต์ออกจากรอบนี้ไปเลย ไม่ใช่ไปตันทีละกลุ่ม
     #
     # ถ้าไม่ตัดตรงนี้ รอบตามเก็บจะยังเปิดโพสต์ทีละกลุ่ม (กลุ่มละ ~13 วินาที)
@@ -8793,13 +8801,13 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         want_comment = False
 
     def _needs_work(entry: dict) -> bool:
-        if not entry.get("posted"):
+        if entry.get("posted") is not True:
             return False
-        if not entry.get("liked"):
-            return True
-        if want_comment and not (entry.get("commented") and entry.get("comment_liked")):
-            return True
-        return not entry.get("link")
+        missing = _fb_result_missing(job, entry)
+        if comment_hold:
+            missing = [item for item in missing
+                       if not item.startswith("คอมเมนต์") and item != "ไลก์คอมเมนต์"]
+        return bool(missing)
 
     # ส่งลิงก์ที่เคยเก็บได้ไปด้วย — รอบตามเก็บจะเปิดโพสต์จากลิงก์นั้นเป็นทางแรก
     # ซึ่งพาเข้า "หน้าโพสต์เดี่ยว" ตรงๆ ไม่ต้องพึ่งทั้งแจ้งเตือนและการเรียงฟีด
@@ -8814,6 +8822,9 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
             return (f"⏸ งาน {job['id']} เหลือแค่งานคอมเมนต์ แต่ตอนนี้{comment_hold}\n"
                     "ไม่ออกตัวไปเสียเวลาจอเปล่าๆ — ค่อยสั่ง /followup ใหม่ตอนพ้นเวลาพัก")
         if done:
+            if _fb_job_complete(job):
+                fb_jobs.update(job["id"], status=fb_auto_post.STATUS_DONE,
+                               finished_at=datetime.now().isoformat(timespec="seconds"))
             return (f"✅ งาน {job['id']} ครบแล้วทั้ง {done} กลุ่ม — ถูกใจ คอมเมนต์ "
                     "และลิงก์เก็บครบตั้งแต่รอบโพสต์ ไม่ต้องตามเก็บ")
         return "งานล่าสุดไม่มีกลุ่มที่โพสต์สำเร็จ"
@@ -8822,8 +8833,7 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
     chat_id = job.get("chat_id", "")
     # ใช้คอมเมนต์ทั้งรายการ ไม่ใช่แค่ข้อความแรก — ไม่งั้นงานที่ตั้งไว้ 2 ข้อความ
     # จะได้แค่ข้อความเดียว และรูปแนบที่เรียงตรงช่องกันจะเลื่อนไปผิดช่องด้วย
-    override = comment_override.strip()
-    comment = override or _fb_comments(job)
+    comment = override or saved_comments
     comment_shots = [] if override else _fb_comment_images(job)
     # ยังมีกลุ่มที่ต้องกดถูกใจ/เก็บลิงก์อยู่ จึงยังออกตัว — แต่ตัดคอมเมนต์ทิ้ง
     # ไม่ให้ไปเปิดแผงคอมเมนต์แล้วพิมพ์ทิ้งเปล่าๆ ระหว่างโดนพัก
@@ -8842,6 +8852,32 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         _fb_say(chat_id, step + fb_auto_post.result_line(entry, fb_groups.label))
 
     def on_done(results: list[dict], error: str) -> None:
+        latest = fb_jobs.get(job_id) or job
+        stopped = (
+            latest.get("status") in {
+                fb_auto_post.STATUS_STOPPED, fb_auto_post.STATUS_CANCELLED,
+            }
+            or fb_runner.for_device(serial).stop_flag.is_set()
+        )
+        pending_posts = _fb_pending_groups(latest)
+        pending_followup = _fb_pending_followup_groups(latest)
+        if stopped:
+            status = latest.get("status")
+        elif error:
+            status = fb_auto_post.STATUS_FAILED
+        elif not pending_posts and not pending_followup and _fb_job_complete(latest):
+            status = fb_auto_post.STATUS_DONE
+        else:
+            status = fb_auto_post.STATUS_FINISHING
+        current = fb_jobs.update(
+            job_id, status=status,
+            finished_at=(datetime.now().isoformat(timespec="seconds")
+                         if status in {fb_auto_post.STATUS_DONE,
+                                       fb_auto_post.STATUS_FAILED}
+                         else None),
+        ) or latest
+        _fb_show_card(current)
+
         liked = sum(1 for r in results if r.get("liked"))
         commented = sum(1 for r in results if r.get("commented"))
         links = sum(1 for r in results if r.get("link"))
@@ -8871,17 +8907,26 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
             )
             return
 
-        _fb_say(chat_id, (
-            f"🏁 <b>ตามเก็บงาน {job_id} จบแล้ว</b>\n"
-            f"ถูกใจ {liked}/{len(results)}"
-            + (f" · คอมเมนต์ {commented}/{len(results)}" if comment else "")
-            + f" · เก็บลิงก์ {links}/{len(results)}"
-            + ("\n\nดูลิงก์ทั้งหมด: /links" if links else "")
-            + (f"\n\n⚠️ {telegram_bot._escape(error)}" if error else "")
-        ))
+        if status == fb_auto_post.STATUS_DONE:
+            _fb_say(chat_id, (
+                f"✅ <b>งาน {job_id} เสร็จครบทุกขั้นแล้ว</b>\n"
+                "เก็บลิงก์ · ไลก์โพสต์ · คอมเมนต์ · ไลก์คอมเมนต์ครบทุกกลุ่ม"
+                + "\n\nดูลิงก์ทั้งหมด: /links"
+            ))
+        elif status not in {fb_auto_post.STATUS_STOPPED,
+                            fb_auto_post.STATUS_CANCELLED}:
+            left = len(_fb_pending_followup_groups(current))
+            _fb_say(chat_id, (
+                f"⏳ <b>งาน {job_id} ยังไม่จบ — ตามเก็บค้าง {left} กลุ่ม</b>\n"
+                f"รอบนี้ถูกใจ {liked}/{len(results)} · คอมเมนต์ "
+                f"{commented}/{len(results)} · ลิงก์ {links}/{len(results)}\n"
+                "กด Resume เพื่อทำเฉพาะขั้นที่ขาด โดยไม่ส่งโพสต์ซ้ำ"
+                + (f"\n\n⚠️ {telegram_bot._escape(error)}" if error else "")
+            ))
         append_log(
             "publish",
-            f"[{job_id}·ตามเก็บ] จบ — ถูกใจ {liked}/{len(results)} · ลิงก์ {links}",
+            f"[{job_id}·ตามเก็บ] จบรอบ — สถานะ {status} · "
+            f"ถูกใจ {liked}/{len(results)} · ลิงก์ {links}",
         )
 
     try:
@@ -8893,6 +8938,9 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         )
     except fb_auto_post.AutoPostError as error:
         return str(error)
+    # ยังห้ามใช้ done ระหว่างรอบนี้ — done สงวนให้หลักฐานบังคับครบทุกกลุ่ม.
+    fb_jobs.update(job_id, status=fb_auto_post.STATUS_FINISHING,
+                   finished_at=None, ui_reset=False)
     append_log("publish", f"[{job_id}] เริ่มตามเก็บ {len(targets)} กลุ่ม")
     return (
         f"🔁 เริ่มตามเก็บ {len(targets)} กลุ่ม — เปิดโพสต์จากแจ้งเตือนแล้วกดถูกใจ"
@@ -9661,6 +9709,17 @@ AUTO_FOLLOWUP_DELAY = 60.0
 #  เพราะวันเดียวโพสต์ไปแล้วราว 26 โพสต์ลงกลุ่มเดิม Facebook เลยเริ่มตรวจก่อน)
 AUTO_FOLLOWUP_SLOW_DELAY = 900.0
 
+_fb_followup_wait_lock = threading.Lock()
+_fb_followup_waits: dict[str, threading.Event] = {}
+
+
+def _fb_cancel_followup_wait(job_id: str) -> None:
+    """ยกเลิกรอบหน่วงเก่าของงาน เพื่อไม่ให้ Stop→Resume แล้วตื่นมาทำซ้ำ."""
+    with _fb_followup_wait_lock:
+        event = _fb_followup_waits.pop(job_id, None)
+    if event:
+        event.set()
+
 
 def _fb_followup_delay(results: list[dict]) -> float:
     """รอนานแค่ไหนก่อนตามเก็บ — ดูจากว่ารอบโพสต์เห็นโพสต์ตัวเองไหม"""
@@ -9672,8 +9731,8 @@ def _fb_followup_delay(results: list[dict]) -> float:
 
 
 def _fb_auto_followup_enabled(serial: str) -> bool:
-    """เปิดรอบตามเก็บอัตโนมัติของเครื่องนี้หรือไม่ (/followup เองไม่เกี่ยว)."""
-    return bool(device_book.setting(serial, "auto_followup", True))
+    """คง API รุ่นเก่าไว้ แต่รอบตามเก็บเป็นขั้นบังคับและปิดแยกรายเครื่องไม่ได้แล้ว."""
+    return True
 
 
 def _fb_auto_followup(job_id: str, delay: float = AUTO_FOLLOWUP_DELAY,
@@ -9690,22 +9749,46 @@ def _fb_auto_followup(job_id: str, delay: float = AUTO_FOLLOWUP_DELAY,
     **ต้องรู้ว่าเครื่องไหน** ไม่งั้นรอบตามเก็บจะไปเกิดบนเครื่องตัวหลักเสมอ ทั้งที่
     โพสต์ไปจากอีกเครื่อง — เปิดแอปผิดบัญชีแล้วหาโพสต์ไม่เจอสักกลุ่ม
     """
+    account = device_book.account(serial)
+    stop_wait = threading.Event()
+    with _fb_followup_wait_lock:
+        old_wait = _fb_followup_waits.get(job_id)
+        if old_wait:
+            old_wait.set()
+        _fb_followup_waits[job_id] = stop_wait
+
     def worker() -> None:
-        deadline = time.time() + 180
-        while fb_runner.busy_on(serial) and time.time() < deadline:
-            time.sleep(2.0)
-        if fb_runner.busy_on(serial):
-            append_log("publish", f"[{job_id}] ตัวรันยังไม่ว่าง — ข้ามการตามเก็บอัตโนมัติ")
-            return
-        time.sleep(delay)
-        append_log("publish", f"[{job_id}] โพสต์จบแล้ว — ไล่หาโพสต์จากแจ้งเตือนต่อ")
         try:
-            note = _fb_followup(job_id=job_id)
-        except Exception as error:      # ห้ามให้เธรดนี้ตายเงียบ
-            append_log("publish", f"[{job_id}] ตามเก็บอัตโนมัติล้ม: {error}")
-            return
-        if note and not note.startswith("🔁"):
-            append_log("publish", f"[{job_id}] ตามเก็บอัตโนมัติไม่ได้: {note}")
+            with fb_auto_post.use_account(account):
+                deadline = time.time() + 180
+                while fb_runner.busy_on(serial) and time.time() < deadline:
+                    if stop_wait.wait(2.0):
+                        return
+                if fb_runner.busy_on(serial):
+                    append_log("publish", f"[{job_id}] ตัวรันยังไม่ว่าง — ข้ามการตามเก็บอัตโนมัติ")
+                    return
+                if stop_wait.wait(max(0.0, delay)):
+                    return
+                current = fb_jobs.get(job_id) or {}
+                if current.get("status") in {
+                    fb_auto_post.STATUS_STOPPED,
+                    fb_auto_post.STATUS_CANCELLED,
+                    fb_auto_post.STATUS_DONE,
+                }:
+                    append_log("publish", f"[{job_id}] งดตามเก็บ — งานถูกหยุด/ยกเลิก/จบแล้ว")
+                    return
+                append_log("publish", f"[{job_id}] โพสต์ครบแล้ว — เริ่มขั้นบังคับตามเก็บ")
+                try:
+                    note = _fb_followup(job_id=job_id)
+                except Exception as error:      # ห้ามให้เธรดนี้ตายเงียบ
+                    append_log("publish", f"[{job_id}] ตามเก็บอัตโนมัติล้ม: {error}")
+                    return
+                if note and not note.startswith("🔁"):
+                    append_log("publish", f"[{job_id}] ตามเก็บอัตโนมัติไม่ได้: {note}")
+        finally:
+            with _fb_followup_wait_lock:
+                if _fb_followup_waits.get(job_id) is stop_wait:
+                    _fb_followup_waits.pop(job_id, None)
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -11488,7 +11571,9 @@ def _telegram_command(chat_id: str, text: str) -> bool:
         targets = [
             job["id"] for job in fb_jobs.listing()
             if job["status"] in fb_auto_post.OPEN_STATUSES
-            or job["status"] == fb_auto_post.STATUS_RUNNING
+            or job["status"] in {
+                fb_auto_post.STATUS_RUNNING, fb_auto_post.STATUS_FINISHING,
+            }
         ]
         stopped = [job_id for job_id in targets if _fb_cancel_job(job_id).startswith("ยกเลิกแล้ว")]
         # ตัวรันอาจกำลังทำ "รอบตามเก็บ" ของงานที่สถานะเป็น done ไปแล้ว
@@ -11752,6 +11837,67 @@ def _fb_pending_groups(job: dict) -> list[str]:
     ]
 
 
+def _fb_required_comment_count(job: dict) -> int:
+    """จำนวนคอมเมนต์ที่ต้องลงต่อกลุ่ม — ขั้นนี้เป็นงานบังคับอย่างน้อยหนึ่งใบ."""
+    return max(1, len(_fb_comments(job)))
+
+
+def _fb_result_missing(job: dict, row: dict) -> list[str]:
+    """ขั้นบังคับที่ยังขาดของผลหนึ่งกลุ่ม เรียงตาม flow ที่ทำจริง."""
+    missing: list[str] = []
+    if row.get("posted") is not True:
+        return ["โพสต์"]
+    if not row.get("link"):
+        missing.append("ลิงก์")
+    if not row.get("liked"):
+        missing.append("ไลก์โพสต์")
+    wanted = _fb_required_comment_count(job)
+    verified_seen = (row.get("verified") or {}).get("comments_seen")
+    actual_comments = (int(verified_seen) if isinstance(verified_seen, int)
+                       else int(row.get("comment_count") or 0))
+    if actual_comments < wanted or not row.get("commented"):
+        missing.append(f"คอมเมนต์ {wanted} รายการ")
+    if not row.get("comment_liked"):
+        missing.append("ไลก์คอมเมนต์")
+    return missing
+
+
+def _fb_pending_followup_groups(job: dict) -> list[str]:
+    """กลุ่มที่โพสต์แล้ว แต่ขั้นบังคับหลังโพสต์ยังไม่ครบ — ห้ามส่งโพสต์ซ้ำ."""
+    by_group = {
+        str(row.get("group_id") or ""): row
+        for row in (job.get("results") or [])
+    }
+    return [
+        str(group_id) for group_id in dict.fromkeys(job.get("groups") or [])
+        if str(group_id) in by_group
+        and by_group[str(group_id)].get("posted") is True
+        and bool(_fb_result_missing(job, by_group[str(group_id)]))
+    ]
+
+
+def _fb_job_complete(job: dict) -> bool:
+    """ครบจริงเมื่อทุกกลุ่มโพสต์แล้วและหลักฐานบังคับครบทั้งสี่ชนิด."""
+    groups = [str(g) for g in dict.fromkeys(job.get("groups") or []) if g]
+    if not groups:
+        return False
+    by_group = {
+        str(row.get("group_id") or ""): row
+        for row in (job.get("results") or [])
+    }
+    return all(group_id in by_group and not _fb_result_missing(job, by_group[group_id])
+               for group_id in groups)
+
+
+def _fb_effective_status(job: dict) -> str:
+    """งานรุ่นเก่าที่เคยถูกปิด done เร็วเกินไป ต้องกลับมาเป็นคิวตามเก็บ."""
+    status = str(job.get("status") or "")
+    if (status == fb_auto_post.STATUS_DONE and job.get("results")
+            and not _fb_job_complete(job)):
+        return fb_auto_post.STATUS_FINISHING
+    return status
+
+
 def _fb_merge_run_results(job: dict, fresh: list[dict]) -> list[dict]:
     """รวมผลรอบ Resume เข้ากับผลเดิม โดยหนึ่งกลุ่มมีผลเพียงแถวเดียว."""
     by_group: dict[str, dict] = {}
@@ -11776,12 +11922,57 @@ def _fb_merge_run_results(job: dict, fresh: list[dict]) -> list[dict]:
 
 
 def _fb_run_job(job_id: str, queued: bool = False, resume: bool = False) -> str:
-    """ตรวจความพร้อมแล้วสั่งรัน — คืนข้อความบอกผลการสั่ง (ว่าง = เริ่มแล้ว)"""
+    """ตรวจความพร้อมแล้วสั่งรัน — คืนข้อความบอกผลการสั่ง (ว่าง = เริ่มแล้ว)
+
+    **ห่อไว้เพื่อจดเหตุผลที่เริ่มไม่ได้ลงใบงาน (16 ก.ย. 2569)**
+
+    เจ้าของกด "โพสต์เลย" ใน Telegram ตอน 11:03 แล้วงานไม่เริ่ม โดยไม่มีอะไร
+    บอกเลยว่าทำไม — เพราะคำอธิบายถูกส่งกลับเป็น**ข้อความเด้งของปุ่ม** ซึ่ง
+    โผล่แวบเดียวแล้วหายไป ส่วนการ์ดงานยังขึ้น "รอโพสต์" เหมือนเดิมทุกประการ
+    เจ้าของจึงต้องมาถามเองว่า "ทำไมบอทถึงยังไม่ทำงาน" (ผ่านไป 2 ชั่วโมงครึ่ง)
+
+    ป้ายสถานะต้องตรงกับความจริง ณ วินาทีที่แสดง (ข้อ 2.3.1) — ใบที่เพิ่งถูก
+    ปฏิเสธไป ต้องหน้าตาไม่เหมือนใบที่ยังไม่มีใครสั่ง
+    """
+    note = _fb_run_job_inner(job_id, queued=queued, resume=resume)
+    # จอไม่ว่างเป็นเรื่องปกติของคิว ไม่ใช่ความผิดพลาดที่ต้องติดป้ายค้างไว้
+    if note and note != PHONE_WAIT_NOTE:
+        fb_jobs.update(
+            job_id, blocked_why=str(note)[:200],
+            blocked_at=datetime.now().isoformat(timespec="seconds"),
+        )
+    elif not note:
+        fb_jobs.update(job_id, blocked_why="", blocked_at="")
+    return note
+
+
+def _fb_run_job_inner(job_id: str, queued: bool = False, resume: bool = False) -> str:
+    """ตัวทำงานจริง — ดู `_fb_run_job` สำหรับเหตุผลที่ต้องมีตัวห่อ"""
     job = fb_jobs.get(job_id)
     if job is None:
         return "ไม่พบงานนี้"
     if job["status"] == fb_auto_post.STATUS_RUNNING:
         return "งานนี้กำลังโพสต์อยู่แล้ว"
+    # ---- ใบที่ลงครบทุกกลุ่มแล้ว ห้ามสั่งลงใหม่ทั้งใบ ----
+    #
+    # **เกิดจริง 16 ก.ย. 2569 — ลงซ้ำ 3 กลุ่มโดยไม่มีอะไรทัดทาน**
+    # ใบ p531402443 ลงครบ 4 กลุ่มแล้วตอน 12:22 สถานะเป็น done
+    # แล้วมีการสั่ง run ใบเดิมอีกครั้งตอน 13:46 ระบบก็ลงให้ใหม่ทั้งชุด
+    # ทั้งที่ `can_run` บนหน้าเว็บคิดไว้แล้วว่าใบ done กดไม่ได้ —
+    # **แต่เป็นการซ่อนปุ่มเฉยๆ ไม่ใช่ด่าน** ใครเรียกที่อยู่นี้ตรงๆ ก็ผ่านฉลุย
+    #
+    # โพสต์ซ้ำถอนคืนไม่ได้ ต้องเข้าไปลบเองในแอปทีละกลุ่ม ด่านจึงต้องอยู่ที่นี่
+    # ซึ่งเป็นทางผ่านเดียวของทุกคำสั่งเริ่มงาน ไม่ใช่ที่หน้าเว็บ
+    #
+    # Resume ยังทำได้ตามเดิม เพราะมันลงเฉพาะกลุ่มที่ยังไม่สำเร็จ
+    if job["status"] == fb_auto_post.STATUS_DONE and not resume:
+        done_at = str(job.get("finished_at") or "")[11:16]
+        return (
+            "ใบนี้ลงครบทุกกลุ่มไปแล้ว"
+            + (f"เมื่อ {done_at}" if done_at else "")
+            + " — สั่งใหม่จะกลายเป็นโพสต์ซ้ำซึ่งลบเองไม่ได้ "
+            "ถ้าตั้งใจลงซ้ำจริง ให้สร้างใบใหม่"
+        )
     # จอของเครื่องนั้นมีเจ้าเดียว — ไม่ว่างก็เข้าคิวรอ ไม่ปฏิเสธทิ้ง
     # (คิวแยกรายเครื่อง งานของเครื่องที่ว่างจึงไม่ต้องรอคิวของเครื่องที่ยุ่ง)
     serial, note = _fb_gate("post", job, queued, str(job.get("serial") or ""))
@@ -11789,6 +11980,9 @@ def _fb_run_job(job_id: str, queued: bool = False, resume: bool = False) -> str:
         return note
     if not job.get("caption", "").strip():
         return "ยังไม่มีแคปชัน"
+    if not _fb_comments(job):
+        return ("ยังไม่มีข้อความคอมเมนต์ — คอมเมนต์และไลก์คอมเมนต์เป็น"
+                "ขั้นบังคับ กรุณาใส่ /comment ก่อนเริ่มหรือ Resume")
     images = [Path(p) for p in (job.get("images") or [job.get("image", "")]) if p]
     images = [p for p in images if p.is_file()][:facebook_group_post.MAX_PHOTOS]
     if not images:
@@ -11877,43 +12071,55 @@ def _fb_run_job(job_id: str, queued: bool = False, resume: bool = False) -> str:
         merged_results = _fb_merge_run_results(
             {**job, "results": previous_results}, results,
         ) if resume else results
+        snapshot = {**latest, "results": merged_results}
         stopped = (
             latest.get("status") in {
                 fb_auto_post.STATUS_STOPPED, fb_auto_post.STATUS_CANCELLED,
             }
             or fb_runner.for_device(serial).stop_flag.is_set()
         )
-        status = (
-            latest.get("status")
-            if latest.get("status") in {
-                fb_auto_post.STATUS_STOPPED, fb_auto_post.STATUS_CANCELLED,
-            }
-            else (fb_auto_post.STATUS_FAILED if error else fb_auto_post.STATUS_DONE)
-        )
+        pending_posts = _fb_pending_groups(snapshot)
+        pending_followup = _fb_pending_followup_groups(snapshot)
+        if stopped:
+            status = latest.get("status")
+        elif error or pending_posts:
+            status = fb_auto_post.STATUS_FAILED
+        elif pending_followup:
+            status = fb_auto_post.STATUS_FINISHING
+        else:
+            status = fb_auto_post.STATUS_DONE
         current = fb_jobs.update(
             job_id, status=status, results=merged_results,
-            finished_at=datetime.now().isoformat(timespec="seconds"),
+            finished_at=(datetime.now().isoformat(timespec="seconds")
+                         if status in {fb_auto_post.STATUS_DONE,
+                                       fb_auto_post.STATUS_FAILED}
+                         else None),
         )
         if current:
             _fb_show_card(current)
         summary = fb_auto_post.summarize(merged_results, fb_groups.label)
         posted = sum(1 for r in merged_results if r.get("posted"))
-        # รอบตามเก็บอัตโนมัติแยกจาก /followup ที่เจ้าของสั่งเองโดยตั้งใจ
-        # อ่านค่าของเครื่องนั้นเพื่อให้หลายบัญชีเลือกพฤติกรรมต่างกันได้ในอนาคต
-        auto_followup = _fb_auto_followup_enabled(serial)
-        chain = bool(posted) and not stopped and auto_followup
+        # ลิงก์/ไลก์โพสต์/คอมเมนต์/ไลก์คอมเมนต์เป็นขั้นบังคับ การตั้งค่าเก่า
+        # auto_followup จึงไม่มีสิทธิ์ตัด flow นี้อีกต่อไป. Stop/Cancel เท่านั้นที่ตัดได้.
+        chain = status == fb_auto_post.STATUS_FINISHING and not stopped
         delay = _fb_followup_delay(merged_results)
         held = delay > AUTO_FOLLOWUP_DELAY      # ไม่เห็นโพสต์เลย = รออนุมัติ
-        _fb_say(chat_id, f"🏁 <b>งาน {job_id} จบแล้ว</b>\n{summary}" + (
-            f"\n\n⚠️ {telegram_bot._escape(error)}" if error else ""
-        ) + (
-            (f"\n\n⏳ โพสต์ยังไม่ปรากฏในฟีดสักกลุ่ม — น่าจะรอผู้ดูแลอนุมัติ\n"
-             f"จะไล่หาจากแจ้งเตือนอีกครั้งในอีก {delay / 60:.0f} นาที"
-             if held else
-             f"\n\n🔎 อีก {delay:.0f} วินาทีจะไล่หาโพสต์จากแจ้งเตือน "
-             "แล้วกดถูกใจ/คอมเมนต์ให้เอง") if chain else ""
-        ))
-        append_log("publish", f"[{job_id}] จบงาน — {status}")
+        if status == fb_auto_post.STATUS_DONE:
+            _fb_say(chat_id, f"✅ <b>งาน {job_id} เสร็จครบทุกขั้นแล้ว</b>\n{summary}\n\n"
+                    "เก็บลิงก์ · ไลก์โพสต์ · คอมเมนต์ · ไลก์คอมเมนต์ครบทุกกลุ่ม")
+        elif chain:
+            _fb_say(chat_id, f"⏳ <b>งาน {job_id} โพสต์ครบแล้ว แต่ยังไม่จบ</b>\n"
+                    f"{summary}\n\nเหลือขั้นบังคับตามเก็บ {len(pending_followup)} กลุ่ม\n" + (
+                        f"โพสต์ยังไม่ปรากฏในฟีด — จะลองจากแจ้งเตือนอีกครั้งใน "
+                        f"{delay / 60:.0f} นาที" if held else
+                        f"อีก {delay:.0f} วินาทีจะเก็บลิงก์/ไลก์/คอมเมนต์ต่อเอง"
+                    ))
+        elif status == fb_auto_post.STATUS_FAILED:
+            _fb_say(chat_id, f"⚠️ <b>งาน {job_id} ยังไม่ครบ</b>\n{summary}\n\n"
+                    f"เหลือโพสต์ {len(pending_posts)} กลุ่ม · ตามเก็บ "
+                    f"{len(pending_followup)} กลุ่ม\nกด Resume เพื่อทำต่อโดยไม่โพสต์ซ้ำ"
+                    + (f"\n\n{telegram_bot._escape(error)}" if error else ""))
+        append_log("publish", f"[{job_id}] จบรอบโพสต์ — สถานะ {status}")
         # ใบที่เรียกมาจาก /recall — ขึ้นกลุ่มไปแล้วต้องปลดต้นฉบับออกจากคลัง
         # และจากคิวรอโพสต์ ไม่งั้นเรียกมาโพสต์ซ้ำได้ ซึ่งถอนคืนไม่ได้
         _fb_release_recall_source(job_id, latest, posted)
@@ -12197,8 +12403,8 @@ async def fb_list_groups(account: str = "", serial: str = "") -> dict:
         "gap_min": settings.get("gap_min", 15),
         "gap_max": settings.get("gap_max", 20),
         "auto_start": bool(settings.get("auto_start")),
-        # ปิดได้เฉพาะรอบที่ต่อท้ายอัตโนมัติ — /followup ที่เจ้าของสั่งเองยังใช้ได้
-        "auto_followup": bool(settings.get("auto_followup", True)),
+        # ขั้นตามเก็บเป็นข้อบังคับแล้ว — คงฟิลด์ไว้ให้หน้าเว็บรุ่นเก่าอ่านได้.
+        "auto_followup": True,
         # ค่าตั้งต้นเปิด — ไม่ได้ตั้งไว้ต้องแปลว่า "เปิด" ไม่ใช่ "ปิด"
         "phone_clean": bool(settings.get("phone_clean", True)),
         "screen_saver": bool(settings.get("screen_saver", True)),
@@ -12484,7 +12690,7 @@ async def fb_save_settings(request: Request) -> dict:
         changes["gap_min"] = max(5, int(payload.get("gap_min") or 15))
     if "gap_max" in payload:
         changes["gap_max"] = max(5, int(payload.get("gap_max") or 20))
-    for key in ("auto_start", "auto_followup", "phone_clean", "screen_saver"):
+    for key in ("auto_start", "phone_clean", "screen_saver"):
         if key in payload:
             changes[key] = bool(payload[key])
 
@@ -12565,9 +12771,10 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
     running_ids = set(running_on.values())
     where = {job_id: device_book.label(serial)
              for serial, job_id in running_on.items()}
-    finished = {fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_CANCELLED}
     everything = fb_jobs.listing()
-    live = [job for job in everything if job.get("status") not in finished]
+    live = [job for job in everything if _fb_effective_status(job) not in {
+        fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_CANCELLED,
+    }]
 
     def queue_key(job: dict) -> tuple:
         # เรียงเหมือนคิวใน Telegram — ตัวที่มือถือทำอยู่มาก่อนเสมอ แล้วค่อย
@@ -12581,11 +12788,12 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
 
     def slip(job: dict) -> dict:
         job_id = job.get("id")
-        status = job.get("status")
+        status = _fb_effective_status(job)
         log = job.get("log") or []
         results = job.get("results") or []
         by_group = {str(row.get("group_id") or ""): row for row in results}
-        pending = _fb_pending_groups(job)
+        pending_posts = _fb_pending_groups(job)
+        pending_followup = _fb_pending_followup_groups(job)
         posted_count = sum(1 for row in results if row.get("posted") is True)
         on_phone = job_id in running_ids
         stopping = on_phone and status == fb_auto_post.STATUS_STOPPED
@@ -12599,20 +12807,24 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
                 seen_gap = True
                 queue.append({"name": fb_groups.label(group_id), "state": state})
                 continue
+            missing = _fb_result_missing(job, row)
             queue.append({
                 "name": fb_groups.label(group_id),
-                "state": "ok" if row.get("posted") is True else "fail",
+                "state": ("finish" if row.get("posted") is True and missing else
+                          ("ok" if row.get("posted") is True else "fail")),
                 "link": str(row.get("link") or ""),
                 "error": str(row.get("error") or ""),
                 "liked": bool(row.get("liked")),
                 "commented": bool(row.get("commented")),
+                "comment_liked": bool(row.get("comment_liked")),
+                "missing": missing,
             })
 
         # ทำต่อไม่ได้ ต้องบอกว่าเพราะอะไร — ปุ่มที่หายไปเฉยๆ แยกไม่ออกจากปุ่มเสีย
         can_resume = (
             status in {fb_auto_post.STATUS_READY, fb_auto_post.STATUS_STOPPED,
-                       fb_auto_post.STATUS_FAILED, fb_auto_post.STATUS_CANCELLED}
-            and bool(pending) and not on_phone
+                       fb_auto_post.STATUS_FAILED, fb_auto_post.STATUS_FINISHING}
+            and bool(pending_posts or pending_followup) and not on_phone
         )
         why = ""
         if not can_resume:
@@ -12620,8 +12832,8 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
                 why = ""
             elif on_phone:
                 why = "มือถือยังทำกลุ่มปัจจุบันค้างอยู่ — รอให้หยุดสนิทก่อนถึงจะทำต่อได้"
-            elif not pending:
-                why = "ทุกกลุ่มโพสต์สำเร็จแล้ว ไม่มีกลุ่มเหลือให้ทำต่อ"
+            elif not pending_posts and not pending_followup:
+                why = "ครบทั้งโพสต์ ลิงก์ ไลก์โพสต์ คอมเมนต์ และไลก์คอมเมนต์แล้ว"
 
         return {
             "id": job_id,
@@ -12646,7 +12858,9 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
             "posted_count": posted_count,
             "failed": sum(1 for row in results if row.get("posted") is not True),
             "total": len(dict.fromkeys(job.get("groups") or [])),
-            "pending": len(pending),
+            "pending": len(pending_posts) + len(pending_followup),
+            "pending_posts": len(pending_posts),
+            "pending_followup": len(pending_followup),
             "queue": queue,
             "latest_step": log[-1] if log else "",
             "tail": log[-14:],
@@ -12658,8 +12872,12 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
             "can_run": status == fb_auto_post.STATUS_READY and not on_phone,
             "can_resume": can_resume,
             "can_reset": not on_phone,
-            "can_stop": on_phone or status == fb_auto_post.STATUS_READY,
+            "can_stop": on_phone or status in {
+                fb_auto_post.STATUS_READY, fb_auto_post.STATUS_FINISHING,
+            },
             "why": why,
+            "blocked_why": str(job.get("blocked_why") or ""),
+            "blocked_at": str(job.get("blocked_at") or ""),
         }
 
     out = [slip(job) for job in rows[:6]]
@@ -12667,7 +12885,8 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
     # ประวัติโหลดเฉพาะตอนผู้ใช้กางดู — ไม่งั้นติดไปกับทุกรอบที่ถามทุกวินาที
     past = []
     if history:
-        for job in [j for j in everything if j.get("status") in finished][:8]:
+        for job in [j for j in everything if _fb_effective_status(j) in {
+                fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_CANCELLED}][:8]:
             results = job.get("results") or []
             past.append({
                 "id": job.get("id"),
@@ -12705,12 +12924,16 @@ def _fb_list_jobs_body() -> dict:
 
     def view(job: dict) -> dict:
         pending = _fb_pending_groups(job)
+        pending_followup = _fb_pending_followup_groups(job)
         results = job.get("results") or []
+        effective_status = _fb_effective_status(job)
         return {
             **job,
+            "status": effective_status,
             "has_image": bool(job.get("image")) and Path(job["image"]).is_file(),
             "group_names": [fb_groups.label(g) for g in (job.get("groups") or [])],
             "pending_groups": pending,
+            "pending_followup_groups": pending_followup,
             "posted_count": sum(1 for row in results if row.get("posted") is True),
             "latest_step": (job.get("log") or [""])[-1],
             "controls": {
@@ -12719,9 +12942,10 @@ def _fb_list_jobs_body() -> dict:
                         fb_auto_post.STATUS_READY,
                         fb_auto_post.STATUS_STOPPED,
                         fb_auto_post.STATUS_FAILED,
-                        fb_auto_post.STATUS_CANCELLED,
+                        fb_auto_post.STATUS_FINISHING,
+                        fb_auto_post.STATUS_DONE,
                     }
-                    and bool(pending)
+                    and bool(pending or pending_followup)
                     and job.get("id") not in running_ids
                 ),
                 "can_reset": job.get("id") not in running_ids,
@@ -12999,7 +13223,7 @@ async def fb_run(job_id: str) -> dict:
 
 @app.post("/api/fb/jobs/{job_id}/resume")
 async def fb_resume(job_id: str) -> dict:
-    """ทำต่อเฉพาะกลุ่มที่ยังไม่มีผล ``posted=True`` เพื่อกันโพสต์ซ้ำ."""
+    """Resume สองคิว: โพสต์เฉพาะที่ยังไม่ขึ้น หรือตามเก็บของที่ขึ้นแล้ว."""
     who = _account_of_job(job_id)
     with _job_ctx(job_id):
         job = fb_jobs.get(job_id)
@@ -13008,17 +13232,32 @@ async def fb_resume(job_id: str) -> dict:
         if fb_runner.job_running(job_id):
             raise HTTPException(status_code=409,
                                 detail="งานนี้ยังหยุดไม่สนิท — รอให้มือถือหยุดก่อน")
-        pending_count = len(_fb_pending_groups(job))
-        if not pending_count:
+        if job.get("status") == fb_auto_post.STATUS_CANCELLED:
+            raise HTTPException(status_code=409,
+                                detail="งานนี้ถูกยกเลิกแล้ว — Resume ไม่ทำงานที่ยกเลิก")
+        pending_posts = len(_fb_pending_groups(job))
+        pending_followup = len(_fb_pending_followup_groups(job))
+        if not pending_posts and not pending_followup:
             raise HTTPException(status_code=400,
-                                detail="ทุกกลุ่มโพสต์สำเร็จแล้ว ไม่มีงานเหลือให้ Resume")
+                                detail="งานนี้ครบทุกขั้นแล้ว ไม่มีงานเหลือให้ Resume")
         fb_jobs.update(job_id, ui_reset=False)
-    note = await asyncio.to_thread(_in_account, who, _fb_run_job, job_id, False, True)
+    if pending_posts:
+        note = await asyncio.to_thread(
+            _in_account, who, _fb_run_job, job_id, False, True)
+        message = (f"Resume งาน {job_id} แล้ว — โพสต์เฉพาะ {pending_posts} กลุ่มที่ยังไม่ขึ้น "
+                   f"และจะตามเก็บ {pending_followup} กลุ่มเดิมต่อ โดยไม่โพสต์ซ้ำ")
+    else:
+        note = await asyncio.to_thread(
+            _in_account, who, _fb_followup, "", job_id)
+        message = (f"Resume งาน {job_id} แล้ว — ตามเก็บ {pending_followup} กลุ่ม "
+                   "โดยไม่ส่งโพสต์ซ้ำ")
     if note:
-        raise HTTPException(status_code=400, detail=note)
+        # _fb_followup คืนข้อความเริ่มงานเมื่อสำเร็จ ต่างจาก _fb_run_job ที่คืนว่าง.
+        if pending_posts or not note.startswith("🔁"):
+            raise HTTPException(status_code=400, detail=note)
     return {
         "ok": True,
-        "message": f"Resume งาน {job_id} แล้ว — ทำเฉพาะ {pending_count} กลุ่มที่ยังไม่สำเร็จ",
+        "message": message,
     }
 
 
@@ -13035,16 +13274,21 @@ def _fb_stop_body(job_id: str) -> dict:
         raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
     serial = fb_runner.job_running(job_id)
     if serial:
+        _fb_cancel_followup_wait(job_id)
         fb_jobs.update(job_id, status=fb_auto_post.STATUS_STOPPED, ui_reset=False)
         fb_jobs.append_log(job_id, "ผู้ใช้กด Stop — กำลังหยุดที่จุดปลอดภัย")
         fb_runner.stop_job(job_id)
         append_log("publish", f"[{job_id}] Stop จากหน้า Group Facebook — รอจบกลุ่มปัจจุบัน")
         return {"ok": True, "message": "รับคำสั่ง Stop แล้ว — จะหยุดที่จุดปลอดภัย"}
-    if job.get("status") == fb_auto_post.STATUS_READY:
+    if job.get("status") in {
+        fb_auto_post.STATUS_READY, fb_auto_post.STATUS_FINISHING,
+        fb_auto_post.STATUS_FAILED,
+    }:
+        _fb_cancel_followup_wait(job_id)
         fb_jobs.update(job_id, status=fb_auto_post.STATUS_STOPPED, ui_reset=False)
-        fb_jobs.append_log(job_id, "ผู้ใช้กด Stop ก่อนเริ่มงาน")
-        append_log("publish", f"[{job_id}] Stop ก่อนเริ่มจากหน้า Group Facebook")
-        return {"ok": True, "message": "หยุดงานที่รอไว้แล้ว — กด Resume เมื่อต้องการทำต่อ"}
+        fb_jobs.append_log(job_id, "ผู้ใช้กด Stop — หยุดคิวที่รอและรอบตามเก็บอัตโนมัติ")
+        append_log("publish", f"[{job_id}] Stop งานที่รอจากหน้า Group Facebook")
+        return {"ok": True, "message": "หยุดงานและรอบตามเก็บที่รอไว้แล้ว — กด Resume เมื่อต้องการทำต่อ"}
     if job.get("status") == fb_auto_post.STATUS_STOPPED:
         return {"ok": True, "message": "สายโพสต์งานนี้หยุดอยู่แล้ว"}
     return {"ok": True, "message": "ตอนนี้ไม่มีงาน Facebook Group กำลังทำ"}

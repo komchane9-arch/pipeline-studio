@@ -12070,6 +12070,32 @@ def _web_account(account: str = "", serial: str = "") -> str:
                 "message": "มีหลายบัญชีในสายโพสต์ — เลือกก่อนว่าจะดูบัญชีไหน"})
 
 
+def _account_of_job(job_id: str) -> str:
+    """ใบงานนี้อยู่ในแฟ้มของบัญชีไหน — ไม่เจอคืนค่าว่าง
+
+    **ไล่หาจากของจริง ไม่เดา** (16 ก.ย. 2569) รหัสใบงานไม่ได้บอกบัญชีในตัวมันเอง
+    พอมีสองบัญชี ปุ่มจัดการใบงาน (เริ่ม · หยุด · ทำต่อ · รีเซ็ต · ยกเลิก) จึง
+    ตอบไม่ได้ว่าจะไปอ่านแฟ้มไหน แล้วล้มด้วย AccountMissing กลายเป็น 500
+    ทั้งที่ผู้ใช้แค่กดปุ่มบนใบงานที่เห็นอยู่ตรงหน้า
+
+    เปิดดูทีละบัญชีว่าใบนี้อยู่ในแฟ้มใคร — ช้ากว่าเดานิดเดียว แต่ตอบถูกเสมอ
+    และถ้าไม่เจอก็บอกได้ว่าไม่เจอจริงๆ ไม่ใช่ไปเดาว่าอยู่บัญชีแรก
+    """
+    for account in _bound_post_accounts():
+        with fb_auto_post.use_account(account):
+            if fb_jobs.get(job_id) is not None:
+                return account
+    return ""
+
+
+def _job_ctx(job_id: str):
+    """เปิดบริบทบัญชีของใบงานนี้ — ไม่เจอใบงานคือ 404 ไม่ใช่ 500"""
+    account = _account_of_job(job_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+    return fb_auto_post.use_account(account)
+
+
 def _in_account(account: str, fn, *args, **kwargs):
     """เรียกฟังก์ชันสายโพสต์ในนามบัญชีนั้น — ใช้ตอนโยนเข้าเธรดแยก
 
@@ -12931,7 +12957,8 @@ def _fb_job_media_path(job: dict, kind: str, index: int) -> Path:
 
 @app.get("/api/fb/jobs/{job_id}/media/{kind}/{index}")
 async def fb_job_media(job_id: str, kind: str, index: int) -> FileResponse:
-    job = fb_jobs.get(job_id)
+    with _job_ctx(job_id):
+        job = fb_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
     return FileResponse(
@@ -12943,7 +12970,8 @@ async def fb_job_media(job_id: str, kind: str, index: int) -> FileResponse:
 @app.get("/api/fb/jobs/{job_id}/image")
 async def fb_job_image(job_id: str) -> FileResponse:
     # โชว์ใบแรกเป็นตัวแทนงาน — ใบที่เหลืออยู่ในโฟลเดอร์เดียวกัน
-    job = fb_jobs.get(job_id)
+    with _job_ctx(job_id):
+        job = fb_jobs.get(job_id)
     if job is None or not job.get("image"):
         raise HTTPException(status_code=404, detail="งานนี้ยังไม่มีรูป")
     path = Path(job["image"])
@@ -12955,7 +12983,10 @@ async def fb_job_image(job_id: str) -> FileResponse:
 
 @app.post("/api/fb/jobs/{job_id}/run")
 async def fb_run(job_id: str) -> dict:
-    note = await asyncio.to_thread(_fb_run_job, job_id)
+    # **ต้องรู้ก่อนว่าใบนี้ของบัญชีไหน** ไม่งั้นไปอ่านแฟ้มผิดบัญชี
+    # แล้วโพสต์ขึ้นในนามคนอื่น ซึ่งถอนคืนไม่ได้
+    note = await asyncio.to_thread(
+        _in_account, _account_of_job(job_id) or "", _fb_run_job, job_id)
     if note:
         raise HTTPException(status_code=400, detail=note)
     return {"ok": True, "message": "เริ่มโพสต์แล้ว — ดูความคืบหน้าที่ log"}
@@ -12964,16 +12995,20 @@ async def fb_run(job_id: str) -> dict:
 @app.post("/api/fb/jobs/{job_id}/resume")
 async def fb_resume(job_id: str) -> dict:
     """ทำต่อเฉพาะกลุ่มที่ยังไม่มีผล ``posted=True`` เพื่อกันโพสต์ซ้ำ."""
-    job = fb_jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
-    if fb_runner.job_running(job_id):
-        raise HTTPException(status_code=409, detail="งานนี้ยังหยุดไม่สนิท — รอให้มือถือหยุดก่อน")
-    pending_count = len(_fb_pending_groups(job))
-    if not pending_count:
-        raise HTTPException(status_code=400, detail="ทุกกลุ่มโพสต์สำเร็จแล้ว ไม่มีงานเหลือให้ Resume")
-    fb_jobs.update(job_id, ui_reset=False)
-    note = await asyncio.to_thread(_fb_run_job, job_id, False, True)
+    who = _account_of_job(job_id)
+    with _job_ctx(job_id):
+        job = fb_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+        if fb_runner.job_running(job_id):
+            raise HTTPException(status_code=409,
+                                detail="งานนี้ยังหยุดไม่สนิท — รอให้มือถือหยุดก่อน")
+        pending_count = len(_fb_pending_groups(job))
+        if not pending_count:
+            raise HTTPException(status_code=400,
+                                detail="ทุกกลุ่มโพสต์สำเร็จแล้ว ไม่มีงานเหลือให้ Resume")
+        fb_jobs.update(job_id, ui_reset=False)
+    note = await asyncio.to_thread(_in_account, who, _fb_run_job, job_id, False, True)
     if note:
         raise HTTPException(status_code=400, detail=note)
     return {
@@ -12985,6 +13020,11 @@ async def fb_resume(job_id: str) -> dict:
 @app.post("/api/fb/jobs/{job_id}/stop")
 async def fb_stop(job_id: str) -> dict:
     """หยุดสายโพสต์ที่จุดปลอดภัย และเก็บผลเดิมไว้ให้ Resume ได้."""
+    with _job_ctx(job_id):
+        return _fb_stop_body(job_id)
+
+
+def _fb_stop_body(job_id: str) -> dict:
     job = fb_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
@@ -13008,12 +13048,14 @@ async def fb_stop(job_id: str) -> dict:
 @app.post("/api/fb/jobs/{job_id}/reset")
 async def fb_reset(job_id: str) -> dict:
     """ล้างเฉพาะกล่องสถานะหน้าเว็บให้ว่าง ไม่ลบงาน/ผลและไม่แตะมือถือ."""
-    job = fb_jobs.get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
-    if fb_runner.job_running(job_id):
-        raise HTTPException(status_code=409, detail="ยังมีงานกำลังทำ — กด Stop และรอให้หยุดก่อน")
-    fb_jobs.update(job_id, ui_reset=True)
+    with _job_ctx(job_id):
+        job = fb_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+        if fb_runner.job_running(job_id):
+            raise HTTPException(status_code=409,
+                                detail="ยังมีงานกำลังทำ — กด Stop และรอให้หยุดก่อน")
+        fb_jobs.update(job_id, ui_reset=True)
     append_log("publish", f"[{job_id}] Reset กล่องสถานะ Group Facebook เป็นว่าง")
     return {
         "ok": True,
@@ -13028,9 +13070,10 @@ async def fb_cancel(job_id: str) -> dict:
     # ของเดิมถ้าสถานะเป็น running จะสั่ง stop() แล้ว return ทันที ไม่เคยตั้งเป็น
     # cancelled เลย พองานที่ตัวรันตายไปแล้วแต่สถานะค้างที่ running จะยกเลิก
     # ยังไงก็ไม่หลุด ค้างตลอดกาล (เจอจริง 12 ส.ค. งาน p545241529)
-    if fb_jobs.get(job_id) is None:
-        raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
-    return {"ok": True, "message": _fb_cancel_job(job_id)}
+    with _job_ctx(job_id) as _:
+        if fb_jobs.get(job_id) is None:
+            raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+        return {"ok": True, "message": _fb_cancel_job(job_id)}
 
 
 # ดึงข้อมูลสินค้าจากลิงก์ Shopee — ใช้ร่วมกันทั้งหน้าเว็บและบอท Telegram

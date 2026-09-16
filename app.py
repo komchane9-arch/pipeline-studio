@@ -10567,11 +10567,16 @@ def _phone_clean_pump(now: datetime | None = None) -> str:
         return ""
     if not _any_phone_free():
         return ""
+    # **ต้องดูงานของทุกบัญชี** ไม่ใช่บัญชีเดียว (16 ก.ย. 2569)
+    # ล้างเครื่องระหว่างที่อีกบัญชีมีงานจ่อจะยิงใน 15 นาที = ลบไฟล์ที่งานนั้น
+    # ต้องใช้ทิ้งไปเฉยๆ แล้วงานล้มโดยไม่มีใครเข้าใจว่าทำไม
     soon = now + timedelta(minutes=15)
-    for job in fb_jobs.listing():
-        when = job.get("run_at") or ""
-        if when and now <= datetime.fromisoformat(when) <= soon:
-            return ""
+    for _account in _bound_post_accounts():
+        with fb_auto_post.use_account(_account):
+            for job in fb_jobs.listing():
+                when = job.get("run_at") or ""
+                if when and now <= datetime.fromisoformat(when) <= soon:
+                    return ""
     return _phone_clean_run(now)
 
 

@@ -8,6 +8,7 @@ import { loadPrompts, openPrompts } from "./prompts.js";
 import { loadBoard } from "./board.js";
 import { loadFbControl, watchFbControl } from "./fbcontrol.js";
 import { loadEngage, wireEngage } from "./engage.js";
+import { loadGfAccounts, onGfAccountChange } from "./gfaccount.js";
 import { fillGems, fillInput, fillRelease, loadClips, loadJobQueue, loadStoryRuns } from "./video.js";
 
 // เวอร์ชันที่หน้านี้ "ควรคู่กับ" เซิร์ฟเวอร์ = อ่านจาก ?v= ของตัวเองอัตโนมัติ
@@ -71,6 +72,13 @@ hooks.reloadConfig = () => reloadConfig();
     // ส่วนกอง "ไม่ดี" ขอเป็นรายกองตอนกดเปิด (ดู board.js)
     await loadBoard();
     document.querySelector("#bdReload")?.addEventListener("click", loadBoard);
+    // แท็บโปรไฟล์ของหน้า Group Facebook — ต้องโหลด **ก่อน** สองส่วนข้างล่าง
+    // เพราะทั้งคู่ต้องรู้ว่ากำลังดูโปรไฟล์ไหนก่อนจะยิงถามข้อมูล
+    await loadGfAccounts();
+    onGfAccountChange(async () => {
+      await loadFbControl();
+      await loadEngage();
+    });
     // แผงคุมบอทสายโพสต์ — ดูสดทุก 5 วิเฉพาะตอนแท็บเปิดอยู่ (ดู fbcontrol.js)
     await loadFbControl();
     watchFbControl();

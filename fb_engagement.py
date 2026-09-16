@@ -96,7 +96,30 @@ COLLECTOR_PROFILE = "Bot10"
 # **เกิดจริงแล้ว** — วัดเมื่อ 13 ก.ย. 2569: อ่านยอดได้สำเร็จครั้งสุดท้าย
 # 2 ก.ย. 16:30 แล้วเงียบไป **11 วัน** โดยไม่มีใครรู้ เพราะบัญชีที่โพสต์
 # เปลี่ยนเป็น Khao Fang Nichapa แต่ตรงนี้ยังชี้ Kp Oo อยู่
-WATCH_ACCOUNTS: tuple[str, ...] = ("Khao Fang Nichapa",)
+# ค่านี้เป็น **ตัวบังคับ** เอาไว้จำกัดเฉพาะบางบัญชี — ว่างไว้ = ตามทุกบัญชี
+# ที่ผูกกับมือถือสายโพสต์จริง ซึ่งเป็นสิ่งที่ถูกต้องกว่าการมานั่งแก้ชื่อทุกครั้ง
+# ที่เพิ่มบัญชี (เจ้าของต่อสายที่สอง Preaw Buchakorn เมื่อ 16 ก.ย. 2569)
+WATCH_ACCOUNTS: tuple[str, ...] = ()
+
+
+def watched_accounts() -> list[str]:
+    """บัญชีที่ควรตามเก็บคอมเมนต์ — อ่านจากทะเบียนมือถือจริง
+
+    **ห้ามเขียนชื่อบัญชีตายตัวอีก** เพราะเคยพังแบบเงียบมาแล้ว: บัญชีที่โพสต์
+    เปลี่ยนเป็น Khao Fang Nichapa แต่ค่านี้ยังชี้ Kp Oo ผลคือเก็บคอมเมนต์
+    ไม่ได้เลย **11 วัน** โดยไม่มีอะไรฟ้อง (วัดเมื่อ 13 ก.ย. 2569)
+
+    ผูกกับทะเบียนแทน — เพิ่มบัญชีใหม่แล้วตามเก็บให้เองทันที ไม่ต้องแก้โค้ด
+    """
+    if WATCH_ACCOUNTS:
+        return [x.strip() for x in WATCH_ACCOUNTS if x.strip()]
+    try:
+        import devices                                          # noqa: PLC0415
+        post = set(devices.enabled_serials("post"))
+        return sorted(name for name, serials in devices.accounts().items()
+                      if name and post.intersection(serials))
+    except Exception:                                           # noqa: BLE001
+        return []
 
 CHECK_EVERY_SECONDS = 3600.0      # เจ้าของสั่ง "ทุก 1 ชั่วโมงก่อน"
 
@@ -259,7 +282,7 @@ def our_posts() -> list[dict]:
     """
     out: list[dict] = []
     seen: set[str] = set()
-    wanted = {name.strip().lower() for name in WATCH_ACCOUNTS if name.strip()}
+    wanted = {name.strip().lower() for name in watched_accounts() if name.strip()}
     for account in shared.known_accounts():
         if wanted and account.strip().lower() not in wanted:
             continue
@@ -1094,7 +1117,7 @@ def _post_meta_by_link() -> dict[str, dict]:
     (``/api/fb/jobs/<รหัส>/media/post/<ลำดับ>``)
     """
     out: dict[str, dict] = {}
-    wanted = {name.strip().lower() for name in WATCH_ACCOUNTS if name.strip()}
+    wanted = {name.strip().lower() for name in watched_accounts() if name.strip()}
     for account in shared.known_accounts():
         if wanted and account.strip().lower() not in wanted:
             continue
@@ -1118,7 +1141,8 @@ def _post_meta_by_link() -> dict[str, dict]:
 _NO_META = {"job_id": "", "caption": "", "images": 0, "comment_images": 0}
 
 
-def threads(limit: int = 40, only_pending: bool = True) -> list[dict]:
+def threads(limit: int = 40, only_pending: bool = True,
+            account: str = "") -> list[dict]:
     """โพสต์พร้อมคอมเมนต์ใต้โพสต์ — เรียงแบบเดียวกับที่เห็นบน Facebook
 
     **เจ้าของสั่ง 13 ก.ย. 2569** — *"ช่องพิมพ์อยู่บนหน้าเว็บ ทำคล้ายๆ กับ
@@ -1144,8 +1168,10 @@ def threads(limit: int = 40, only_pending: bool = True) -> list[dict]:
                       MAX(checked_at) AS checked_at
                  FROM my_post
                 WHERE TRIM(post_url) <> ''
+                  AND (? = '' OR account = ?)
                 GROUP BY post_url
-                ORDER BY MAX(checked_at) DESC""").fetchall()
+                ORDER BY MAX(checked_at) DESC""",
+            (account.strip(), account.strip())).fetchall()
 
         rows = conn.execute(
             """SELECT comment_key, post_url, seq, author, body, when_text,

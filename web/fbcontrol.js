@@ -37,6 +37,7 @@
  */
 
 import { api } from "./core.js";
+import { gfQuery } from "./gfaccount.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -514,7 +515,8 @@ export async function loadFbControl() {
   try {
     // เส้นเบา — ส่งเฉพาะที่แผงนี้โชว์ ราว 10 KB แทน 134 KB ของเส้นเต็ม
     // จึงถามได้ทุกวินาทีโดยไม่ทำให้หน้าหน่วง (ดู app.py /api/fb/jobs/live)
-    data = await api(`/api/fb/jobs/live${historyOpen ? "?history=1" : ""}`);
+    // **ต้องบอกว่าโปรไฟล์ไหน** ไม่งั้นเห็นใบงานของอีกโปรไฟล์ปนมา
+    data = await api(gfQuery(`/api/fb/jobs/live${historyOpen ? "?history=1" : ""}`));
   } catch (error) {
     // **แยก "อ่านไม่ได้" ออกจาก "ไม่มีงาน"** สองอย่างนี้ต่างกันสิ้นเชิง
     if (note) setText(note, `อ่านสถานะบอทไม่ได้ — ${error.message}`);

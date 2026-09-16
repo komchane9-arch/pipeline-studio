@@ -26,6 +26,7 @@
  */
 
 import { api } from "./core.js";
+import { gfQuery } from "./gfaccount.js";
 
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, cls, text) => {
@@ -300,7 +301,7 @@ export async function loadEngage() {
   const wrap = box();
   if (!wrap) return;
   try {
-    data = await api(`/api/fb/engage/threads?pending=${onlyPending ? 1 : 0}`);
+    data = await api(gfQuery(`/api/fb/engage/threads?pending=${onlyPending ? 1 : 0}`));
   } catch (error) {
     // **แยก "อ่านไม่ได้" ออกจาก "ไม่มีคอมเมนต์"** สองอย่างนี้ต่างกันสิ้นเชิง
     const note = $("#egNote");

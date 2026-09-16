@@ -12347,7 +12347,8 @@ async def fb_followup(request: Request) -> dict:
 
 
 @app.get("/api/fb/engage/threads")
-async def fb_engage_threads(pending: int = 1, limit: int = 40) -> dict:
+async def fb_engage_threads(pending: int = 1, limit: int = 40,
+                            account: str = "") -> dict:
     """โพสต์ของเราพร้อมคอมเมนต์ใต้โพสต์ — สำหรับหน้าตอบคอมเมนต์บนเว็บ
 
     **เจ้าของสั่ง 13 ก.ย. 2569** — *"ช่องพิมพ์อยู่บนหน้าเว็บ ทำคล้ายๆ กับ
@@ -12362,10 +12363,13 @@ async def fb_engage_threads(pending: int = 1, limit: int = 40) -> dict:
     import fb_engagement                                        # noqa: PLC0415
     # นำเข้าตรงนี้เหมือนที่อื่นในไฟล์ — ตัวนี้เปิดฐานข้อมูลตอนนำเข้า ถ้าดึงไว้
     # ตั้งแต่หัวไฟล์ เซิร์ฟเวอร์จะเปิดไฟล์ค้างไว้ทั้งที่ยังไม่มีใครเรียกใช้
+    # ว่าง = ทุกบัญชี · ระบุมา = เฉพาะโปรไฟล์นั้น (เจ้าของสั่งแยกรายโปรไฟล์ 16 ก.ย.)
     rows = await asyncio.to_thread(
-        fb_engagement.threads, max(1, min(int(limit), 200)), bool(pending))
+        fb_engagement.threads, max(1, min(int(limit), 200)), bool(pending),
+        str(account or "").strip())
     return {
         "ok": True,
+        "account": str(account or "").strip(),
         "posts": rows,
         "pending_total": sum(p["pending"] for p in rows),
         "drafted_total": sum(p["drafted"] for p in rows),

@@ -3597,6 +3597,28 @@ body.typing-through {
 .tkc-name.is-warn { color: var(--bad-ink); font-weight: 700; }
 /* บรรทัดบอกความพร้อมของสายโพสต์ — ขาดของต้องเห็นชัดโดยไม่ต้องอ่านจบประโยค */
 .note.is-warn { color: var(--warn-ink); font-weight: 700; }
+
+/* แท็บเลือกโปรไฟล์ที่จะโพสต์ (เจ้าของสั่ง 16 ก.ย. 2569)
+   ตั้งใจให้ "สายไหนกำลังโพสต์อยู่" อ่านได้ในตาเดียว เพราะโพสต์ผิดบัญชี
+   กู้คืนไม่ได้ — แท็บที่เลือกอยู่จึงต้องเด่นกว่าปกติ ไม่ใช่ต่างกันนิดเดียว */
+.fb-acct-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 6px; }
+.fb-acct-tab {
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+  padding: 7px 14px; border-radius: 12px; text-align: left;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+.fb-acct-tab b { font-size: 13px; }
+.fb-acct-tab small { color: var(--ink-3); font-size: 11px; }
+.fb-acct-tab:hover { border-color: var(--accent); }
+.fb-acct-tab.is-on {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+}
+/* สายที่ยังไม่ครบ — จุดกลวงบอกได้โดยไม่ต้องพึ่งสีอย่างเดียว */
+.fb-acct-dot { font-size: 11px; color: var(--ok); }
+.fb-acct-tab.is-todo .fb-acct-dot { color: var(--warn-ink); }
+.fb-acct-tab.is-todo b { color: var(--ink-2); }
 .tkc-warn { margin: 7px 0 0; font-size: 11px; color: var(--bad-ink); font-weight: 700; }
 
 .tkc-buttons { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }

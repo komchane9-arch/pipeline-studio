@@ -831,63 +831,72 @@ function withAccount(path) {
 
 export async function loadPostAccounts() {
   const row = $("#fbAccountRow");
-  const box = $("#fbAccount");
-  if (!row || !box) return;
+  const strip = $("#fbAccountTabs");
+  if (!row || !strip) return;
   let data;
   try {
     data = await api("/api/fb/post-accounts");
   } catch {
-    return;                       // อ่านไม่ได้ก็ไม่ต้องโชว์ช่องเลือก
+    return;                       // อ่านไม่ได้ก็ไม่ต้องโชว์แท็บ
   }
   const list = data.accounts || [];
   postAccount = data.current || (list.length === 1 ? list[0].account : "");
-  // มีบัญชีเดียวไม่ต้องโชว์ให้รก — ช่องเลือกมีไว้ตอนมีหลายบัญชีเท่านั้น
+  // มีสายเดียวไม่ต้องโชว์แท็บให้รก — แท็บมีไว้ตอนมีหลายสายเท่านั้น
   row.hidden = list.length < 2;
-  const option = (value, text, picked) => {
-    const node = document.createElement("option");
-    node.value = value;
-    node.textContent = text;
-    node.selected = picked;
-    return node;
-  };
-  box.replaceChildren(
-    ...(postAccount ? [] : [option("", "— เลือกบัญชี —", true)]),
-    ...list.map((a) => option(a.account, `${a.account} · ${a.device}`,
-                              a.account === postAccount)),
-  );
+
+  strip.replaceChildren(...list.map((a) => {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "fb-acct-tab" + (a.account === postAccount ? " is-on" : "")
+      + (a.ready ? "" : " is-todo");
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", a.account === postAccount ? "true" : "false");
+    // จุดนำหน้าบอกความพร้อมโดยไม่ต้องอ่านตัวหนังสือ และไม่ได้ใช้สีอย่างเดียว
+    const dot = document.createElement("span");
+    dot.className = "fb-acct-dot";
+    dot.textContent = a.ready ? "●" : "○";
+    const name = document.createElement("b");
+    name.textContent = a.account;
+    const where = document.createElement("small");
+    where.textContent = `${a.device} · ${a.groups} กลุ่ม`;
+    tab.append(dot, name, where);
+    tab.title = a.ready
+      ? `พร้อมโพสต์ — บอท ${a.bot}`
+      : `ยังใช้ไม่ได้ — ${a.missing.join(" · ")}`;
+    tab.addEventListener("click", () => switchAccount(a.account));
+    return tab;
+  }));
+
   const note = $("#fbAccountNote");
   if (note) {
-    // **ขาดอะไรต้องบอกชื่อสิ่งนั้น** ไม่ใช่บอกแค่ว่า "ยังไม่พร้อม"
-    // สายโพสต์หนึ่งสายมี 4 ชิ้นอยู่คนละที่ ขาดชิ้นไหนระบบก็เงียบจนกว่าจะ
-    // ส่งงานจริงแล้วไม่มีอะไรเกิดขึ้น
     const picked = list.find((a) => a.account === postAccount);
     if (!postAccount) {
-      note.textContent = "ยังไม่ได้เลือก — กลุ่มและใบงานจะยังไม่ขึ้นจนกว่าจะเลือกบัญชี";
+      note.textContent = "ยังไม่ได้เลือกโปรไฟล์ — กดแท็บด้านบนก่อน";
       note.className = "note";
     } else if (picked && !picked.ready) {
       note.textContent = `⚠️ สายนี้ยังใช้งานจริงไม่ได้ — ${picked.missing.join(" · ")}`;
       note.className = "note is-warn";
     } else {
       note.textContent = picked
-        ? `✅ พร้อมใช้งาน — ${picked.groups} กลุ่ม · บอท ${picked.bot}`
+        ? `✅ พร้อมใช้งาน — ${picked.groups} กลุ่ม · บอท ${picked.bot} · มือถือ ${picked.device}`
         : "";
       note.className = "note";
     }
   }
-  if (!box.dataset.wired) {
-    box.dataset.wired = "1";
-    box.addEventListener("change", async () => {
-      postAccount = box.value;
-      try {
-        await api("/api/fb/post-accounts", {
-          method: "POST",
-          body: JSON.stringify({ account: postAccount }),
-        });
-      } catch { /* จำไม่ได้ก็ยังใช้ค่าในหน้านี้ต่อได้ */ }
-      await loadFbGroups();
-      await loadFbJobs();
+}
+
+/** สลับโปรไฟล์ที่กำลังโพสต์ — จำไว้ฝั่งเซิร์ฟเวอร์ด้วย ไม่ใช่จำแค่ในหน้านี้ */
+async function switchAccount(account) {
+  if (account === postAccount) return;
+  postAccount = account;
+  try {
+    await api("/api/fb/post-accounts", {
+      method: "POST",
+      body: JSON.stringify({ account }),
     });
-  }
+  } catch { /* จำไม่ได้ก็ยังใช้ค่าในหน้านี้ต่อได้ */ }
+  await loadFbGroups();
+  await loadFbJobs();
 }
 
 export async function loadFbGroups() {

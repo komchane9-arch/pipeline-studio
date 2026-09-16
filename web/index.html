@@ -703,11 +703,15 @@
           <!-- เลือกบัญชี — มีมากกว่าหนึ่งบัญชีเมื่อไร ทุกอย่างใต้หัวข้อนี้
                (กลุ่ม · ใบงาน · ค่าตั้ง) ต้องรู้ว่ากำลังดูของบัญชีไหน
                ไม่งั้นระบบจะตอบว่าเลือกไม่ได้ ซึ่งถูกแล้ว — โพสต์ผิดบัญชีกู้ไม่ได้ -->
-          <div class="inline-row" id="fbAccountRow" hidden>
-            <label>บัญชีที่กำลังดู
-              <select id="fbAccount"></select>
-            </label>
-            <span id="fbAccountNote" class="note"></span>
+          <!-- แท็บเลือกโปรไฟล์ที่จะโพสต์ (เจ้าของสั่ง 16 ก.ย. 2569)
+               "แยกสายบอทที่โพสต์เป็นสองสายออกจากกัน ทั้ง Khao fang, Preaw
+                telegram - มือถือ - หน้าเว็ป · บนหน้าเว็ปให้สร้างเป็น tab
+                ให้กดว่าจะโพสต์ profile ไหน"
+               แท็บบอกได้ในตาเดียวว่ามีกี่สาย และกำลังอยู่สายไหน — ต่างจาก
+               ช่องเลือกที่ต้องกดเปิดก่อนถึงจะรู้ว่ามีอะไรให้เลือกบ้าง -->
+          <div id="fbAccountRow" hidden>
+            <div id="fbAccountTabs" class="fb-acct-tabs" role="tablist"></div>
+            <p id="fbAccountNote" class="note"></p>
           </div>
 
           <ul id="fbGroupList" class="fb-list"></ul>

@@ -3595,6 +3595,8 @@ body.typing-through {
   overflow-wrap: anywhere;
 }
 .tkc-name.is-warn { color: var(--bad-ink); font-weight: 700; }
+/* บรรทัดบอกความพร้อมของสายโพสต์ — ขาดของต้องเห็นชัดโดยไม่ต้องอ่านจบประโยค */
+.note.is-warn { color: var(--warn-ink); font-weight: 700; }
 .tkc-warn { margin: 7px 0 0; font-size: 11px; color: var(--bad-ink); font-weight: 700; }
 
 .tkc-buttons { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }

@@ -12006,10 +12006,49 @@ async def fb_post_accounts() -> dict:
     if saved not in bound:
         saved = next(iter(bound)) if len(bound) == 1 else ""
     return {"ok": True,
-            "accounts": [{"account": name, "serial": serial,
-                          "device": device_book.label(serial)}
+            "accounts": [_post_account_card(name, serial)
                          for name, serial in bound.items()],
             "current": saved}
+
+
+def _post_account_card(account: str, serial: str) -> dict:
+    """ความพร้อมของสายโพสต์หนึ่งสาย — ขาดอะไรต้องบอกชื่อสิ่งนั้นตรงๆ
+
+    **เจ้าของสั่งต่อสายที่สอง 16 ก.ย. 2569 ว่า "ให้เหมือนเพิ่มทุกอย่างเลย"**
+    ปัญหาคือ "ทุกอย่าง" ของสายโพสต์มี 4 ชิ้นที่อยู่คนละที่ และขาดชิ้นไหนไป
+    ระบบก็ **เงียบ** จนกว่าจะส่งงานจริงแล้วไม่มีอะไรเกิดขึ้น
+    (ของจริงในระบบตอนนี้: บอทหลักผูกกับบัญชี `kamolchanok lill` ซึ่งไม่มีมือถือ
+     เครื่องไหนผูกไว้เลย — ส่งงานเข้าไปก็ไม่มีใครรับ และไม่มีอะไรฟ้อง)
+
+    การ์ดนี้จึงตอบว่า **ขาดอะไรบ้าง** ไม่ใช่ตอบแค่ว่าพร้อมหรือไม่พร้อม
+    """
+    missing: list[str] = []
+    try:
+        with fb_auto_post.use_account(account):
+            groups = len(fb_groups.listing())
+    except Exception:                                           # noqa: BLE001
+        groups = 0
+    if not groups:
+        missing.append("ยังไม่มีกลุ่มสักกลุ่ม")
+
+    bot = next((b for b in extra_bots()
+                if b.get("role") == "facebook"
+                and str(b.get("account") or "") == account), None)
+    if bot is None and str(load_config().get("telegram_main_account") or "") == account:
+        bot = {"name": "บอทหลัก"}
+    if bot is None:
+        missing.append("ยังไม่มีบอท Telegram ที่ผูกกับบัญชีนี้")
+
+    enabled = serial in set(device_book.enabled_serials("post"))
+    if not enabled:
+        missing.append("มือถือยังไม่ได้เปิดใช้ในสายโพสต์")
+
+    return {"account": account, "serial": serial,
+            "device": device_book.label(serial),
+            "groups": groups,
+            "bot": str((bot or {}).get("name") or ""),
+            "ready": not missing,
+            "missing": missing}
 
 
 @app.post("/api/fb/post-accounts")

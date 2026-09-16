@@ -857,9 +857,22 @@ export async function loadPostAccounts() {
   );
   const note = $("#fbAccountNote");
   if (note) {
-    note.textContent = postAccount
-      ? ""
-      : "ยังไม่ได้เลือก — กลุ่มและใบงานจะยังไม่ขึ้นจนกว่าจะเลือกบัญชี";
+    // **ขาดอะไรต้องบอกชื่อสิ่งนั้น** ไม่ใช่บอกแค่ว่า "ยังไม่พร้อม"
+    // สายโพสต์หนึ่งสายมี 4 ชิ้นอยู่คนละที่ ขาดชิ้นไหนระบบก็เงียบจนกว่าจะ
+    // ส่งงานจริงแล้วไม่มีอะไรเกิดขึ้น
+    const picked = list.find((a) => a.account === postAccount);
+    if (!postAccount) {
+      note.textContent = "ยังไม่ได้เลือก — กลุ่มและใบงานจะยังไม่ขึ้นจนกว่าจะเลือกบัญชี";
+      note.className = "note";
+    } else if (picked && !picked.ready) {
+      note.textContent = `⚠️ สายนี้ยังใช้งานจริงไม่ได้ — ${picked.missing.join(" · ")}`;
+      note.className = "note is-warn";
+    } else {
+      note.textContent = picked
+        ? `✅ พร้อมใช้งาน — ${picked.groups} กลุ่ม · บอท ${picked.bot}`
+        : "";
+      note.className = "note";
+    }
   }
   if (!box.dataset.wired) {
     box.dataset.wired = "1";

@@ -224,6 +224,59 @@ function buildCard(jobId) {
     bar.append(button);
   });
 
+  /* ---- ตั้งเวลาโพสต์ (เจ้าของสั่ง 16 ก.ย. 2569) --------------------------
+   *
+   * *"เพิ่มฟังก์ชั่นตั้งเวลาโพสต์ในใบงานที่หน้าเว็บให้ด้วย · ทั้ง 2 เครื่องเลยนะ"*
+   *
+   * เดิมตั้งได้เฉพาะทาง Telegram ซึ่งต้องพิมพ์รหัสใบงานเอง — บนหน้าเว็บเห็น
+   * ใบงานอยู่ตรงหน้าแล้ว กดตั้งตรงนั้นตรงกว่าและพิมพ์รหัสผิดไม่ได้
+   *
+   * ใช้ได้ทั้งสองโปรไฟล์เอง เพราะเซิร์ฟเวอร์หาบัญชีจากตัวใบงาน ไม่ได้ผูกกับ
+   * โปรไฟล์ที่กำลังเปิดดูอยู่
+   */
+  const timeRow = el("div", "fc-sched");
+  const timeBox = document.createElement("input");
+  timeBox.type = "datetime-local";
+  timeBox.className = "fc-sched-input";
+  timeBox.title = "เลือกวันและเวลาที่จะให้โพสต์";
+  const setBtn = el("button", "fc-btn fc-sched-set", "⏰ ตั้งเวลา");
+  setBtn.type = "button";
+  const clearBtn = el("button", "fc-btn fc-sched-clear", "ล้างเวลา");
+  clearBtn.type = "button";
+  const schedNote = el("span", "fc-sched-note");
+  timeRow.append(timeBox, setBtn, clearBtn, schedNote);
+
+  const schedule = async (value, button) => {
+    const was = button.textContent;
+    [setBtn, clearBtn].forEach((b) => { b.disabled = true; });
+    button.textContent = "กำลังตั้ง…";
+    try {
+      const out = await api(
+        `/api/fb/jobs/${encodeURIComponent(jobId)}/schedule`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ when: value }) });
+      schedNote.textContent = out.message || "";
+      schedNote.classList.remove("is-bad");
+      await loadFbControl();
+    } catch (error) {
+      // **ห้ามทำเหมือนสำเร็จ** ไม่งั้นเจ้าของนึกว่าตั้งแล้วแต่ไม่มีอะไรยิง
+      schedNote.textContent = error.message;
+      schedNote.classList.add("is-bad");
+    } finally {
+      button.textContent = was;
+      [setBtn, clearBtn].forEach((b) => { b.disabled = false; });
+    }
+  };
+  setBtn.addEventListener("click", () => {
+    if (!timeBox.value) {
+      schedNote.textContent = "เลือกวันและเวลาก่อน";
+      schedNote.classList.add("is-bad");
+      return;
+    }
+    schedule(timeBox.value, setBtn);
+  });
+  clearBtn.addEventListener("click", () => schedule("-", clearBtn));
+
   const why = el("p", "fc-why");
   why.hidden = true;
   const help = el("p", "fc-help",
@@ -241,12 +294,13 @@ function buildCard(jobId) {
    * ของที่ต้องเลื่อนไปหา คือของที่ไม่มีใครเห็น
    */
   root.append(head, caption, content, meta, times, alert, track, prog, step, idle,
-    feed, queueBox, bar, why, help);
+    feed, queueBox, timeRow, bar, why, help);
 
   const entry = {
     root, badge, title, source, caption, meta, times, alert,
     fill, prog, step, idle, feed, queueHead, queue, content,
     contentBody, contentHead, buttons, bar, why, job: null,
+    timeRow, timeBox, clearBtn, schedNote,
     feedKey: "", queueKey: "", contentKey: "",
   };
 
@@ -399,6 +453,18 @@ function paintCard(entry, job) {
       : `⏰ นัดไว้ ${clockText(job.run_at)} · ถึงเวลาแล้ว`);
   } else if (job.status === "ready") {
     lines.push("⏰ ไม่ได้ตั้งเวลา — กด \"โพสต์เลย\" ถึงจะเริ่ม");
+  }
+  // แถวตั้งเวลา — โชว์เฉพาะใบที่ยังโพสต์ได้ ใบที่จบ/ยกเลิกแล้วตั้งไปก็ไม่มีผล
+  if (entry.timeRow) {
+    const canSchedule = ["ready", "stopped", "failed"].includes(job.status);
+    show(entry.timeRow, canSchedule);
+    if (canSchedule) {
+      // ไม่ทับค่าที่ผู้ใช้กำลังพิมพ์อยู่ — วาดใหม่ทุกวินาที เดี๋ยวพิมพ์ไม่ทัน
+      if (document.activeElement !== entry.timeBox) {
+        entry.timeBox.value = job.run_at ? String(job.run_at).slice(0, 16) : "";
+      }
+      show(entry.clearBtn, Boolean(job.run_at));
+    }
   }
   if (job.started_at) {
     const ended = when(job.finished_at);

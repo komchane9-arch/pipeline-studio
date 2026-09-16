@@ -13068,6 +13068,56 @@ async def fb_reset(job_id: str) -> dict:
     }
 
 
+@app.post("/api/fb/jobs/{job_id}/schedule")
+async def fb_schedule(job_id: str, request: Request) -> dict:
+    """ตั้ง/ยกเลิกเวลาโพสต์ของใบงานจากหน้าเว็บ
+
+    **เจ้าของสั่ง 16 ก.ย. 2569** — *"เพิ่มฟังก์ชั่นตั้งเวลาโพสต์ในใบงานที่หน้าเว็บ
+    ให้ด้วย · ทั้ง 2 เครื่องเลยนะ"*
+
+    เดิมตั้งเวลาได้เฉพาะทาง Telegram (`/schedule`) ซึ่งต้องพิมพ์รหัสใบงานเอง
+    บนหน้าเว็บเห็นใบงานอยู่ตรงหน้าแล้ว กดตั้งตรงนั้นเลยตรงกว่า
+
+    รับได้ทั้งแบบที่ช่องเลือกเวลาของเบราว์เซอร์ส่งมา (`2026-09-16T20:30`)
+    และแบบที่พิมพ์เองเหมือนใน Telegram (`20:30` · `9/8 20:30` · `+30`)
+    ส่งค่าว่างหรือ `-` = ยกเลิกเวลาที่ตั้งไว้
+
+    **ใช้ได้ทั้งสองโปรไฟล์โดยอัตโนมัติ** เพราะหาบัญชีจากตัวใบงานเอง
+    ไม่ได้ผูกกับบัญชีที่หน้าเว็บกำลังเปิดดูอยู่ — กดจากแท็บไหนก็ตั้งถูกใบเสมอ
+    """
+    payload = await request.json() if await request.body() else {}
+    raw = str((payload or {}).get("when") or "").strip()
+    with _job_ctx(job_id):
+        job = fb_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+        if raw in {"", "-"}:
+            fb_jobs.update(job_id, run_at="")
+            append_log("publish", f"[{job_id}] ยกเลิกเวลาที่ตั้งไว้จากหน้าเว็บ")
+            return {"ok": True, "run_at": "",
+                    "message": "ยกเลิกเวลาแล้ว — ต้องกดโพสต์เอง"}
+        # ช่องเลือกเวลาของเบราว์เซอร์ส่งมาเป็น 2026-09-16T20:30
+        when = None
+        try:
+            when = datetime.fromisoformat(raw)
+        except ValueError:
+            when = _fb_parse_when(raw)
+        if when is None:
+            raise HTTPException(
+                status_code=400,
+                detail="อ่านเวลาไม่ออก — ใช้ 20:30 · 9/8 20:30 · +30 "
+                       "หรือเลือกจากช่องเวลาก็ได้")
+        if when <= datetime.now():
+            raise HTTPException(
+                status_code=400,
+                detail=f"เวลา {when:%d/%m %H:%M} ผ่านไปแล้ว — เลือกเวลาข้างหน้า")
+        fb_jobs.update(job_id, run_at=when.isoformat(timespec="seconds"))
+        append_log("publish",
+                   f"[{job_id}] ตั้งเวลาโพสต์จากหน้าเว็บเป็น {when:%d/%m %H:%M}")
+        return {"ok": True, "run_at": when.isoformat(timespec="seconds"),
+                "message": f"ตั้งเวลาโพสต์ {when:%d/%m %H:%M} แล้ว"}
+
+
 @app.post("/api/fb/jobs/{job_id}/cancel")
 async def fb_cancel(job_id: str) -> dict:
     # ใช้ตัวเดียวกับปุ่มยกเลิกใน Telegram — ตั้งสถานะ **และ** สั่งหยุดตัวรัน

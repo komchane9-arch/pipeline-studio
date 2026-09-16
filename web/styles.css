@@ -19,6 +19,20 @@
 
 * { box-sizing: border-box; }
 
+/* สั่งซ่อนแล้วต้องซ่อนจริง — กฎ [hidden] ของเบราว์เซอร์อ่อนที่สุดในระบบ
+   คลาสไหนที่ตั้ง display เอาไว้จะทับมันทันที แล้วของที่สั่งซ่อนจะโผล่ค้างอยู่
+   โดยฝั่งโค้ดเชื่อว่าซ่อนไปแล้ว — "สั่งแล้ว" ไม่เท่ากับ "เกิดขึ้นจริง" (ข้อ 2.3.1)
+
+   บั๊กนี้เกิดซ้ำ 3 ครั้งในไฟล์เดียวกัน และสองครั้งแรกแก้เฉพาะจุด มันจึงกลับมาใหม่
+   ทุกครั้งที่มีคนเขียนคลาสใหม่ที่ตั้ง display — 16 ก.ย. 2569 แก้ที่รากทีเดียว
+
+   วัดตอนแก้: ทั้งหน้ามีของที่สั่งซ่อน 39 จุด และ 3 จุดซ่อนไม่ติด
+     #shopeeResult      กล่องผลดึงสินค้าโผล่ค้างทั้งที่ยังไม่ได้ดึงอะไร
+     #approvalActions   ปุ่มอนุมัติกดได้ทั้งที่ยังไม่มีงานให้อนุมัติ
+     .fc-sched          ตั้งเวลาโพสต์บนใบที่ยกเลิกไปแล้วได้ แล้วขึ้นว่าตั้งสำเร็จ
+*/
+[hidden] { display: none !important; }
+
 :root {
   /* --- พื้นและผิว (iOS systemGroupedBackground) --- */
   --bg: #f2f2f7;            /* พื้นหลังรวมแบบ grouped ของ iOS */
@@ -3397,6 +3411,21 @@ body.typing-through {
 }
 
 .fc-run { border-color: var(--ok); color: var(--ok-ink); font-weight: 700; }
+
+/* แถวตั้งเวลาโพสต์บนการ์ดงาน (เจ้าของสั่ง 16 ก.ย. 2569)
+   วางไว้เหนือแถวปุ่ม เพราะ "จะโพสต์เมื่อไร" ต้องตัดสินใจก่อน "กดโพสต์" */
+.fc-sched {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  margin: 7px 0 0;
+}
+.fc-sched-input {
+  font-size: 11.5px; padding: 3px 7px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+.fc-sched-set { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.fc-sched-clear { color: var(--ink-3); }
+.fc-sched-note { font-size: 10.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.fc-sched-note.is-bad { color: var(--bad-ink); font-weight: 700; }
 .fc-reset { border-color: var(--none); color: var(--ink-3); }
 .fc-help { margin: 6px 0 0; font-size: 10.5px; color: var(--ink-3); line-height: 1.5; }
 

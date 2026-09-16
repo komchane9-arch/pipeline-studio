@@ -11714,6 +11714,27 @@ def _fb_run_job(job_id: str, queued: bool = False, resume: bool = False) -> str:
             "ทุกกลุ่มในใบงานนี้โพสต์สำเร็จแล้ว — ไม่มีงานเหลือให้ Resume"
             if resume else "ยังไม่ได้เลือกกลุ่มสักกลุ่ม"
         )
+    # ---- ด่านสุดท้ายก่อนแตะจอ: บัญชีบนหน้าจอต้องตรงกับที่ทะเบียนผูกไว้ ----
+    #
+    # **เจ้าของต่อสายโพสต์บัญชีที่สอง 16 ก.ย. 2569** ก่อนหน้านี้ระบบกันเรื่อง
+    # "โพสต์ผิดบัญชี" ไว้แน่นหนาทุกชั้น **ยกเว้นชั้นล่างสุดที่เป็นหน้าจอจริง**
+    # ซึ่งไม่เคยถามสักครั้งว่าแอปเปิดอยู่ที่บัญชีไหน
+    #
+    # วัดจริงบนเครื่อง 7a95129e: ล็อกอินค้างไว้ **6 บัญชี** ใครสลับทิ้งไว้
+    # งานถัดไปจะขึ้นในนามคนนั้นทันที และถอนคืนไม่ได้
+    #
+    # อ่านไม่ออกก็ไม่ให้ผ่านเหมือนกัน — "ยังไม่ได้ตรวจ" ห้ามหน้าตาเหมือน
+    # "ตรวจแล้วผ่าน" (ข้อ 2.3.1 ข้อ 4)
+    import fb_account_guard                                     # noqa: PLC0415
+    try:
+        seen = fb_account_guard.require(
+            fb_account_guard.ADB, serial, device_book.account(serial))
+    except (fb_account_guard.AccountMismatch,
+            fb_account_guard.AccountUnreadable) as error:
+        append_log("publish", f"[{job_id}] ด่านบัญชีไม่ผ่าน — {error}")
+        return str(error)
+    append_log("publish", f"[{job_id}] ด่านบัญชีผ่าน — จอเปิดอยู่ที่ {seen}")
+
     # เตือนเรื่องโควตาคอมเมนต์ **ก่อนออกตัว** ไม่ใช่ไปตันทีละกลุ่มกลางทาง
     _fb_warn_comment_quota(job, groups, serial)
     if len(groups) > fb_auto_post.MAX_GROUPS_PER_POST:

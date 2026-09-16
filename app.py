@@ -8511,7 +8511,13 @@ def _telegram_text(chat_id: str, text: str) -> None:
         try:
             entry = fb_groups.add(text)
         except fb_auto_post.AutoPostError as error:
-            append_log("publish", f"เพิ่มกลุ่มจากลิงก์ไม่สำเร็จ: {error}")
+            # **ต้องจดลิงก์ที่พังไว้ด้วย** ไม่งั้นไล่สาเหตุต่อไม่ได้เลย
+            # เจอจริง 16 ก.ย. 2569: เจ้าของเพิ่มกลุ่มไม่ได้ 5 ครั้ง แต่บันทึก
+            # จดแค่ข้อความว่าไม่สำเร็จ ไม่ได้จดว่าลิงก์ไหน — พอมาไล่ทีหลัง
+            # จึงทดสอบซ้ำไม่ได้ ต้องไปขอลิงก์จากเจ้าของใหม่
+            append_log("publish",
+                       f"เพิ่มกลุ่มจากลิงก์ไม่สำเร็จ: {error} · ลิงก์ที่วางมา: "
+                       f"{text.strip()[:120]}")
             _fb_say(chat_id, f"เพิ่มกลุ่มไม่ได้: {error}")
             return
         word = "มีอยู่แล้ว — อัปเดตให้" if entry.get("duplicated") else "เพิ่มแล้ว"

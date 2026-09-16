@@ -9041,7 +9041,20 @@ def _routine_fire(record: dict, forced: bool = False) -> str:
 
 
 def _routine_pump() -> None:
-    """ถึงเวลาไหนแล้วก็ลงให้ — เกาะไปกับตัวตั้งเวลาที่วนอยู่แล้ว"""
+    """ถึงเวลาไหนแล้วก็ลงให้ — เกาะไปกับตัวตั้งเวลาที่วนอยู่แล้ว
+
+    **ตารางโพสต์ประจำวันเป็นของรายบัญชี ต้องวนให้ครบ** (16 ก.ย. 2569)
+    ของเดิมเรียกเปล่าๆ พอมีสองบัญชีก็ตอบไม่ได้ว่าจะอ่านตารางของใคร
+    แล้วทำให้ตัวตั้งเวลาทั้งตัวสะดุดทุก 20 วินาที — ไม่ใช่แค่ตารางที่ไม่ทำงาน
+    แต่ **งานที่ตั้งเวลาไว้ก็ไม่ถูกยิงไปด้วย** เพราะอยู่ในลูปเดียวกัน
+    """
+    for _account in _bound_post_accounts():
+        with fb_auto_post.use_account(_account):
+            _routine_pump_one()
+
+
+def _routine_pump_one() -> None:
+    """ตารางของบัญชีเดียว — ต้องเรียกใน use_account แล้วเท่านั้น"""
     for record in fb_routine.missed():
         # ตกรอบไปไกลเกิน CATCHUP_MINUTES — ข้ามแล้วบอกให้รู้ ไม่ใช่เงียบ
         fb_routine.mark_skipped(record["id"])
@@ -10354,13 +10367,17 @@ def _housekeeping() -> None:
     #
     # เรื่องเดิมที่พลาด: 16 ส.ค. คอมเมนต์ล้ม 32 ครั้งติดกัน 5 ชั่วโมงโดยไม่มี
     # ข้อความเข้าแชทสักบรรทัด ผู้ใช้รู้ตัวก็ต่อเมื่อมานั่งไล่ดูงานเองทีหลัง
-    try:
-        alert = fb_comment_guard.take_alert()
-        if alert:
-            _fb_say(_fb_telegram()[1], alert)
-            append_log("publish", "แจ้งเตือน: พักคอมเมนต์ทั้งระบบ")
-    except Exception as error:
-        append_log("publish", f"แจ้งเตือนพักคอมเมนต์ไม่สำเร็จ: {error}")
+    # ด่านกันคอมเมนต์ถี่แยกรายบัญชี — ต้องถามทีละบัญชี ไม่ใช่ถามรวม
+    for _account in _bound_post_accounts():
+        try:
+            with fb_auto_post.use_account(_account):
+                alert = fb_comment_guard.take_alert()
+            if alert:
+                _fb_say(_account_channel(_account)[1] or _fb_telegram()[1], alert)
+                append_log("publish", f"[{_account}] แจ้งเตือน: พักคอมเมนต์")
+        except Exception as error:
+            append_log("publish",
+                       f"[{_account}] แจ้งเตือนพักคอมเมนต์ไม่สำเร็จ: {error}")
 
     try:
         made = fb_backup.run_daily()
@@ -10372,6 +10389,15 @@ def _housekeeping() -> None:
     except Exception as error:
         append_log("publish", f"สำรองข้อมูลไม่สำเร็จ: {error}")
 
+    # ไล่โพสต์ที่ยังไม่ขึ้น — ใบงานและรายการรออนุมัติเป็นของรายบัญชี
+    # ต้องวนให้ครบ ไม่งั้นทั้งก้อนล้มแล้วไม่มีบัญชีไหนถูกไล่เลย
+    for _account in _bound_post_accounts():
+        with fb_auto_post.use_account(_account):
+            _pending_pump_one()
+
+
+def _pending_pump_one() -> None:
+    """ไล่โพสต์ที่ยังไม่ขึ้นของบัญชีเดียว — ต้องเรียกใน use_account แล้วเท่านั้น"""
     try:
         jobs = fb_jobs.listing()
         fb_pending.cleanup(jobs)
@@ -10390,6 +10416,7 @@ def _housekeeping() -> None:
         append_log("publish", f"ไล่โพสต์ที่ยังไม่ขึ้นเอง — {note[:80]}")
     except Exception as error:
         append_log("publish", f"ไล่โพสต์ที่ยังไม่ขึ้นไม่สำเร็จ: {error}")
+    # (ตัวเรียกห่อ use_account ให้แล้ว — ดูจุดที่เรียก)
 
 
 PHONE_CLEAN_OWNER = "ล้างเครื่องประจำวัน"
@@ -10444,7 +10471,14 @@ def _screen_pump(now: datetime | None = None) -> str:
         if serial not in ready:
             continue
         try:
-            note = _screen_pump_one(serial, now)
+            # **ใช้บัญชีของเครื่องนั้นเอง** ทะเบียนผูกไว้อยู่แล้ว หนึ่งเครื่อง
+            # หนึ่งไอดี — ตัวดูแลจอต้องอ่านใบงานของบัญชีนั้น ไม่ใช่ถามรวม
+            _own = device_book.account(serial)
+            if _own:
+                with fb_auto_post.use_account(_own):
+                    note = _screen_pump_one(serial, now)
+            else:
+                note = _screen_pump_one(serial, now)
         except Exception as error:    # เครื่องเดียวพังต้องไม่ลามไปหยุดเครื่องอื่น
             append_log("publish", f"ดูแลจอ {device_book.label(serial)} ไม่สำเร็จ: {error}")
             continue
@@ -10656,6 +10690,23 @@ def _fb_scheduler() -> None:
                 _screen_pump()          # ดับจอตอนว่าง / ปลุกก่อนงานถึง
             except Exception as error:
                 append_log("publish", f"ดูแลจอมือถือไม่สำเร็จ: {error}")
+            # **วนทุกบัญชีในสายโพสต์** (16 ก.ย. 2569)
+            #
+            # ของเดิมเรียก `fb_jobs.listing()` เปล่าๆ ซึ่งแปลว่า "บัญชีที่ควรใช้
+            # ตอนนี้" พอมีสองบัญชี ระบบตอบว่าเลือกไม่ได้ (ถูกแล้ว ห้ามเดา)
+            # แล้ว **ตัวตั้งเวลาสะดุดทุก 20 วินาที** เขียน log รกและงานที่ตั้งเวลา
+            # ไว้จะไม่มีวันถูกยิงเลยสักใบ ทั้งที่ไม่มีอะไรพังจริง
+            for _account in _bound_post_accounts():
+                with fb_auto_post.use_account(_account):
+                    _fb_due_jobs(_account)
+        except Exception as error:      # ตัวเฝ้าต้องไม่ตายเพราะงานเดียวพัง
+            append_log("publish", f"ตัวตั้งเวลาสะดุด: {error}")
+
+
+def _fb_due_jobs(account: str) -> None:
+    """ยิงงานที่ถึงเวลาแล้วของบัญชีเดียว — ต้องเรียกใน use_account แล้วเท่านั้น"""
+    if True:
+        if True:
             for job in fb_jobs.listing():
                 if job["status"] != fb_auto_post.STATUS_READY:
                     continue
@@ -10696,8 +10747,6 @@ def _fb_scheduler() -> None:
                 if note:
                     append_log("publish", f"[{job['id']}] เริ่มไม่ได้: {note}")
                 _fb_say(job.get("chat_id", ""), note or f"⏰ ถึงเวลาโพสต์งาน {job['id']}")
-        except Exception as error:      # ตัวเฝ้าต้องไม่ตายเพราะงานเดียวพัง
-            append_log("publish", f"ตัวตั้งเวลาสะดุด: {error}")
 
 
 def _fb_when_text(run_at: str) -> str:

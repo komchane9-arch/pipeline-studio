@@ -811,10 +811,78 @@ function renderFbGroups() {
   );
 }
 
+/* ---- บัญชีที่หน้านี้กำลังดู --------------------------------------------
+ *
+ * **เจ้าของสั่ง 16 ก.ย. 2569** ให้ต่อสายโพสต์บัญชีที่สอง (Preaw Buchakorn
+ * บนเครื่อง Xiaomi 11T pro) พอผูกเสร็จ หน้ากลุ่มกับหน้าใบงาน **พัง 500 ทันที**
+ * เพราะเซิร์ฟเวอร์ไม่ยอมเดาว่าจะใช้บัญชีไหน (ถูกแล้ว — โพสต์ผิดบัญชีกู้ไม่ได้)
+ * แต่หน้าเว็บไม่มีที่ให้บอก
+ *
+ * ทุกคำขอของสายโพสต์จึงต้องแนบชื่อบัญชีไปด้วยตั้งแต่ตอนนี้
+ */
+let postAccount = "";
+
+/** ต่อท้ายชื่อบัญชีให้ที่อยู่ — ไม่รู้บัญชีก็ส่งเปล่า ให้เซิร์ฟเวอร์ตัดสินเอง */
+function withAccount(path) {
+  if (!postAccount) return path;
+  return path + (path.includes("?") ? "&" : "?")
+    + "account=" + encodeURIComponent(postAccount);
+}
+
+export async function loadPostAccounts() {
+  const row = $("#fbAccountRow");
+  const box = $("#fbAccount");
+  if (!row || !box) return;
+  let data;
+  try {
+    data = await api("/api/fb/post-accounts");
+  } catch {
+    return;                       // อ่านไม่ได้ก็ไม่ต้องโชว์ช่องเลือก
+  }
+  const list = data.accounts || [];
+  postAccount = data.current || (list.length === 1 ? list[0].account : "");
+  // มีบัญชีเดียวไม่ต้องโชว์ให้รก — ช่องเลือกมีไว้ตอนมีหลายบัญชีเท่านั้น
+  row.hidden = list.length < 2;
+  const option = (value, text, picked) => {
+    const node = document.createElement("option");
+    node.value = value;
+    node.textContent = text;
+    node.selected = picked;
+    return node;
+  };
+  box.replaceChildren(
+    ...(postAccount ? [] : [option("", "— เลือกบัญชี —", true)]),
+    ...list.map((a) => option(a.account, `${a.account} · ${a.device}`,
+                              a.account === postAccount)),
+  );
+  const note = $("#fbAccountNote");
+  if (note) {
+    note.textContent = postAccount
+      ? ""
+      : "ยังไม่ได้เลือก — กลุ่มและใบงานจะยังไม่ขึ้นจนกว่าจะเลือกบัญชี";
+  }
+  if (!box.dataset.wired) {
+    box.dataset.wired = "1";
+    box.addEventListener("change", async () => {
+      postAccount = box.value;
+      try {
+        await api("/api/fb/post-accounts", {
+          method: "POST",
+          body: JSON.stringify({ account: postAccount }),
+        });
+      } catch { /* จำไม่ได้ก็ยังใช้ค่าในหน้านี้ต่อได้ */ }
+      await loadFbGroups();
+      await loadFbJobs();
+    });
+  }
+}
+
 export async function loadFbGroups() {
   try {
     await loadGfpDevices();
-    const payload = await api("/api/fb/groups");
+    await loadPostAccounts();
+    if (!postAccount && !$("#fbAccountRow")?.hidden) return;
+    const payload = await api(withAccount("/api/fb/groups"));
     fbGroups = payload.groups;
     $("#fbGapMin").value = payload.gap_min;
     $("#fbGapMax").value = payload.gap_max;
@@ -1021,7 +1089,7 @@ function renderFbJobs(jobs, running) {
 
 export async function loadFbJobs() {
   try {
-    const payload = await api("/api/fb/jobs");
+    const payload = await api(withAccount("/api/fb/jobs"));
     renderFbJobs(payload.jobs, payload.running);
     // กำลังโพสต์อยู่ค่อยถามถี่ — ไม่งั้นปล่อยให้เงียบ ไม่ยิงทิ้งทุก 3 วินาทีทั้งวัน
     // (เปิดหน้าเว็บตอนงานรันค้างอยู่ก็ต้องเริ่มถามเองด้วย ไม่ใช่เฉพาะตอนกดปุ่ม)
@@ -1137,7 +1205,7 @@ $("#fbGroupAdd").addEventListener("click", async () => {
     return;
   }
   try {
-    const payload = await api("/api/fb/groups", {
+    const payload = await api(withAccount("/api/fb/groups"), {
       method: "POST",
       body: JSON.stringify({ link, name: $("#fbGroupName").value }),
     });

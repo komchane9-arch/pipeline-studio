@@ -6906,9 +6906,13 @@ def _engagement_report(done: dict) -> None:
 async def _start_watcher() -> None:
     _fb_seed_groups()
     _fb_reclaim_interrupted()
-    moved = fb_groups.split_into_sets()
-    if moved:
-        append_log("publish", f"แบ่งกลุ่มเข้าชุดอัตโนมัติ {moved} กลุ่ม (ชุดละไม่เกิน 6)")
+    # แบ่งกลุ่มเข้าชุด — **ของรายบัญชี ต้องวนให้ครบทุกบัญชีเหมือนกัน**
+    for _account in _bound_post_accounts():
+        with fb_auto_post.use_account(_account):
+            moved = fb_groups.split_into_sets()
+        if moved:
+            append_log("publish", f"[{_account}] แบ่งกลุ่มเข้าชุดอัตโนมัติ "
+                                  f"{moved} กลุ่ม (ชุดละไม่เกิน 6)")
     approval_watcher.start()
     # ห้าม clip_watcher.start() ที่นี่ — บอทคลิปอ่าน getUpdates อยู่ที่ clip_app.py
     # โทเคนเดียวมีตัวอ่านได้ตัวเดียว อ่านซ้อนกันจะได้ 409 Conflict แล้วข้อความหาย
@@ -7599,6 +7603,23 @@ def _fb_reclaim_interrupted() -> None:
     เธรดตายไปพร้อมโปรเซส (เจอจริง 12 ส.ค. งาน p545241529: รีสตาร์ตตอน 22:50:59
     ระหว่างโพสต์กลุ่มที่ 5 · สถานะค้าง running · finished_at = None)
     """
+    # **ต้องวนทุกบัญชีในสายโพสต์** (16 ก.ย. 2569)
+    #
+    # ของเดิมเรียก `fb_jobs.listing()` เปล่าๆ ซึ่งแปลว่า "บัญชีที่ควรใช้ตอนนี้"
+    # พอเจ้าของต่อสายโพสต์บัญชีที่สอง ระบบตอบว่าเลือกไม่ได้ (ถูกแล้ว ห้ามเดา)
+    # **แล้วเซิร์ฟเวอร์เปิดไม่ขึ้นทั้งตัว** เพราะตัวนี้ทำงานตอนสตาร์ต
+    #
+    # งานค้างเป็นของรายบัญชี จึงต้องเก็บกวาดให้ครบทุกบัญชี ไม่ใช่เลือกมาบัญชีเดียว
+    for _account in (_bound_post_accounts() or {str(load_config().get(
+            "telegram_main_account") or ""): ""}):
+        if not _account:
+            continue
+        with fb_auto_post.use_account(_account):
+            _fb_reclaim_one(_account)
+
+
+def _fb_reclaim_one(account: str) -> None:
+    """เก็บกวาดงานค้างของบัญชีเดียว — ต้องเรียกใน use_account แล้วเท่านั้น"""
     stuck = [
         j for j in fb_jobs.listing()
         if j.get("status") == fb_auto_post.STATUS_RUNNING
@@ -7612,11 +7633,12 @@ def _fb_reclaim_interrupted() -> None:
         )
         append_log(
             "publish",
-            f"[{job['id']}] ถูกตัดกลางคันตอนเซิร์ฟเวอร์ปิด — "
+            f"[{account}] [{job['id']}] ถูกตัดกลางคันตอนเซิร์ฟเวอร์ปิด — "
             f"โพสต์ไปแล้ว {done}/{total} กลุ่ม",
         )
     if stuck:
-        append_log("publish", f"เก็บกวาดงานค้างจากรอบก่อน {len(stuck)} งาน")
+        append_log("publish",
+                   f"[{account}] เก็บกวาดงานค้างจากรอบก่อน {len(stuck)} งาน")
 
 
 def _fb_seed_groups() -> None:
@@ -11896,16 +11918,109 @@ approval_watcher.on_callback = _as_bot(_telegram_callback)
 # ถ้าสองโปรเซสอ่านพร้อมกันจะได้ 409 Conflict แล้วข้อความหายสลับไปมา
 
 
+def _bound_post_accounts() -> dict[str, str]:
+    """บัญชี → serial ของเครื่องสายโพสต์ที่เปิดใช้ (เรียงตามชื่อบัญชี)"""
+    post = set(device_book.enabled_serials("post"))
+    out: dict[str, str] = {}
+    for name, serials in device_book.accounts().items():
+        hit = [x for x in serials if x in post]
+        if name and hit:
+            out[name] = hit[0]
+    return dict(sorted(out.items()))
+
+
+def _web_account(account: str = "", serial: str = "") -> str:
+    """บัญชีที่คำขอนี้หมายถึง — **ห้ามเดา** (CLAUDE.md ข้อ 8)
+
+    **ทำไมต้องมี (16 ก.ย. 2569)** เจ้าของสั่งต่อสายโพสต์บัญชีที่สอง
+    (Preaw Buchakorn บนเครื่อง Xiaomi 11T pro) พอผูกเสร็จ **หน้ากลุ่มกับ
+    หน้าใบงานพัง 500 ทันที** เพราะทั้งสองที่อยู่เรียกแฟ้มรายบัญชีโดยไม่บอกว่า
+    บัญชีไหน ระบบจึงโยน AccountMissing ตามที่ออกแบบไว้ (ถูกแล้ว — โพสต์ลง
+    บัญชีผิดกู้คืนไม่ได้) แต่หน้าเว็บไม่มีที่ให้บอก
+
+    ลำดับการตัดสิน
+      1. บอกมาตรงๆ ใน `account` หรือ `serial`
+      2. บัญชีที่หน้าเว็บเลือกค้างไว้ (config `web_post_account`) ถ้ายังใช้ได้
+      3. มีบัญชีเดียวในสายโพสต์ → ตัวนั้น
+      4. ตอบไม่ได้ → 409 พร้อม **รายชื่อบัญชีทั้งหมด** ให้หน้าเว็บเอาไปให้คนเลือก
+    """
+    bound = _bound_post_accounts()
+    clean = str(account or "").strip()
+    if clean:
+        if clean not in bound:
+            raise HTTPException(
+                status_code=400,
+                detail=f"บัญชี '{clean}' ไม่ได้ผูกกับมือถือสายโพสต์เครื่องไหนเลย")
+        return clean
+    if serial:
+        found = device_book.account(str(serial).strip())
+        if found:
+            return found
+    saved = str(load_config().get("web_post_account") or "").strip()
+    if saved and saved in bound:
+        return saved
+    if len(bound) == 1:
+        return next(iter(bound))
+    raise HTTPException(
+        status_code=409,
+        detail={"need_account": True, "accounts": list(bound),
+                "message": "มีหลายบัญชีในสายโพสต์ — เลือกก่อนว่าจะดูบัญชีไหน"})
+
+
+def _in_account(account: str, fn, *args, **kwargs):
+    """เรียกฟังก์ชันสายโพสต์ในนามบัญชีนั้น — ใช้ตอนโยนเข้าเธรดแยก
+
+    `use_account` จำค่าไว้แบบ **แยกตามเธรด** ถ้าเรียกผ่าน `asyncio.to_thread`
+    โดยครอบไว้ข้างนอก เธรดลูกจะไม่เห็นค่าเลย แล้วตกไปที่ "เดาบัญชี" อีก
+    """
+    with fb_auto_post.use_account(account):
+        return fn(*args, **kwargs)
+
+
+@app.get("/api/fb/post-accounts")
+async def fb_post_accounts() -> dict:
+    """บัญชีสายโพสต์ทั้งหมด + ตัวที่หน้าเว็บเลือกค้างไว้"""
+    bound = _bound_post_accounts()
+    saved = str(load_config().get("web_post_account") or "").strip()
+    if saved not in bound:
+        saved = next(iter(bound)) if len(bound) == 1 else ""
+    return {"ok": True,
+            "accounts": [{"account": name, "serial": serial,
+                          "device": device_book.label(serial)}
+                         for name, serial in bound.items()],
+            "current": saved}
+
+
+@app.post("/api/fb/post-accounts")
+async def fb_set_post_account(request: Request) -> dict:
+    """จำไว้ว่าหน้าเว็บกำลังดูบัญชีไหน — ส่งค่าว่าง = ล้างที่จำไว้"""
+    payload = await request.json() if await request.body() else {}
+    wanted = str((payload or {}).get("account") or "").strip()
+    bound = _bound_post_accounts()
+    if wanted and wanted not in bound:
+        raise HTTPException(status_code=400,
+                            detail=f"ไม่รู้จักบัญชี '{wanted}' ในสายโพสต์")
+    config = load_config()
+    config["web_post_account"] = wanted
+    save_config(config)
+    append_log("publish", f"หน้าเว็บสลับไปดูบัญชี {wanted or '(ล้างค่า)'}")
+    return {"ok": True, "current": wanted}
+
+
 @app.get("/api/fb/groups")
-async def fb_list_groups() -> dict:
+async def fb_list_groups(account: str = "", serial: str = "") -> dict:
     settings = _fb_settings()
     # บอทหลักไม่มีโทเคน = งานจาก Telegram จะไม่เข้าเลย และจะ "เงียบ" แบบไม่มีอะไรฟ้อง
     # (เจอจริง: ผู้ใช้ส่งอัลบั้ม + /schedule ไปแล้วไม่มีอะไรตอบ เพราะไฟล์โทเคนหายไป)
     bot_ready = bool(_fb_telegram()[0] and _fb_telegram()[1])
+    who = _web_account(account, serial)
+    with fb_auto_post.use_account(who):
+        groups = fb_groups.listing()
     return {
         "ok": True,
         "bot_ready": bot_ready,
-        "groups": fb_groups.listing(),
+        "account": who,
+        "groups": groups,
         "gap_min": settings.get("gap_min", 15),
         "gap_max": settings.get("gap_max", 20),
         "auto_start": bool(settings.get("auto_start")),
@@ -11964,7 +12079,7 @@ async def fb_group_decide(request: Request) -> dict:
 
 
 @app.get("/api/fb/group-health")
-async def fb_group_health_view() -> dict:
+async def fb_group_health_view(account: str = "", serial: str = "") -> dict:
     """สถานะรายกลุ่ม — กลุ่มไหนคึกคัก กลุ่มไหนตายแล้ว (เจ้าของสั่ง 31 ส.ค. 2569)
 
     **ส่งทะเบียนกลุ่มเข้าไปให้ ไม่ให้โมดูลไปเดาพาธเอง** ทะเบียนเก็บแยกราย
@@ -11977,7 +12092,8 @@ async def fb_group_health_view() -> dict:
     try:
         import fb_group_health                              # noqa: PLC0415
 
-        return fb_group_health.report(fb_groups.listing())
+        with fb_auto_post.use_account(_web_account(account, serial)):
+            return fb_group_health.report(fb_groups.listing())
     except Exception as error:                              # noqa: BLE001
         append_log("publish", f"อ่านสถานะกลุ่มไม่สำเร็จ: {error}")
         raise HTTPException(
@@ -11989,37 +12105,49 @@ async def fb_group_health_view() -> dict:
 @app.post("/api/fb/groups")
 async def fb_add_group(request: Request) -> dict:
     payload = await request.json()
+    who = _web_account(str(payload.get("account", "")), str(payload.get("serial", "")))
     try:
         # ลิงก์ย่อต้องยิงเน็ตไปถามปลายทาง — ทำใน thread ห้ามบล็อก event loop
         entry = await asyncio.to_thread(
+            _in_account, who,
             fb_groups.add, str(payload.get("link", "")), str(payload.get("name", ""))
         )
     except fb_auto_post.AutoPostError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    append_log("publish", f"เพิ่มกลุ่ม {entry['group_id']} ({entry['name']})")
-    return {"ok": True, "group": entry, "groups": fb_groups.listing()}
+    append_log("publish", f"[{who}] เพิ่มกลุ่ม {entry['group_id']} ({entry['name']})")
+    with fb_auto_post.use_account(who):
+        return {"ok": True, "account": who, "group": entry,
+                "groups": fb_groups.listing()}
 
 
 @app.post("/api/fb/groups/{group_id}")
 async def fb_update_group(group_id: str, request: Request) -> dict:
     payload = await request.json()
+    _who = _web_account(str(payload.get("account", "")), str(payload.get("serial", "")))
     changes: dict = {}
     if "name" in payload:
         changes["name"] = str(payload["name"]).strip()[:60]
     if "enabled" in payload:
         changes["enabled"] = bool(payload["enabled"])
-    entry = fb_groups.update(group_id, **changes)
+    with fb_auto_post.use_account(_who):
+        entry = fb_groups.update(group_id, **changes)
     if entry is None:
         raise HTTPException(status_code=404, detail="ไม่พบกลุ่มนี้")
     return {"ok": True, "group": entry}
 
 
 @app.delete("/api/fb/groups/{group_id}")
-async def fb_delete_group(group_id: str) -> dict:
+async def fb_delete_group(group_id: str, account: str = "",
+                          serial: str = "") -> dict:
+    _who = _web_account(account, serial)
+    _ctx = fb_auto_post.use_account(_who)
+    _ctx.__enter__()
     if not fb_groups.remove(group_id):
         raise HTTPException(status_code=404, detail="ไม่พบกลุ่มนี้")
     append_log("publish", f"ลบกลุ่ม {group_id} ออกจากรายการ")
-    return {"ok": True, "groups": fb_groups.listing()}
+    result = {"ok": True, "account": _who, "groups": fb_groups.listing()}
+    _ctx.__exit__(None, None, None)
+    return result
 
 
 @app.get("/api/claude/inbox")
@@ -12216,7 +12344,8 @@ async def fb_save_settings(request: Request) -> dict:
 
 
 @app.get("/api/fb/jobs/live")
-async def fb_jobs_live(history: int = 0) -> dict:
+async def fb_jobs_live(history: int = 0, account: str = "",
+                       serial: str = "") -> dict:
     """ใบโพสต์ที่ยังไม่จบ พร้อมคิวกลุ่มและเวลา — **เบาพอให้ถามทุกวินาที**
 
     **ทำไมต้องมีเส้นนี้** (เจ้าของสั่ง 11 ก.ย. 2569 ว่า "ปรับให้อัปเดตไวขึ้น")
@@ -12245,6 +12374,16 @@ async def fb_jobs_live(history: int = 0) -> dict:
     `orphan`    ใบงานเขียนว่า running แต่ไม่มีตัวรันถืออยู่ — ตัวรันตายไปแล้ว
     `deferred`  ถึงเวลาที่ตั้งไว้แล้วแต่จอไม่ว่าง ระบบเลื่อนไปลองรอบหน้าเอง
     """
+    _who = _web_account(account, serial)
+    _ctx = fb_auto_post.use_account(_who)
+    _ctx.__enter__()          # ปิดที่ finally ท้ายฟังก์ชัน — ห้ามให้ค้างข้ามคำขอ
+    try:
+        return _fb_jobs_live_body(history, _who)
+    finally:
+        _ctx.__exit__(None, None, None)
+
+
+def _fb_jobs_live_body(history: int, _who: str) -> dict:
     running_on = fb_runner.running()
     running_ids = set(running_on.values())
     where = {job_id: device_book.label(serial)
@@ -12366,6 +12505,7 @@ async def fb_jobs_live(history: int = 0) -> dict:
 
     return {
         "ok": True,
+        "account": _who,
         "running": fb_runner.any_busy(),
         "live_count": len(live),
         "at": datetime.now().strftime("%H:%M:%S"),
@@ -12375,7 +12515,12 @@ async def fb_jobs_live(history: int = 0) -> dict:
 
 
 @app.get("/api/fb/jobs")
-async def fb_list_jobs() -> dict:
+async def fb_list_jobs(account: str = "", serial: str = "") -> dict:
+    with fb_auto_post.use_account(_web_account(account, serial)):
+        return _fb_list_jobs_body()
+
+
+def _fb_list_jobs_body() -> dict:
     all_jobs = fb_jobs.listing()
     jobs = all_jobs[:10]
     running_on = fb_runner.running()

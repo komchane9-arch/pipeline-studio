@@ -700,6 +700,16 @@
             (วางลิงก์กลุ่มในแชทก็เพิ่มกลุ่มได้)
           </p>
 
+          <!-- เลือกบัญชี — มีมากกว่าหนึ่งบัญชีเมื่อไร ทุกอย่างใต้หัวข้อนี้
+               (กลุ่ม · ใบงาน · ค่าตั้ง) ต้องรู้ว่ากำลังดูของบัญชีไหน
+               ไม่งั้นระบบจะตอบว่าเลือกไม่ได้ ซึ่งถูกแล้ว — โพสต์ผิดบัญชีกู้ไม่ได้ -->
+          <div class="inline-row" id="fbAccountRow" hidden>
+            <label>บัญชีที่กำลังดู
+              <select id="fbAccount"></select>
+            </label>
+            <span id="fbAccountNote" class="note"></span>
+          </div>
+
           <ul id="fbGroupList" class="fb-list"></ul>
           <div class="inline-row">
             <input id="fbGroupLink" type="text"

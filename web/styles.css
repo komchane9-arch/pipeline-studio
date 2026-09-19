@@ -3860,3 +3860,27 @@ body.typing-through {
 .up1080-tally { color: var(--ink-2); }
 .up1080-last  { color: var(--ink-3); }
 .up1080-why   { color: var(--bad-ink); font-weight: 700; }
+
+/* แถว "ขยายเลย" บนการ์ดใบงาน — โผล่เฉพาะใบที่ needs_1080 เป็นจริง
+   ใช้เขียวมรกตเดียวกับกอง Auto 1080P บนกระดาน เพื่อให้โยงกันได้ด้วยตา */
+.up1080-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 7px 0; padding: 7px 11px; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #10b981 40%, var(--line));
+  background: color-mix(in srgb, #10b981 8%, var(--panel));
+  font-size: 12px;
+}
+.up1080-row-tag { font-size: 14px; }
+.up1080-row-why { flex: 1 1 200px; overflow-wrap: anywhere; }
+.up1080-go { border-color: #10b981; color: #10b981; font-weight: 700; }
+.up1080-go:disabled { opacity: .5; cursor: progress; }
+.up1080-row.is-done {
+  border-color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, var(--panel));
+}
+/* ขยายไม่สำเร็จ — แดงได้ **แต่ข้อความต้องเป็นของเซิร์ฟเวอร์ล้วน**
+   เพราะเคส "วัดความละเอียดไม่ได้" คือ "ยังไม่รู้" ไม่ใช่ "คลิปเสีย"
+   ถ้าหน้าเว็บเติมคำว่าล้มเหลวทับลงไป จะอ่านผิดทันที */
+.up1080-row.is-bad {
+  border-color: var(--bad); background: color-mix(in srgb, var(--bad) 8%, var(--panel));
+}
+.up1080-row.is-bad .up1080-row-why { color: var(--bad-ink); font-weight: 700; }

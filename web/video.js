@@ -1925,9 +1925,13 @@ function up1080Line(status) {
                              textContent: `⏳ กำลังขยายใบ ${status.busy}` }));
   }
   if (status.done || status.failed) {
-    wrap.append(el("span", { className: "up1080-tally",
-      textContent: `ทำแล้ว ${status.done || 0} ใบ`
-        + (status.failed ? ` · ล้ม ${status.failed} ใบ` : "") }));
+    // **นับตั้งแต่เซิร์ฟเวอร์เริ่ม ไม่ใช่ยอดสะสมตลอดกาล** รีสตาร์ตแล้วกลับเป็น 0
+    // ถ้าเขียนแค่ "ทำแล้ว 3 ใบ" จะถูกอ่านเป็นยอดรวม แล้วงงว่าทำไมเลขลดลงเอง
+    const tally = el("span", { className: "up1080-tally",
+      textContent: `รอบนี้ทำแล้ว ${status.done || 0} ใบ`
+        + (status.failed ? ` · ล้ม ${status.failed} ใบ` : "") });
+    tally.title = "นับตั้งแต่เซิร์ฟเวอร์เริ่มรอบล่าสุด — รีสตาร์ตแล้วกลับไปเริ่มนับใหม่";
+    wrap.append(tally);
   }
   if (status.last) {
     wrap.append(el("small", { className: "up1080-last",
@@ -3953,12 +3957,57 @@ async function showStoryRun(itemId) {
 
 /** ของที่ดูได้เสมอไม่ว่างานอยู่ขั้นไหน — ลิงก์ แชท GPT และคำสั่ง Flow
  *  ใช้ร่วมกันระหว่างหน้ารายละเอียดของคิว กับรายการงานที่เก็บไว้ */
+/** แถว "ขยายเลย" ของใบเดียว — โผล่เฉพาะใบที่ต้องขยายจริง
+ *
+ * **ผูกกับ `needs_1080` ตรงๆ ตัวเดียว ห้ามคิดเองจากความละเอียด**
+ * เพราะ `clip_is_1080` มีสามค่าไม่ใช่สอง: true · false · **null = วัดไม่ได้
+ * หรือยังไม่มีคลิป** (วัดจริงบนเซิร์ฟเวอร์: null 354 ใบ · true 336 · false 1)
+ * ถ้าเขียนเงื่อนไขเป็น `!clip_is_1080` ปุ่มจะโผล่ใส่ 355 ใบ ทั้งที่ขยายได้จริง
+ * ใบเดียว แล้ว 354 ใบที่เหลือกดไปก็ได้ 409 — ปุ่มที่หลอกให้กด
+ *
+ * ตัวขยายฝั่งงานปฏิเสธใบที่วัดไม่ได้**โดยตั้งใจ** เพราะ "วัดไม่ได้" ไม่ใช่
+ * "ต่ำกว่าเกณฑ์" ถ้าเดาว่าต่ำ วันที่เครื่องมือวัดพัง คลิป 1080p ทุกใบจะโดน
+ * ขยายซ้ำทั้งระบบ
+ */
+function up1080Row(run) {
+  if (!run || run.needs_1080 !== true) return [];
+  const row = el("div", { className: "up1080-row" });
+  const why = el("span", { className: "up1080-row-why",
+                           textContent: run.up1080_why || "คลิปยังไม่ถึง 1080p" });
+  const button = textBtn("⤢ ขยายเลย", "ghost up1080-go", async () => {
+    button.disabled = true;
+    // วัดจริงแล้วใช้ 2.8–6.1 วินาที ต้องบอกว่ากำลังทำ ไม่ใช่ปล่อยให้ดูเหมือนค้าง
+    why.textContent = "กำลังขยาย… (ปกติ 2–5 วินาที)";
+    row.classList.remove("is-bad");
+    try {
+      const out = await api(
+        `${CLIP_API}/api/clips/${encodeURIComponent(run.item_id)}/up1080`,
+        { method: "POST" });
+      why.textContent = out.message || "ขยายเสร็จแล้ว";
+      row.classList.add("is-done");
+      loadJobQueue();
+    } catch (error) {
+      // ข้อความไทยมาจากเซิร์ฟเวอร์ครบแล้ว แสดงตรงๆ
+      //
+      // **เคส "วัดความละเอียดของคลิปไม่ได้" ห้ามอ่านแล้วเข้าใจว่าคลิปเสีย**
+      // มันคือ "ยังไม่รู้" ไม่ใช่ "ไม่ผ่าน" จึงไม่ใส่คำว่าล้มเหลวทับลงไป
+      // ปล่อยให้ข้อความของเซิร์ฟเวอร์พูดเอง
+      why.textContent = error.message;
+      row.classList.add("is-bad");
+      button.disabled = false;
+    }
+  });
+  row.append(el("span", { className: "up1080-row-tag", textContent: "🎞️" }), why, button);
+  return [row];
+}
+
 function runExtras(run, skipVideos = false, view = null, job = null) {
   if (!run || !run.item_id) return [];
   const parts = [];
   // คลิปขึ้นก่อนของอื่น — เป็นผลลัพธ์ที่คนอยากดูที่สุด
   // ข้ามเมื่องานอยู่ขั้นรอตรวจคลิป เพราะตรงนั้นแสดงไปแล้วพร้อมปุ่มอนุมัติ
   if (!skipVideos) parts.push(...videoBlock(run, "▶️ คลิปที่เจนไว้", view));
+  parts.push(...up1080Row(run));
   if (run.affiliate_url) {
     parts.push(el("a", {
       href: run.affiliate_url, target: "_blank", rel: "noreferrer",

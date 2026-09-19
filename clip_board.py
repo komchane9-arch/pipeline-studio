@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import clip_check
 import clip_queue
 import publish_order
 
@@ -66,6 +67,24 @@ CHECK_CLIP = "check_clip"
 # พังด้วย HTTP 500** (KeyError: 'clip') และแถวที่ตกมาที่กองนี้จะหายเงียบ
 # ไม่โผล่ในกองไหนเลย — ลบชื่อทิ้งทำให้ของแบบนี้ล้มตั้งแต่ตอนเปิดโปรแกรม
 # ไม่ใช่ล้มตอนเจ้าของเปิดหน้าเว็บ
+# ---- กองทำคลิปให้เป็น 1080p (เจ้าของสั่ง 19 ก.ย. 2569) ------------------
+#
+# *"หลังจากตรวจคลิปเสร็จ จะมีกล่องทำคลิปให้เป็น 1080P เพื่อที่จะให้คลิปได้
+#   1080P ทุกคลิป"* — ต่อจากกองตรวจคลิป ก่อนกองลง Shopee ตามที่วาดมา
+#
+# **ใช้ ffmpeg ธรรมดา ไม่ใช่ AI** — วัดกับคลิปจริงแล้วเทียบ 5 วิธี
+# (เอาคลิป 1080 ของจริงมาย่อเป็น 720 แล้วอัปกลับ เทียบกับตัวจริง)
+#
+#   waifu2x             48.39 คะแนน   20.7 นาที/คลิป
+#   ffmpeg lanczos      46.09 คะแนน    0.8 นาที/คลิป   ← เลือกตัวนี้
+#   Real-ESRGAN x4plus  43.99 คะแนน  493.5 นาที/คลิป
+#   Real-ESRGAN วิดีโอ  40.88 คะแนน   13.5 นาที/คลิป
+#   Real-CUGAN          37.57 คะแนน   21.0 นาที/คลิป
+#
+# ตัว AI สามตัว **ได้คะแนนแย่กว่า ffmpeg ธรรมดา** เพราะมันไม่ได้ขยายภาพเฉยๆ
+# แต่เดารายละเอียดขึ้นมาใหม่ แล้วเดาไม่ตรงของจริง ส่วน waifu2x ชนะแค่ 2.3
+# คะแนนแต่ใช้เวลามากกว่า 26 เท่า — คลิปค้าง 430 ใบจะใช้ 6 วันแทน 5 ชั่วโมงครึ่ง
+UP1080 = "up1080"
 SHOPEE = "shopee_video"
 REELS = "facebook_reels"
 TIKTOK = "tiktok"
@@ -177,6 +196,7 @@ FIX_OTHER = ("other", "❓ อื่นๆ", "ขั้นที่ระบบ�
 BOARD_KEY_FIX_GROUP = {
     LINK: "link", PICTURE: "storyboard", MANUAL: "clip",
     STORY: "storyboard", GEN_CLIP: "clip", CHECK_CLIP: "clip",
+    UP1080: "clip",
     SHOPEE: "post", REELS: "post", TIKTOK: "post", NO_SHOP: "post",
 }
 
@@ -285,6 +305,8 @@ BOARD = (
     (STORY,  "🎨 Storyboard",      "อนุมัติรูปแล้ว รอทำและอนุมัติสตอรีบอร์ด + บทพูด"),
     (GEN_CLIP,   "🎬 เจน Clip",    "ได้สตอรีบอร์ดแล้ว รอเจนคลิปใน Google Flow"),
     (CHECK_CLIP, "🔍 ตรวจ Clip",   "มีคลิปแล้ว รอตรวจและอนุมัติก่อนโพสต์"),
+    (UP1080, "🎞️ Auto 1080P",
+     "คลิปยังไม่ถึง 1080p — รอขยายให้ก่อนถึงจะเอาไปลงได้"),
     (SHOPEE, "🛍️ Shopee Video",    "อนุมัติคลิปแล้ว รอลง Shopee Video"),
     (REELS,  "💙 Facebook Reels",  "ลง Shopee แล้ว รอลง Facebook Reels"),
     (TIKTOK, "🎵 TikTok",          "ลง Facebook แล้ว รอลง TikTok"),
@@ -302,7 +324,7 @@ BOARD = (
 # กองพวกนี้ต้องส่ง target = 0 ไม่งั้นหน้าเว็บจะขึ้นว่า "(55/10)" ซึ่งอ่านว่า
 # "55 จากสต๊อกที่อยากมี 10" — ชวนให้เข้าใจว่ายังขาดอีก ทั้งที่ความจริงคือ
 # ยิ่งเยอะยิ่งแย่ (สายกลางจับได้ตอนเทสหน้าเว็บจริง 13 ก.ย. 2569)
-NO_TARGET: set[str] = {MANUAL, NO_SHOP, DONE_NO_HUMAN}
+NO_TARGET: set[str] = {MANUAL, UP1080, NO_SHOP, DONE_NO_HUMAN}
 
 # ปลายทางของกองที่ 4-6 → ชื่อที่ `publish_order` ใช้
 POST_TARGET = {SHOPEE: "shopee_video", REELS: "facebook_reels", TIKTOK: "tiktok"}
@@ -362,6 +384,68 @@ def manual_fields(run: dict | None) -> dict:
         "manual_ready": bool(boards and video),
         "manual_done_at": str(mark.get("done_at") or ""),
         "manual_at": str(mark.get("at") or ""),
+    }
+
+
+# ความละเอียดที่ต้องถึงก่อนเอาไปลง — ใช้ตัวเดียวกับที่ตัวตรวจคลิปใช้
+# ห้ามเขียนเลข 1080 ซ้ำที่นี่ ไม่งั้นวันหนึ่งสองที่จะไม่ตรงกัน
+UP1080_MIN_SIDE = clip_check.MIN_SHORT_SIDE
+
+
+def clip_short_side(run: dict | None) -> int | None:
+    """ด้านสั้นของคลิปในใบนี้ — **None = วัดไม่ได้ ไม่ใช่ 0**
+
+    นับจากด้านสั้นเสมอ เพราะคลิปเป็นแนวตั้ง 9:16 (720p = 720×1280)
+    ถ้าไปเทียบความสูง คลิป 720p จะผ่านทันทีทั้งที่ยังไม่ถึง — เคยพลาดจริง
+    29 ส.ค. 2569 แล้วตัวตรวจบอกว่าคลิป 720p ผ่านหมด 12 ใบ
+    """
+    run = run or {}
+    known = [h for h in (run.get("video_heights") or []) if h]
+    if known:
+        return min(known)
+    low = run.get("video_min_height")
+    if low:
+        return int(low)
+    check = run.get("video_check")
+    side = (check or {}).get("short_side") if isinstance(check, dict) else None
+    return int(side) if side else None
+
+
+def up1080_done(run: dict | None) -> dict:
+    """ผลการขยายรอบล่าสุดของใบนี้ — ว่าง = ยังไม่เคยขยาย"""
+    mark = (run or {}).get("up1080")
+    return mark if isinstance(mark, dict) else {}
+
+
+def needs_1080(run: dict | None) -> bool:
+    """ใบนี้ต้องเข้ากล่องขยายก่อนไหม
+
+    **ต้องมีคลิปจริงก่อน** ใบที่ยังไม่มีคลิปไม่เกี่ยวกับกล่องนี้เลย
+
+    **วัดด้านสั้นไม่ได้ = ไม่เข้ากล่อง** เพราะ "วัดไม่ได้" ไม่ใช่ "ต่ำกว่า
+    เกณฑ์" (กติกา 2.3.1 ข้อ 4) ถ้าเดาว่าต่ำแล้วลากเข้ากล่อง วันที่ไม่มี
+    ffprobe คลิปทุกใบจะถูกขยายซ้ำทั้งที่เป็น 1080p อยู่แล้ว
+    """
+    if not _existing_video_names(run):
+        return False
+    side = clip_short_side(run)
+    return bool(side) and side < UP1080_MIN_SIDE
+
+
+def up1080_fields(run: dict | None) -> dict:
+    """ข้อมูลกล่อง Auto 1080P ที่หน้าเว็บใช้วาด — คิดจากจุดเดียว"""
+    side = clip_short_side(run)
+    mark = up1080_done(run)
+    return {
+        "clip_short_side": side,
+        "clip_is_1080": None if not side else side >= UP1080_MIN_SIDE,
+        "needs_1080": needs_1080(run),
+        "up1080_at": str(mark.get("at") or ""),
+        "up1080_from": mark.get("from"),
+        "up1080_backup": str(mark.get("backup") or ""),
+        "up1080_why": (
+            "" if not needs_1080(run) else
+            f"คลิปได้ {side}p ยังไม่ถึง {UP1080_MIN_SIDE}p — รอขยายก่อนเอาไปลง"),
     }
 
 
@@ -594,6 +678,20 @@ def bucket_of_run(run: dict) -> str:
     # จะไม่มี storyboard เหลืออยู่ก็ตาม ต้องส่งต่อไปกองโพสต์ตามสถานะเดิมก่อน
     # ตรวจความครบของรูป/Storyboard ไม่เช่นนั้นงานที่มีคลิปแล้วจะถอยหลังผิดกอง
     if _existing_video_names(run):
+        # ---- แวะกล่องขยายก่อนถึงจะไปกองลงได้ (เจ้าของสั่ง 19 ก.ย. 2569) ----
+        #
+        # *"เพื่อที่จะให้คลิปได้ 1080P ทุกคลิป"* — ด่านอยู่ตรงนี้จุดเดียว
+        # ทั้งกระดานและตัวโพสต์จึงเห็นตรงกัน ไม่มีทางที่กระดานบอกว่ารอลง
+        # แต่คลิปยังเป็น 720p อยู่
+        #
+        # ใบที่ลงไปแล้วอย่างน้อยหนึ่งที่ **ไม่ต้องย้อนกลับมาขยาย** เพราะคลิป
+        # ที่ลงไปแล้วเปลี่ยนไม่ได้ ถ้าขยายตอนนี้จะกลายเป็นคนละไฟล์กับที่ลงไป
+        # **ขยายตราบใดที่ยังเหลือที่ให้ลง** — ใบที่ลง Shopee ไปแล้วแต่ยัง
+        # เหลือ Facebook กับ TikTok ยังคุ้มที่จะขยาย เพราะได้ 1080p สองที่
+        # ดีกว่าได้ศูนย์ที่ ส่วนใบที่ลงครบสามที่แล้วขยายไปก็ไม่มีที่ให้ใช้
+        # (ของเดิมยังอยู่ครบ ตัวขยายเก็บไฟล์เดิมไว้เป็นสำรองทุกใบ)
+        if needs_1080(run) and publish_order.next_target(run):
+            return UP1080
         target = publish_order.next_target(run)
         for key, name in POST_TARGET.items():
             if name == target:
@@ -770,6 +868,7 @@ FOLDER_OF_BUCKET = {
 PARKED_FOLDER_OF_BUCKET = {
     LINK: "waitstory", PICTURE: "waitstory", MANUAL: "waitstory",
     STORY: "waitstory", GEN_CLIP: "waitstory", CHECK_CLIP: "waitstory",
+    UP1080: "waitstory",
     SHOPEE: "waitclips",
     REELS: "waitclipsfb",
     TIKTOK: "waitclipstiktok",

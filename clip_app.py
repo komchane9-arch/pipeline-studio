@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -10157,6 +10158,236 @@ async def prompts_view() -> dict:
                     "แก้โค้ดแล้วหน้านี้เปลี่ยนตามทันที"}
 
 
+# ---- กล่อง Auto 1080P (เจ้าของสั่ง 19 ก.ย. 2569) ---------------------------
+#
+# *"หลังจากตรวจคลิปเสร็จ จะมีกล่องทำคลิปให้เป็น 1080P เพื่อที่จะให้คลิปได้
+#   1080P ทุกคลิป โดยใช้ model ai local"*
+#
+# **ลงท้ายเลือก ffmpeg ไม่ใช่ AI** เจ้าของตัดสินเองหลังเห็นผลวัด — วัดกับคลิป
+# จริงโดยเอาคลิป 1080 ของจริงมาย่อเป็น 720 แล้วอัปกลับ เทียบกับตัวจริง
+#
+#   waifu2x             48.39 คะแนน   20.7 นาที/คลิป
+#   ffmpeg lanczos      46.09 คะแนน    0.8 นาที/คลิป   <- เลือกตัวนี้
+#   Real-ESRGAN x4plus  43.99 คะแนน  493.5 นาที/คลิป
+#   Real-ESRGAN วิดีโอ  40.88 คะแนน   13.5 นาที/คลิป
+#   Real-CUGAN          37.57 คะแนน   21.0 นาที/คลิป
+#
+# ตัว AI สามตัวได้คะแนน **แย่กว่า** ffmpeg ธรรมดา เพราะมันเดารายละเอียดขึ้นมาใหม่
+# แล้วเดาไม่ตรงของจริง ส่วน waifu2x ชนะ 2.3 คะแนนแต่ช้ากว่า 26 เท่า
+UP1080_EVERY_SECONDS = 90.0
+UP1080_TIMEOUT = 900          # คลิป 10 วินาทีใช้จริง ~48 วินาที เผื่อไว้หนามาก
+UP1080_BACKUP_SUFFIX = "-ก่อนขยาย"
+_up1080_state = {"busy": "", "last": "", "done": 0, "failed": 0, "why": ""}
+_up1080_lock = threading.Lock()
+
+
+def _up1080_on() -> bool:
+    """กล่องนี้เปิดทำงานอัตโนมัติอยู่ไหม — ค่าปริยายคือเปิด"""
+    return bool(shared.read_json(shared.CONFIG_FILE, {}).get("up1080_auto", True))
+
+
+def _up1080_targets() -> list[dict]:
+    """ใบที่รอขยาย — กองเดียวกับที่กระดานแสดง ห้ามคิดเงื่อนไขซ้ำที่นี่"""
+    runs = clip_store.list_runs(DATA_DIR) + clip_store.list_done(DATA_DIR)
+    return [r for r in runs if clip_board.bucket_of_run(r) == clip_board.UP1080]
+
+
+def _up1080_one(item_id: str) -> dict:
+    """ขยายคลิปของใบนี้ให้เป็น 1080p — คืนผลที่อ่านแล้วรู้เรื่อง
+
+    **เก็บไฟล์เดิมไว้เสมอ** ถ้าขยายแล้วไม่ถูกใจ เอาของเดิมกลับมาได้
+    ถ้าไม่เก็บ ก็คือทับไฟล์ที่จ่ายเครดิต Veo ไป 15 หน่วยกว่าจะได้มา
+    """
+    run = clip_store.load_run(DATA_DIR, item_id)
+    if not run:
+        raise RuntimeError(f"ไม่พบใบงาน {item_id}")
+    names = clip_board._existing_video_names(run)
+    if not names:
+        raise RuntimeError("ใบนี้ยังไม่มีไฟล์คลิป")
+    side = clip_board.clip_short_side(run)
+    if not side:
+        # วัดไม่ได้ ไม่ใช่ต่ำกว่าเกณฑ์ — ห้ามขยายมั่ว (กติกา 2.3.1 ข้อ 4)
+        raise RuntimeError("วัดความละเอียดของคลิปไม่ได้ จึงยังไม่ขยาย")
+    if side >= clip_board.UP1080_MIN_SIDE:
+        return {"ok": True, "skipped": True,
+                "message": f"คลิปเป็น {side}p อยู่แล้ว ไม่ต้องขยาย"}
+
+    folder = clip_store.target_dir(DATA_DIR, item_id)
+    source = folder / names[0]
+    backup = source.with_name(source.stem + UP1080_BACKUP_SUFFIX + source.suffix)
+    made = source.with_name(source.stem + "-1080" + source.suffix)
+    tall = clip_board.UP1080_MIN_SIDE * 16 // 9      # 1080 -> 1920
+
+    start = time.time()
+    done = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", str(source),
+         "-vf", f"scale={clip_board.UP1080_MIN_SIDE}:{tall}:flags=lanczos",
+         "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+         "-c:a", "copy", str(made)],
+        capture_output=True, text=True, errors="replace", timeout=UP1080_TIMEOUT)
+    seconds = round(time.time() - start, 1)
+    if done.returncode != 0 or not made.is_file():
+        raise RuntimeError(f"ffmpeg ขยายไม่สำเร็จ: {(done.stderr or '')[-200:]}")
+
+    # ---- ตรวจผลลัพธ์ ไม่ใช่ตรวจว่าสั่งไปแล้ว (กติกา 2.3.1 ข้อ 2) ----------
+    got = clip_store.video_height(made)
+    if not got:
+        made.unlink(missing_ok=True)
+        raise RuntimeError("ขยายแล้วแต่วัดความละเอียดของไฟล์ใหม่ไม่ได้")
+    if got < clip_board.UP1080_MIN_SIDE:
+        made.unlink(missing_ok=True)
+        raise RuntimeError(f"ขยายแล้วยังได้แค่ {got}p ไม่ถึงเกณฑ์")
+
+    if not backup.exists():
+        source.rename(backup)
+    else:
+        source.unlink(missing_ok=True)
+    made.rename(source)
+
+    when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    clip_store.save_video(DATA_DIR, item_id, [source],
+                          note=f"ขยายเป็น {got}p ด้วย ffmpeg (เดิม {side}p)")
+
+    path = folder / "run.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["up1080"] = {"at": when, "from": side, "to": got,
+                      "seconds": seconds, "how": "ffmpeg lanczos",
+                      "backup": backup.name}
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+
+    # ผลตรวจเดิมพูดถึงคลิปเก่า ต้องตรวจใหม่ ไม่งั้นป้าย "ยังไม่ 1080p" ค้างอยู่
+    checked = {}
+    try:
+        checked = _clip_check_videos(item_id, force=True) or {}
+    except Exception as error:                                   # noqa: BLE001
+        _clip_log(f"ขยายใบ {item_id} เสร็จแล้วแต่ตรวจซ้ำไม่ได้: "
+                  f"{type(error).__name__}: {str(error)[:120]}")
+    _clip_log(f"ขยายคลิปใบ {item_id}: {side}p -> {got}p ใช้ {seconds} วินาที "
+              f"· เก็บของเดิมไว้ที่ {backup.name}")
+    return {"ok": True, "skipped": False, "item_id": item_id,
+            "from": side, "to": got, "seconds": seconds,
+            "backup": backup.name, "check": checked,
+            "message": f"ขยายจาก {side}p เป็น {got}p แล้ว ใช้เวลา {seconds} วินาที"}
+
+
+def _up1080_round() -> None:
+    """ขยายใบที่รออยู่ **ทีละใบ** ไม่แย่งเครื่องกับงานอื่นของสายคลิป"""
+    if not _up1080_on():
+        return
+    with _up1080_lock:
+        if _up1080_state["busy"]:
+            return
+    waiting = _up1080_targets()
+    if not waiting:
+        return
+    item_id = str(waiting[0].get("item_id") or "")
+    if not item_id:
+        return
+    with _up1080_lock:
+        _up1080_state["busy"] = item_id
+    try:
+        got = _up1080_one(item_id)
+        with _up1080_lock:
+            _up1080_state["done"] += 0 if got.get("skipped") else 1
+            _up1080_state["last"] = got.get("message") or ""
+            _up1080_state["why"] = ""
+    except Exception as error:                                   # noqa: BLE001
+        why = f"{type(error).__name__}: {str(error)[:160]}"
+        with _up1080_lock:
+            _up1080_state["failed"] += 1
+            _up1080_state["why"] = why
+        # **ล้มแล้วต้องพักใบไว้ ไม่ใช่วนลองใบเดิมทุก 90 วินาทีตลอดกาล**
+        _clip_log(f"ขยายคลิปใบ {item_id} ไม่สำเร็จ — {why}")
+        try:
+            clip_store.park_run(DATA_DIR, item_id,
+                                why=f"ขยายเป็น 1080p ไม่สำเร็จ: {why}")
+        except Exception as bad:                                 # noqa: BLE001
+            _clip_log(f"พักใบ {item_id} ไม่ได้ด้วย: {type(bad).__name__}")
+    finally:
+        with _up1080_lock:
+            _up1080_state["busy"] = ""
+
+
+def _up1080_keeper() -> None:
+    """เธรดเฝ้ากล่อง Auto 1080P — เดินเงียบๆ ข้างหลัง"""
+    while True:
+        try:
+            _up1080_round()
+        except Exception as error:                               # noqa: BLE001
+            _clip_log(f"ตัวขยายคลิปสะดุด: {type(error).__name__}: {error}")
+        time.sleep(UP1080_EVERY_SECONDS)
+
+
+def _up1080_status() -> dict:
+    """สถานะกล่องสำหรับหน้าเว็บ — ตัวเลขทุกตัวนับจากของจริง"""
+    with _up1080_lock:
+        state = dict(_up1080_state)
+    waiting = _up1080_targets()
+    on = _up1080_on()
+    busy = state.get("busy") or ""
+    return {
+        **state,
+        "on": on,
+        "waiting": len(waiting),
+        "waiting_ids": [str(r.get("item_id") or "") for r in waiting[:20]],
+        "min_side": clip_board.UP1080_MIN_SIDE,
+        "how": "ffmpeg lanczos",
+        "label": ("ปิดอยู่" if not on else
+                  f"กำลังขยายใบ {busy}" if busy else
+                  f"รอขยาย {len(waiting)} ใบ" if waiting else
+                  "ไม่มีใบไหนรอขยาย"),
+        "note": ("ใช้ ffmpeg ธรรมดา วัดแล้วได้ผลดีกว่าตัว AI สามในสี่ตัว "
+                 "และเร็วกว่า 26 เท่า — ใบละประมาณ 48 วินาที"),
+    }
+
+
+@app.get("/api/up1080")
+async def up1080_view() -> dict:
+    """สถานะกล่อง Auto 1080P"""
+    return {"ok": True, "up1080": await asyncio.to_thread(_up1080_status)}
+
+
+@app.post("/api/up1080")
+async def up1080_switch(request: Request) -> dict:
+    """เปิด/ปิดการขยายอัตโนมัติ"""
+    payload = await request.json() if await request.body() else {}
+    want = (payload or {}).get("on")
+    if not isinstance(want, bool):
+        raise HTTPException(status_code=400,
+                            detail='ต้องส่ง {"on": true} หรือ {"on": false}')
+
+    def save() -> None:
+        shared.update_json(shared.CONFIG_FILE,
+                           lambda c: c.update({"up1080_auto": want}), default={})
+
+    await asyncio.to_thread(save)
+    _clip_log(f"กล่อง Auto 1080P: {'เปิด' if want else 'ปิด'}อัตโนมัติ")
+    return {"ok": True, "up1080": await asyncio.to_thread(_up1080_status),
+            "message": ("เปิดแล้ว — จะไล่ขยายใบที่ยังไม่ถึง 1080p ให้เอง"
+                        if want else
+                        "ปิดแล้ว — ใบที่รอขยายจะค้างอยู่จนกว่าจะเปิดหรือกดทีละใบ")}
+
+
+@app.post("/api/clips/{item_id}/up1080")
+async def up1080_run_one(item_id: str) -> dict:
+    """สั่งขยายใบนี้เดี๋ยวนี้ — ใช้ตอนไม่อยากรอรอบอัตโนมัติ"""
+    with _up1080_lock:
+        if _up1080_state["busy"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"กำลังขยายใบ {_up1080_state['busy']} อยู่ รอให้จบก่อน")
+        _up1080_state["busy"] = str(item_id)
+    try:
+        got = await asyncio.to_thread(_up1080_one, item_id)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    finally:
+        with _up1080_lock:
+            _up1080_state["busy"] = ""
+    return got
+
+
 @app.get("/api/board")
 async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ `clip_board` — ทับชื่อโมดูล
     """กระดาน 6 ขั้น — งานไหนค้างอยู่ตรงไหน (ผู้ใช้สั่ง 26 ส.ค. 2026)
@@ -10245,6 +10476,7 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
         # สถานะ AI ในเครื่อง + ปุ่มคุมคิวดึงลิงก์ — แนบมากับกระดานที่หน้าเว็บ
         # ดึงอยู่แล้ว จะได้ไม่ต้องยิงเพิ่มอีกสองที่อยู่ทุกรอบ (เจ้าของสั่ง 19 ก.ย.)
         board["ollama"] = _ollama_status()
+        board["up1080"] = _up1080_status()
         board["link_queue"] = _link_queue_state()
 
         dup = clip_store.duplicates(DATA_DIR)
@@ -12011,6 +12243,8 @@ async def _startup() -> None:
     threading.Thread(target=_extra_sync_loop, daemon=True).start()
     # ตัวเฝ้า AI ในเครื่อง — ตายแล้วปลุกเอง ฟื้นแล้วปลุกใบที่พักไว้กลับเข้าคิว
     threading.Thread(target=_ollama_keeper, daemon=True).start()
+    # กล่อง Auto 1080P — ไล่ขยายคลิปที่ยังไม่ถึง 1080p ทีละใบ
+    threading.Thread(target=_up1080_keeper, daemon=True).start()
     # สรุปประจำวันส่งเข้าแชทเอง — อยู่ที่นี่เพราะคิวกับคลังคลิปอยู่ในโปรเซสนี้
     threading.Thread(target=_digest_keeper, daemon=True).start()
     # บทสนทนาแชท + log ระบบ ขึ้น Drive เอง — ไม่ต้องรอให้มีคลิปใหม่

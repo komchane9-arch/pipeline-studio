@@ -37,6 +37,7 @@ import clip_pickimg
 import clip_store
 import screen_read
 import scrcpy_control
+import tiktok_match_rules
 
 
 TIKTOK_PACKAGE = "com.ss.android.ugc.trill"
@@ -252,6 +253,33 @@ def build_search_query(product_name: str) -> str:
     return clean[:140]
 
 
+def search_query_for(product_name: str, log: Callable[[str], None] = print) -> str:
+    """คำค้นที่ **ต้องบอกให้ได้ว่ากำลังหาสินค้าชนิดไหน** (เจ้าของสั่ง 14 ก.ย. 2569)
+
+    ของเดิมส่งชื่อ Shopee ตัดท้ายที่ 140 ตัวอักษรไปค้นดิบ ๆ ชื่อเคสมือถือจึง
+    กลายเป็นรายการรุ่นที่ใส่ได้ยาวเป็นพืด::
+
+        สำหรับ Vivo X300 X300 pro X200 ultra X300fe ... V70 เคสdiandu
+
+    TikTok เห็นแบบนี้แล้วคืนอะไรก็ได้ที่มีรุ่นตรงสักตัว — รอบที่โดนตีธงได้
+    **ฟิล์มกันรอย** มาเป็นอันดับ 1 ทั้งที่ใบงานเป็นเคส
+
+    ถ้าชื่อสินค้าไม่ได้บอกเลยว่ามันคืออะไร ให้ **หยุดแล้วบอกเหตุผล** ไม่ใช่
+    ค้นส่งเดชแล้วหวังว่าด่านหลังจะกรองได้ (กติกาข้อ 2.9 — ห้ามถอยไปใช้ของด้อยกว่า)
+    """
+    query = build_search_query(product_name)
+    fixed, note = tiktok_match_rules.improve_query(query, str(product_name or ""))
+    if note:
+        log(f"ปรับคำค้น: {note}")
+    verdict = tiktok_match_rules.query_check(fixed)
+    if not verdict.passed:
+        raise TikTokLinkError(
+            "ยังค้นหาสินค้านี้ไม่ได้ — " + verdict.why
+            + f" (ชื่อในใบงาน: “{str(product_name or '')[:90]}”) "
+              "ต้องแก้ชื่อสินค้าในใบงานให้บอกชนิดก่อน")
+    return fixed
+
+
 def choose_reference(run: dict, data_dir: Path, log: Callable[[str], None]) -> tuple[Path, dict]:
     """คืนรูปแรกตามลำดับใบงานที่เห็นสินค้าเต็ม ไม่ใช่ ``images[0]`` แบบตายตัว"""
     item_id = str(run.get("item_id") or "")
@@ -357,9 +385,28 @@ def analyze_four(
         "not readable: then brand, product type, size and variant must ALL FOUR agree. "
         "If all four agree, choose that listing and answer confidence medium. "
         "If even one of the four disagrees, it is NOT a match.\n"
+        # ---- ห้ามตัดสินจากหน้าตาอย่างเดียว (เจ้าของสั่ง 14 ก.ย. 2569) --------
+        #
+        # ใบ 52807075353 โดน TikTok ตีธง "โปรโมตสินค้าที่ไม่ตรงกับสินค้าจริง"
+        # เหตุผลที่โมเดลเขียนไว้คือ *"decorative phone case with a similar
+        # glittery finish and Hello Kitty design"* — ความเหมือนของรูปล้วน ๆ
+        # ซึ่งเคสกากเพชรลายคิตตี้มีคนขายเป็นร้อยเจ้า
+        #
+        # บังคับให้ตอบมาตรง ๆ ว่าใช้หลักฐานอะไรตัดสิน แล้วฝั่งเราปฏิเสธ
+        # ``image_only`` ทิ้งทั้งหมด — ดูรูปเหมือนกัน ≠ เป็นสินค้าตัวเดียวกัน
+        "NEVER decide from visual similarity alone. Mass-market goods (phone "
+        "cases, screen films, no-brand cables) look identical across hundreds "
+        "of different sellers and listings. If your only evidence is that the "
+        "pictures look alike, answer match 0.\n"
+        "Report what your decision rests on in evidence: \"model_code\" when a "
+        "listing shows the same model code, \"title_text\" when the listing "
+        "title names the same brand/product type/size, \"image_only\" when you "
+        "are going by how the pictures look. evidence image_only MUST come with "
+        "match 0.\n"
         "Never treat a guessed model code as readable. Return one JSON object only:\n"
-        '{"match":0,"confidence":"high|medium|low","reason":"short Thai reason",'
-        '"titles":["","","",""]}\n'
+        '{"match":0,"confidence":"high|medium|low",'
+        '"evidence":"model_code|title_text|image_only",'
+        '"reason":"short Thai reason","titles":["","","",""]}\n'
         "match must be 1,2,3,4 for the chosen listing; use 0 when neither stage matches."
     )
     blob = base64.b64encode(collage.read_bytes()).decode("ascii")
@@ -392,6 +439,7 @@ def analyze_four(
         rank = 0
     result["match"] = rank if rank in (0, 1, 2, 3, 4) else 0
     result["confidence"] = str(result.get("confidence") or "low").lower()
+    result["evidence"] = str(result.get("evidence") or "").strip().lower()
     result["titles"] = [str(title)[:160] for title in (result.get("titles") or [])][:4]
     return result
 
@@ -1086,12 +1134,18 @@ class PhoneFlow:
             f"อ่านจอได้ {len(seen.split())} คำ ไม่พบคำยืนยันสักคำ "
             "(สำรวจสินค้าสำหรับคุณ · เพิ่มในโชว์เคสแล้ว · สร้างตอนนี้เลย)")
 
-def confident_rank(vision: dict, reference_check: dict) -> int:
-    """คืนอันดับที่ยืนยันได้จริง; 0 = ต้องรอคนตรวจและห้ามเลือกอัตโนมัติ."""
+def confident_rank(vision: dict, reference_check: dict,
+                   product_name: str = "") -> tuple[int, str]:
+    """คืน ``(อันดับที่ยืนยันได้จริง, เหตุผลที่ไม่เอา)``; 0 = ต้องรอคนตรวจ
+
+    เดิมคืนแค่ตัวเลขแล้วเหตุผลหายไป ผู้เรียกจึงเขียนลงใบงานได้แต่เหตุผลของ AI
+    ซึ่งตอนที่ AI ตัดสินผิด เหตุผลนั้น **ฟังดูดีทุกครั้ง** — เจ้าของเปิดดูแล้ว
+    ไม่มีทางรู้ว่าระบบเราปฏิเสธเพราะอะไร
+    """
     try:
         rank = int((vision or {}).get("match") or 0)
     except (TypeError, ValueError):
-        return 0
+        return 0, "อ่านอันดับที่โมเดลเลือกไม่ได้"
     # **รับทั้งสองชั้นตามที่เจ้าของสั่ง 13 ก.ย. 2569**
     #   high    = ชั้นที่ 1 รหัสรุ่นตรง -> เลือกเลย
     #   medium  = ชั้นที่ 2 ยี่ห้อ · ชนิด · ขนาด · ตัวเลือก ตรงครบทั้งสี่ -> เลือกได้
@@ -1100,9 +1154,21 @@ def confident_rank(vision: dict, reference_check: dict) -> int:
     #
     # ด่านที่กันการกดผิดตัวยังอยู่ครบ: หลังกดต้องเปิดหน้าสินค้าแล้วอ่านชื่อจริง
     # กลับมาเทียบกับใบงาน ถ้าไม่มีคำตรงกันสักคำ งานจะล้มก่อนเพิ่มโชว์เคส
-    return (rank if rank in (1, 2, 3, 4)
-            and str((vision or {}).get("confidence") or "").lower() in {"high", "medium"}
-            and not (reference_check or {}).get("reference_review") else 0)
+    if rank not in (1, 2, 3, 4):
+        return 0, "โมเดลไม่ได้เลือกอันดับไหนเลย"
+    if str((vision or {}).get("confidence") or "").lower() not in {"high", "medium"}:
+        return 0, "โมเดลตอบว่ายังไม่มั่นใจ"
+    if (reference_check or {}).get("reference_review"):
+        return 0, "รูปที่ใช้เทียบยังไม่ผ่านการตรวจว่าเห็นสินค้าเต็มชิ้น"
+    # ---- ข้อ 3 ที่เจ้าของสั่ง: ห้ามตัดสินว่าตรงจากหน้าตาอย่างเดียว ----------
+    #
+    # ``evidence_check`` ตอบสามอย่าง — ผ่าน · ไม่ผ่าน · **ยังพิสูจน์ไม่ได้**
+    # อย่างหลังเกิดเมื่ออ่านชื่อประกาศบนหน้าผลค้นหาไม่ได้ ซึ่งยังไปพิสูจน์ต่อ
+    # ที่หน้าสินค้าจริงได้ จึงให้เดินต่อ แต่ด่านชื่อบนหน้าสินค้าจะเข้มแทน
+    proof = tiktok_match_rules.evidence_check(vision or {}, product_name)
+    if proof.ok is False:
+        return 0, proof.why
+    return rank, ""
 
 
 def product_title_from_nodes(
@@ -1169,7 +1235,7 @@ def find_product_link(
     log(f"ส่งรูป {reference.name} เข้ามือถือแล้ว: {remote}")
     progress(1, "prepare", "เตรียมรูปสินค้าและส่งเข้ามือถือ", True,
              f"ส่ง {reference.name} แล้ว")
-    search_query = build_search_query(str(run.get("name") or ""))
+    search_query = search_query_for(str(run.get("name") or ""), log)
     log(f"ค้นหา TikTok ด้วยชื่อ/ยี่ห้อ/รุ่น: {search_query}")
     # หน้าจอ TikTok/เมนูแชร์อาจสะดุดจาก lock screen หรือแอปอื่นขึ้นทับ แต่ห้าม
     # เริ่มใบเดิมซ้ำในรอบอัตโนมัติ: caller จะเก็บภาพ พักใบนี้ และเดินใบถัดไป.
@@ -1201,7 +1267,45 @@ def find_product_link(
             )
             if vision.get("analysis_error"):
                 raise TikTokLinkError(str(vision.get("reason") or "โมเดลวิเคราะห์ผลไม่ได้"))
-            selected = confident_rank(vision, reference_check)
+            selected, refused_why = confident_rank(
+                vision, reference_check, str(run.get("name") or ""))
+            if refused_why:
+                log(f"ไม่รับผลของโมเดล: {refused_why}")
+
+            # ---- ข้อ 4: ของทั่วไปที่หน้าตาซ้ำกันทั้งตลาด ต้องให้เจ้าของยืนยัน ---
+            #
+            # เคสมือถือ · ฟิล์ม · สายชาร์จโนเนม — รูปเหมือนกันทั้งตลาดจริง ๆ
+            # ธงนี้ติดไปกับใบงานเพื่อให้ตัวโพสต์รู้ว่า **ห้ามผ่านอัตโนมัติ**
+            # ไม่ว่าโมเดลจะมั่นใจแค่ไหน
+            common = tiktok_match_rules.generic_lookalike(str(run.get("name") or ""))
+            if common.ok is True:
+                log(f"สินค้าชนิดนี้ต้องให้เจ้าของยืนยันเสมอ — {common.why}")
+
+            def pending(reason: str, label: str = "รอตรวจ", **extra) -> dict:
+                """จบใบแบบ **รอตรวจ** — ไม่ใช่ error และห้ามผูกลิงก์ไว้"""
+                return {
+                    "status": "pending_review",
+                    "label": label,
+                    "showcase_added": False,
+                    "selected_rank": 0,
+                    "matched_rank": 0,
+                    "confidence": vision.get("confidence") or "low",
+                    "reason": str(reason or "")[:400],
+                    "ai_reason": str(vision.get("reason") or "")[:400],
+                    "evidence_kind": str(vision.get("evidence") or ""),
+                    "needs_owner_confirm": common.ok is True,
+                    "generic_lookalike": common.ok is True,
+                    "result_titles": vision.get("titles") or [],
+                    "search_query": search_query,
+                    "reference_image": reference.name,
+                    "reference_index": reference_check.get("index") or 1,
+                    "reference_check": reference_check,
+                    "results_images": [str(first_screen.relative_to(folder)),
+                                       str(second_screen.relative_to(folder))],
+                    "results_layout": layout,
+                    "updated_at": _now(),
+                    **extra,
+                }
             # ---- เจ้าของยืนยันเองว่าอันดับไหนใช่ -> เชื่อคน ไม่เชื่อ AI -------
             #
             # เจ้าของสั่ง 13 ก.ย. 2569 หลังเปิดภาพหลักฐานดูเองแล้วเห็นว่า AI
@@ -1232,30 +1336,12 @@ def find_product_link(
             if not selected:
                 # ไม่มีตัวที่ยืนยันได้ = จบแบบรอตรวจ ไม่ใช่ operational error.
                 # ห้ามเปิดอันดับแรกและห้ามคัดลอก URL มาเป็นหลักฐานเท็จ.
-                log(f"ตรวจสี่อันดับ: {vision.get('reason') or '-'} — "
+                why = refused_why or str(vision.get("reason") or "ไม่พบตัวที่มั่นใจ")
+                log(f"ตรวจสี่อันดับ: {why} — "
                     "ยังไม่มีตัวที่มั่นใจ จึงไม่เลือกสินค้าและค้างรอตรวจ")
-                progress(5, "analyze", "ตรวจความตรงของสินค้า 4 อันดับ", True,
-                         str(vision.get("reason") or "ไม่พบตัวที่มั่นใจ"))
-                progress(6, "review", "หยุดใบนี้ไว้รอตรวจสินค้า", False,
-                         str(vision.get("reason") or "ไม่พบสินค้าที่มั่นใจ"))
-                return {
-                    "status": "pending_review",
-                    "label": "รอตรวจ",
-                    "showcase_added": False,
-                    "selected_rank": 0,
-                    "matched_rank": 0,
-                    "confidence": vision.get("confidence") or "low",
-                    "reason": str(vision.get("reason") or "")[:400],
-                    "result_titles": vision.get("titles") or [],
-                    "search_query": search_query,
-                    "reference_image": reference.name,
-                    "reference_index": reference_check.get("index") or 1,
-                    "reference_check": reference_check,
-                    "results_images": [str(first_screen.relative_to(folder)),
-                                       str(second_screen.relative_to(folder))],
-                    "results_layout": layout,
-                    "updated_at": _now(),
-                }
+                progress(5, "analyze", "ตรวจความตรงของสินค้า 4 อันดับ", True, why)
+                progress(6, "review", "หยุดใบนี้ไว้รอตรวจสินค้า", False, why)
+                return pending(why)
             log(f"ตรวจสี่อันดับ: {vision.get('reason') or '-'} — "
                 f"มั่นใจว่าสินค้าตรงอันดับ {selected}")
             progress(5, "analyze", "ตรวจความตรงของสินค้า 4 อันดับ", True,
@@ -1265,6 +1351,41 @@ def find_product_link(
             product_title = phone.copy_current_product_name(str(run.get("name") or ""))
             progress(6, "open_product", "เปิดสินค้าและคัดลอกชื่อเต็ม", True,
                      product_title[:180])
+
+            # ---- ด่านชื่อสินค้า: **อ่านแล้วไม่ใช่ชื่อสินค้า = ห้ามผูก** --------
+            #
+            # เจ้าของสั่ง 14 ก.ย. 2569 หลังใบ 52807075353 โดนตีธง — ชื่อที่ระบบ
+            # อ่านได้และผูกไว้จริงคือ ``x300 ultra x3oo pro x300 x3oo`` ซึ่ง
+            # ไม่ใช่ชื่อสินค้าเลยสักนิด แต่ระบบก็เพิ่มเข้าโชว์เคสไปแล้ว
+            #
+            # ต้องอยู่ **ก่อน** ``add_current_product_to_showcase`` เพราะเพิ่ม
+            # เข้าโชว์เคสไปแล้วถอนเองไม่ได้ ต้องไปลบในแอป (กติกาข้อ 2.8 ข้อ 1)
+            named = tiktok_match_rules.title_check(
+                product_title, str(run.get("name") or ""))
+            same = tiktok_match_rules.name_agreement(
+                product_title, str(run.get("name") or ""))
+            for gate, step in ((named, "ชื่อที่อ่านได้"), (same, "ความตรงกับใบงาน")):
+                if gate.passed:
+                    continue
+                # ok is False = อ่านได้แล้วพบว่าไม่ใช่ · ok is None = ยังอ่านไม่ครบ
+                # สองอย่างนี้หยุดเหมือนกันแต่ **ต้องบอกเจ้าของคนละแบบ** (กติกา 2.3.1)
+                head = ("หยุดไว้เพราะยังพิสูจน์ไม่ได้" if gate.ok is None
+                        else "หยุดไว้เพราะตรวจแล้วไม่ผ่าน")
+                why = f"{head} ({step}) — {gate.why}"
+                log(f"⛔ ไม่เพิ่มเข้าโชว์เคส: {why}")
+                try:
+                    phone.capture(evidence / "product-page-refused.png")
+                except Exception:                              # noqa: BLE001
+                    log("แคปหน้าสินค้าตอนปฏิเสธไม่ได้ — เก็บเหตุผลไว้อย่างเดียว")
+                progress(7, "showcase", "เพิ่มสินค้าเข้าโชว์เคส", False, why)
+                return pending(
+                    why, label="รอตรวจ — ชื่อสินค้าไม่ผ่าน",
+                    tiktok_product_name=product_title,
+                    refused_rank=selected,
+                    title_check=named.as_dict(),
+                    name_check=same.as_dict(),
+                )
+
             progress(7, "showcase", "เพิ่มสินค้าเข้าโชว์เคส", None, "")
             phone.add_current_product_to_showcase(
                 proof=evidence / "showcase-confirmed.png")
@@ -1329,6 +1450,15 @@ def find_product_link(
         "matched_rank": selected,
         "confidence": vision.get("confidence") or "low",
         "reason": str(vision.get("reason") or "")[:400],
+        # โมเดลตัดสินจากอะไร — ``image_only`` ถูกปฏิเสธไปตั้งแต่ก่อนกดแล้ว
+        "evidence_kind": str(vision.get("evidence") or ""),
+        # ของทั่วไปที่หน้าตาซ้ำกันทั้งตลาด (เคส · ฟิล์ม · สายชาร์จโนเนม)
+        # **ห้ามผ่านอัตโนมัติ** ต้องให้เจ้าของกดยืนยันเสมอ
+        "needs_owner_confirm": common.ok is True,
+        "generic_lookalike": common.ok is True,
+        "generic_reason": common.why if common.ok is True else "",
+        "title_check": named.as_dict(),
+        "name_check": same.as_dict(),
         "result_titles": vision.get("titles") or [],
         "search_query": search_query,
         "reference_image": reference.name,

@@ -21,6 +21,7 @@ from PIL import Image
 import evidence
 import publish_flow
 import publish_media
+import tiktok_match_rules
 import tiktok_product_link
 
 
@@ -250,13 +251,63 @@ def _model_terms(name: str) -> list[str]:
     return ([brand] if brand else []) + models[:3]
 
 
+def link_rule_problem(run: dict) -> str:
+    """สินค้าที่ผูกไว้ในใบนี้ ผิดกติกาการจับคู่ข้อไหนไหม — ว่าง = ไม่ผิด
+
+    **ต้องตรวจซ้ำตรงนี้ ไม่ใช่เชื่อธงที่ตัวหาบันทึกไว้** เพราะใบที่ผูกไว้
+    ก่อน 14 ก.ย. 2569 ถูกผูกด้วยกติกาเก่าที่ยังปล่อยผ่าน — รวมถึงใบ
+    52807075353 ที่ TikTok ตีธงว่าผิดนโยบาย ซึ่งตอนนั้นระบบขึ้นว่าสำเร็จ
+
+    ด่านนี้อยู่ที่ตัวโพสต์ เพราะการเพิ่มโชว์เคสถอนเองไม่ได้แล้ว แต่ **การโพสต์
+    ยังห้ามได้** ถ้าไม่ห้ามตรงนี้ ใบเก่าที่ผิดกติกาจะไหลออกไปเรื่อย ๆ
+    """
+    state = (run or {}).get("tiktok_product_link") or {}
+    name = str((run or {}).get("name") or "")
+    title = str(state.get("tiktok_product_name") or "")
+    named = tiktok_match_rules.title_check(title, name)
+    if not named.passed:
+        return ("ชื่อสินค้าที่ผูกไว้ยังใช้ไม่ได้ — " + named.why) if named.ok is False \
+            else ("ยังพิสูจน์ชื่อสินค้าที่ผูกไว้ไม่ได้ — " + named.why)
+    same = tiktok_match_rules.name_agreement(title, name)
+    if not same.passed:
+        return ("สินค้าที่ผูกไว้ไม่ตรงกับใบงาน — " + same.why) if same.ok is False \
+            else ("ยังพิสูจน์ไม่ได้ว่าสินค้าที่ผูกไว้ตรงกับใบงาน — " + same.why)
+    return ""
+
+
+def lookalike_commodity(run: dict) -> bool:
+    """ใบนี้เป็นของทั่วไปที่หน้าตาซ้ำกันทั้งตลาดไหม (เคส · ฟิล์ม · สายโนเนม)
+
+    เจ้าของสั่ง 14 ก.ย. 2569 ว่าของกลุ่มนี้ **ห้ามผ่านอัตโนมัติเด็ดขาด**
+    ใบที่ TikTok ตีธง (52807075353) เป็นเคสมือถือไม่มียี่ห้อพอดี — เคสกากเพชร
+    ลายคิตตี้หน้าตาเหมือนกันทั้งตลาด ตาคนเท่านั้นที่แยกออกว่าคนละร้าน
+
+    วันนี้ **ทุกใบ** ต้องให้เจ้าของยืนยันอยู่แล้ว (ดู ``showcase_prepared``)
+    ธงนี้จึงยังไม่ได้กันอะไรเพิ่ม แต่ต้องมีไว้ให้หน้าเว็บขึ้นป้ายเตือนได้ และ
+    ให้คนที่มาผ่อนกฎรวมทีหลังเห็นว่ากลุ่มนี้ผ่อนตามไม่ได้
+    """
+    if tiktok_match_rules.generic_lookalike(
+            str((run or {}).get("name") or "")).ok is True:
+        return True
+    state = (run or {}).get("tiktok_product_link") or {}
+    return bool(state.get("generic_lookalike") or state.get("needs_owner_confirm"))
+
+
 def showcase_prepared(run: dict) -> bool:
-    """งานรูปแบบใหม่เพิ่มสินค้าไว้แล้ว จึงไม่ต้องมีหรือเปิด URL ก่อนโพสต์."""
+    """งานรูปแบบใหม่เพิ่มสินค้าไว้แล้ว จึงไม่ต้องมีหรือเปิด URL ก่อนโพสต์.
+
+    **ดูของที่มีเฉพาะตอนสำเร็จ** (กติกา 2.3.1) — ต้องครบทุกข้อ: เพิ่มโชว์เคส
+    สำเร็จจริง · โมเดลมั่นใจหรือคนเลือกเอง · **ชื่อสินค้าที่ผูกไว้ผ่านกติกา
+    การจับคู่** · และเจ้าของกดยืนยันแล้ว
+    """
     state = (run or {}).get("tiktok_product_link") or {}
     confidence = str(state.get("confidence") or "").lower()
     return bool(state.get("status") == "showcase_added"
                 and state.get("showcase_added")
                 and confidence in {"high", "human_confirmed"}
+                and not link_rule_problem(run)
+                # เจ้าของต้องกดยืนยันทุกใบ — ของทั่วไปที่หน้าตาซ้ำกันทั้งตลาด
+                # (``lookalike_commodity``) ยิ่งห้ามผ่านอัตโนมัติเด็ดขาด
                 and owner_confirmed(run))
 
 

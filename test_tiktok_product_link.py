@@ -72,22 +72,28 @@ class ConfidenceGateTests(unittest.TestCase):
         ชั้นที่ 2 จะไม่มีวันถูกเลือกเลยแม้คำสั่งจะบอกให้เลือก = แก้แล้วเหมือนไม่ได้แก้
         """
         self.assertEqual(
-            target.confident_rank({"match": 3, "confidence": "high"}, {}), 3,
+            target.confident_rank({"match": 3, "confidence": "high"}, {})[0], 3,
             "ชั้นที่ 1 รหัสรุ่นตรง ต้องเลือกเลย")
         self.assertEqual(
-            target.confident_rank({"match": 2, "confidence": "medium"}, {}), 2,
+            target.confident_rank({"match": 2, "confidence": "medium"}, {})[0], 2,
             "ชั้นที่ 2 ตรงครบสี่อย่าง ต้องเลือกได้")
 
     def test_rejects_low_confidence_and_uncertain_reference(self) -> None:
         self.assertEqual(
-            target.confident_rank({"match": 1, "confidence": "low"}, {}), 0)
+            target.confident_rank({"match": 1, "confidence": "low"}, {})[0], 0)
         self.assertEqual(
             target.confident_rank(
-                {"match": 1, "confidence": "high"}, {"reference_review": True}), 0)
+                {"match": 1, "confidence": "high"},
+                {"reference_review": True})[0], 0)
         # รูปตั้งต้นน่าสงสัย = ห้ามเลือกแม้ชั้นที่ 2 จะผ่าน
         self.assertEqual(
             target.confident_rank(
-                {"match": 1, "confidence": "medium"}, {"reference_review": True}), 0)
+                {"match": 1, "confidence": "medium"},
+                {"reference_review": True})[0], 0)
+        # **ทุกครั้งที่ไม่รับ ต้องบอกเหตุผลด้วย** ไม่ใช่คืนเลข 0 เงียบ ๆ
+        # แล้วปล่อยให้ใบงานเก็บแต่เหตุผลของ AI ซึ่งตอนตัดสินผิดจะฟังดูดีเสมอ
+        self.assertTrue(
+            target.confident_rank({"match": 1, "confidence": "low"}, {})[1])
 
 
 class ShowcaseStepTests(unittest.TestCase):
@@ -115,9 +121,12 @@ class ShowcaseStepTests(unittest.TestCase):
                 pass
 
             def copy_current_product_name(self, _fallback):
-                return "UGREEN Uno Robot Hub 6-in-1"
+                # ชื่อจริงที่อ่านได้จากหน้า TikTok ของใบ 29708536674
+                # (คัดลอกมาทั้งดุ้นรวมจุดไข่ปลาที่หน้าจอตัดไว้จริง)
+                return ("UGREEN 100W สายชาร์จ USB-C to USB-C PD3.0 "
+                        "ชาร์จเร็ว 5A มีจอ LE ...")
 
-            def add_current_product_to_showcase(self):
+            def add_current_product_to_showcase(self, *_args, **_kwargs):
                 raise target.TikTokLinkError("หน้าจอไม่ยืนยันผลสำเร็จ")
 
         with tempfile.TemporaryDirectory() as raw:
@@ -133,12 +142,16 @@ class ShowcaseStepTests(unittest.TestCase):
                 mock.patch.object(target, "analyze_four", return_value={
                     "confidence": "high", "reason": "ตรง", "titles": ["UGREEN"],
                 }),
-                mock.patch.object(target, "confident_rank", return_value=1),
+                mock.patch.object(target, "confident_rank", return_value=(1, "")),
             ):
                 with self.assertRaisesRegex(target.TikTokLinkError,
                                             "หน้าจอไม่ยืนยันผลสำเร็จ"):
                     target.find_product_link(
-                        "phone", "item", {"name": "UGREEN Uno"}, folder,
+                        # ชื่อจริงจากใบงาน 29708536674 — ต้องมีคำบอกชนิดสินค้า
+                        # ("สายชาร์จ") ไม่งั้นด่านคำค้นจะหยุดตั้งแต่ก่อนเปิดแอป
+                        "phone", "item",
+                        {"name": "UGREEN Uno 100W Type C สายชาร์จเร็ว E-Marker "
+                                 "สําหรับ iPhone 17 Pro Max"}, folder,
                         log=lambda _message: None,
                     )
 

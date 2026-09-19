@@ -29,7 +29,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -3557,6 +3557,28 @@ def _clip_worker(job: dict, slot: int = 1) -> None:
     """
     _SLOT.number = int(slot or 1)
     came_from = job.get("claimed_from")
+    # ---- ติ๊กทำเองไว้ = ตัวรันห้ามทำขั้นนั้นแทน (เจ้าของสั่ง 19 ก.ย. 2569) ----
+    #
+    # กันเฉพาะสามขั้นที่ **ทับของที่เจ้าของทำเอง** คือทำสตอรีบอร์ด · สั่งแก้ ·
+    # เจนคลิป ส่วนขั้นดึงข้อมูลกับขั้นโพสต์ปล่อยผ่านตามปกติ เพราะโหมดทำเอง
+    # เปลี่ยนแค่ "ใครทำสตอรีบอร์ดกับคลิป" ไม่ได้เปลี่ยนทั้งสาย
+    #
+    # **ต้องดันสถานะกลับก่อนพัก** ตัวรันเปลี่ยนสถานะเป็น "กำลังทำ" ไปแล้วตอนหยิบ
+    # ถ้าพักทับไว้เฉยๆ วันที่เอากลับ ใบจะไปโผล่ที่ขั้น "กำลังทำ" ซึ่งไม่มีใคร
+    # หยิบอีกเลย แล้วใบจะหายเงียบ
+    if came_from in {clip_queue.STAGE_READY_STORYBOARD,
+                     clip_queue.STAGE_REVISING,
+                     clip_queue.STAGE_READY_FLOW}:
+        run_now = clip_store.load_run(DATA_DIR, job.get("item_id") or "")
+        if clip_board.manual_on(run_now):
+            what = STAGE_WORK_NAME.get(came_from, came_from)
+            clip_jobs.update(job["id"], stage=came_from)
+            clip_jobs.park(job["id"],
+                           why=f"{MANUAL_PARK_MARK} — ข้ามขั้น “{what}” "
+                               "เพราะเจ้าของอัปสตอรีบอร์ดกับคลิปเอง")
+            _clip_log(f"ใบ {job.get('item_id')}: โหมดทำเอง จึงไม่ทำขั้น “{what}” ให้")
+            return
+
     tiktok = _job_kind(job) == "tiktok"
     try:
         if came_from == clip_queue.STAGE_QUEUED:
@@ -6604,7 +6626,9 @@ def _failed_jobs() -> list[dict]:
 WAIT_LISTS = {
     "/waitlink": (clip_board.LINK, "🐣 ดึงข้อมูล"),
     "/waitstoryboard": (clip_board.STORY, "🎨 สตอรีบอร์ด + บทพูด"),
-    "/waitclip": (clip_board.CLIP, "🎬 คลิป"),
+    "/waitclip": (clip_board.GEN_CLIP, "🎬 เจนคลิป"),
+    "/waitcheckclip": (clip_board.CHECK_CLIP, "🔍 ตรวจคลิป"),
+    "/waitmanual": (clip_board.MANUAL, "✋ ทำเอง"),
     "/waitclips": (clip_board.SHOPEE, "🛍 รอลง Shopee Video"),
     "/waitclipsfb": (clip_board.REELS, "📘 รอลง Facebook Reels"),
     "/waitclipstiktok": (clip_board.TIKTOK, "🎵 รอลง TikTok"),
@@ -8950,6 +8974,8 @@ async def clips_list() -> dict:
         # ติดธงแค่ 4 ใบ) สายกลางจับได้ตอนเทสหน้าเว็บจริง — ตัวตรวจสองชุดที่ตอบ
         # คนละอย่างอันตรายกว่าไม่มีตัวตรวจ (กติกา 2.3.1)
         run.update(clip_board.confirm_fields(run))
+        # กล่องโหมดทำเองใช้ฟิลด์ชุดเดียวกับกระดาน ห้ามคิดเองซ้ำเหมือนกัน
+        run.update(clip_board.manual_fields(run))
     return {"ok": True, "runs": runs}
 
 
@@ -9133,6 +9159,253 @@ async def tiktok_link_owner_confirm(item_id: str, request: Request) -> dict:
     await asyncio.to_thread(clip_store.set_tiktok_product_link, DATA_DIR, item_id, link)
     _clip_log(f"เจ้าของยืนยันสินค้า TikTok ใบ {item_id}: {message}")
     return {"ok": True, "item_id": item_id, "answer": answer, "message": message}
+
+
+# ---- โหมดทำเอง (เจ้าของสั่ง 19 ก.ย. 2569) --------------------------------
+#
+# *"ในใบงานให้มีปุ่มติ๊กมา loop manual ... ผมจะอัพโหลด storyboard เอง
+#   เพิ่มให้อัพได้สูงสุด 2 storyboard และผมจะอัพโหลดคลิปเอง ให้มีปุ่มกดเสร็จ
+#   โดยหลังจากกดเสร็จ จะไปเข้าขั้นตอนการตรวจครับเลย"*
+#
+# ติ๊กได้ตั้งแต่ใบงานโผล่พร้อมรูปและรายละเอียด **ยังไม่ต้องอนุมัติรูปก่อน**
+# (เจ้าของยืนยันเอง) และคลิปที่อัปเอง **ต้องผ่านตัวตรวจเหมือนคลิปที่เจนมา**
+MANUAL_IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".webp"}
+MANUAL_VIDEO_TYPES = {".mp4", ".mov", ".m4v", ".webm"}
+# กันไฟล์ใหญ่เกินจนกินแรมตอนอ่านเข้า — คลิป 9:16 ยาว 10 วินาทีปกติ 3-7 MB
+MANUAL_MAX_MB = 200
+# ป้ายบอกว่าใบนี้ถูกพักเพราะติ๊กทำเอง — ใช้ตอนเอาติ๊กออกแล้วปลดพักคืนให้เอง
+MANUAL_PARK_MARK = "อยู่ในโหมดทำเอง"
+
+
+def _manual_run(item_id: str) -> dict:
+    run = clip_store.load_run(DATA_DIR, item_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"ไม่พบใบงาน {item_id}")
+    return run
+
+
+def _manual_save(item_id: str, change) -> dict:
+    """อ่าน-แก้-เขียนช่อง manual ของใบงานหนึ่งใบ แล้วคืนค่าใหม่"""
+    run = _manual_run(item_id)
+    folder = clip_store.target_dir(DATA_DIR, item_id)
+    path = folder / "run.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="ไม่พบไฟล์ใบงาน")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    mark = data.get("manual")
+    mark = dict(mark) if isinstance(mark, dict) else {}
+    change(mark)
+    data["manual"] = mark
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    return mark
+
+
+async def _manual_read_upload(upload: UploadFile, allow: set[str]) -> tuple[str, bytes]:
+    """อ่านไฟล์ที่อัปมา + ตรวจชนิดและขนาด — คืน (นามสกุล, เนื้อไฟล์)"""
+    name = str(getattr(upload, "filename", "") or "")
+    suffix = Path(name).suffix.lower()
+    if suffix not in allow:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ไฟล์ {name or chr(40) + chr(41)} ใช้ไม่ได้ — รับเฉพาะ "
+                   + " · ".join(sorted(allow)))
+    blob = await upload.read()
+    if not blob:
+        raise HTTPException(status_code=400, detail="ไฟล์ว่างเปล่า")
+    if len(blob) > MANUAL_MAX_MB * 1048576:
+        raise HTTPException(
+            status_code=413,
+            detail=f"ไฟล์ใหญ่เกิน {MANUAL_MAX_MB} MB "
+                   f"(ได้มา {len(blob) / 1048576:.1f} MB)")
+    return suffix, blob
+
+
+@app.post("/api/clips/{item_id}/manual")
+async def manual_toggle(item_id: str, request: Request) -> dict:
+    """ติ๊ก/เอาติ๊กออก โหมดทำเอง — ส่ง {"on": true} หรือ {"on": false}"""
+    payload = await request.json() if await request.body() else {}
+    want = (payload or {}).get("on")
+    if not isinstance(want, bool):
+        raise HTTPException(status_code=400, detail='ต้องส่ง {"on": true} หรือ {"on": false}')
+    when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def change(mark: dict) -> None:
+        mark["on"] = want
+        if want:
+            mark["at"] = when
+            mark.pop("done_at", None)
+        # **เอาติ๊กออกไม่ลบไฟล์ที่อัปไว้** ติ๊กกลับมาแล้วของยังอยู่ครบ
+
+    mark = await asyncio.to_thread(_manual_save, item_id, change)
+    # เอาติ๊กออก = ใบกลับเข้าสายปกติ จึงต้องปลดพักที่ **เราเป็นคนพักไว้เอง**
+    # ให้ด้วย ไม่งั้นใบจะค้างในถังรอแก้ตลอดกาลโดยที่เจ้าของไม่รู้ว่าต้องกดอะไร
+    # (ปลดเฉพาะป้ายของเรา ใบที่พักด้วยเหตุอื่นห้ามแตะ)
+    freed = 0
+    if not want:
+        def release() -> int:
+            count = 0
+            for job in clip_jobs.parked():
+                if str(job.get("item_id") or "") != str(item_id):
+                    continue
+                why = str((job.get("parked") or {}).get("why") or "")
+                if MANUAL_PARK_MARK not in why:
+                    continue
+                try:
+                    clip_jobs.unpark(job["id"])
+                    count += 1
+                except clip_queue.ClipQueueError as error:
+                    _clip_log(f"ปลดพักใบ {item_id} ไม่ได้: {error}")
+            return count
+
+        freed = await asyncio.to_thread(release)
+    did = "เข้าโหมดทำเอง" if want else "ออกจากโหมดทำเอง"
+    _clip_log(f"ใบ {item_id}: {did}")
+    return {"ok": True, "item_id": item_id, "manual": mark,
+            "message": ("เข้าโหมดทำเองแล้ว — อัปสตอรีบอร์ดได้ถึง "
+                        f"{clip_board.MANUAL_STORYBOARD_MAX} ใบ แล้วอัปคลิป")
+            if want else ("ออกจากโหมดทำเองแล้ว — ใบนี้กลับเข้าสายปกติ"
+                          + (f" · ปลดพักคืนให้ {freed} ใบงาน" if freed else ""))}
+
+@app.post("/api/clips/{item_id}/manual/storyboard")
+async def manual_upload_storyboard(item_id: str,
+                                   file: UploadFile = File(...)) -> dict:
+    """อัปภาพสตอรีบอร์ดเอง — ได้สูงสุดตาม MANUAL_STORYBOARD_MAX ใบ"""
+    suffix, blob = await _manual_read_upload(file, MANUAL_IMAGE_TYPES)
+    run = await asyncio.to_thread(_manual_run, item_id)
+    folder = clip_store.target_dir(DATA_DIR, item_id)
+    when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    top = clip_board.MANUAL_STORYBOARD_MAX
+
+    def work() -> dict:
+        have = [n for n in (clip_board.manual_state(run).get("storyboards") or []) if n]
+        if len(have) >= top:
+            raise HTTPException(
+                status_code=409,
+                detail=f"อัปได้สูงสุด {top} ใบ ตอนนี้มีแล้ว {len(have)} ใบ "
+                       "— ลบใบเก่าก่อนถ้าจะเปลี่ยน")
+        where = folder / clip_store.STORYBOARD_DIR
+        where.mkdir(parents=True, exist_ok=True)
+        name = f"manual-{len(have) + 1}{suffix}"
+        (where / name).write_bytes(blob)
+        rel = f"{clip_store.STORYBOARD_DIR}/{name}"
+
+        def change(mark: dict) -> None:
+            kept = [n for n in (mark.get("storyboards") or []) if n]
+            if rel not in kept:
+                kept.append(rel)
+            mark["storyboards"] = kept
+            mark["updated_at"] = when
+
+        return _manual_save(item_id, change)
+
+    mark = await asyncio.to_thread(work)
+    count = len([n for n in (mark.get("storyboards") or []) if n])
+    _clip_log(f"ใบ {item_id}: อัปสตอรีบอร์ดเอง ใบที่ {count} "
+              f"({len(blob) / 1024:.0f} KB)")
+    return {"ok": True, "item_id": item_id, "manual": mark,
+            "message": f"เก็บสตอรีบอร์ดใบที่ {count} แล้ว "
+                       f"(อัปได้อีก {top - count} ใบ)"}
+
+
+@app.post("/api/clips/{item_id}/manual/video")
+async def manual_upload_video(item_id: str,
+                              file: UploadFile = File(...)) -> dict:
+    """อัปคลิปเอง — ทับของเดิมได้ เพราะหนึ่งใบงานมีคลิปใบเดียว"""
+    suffix, blob = await _manual_read_upload(file, MANUAL_VIDEO_TYPES)
+    run = await asyncio.to_thread(_manual_run, item_id)
+    folder = clip_store.target_dir(DATA_DIR, item_id)
+    when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def work() -> dict:
+        where = folder / clip_store.VIDEO_DIR
+        where.mkdir(parents=True, exist_ok=True)
+        name = f"manual-clip{suffix}"
+        (where / name).write_bytes(blob)
+
+        def change(mark: dict) -> None:
+            mark["video"] = f"{clip_store.VIDEO_DIR}/{name}"
+            mark["video_mb"] = round(len(blob) / 1048576, 2)
+            mark["updated_at"] = when
+            # อัปคลิปใหม่ = ผลตรวจเก่าใช้ไม่ได้แล้ว ต้องกดเสร็จใหม่อีกรอบ
+            mark.pop("done_at", None)
+
+        return _manual_save(item_id, change)
+
+    mark = await asyncio.to_thread(work)
+    _clip_log(f"ใบ {item_id}: อัปคลิปเอง {len(blob) / 1048576:.1f} MB")
+    return {"ok": True, "item_id": item_id, "manual": mark,
+            "message": "เก็บคลิปแล้ว — กดเสร็จเพื่อส่งเข้าตัวตรวจ"}
+
+
+@app.post("/api/clips/{item_id}/manual/done")
+async def manual_done(item_id: str) -> dict:
+    """กดเสร็จ — ลงทะเบียนคลิป **ส่งผ่านตัวตรวจ** แล้วย้ายไปกองตรวจคลิป
+
+    เจ้าของสั่ง 19 ก.ย. 2569 ว่าคลิปที่อัปเอง **ต้องผ่านตัวตรวจด้วย** จึงเรียก
+    `_clip_check_videos` ตัวเดียวกับคลิปที่เจนจาก Flow ไม่เขียนด่านใหม่ขึ้นมา
+    ซ้ำ (ด่านสองชุดที่ตอบไม่ตรงกันอันตรายกว่าไม่มีด่าน — กติกา 2.3.1)
+
+    **ตรวจไม่ผ่านก็ยังย้ายกอง** เพราะกองตรวจคลิปคือที่ที่คนไปดูผลตรวจแล้ว
+    ตัดสินใจ ถ้ากั้นไว้ที่กอง Manual เจ้าของจะไม่เห็นว่าติดอะไร (กติกา 2.4)
+    """
+    run = await asyncio.to_thread(_manual_run, item_id)
+    mark = clip_board.manual_state(run)
+    boards = [n for n in (mark.get("storyboards") or []) if n]
+    video = str(mark.get("video") or "")
+    folder = clip_store.target_dir(DATA_DIR, item_id)
+    if not boards:
+        raise HTTPException(status_code=409, detail="ยังไม่ได้อัปสตอรีบอร์ดสักใบ")
+    if not video or not (folder / video).is_file():
+        raise HTTPException(status_code=409, detail="ยังไม่ได้อัปคลิป")
+
+    def work() -> dict:
+        # ลงทะเบียนคลิปด้วยตัวเดียวกับสายปกติ — วัดความละเอียดจากไฟล์จริงให้ด้วย
+        clip_store.save_video(DATA_DIR, item_id, [folder / video],
+                              note="เจ้าของอัปเอง (โหมดทำเอง)")
+        try:
+            checked = _clip_check_videos(item_id, force=True) or {}
+        except Exception as error:                           # noqa: BLE001
+            # **ตรวจไม่ได้ ไม่ใช่ตรวจแล้วไม่ผ่าน** ต้องแยกให้ชัด (กติกา 2.3.1)
+            _clip_log(f"ตรวจคลิปที่อัปเองของ {item_id} ไม่สำเร็จ: "
+                      f"{type(error).__name__}: {str(error)[:120]}")
+            checked = {"ok": None,
+                       "problems": [f"ตรวจไม่ได้: {type(error).__name__}"]}
+        when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        def change(mark: dict) -> None:
+            mark["done_at"] = when
+
+        _manual_save(item_id, change)
+        moved = 0
+        for job in clip_jobs.all():
+            if str(job.get("item_id") or "") != str(item_id):
+                continue
+            try:
+                # **ต้องปลดป้ายพักก่อนย้าย** ใบที่ติ๊กทำเองถูกตัวรันพักไว้ตอนที่
+                # มันเจอว่าห้ามทำสตอรีบอร์ด/เจนคลิปแทน ถ้าย้ายขั้นเฉยๆ ป้ายพัก
+                # ยังติดอยู่ ใบจะไปโผล่ **กองรอแก้** ไม่ใช่กองตรวจคลิป แล้ว
+                # เจ้าของจะหาใบที่เพิ่งกดเสร็จไม่เจอ (เจอจริงตอนทดสอบ 19 ก.ย.)
+                if job.get("parked"):
+                    clip_jobs.unpark(job["id"])
+                clip_jobs.update(job["id"], stage=clip_queue.STAGE_VIDEO_REVIEW)
+                moved += 1
+            except clip_queue.ClipQueueError as error:
+                _clip_log(f"ย้ายใบ {item_id} ไปกองตรวจคลิปไม่ได้: {error}")
+        return {"check": checked, "moved": moved}
+
+    got = await asyncio.to_thread(work)
+    checked = got["check"]
+    ok = checked.get("ok")
+    verdict = ("ตรวจผ่าน" if ok is True else
+               "ยังตรวจไม่ได้" if ok is None else
+               "ตรวจแล้วไม่ผ่าน: " + " / ".join(checked.get("problems") or []))
+    _clip_log(f"ใบ {item_id}: กดเสร็จโหมดทำเอง — {verdict} · "
+              f"ย้ายเข้ากองตรวจคลิป {got['moved']} ใบงาน")
+    return {"ok": True, "item_id": item_id, "check": checked,
+            "moved": got["moved"],
+            "message": f"ส่งเข้ากองตรวจคลิปแล้ว — {verdict}"}
+
 
 
 @app.post("/api/clips/{item_id}/generate")

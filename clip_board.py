@@ -46,8 +46,26 @@ STOCK_TARGET = 10
 
 LINK = "link"
 PICTURE = "picture"
+# ---- กอง Manual: เจ้าของทำสตอรีบอร์ดกับคลิปเอง (เจ้าของสั่ง 19 ก.ย. 2569) ----
+#
+# *"ในใบงานให้มีปุ่มติ๊กมา loop manual แล้วก็เพิ่มกล่องแมนนวล ... โดยในโหมด
+#   manual นี้ผมจะอัพโหลด storyboard เอง เพิ่มให้อัพได้สูงสุด 2 storyboard
+#   และผมจะอัพโหลดคลิปเอง ให้มีปุ่มกดเสร็จ โดยหลังจากกดเสร็จ จะไปเข้าขั้นตอน
+#   การตรวจครับเลย"*
+#
+# กองนี้ **แทนที่ทั้งขั้นสตอรีบอร์ดและขั้นเจนคลิป** ไม่ใช่ขั้นเพิ่ม — ใบที่ติ๊ก
+# แล้วจะไม่ถูกส่งเข้า GPT และไม่กินเครดิต Veo เลยสักหน่วย
+MANUAL = "manual"
 STORY = "story"
-CLIP = "clip"
+GEN_CLIP = "gen_clip"
+CHECK_CLIP = "check_clip"
+# ⛔ เคยมี CLIP = "clip" ตรงนี้ **ลบทิ้งแล้ว 19 ก.ย. 2569** อย่าเอากลับมา
+#
+# ตอนแยกกองคลิปเป็น "เจน Clip" กับ "ตรวจ Clip" ชื่อนี้ไม่ได้เป็นกองบน
+# กระดานอีกแล้ว แต่ยังถูกใช้เป็นกองสำรองอยู่ 5 จุด ผลคือ **กระดานทั้งหน้า
+# พังด้วย HTTP 500** (KeyError: 'clip') และแถวที่ตกมาที่กองนี้จะหายเงียบ
+# ไม่โผล่ในกองไหนเลย — ลบชื่อทิ้งทำให้ของแบบนี้ล้มตั้งแต่ตอนเปิดโปรแกรม
+# ไม่ใช่ล้มตอนเจ้าของเปิดหน้าเว็บ
 SHOPEE = "shopee_video"
 REELS = "facebook_reels"
 TIKTOK = "tiktok"
@@ -86,12 +104,20 @@ STORY_STAGES = {
     clip_queue.STAGE_REVISING,
 }
 
-# ช่วงเจนคลิปจนถึงรออนุมัติคลิป
-CLIP_STAGES = {
+# ---- แยกกอง Clip เป็นสอง (เจ้าของสั่ง 19 ก.ย. 2569) ----------------------
+#
+# *"ตรงช่องคลิป ให้แยกออกเป็น 2 ช่องคือ เจน clip กับ ตรวจ clip
+#   เพื่อป้องกันการสับสน"*
+#
+# เดิมกองเดียวโชว์ "(0 เจน/0 ตรวจ)" ซึ่งอ่านแล้วต้องแปลอีกที และเวลามีของ
+# ค้างก็บอกไม่ได้ว่าค้างเพราะรอเจนหรือรอคนตรวจ — คนละงานคนละคนทำ
+GEN_CLIP_STAGES = {
     clip_queue.STAGE_READY_FLOW,
     clip_queue.STAGE_GENERATING,
-    clip_queue.STAGE_VIDEO_REVIEW,
 }
+CHECK_CLIP_STAGES = {clip_queue.STAGE_VIDEO_REVIEW}
+# ชื่อเดิมเก็บไว้ให้โค้ดที่ยังอ้างถึงอยู่ = รวมทั้งสองกอง
+CLIP_STAGES = GEN_CLIP_STAGES | CHECK_CLIP_STAGES
 
 # ============================================================================
 # กองรอแก้ — **แยกย่อยตามชนิดของการแก้** (ผู้ใช้สั่ง 27 ส.ค. 2026)
@@ -149,7 +175,8 @@ FIX_OTHER = ("other", "❓ อื่นๆ", "ขั้นที่ระบบ�
 # ทั้งกอง — เจอจริงตอนทดสอบ 27 ส.ค. 2569 (พักใบรอลง Shopee แล้ว /waitclips
 # บอกว่าว่าง ส่วน /waitclip กลับมีใบนั้นอยู่)
 BOARD_KEY_FIX_GROUP = {
-    LINK: "link", PICTURE: "storyboard", STORY: "storyboard", CLIP: "clip",
+    LINK: "link", PICTURE: "storyboard", MANUAL: "clip",
+    STORY: "storyboard", GEN_CLIP: "clip", CHECK_CLIP: "clip",
     SHOPEE: "post", REELS: "post", TIKTOK: "post", NO_SHOP: "post",
 }
 
@@ -219,7 +246,8 @@ def parked_by_bucket(rows: list[dict]) -> list[dict]:
         came = (row.get("parked") or {}).get("from") or row.get("stage") or ""
         # จดมาเป็นชื่อกองอยู่แล้ว (งานที่ออกจากคิวไปแล้ว) ใช้ได้เลย ไม่ต้องแปล
         key = came if came in board_keys else bucket_of({"stage": came}, None)[0]
-        piles.setdefault(key or CLIP, []).append(row)
+        # แมปกองไม่ได้ให้ตกกอง “เจน Clip” ไว้ก่อน ดีกว่าหายจากทุกกอง
+        piles.setdefault(key or GEN_CLIP, []).append(row)
 
     out = []
     for key, title, _hint in BOARD:
@@ -253,8 +281,10 @@ def parked_by_bucket(rows: list[dict]) -> list[dict]:
 BOARD = (
     (LINK,   "🐣 ดึง Link",        "มีลิงก์แล้ว รอดึงข้อมูลสินค้า"),
     (PICTURE, "🖼️ Picture",        "ได้ข้อมูลสินค้าแล้ว รออนุมัติชุดรูป"),
+    (MANUAL, "✋ Manual",          "เจ้าของทำเอง — อัปสตอรีบอร์ดได้ถึง 2 ใบ + อัปคลิปเอง แล้วกดเสร็จ"),
     (STORY,  "🎨 Storyboard",      "อนุมัติรูปแล้ว รอทำและอนุมัติสตอรีบอร์ด + บทพูด"),
-    (CLIP,   "🎬 Clip",            "รอเจนคลิป หรือมีคลิปแล้วรออนุมัติก่อนโพสต์"),
+    (GEN_CLIP,   "🎬 เจน Clip",    "ได้สตอรีบอร์ดแล้ว รอเจนคลิปใน Google Flow"),
+    (CHECK_CLIP, "🔍 ตรวจ Clip",   "มีคลิปแล้ว รอตรวจและอนุมัติก่อนโพสต์"),
     (SHOPEE, "🛍️ Shopee Video",    "อนุมัติคลิปแล้ว รอลง Shopee Video"),
     (REELS,  "💙 Facebook Reels",  "ลง Shopee แล้ว รอลง Facebook Reels"),
     (TIKTOK, "🎵 TikTok",          "ลง Facebook แล้ว รอลง TikTok"),
@@ -272,7 +302,7 @@ BOARD = (
 # กองพวกนี้ต้องส่ง target = 0 ไม่งั้นหน้าเว็บจะขึ้นว่า "(55/10)" ซึ่งอ่านว่า
 # "55 จากสต๊อกที่อยากมี 10" — ชวนให้เข้าใจว่ายังขาดอีก ทั้งที่ความจริงคือ
 # ยิ่งเยอะยิ่งแย่ (สายกลางจับได้ตอนเทสหน้าเว็บจริง 13 ก.ย. 2569)
-NO_TARGET: set[str] = {NO_SHOP, DONE_NO_HUMAN}
+NO_TARGET: set[str] = {MANUAL, NO_SHOP, DONE_NO_HUMAN}
 
 # ปลายทางของกองที่ 4-6 → ชื่อที่ `publish_order` ใช้
 POST_TARGET = {SHOPEE: "shopee_video", REELS: "facebook_reels", TIKTOK: "tiktok"}
@@ -281,6 +311,58 @@ POST_TARGET = {SHOPEE: "shopee_video", REELS: "facebook_reels", TIKTOK: "tiktok"
 def _link_file(layout: str | None, name: str) -> str:
     """ชื่อไฟล์ภาพรวมผลค้นหา — ว่างเมื่อรอบนั้นไม่ได้เก็บภาพรวมไว้"""
     return name if layout else ""
+
+
+# จำนวนสตอรีบอร์ดที่อัปเองได้สูงสุด — เจ้าของกำหนดเอง 19 ก.ย. 2569
+MANUAL_STORYBOARD_MAX = 2
+
+
+def manual_state(run: dict | None) -> dict:
+    """โหมดทำเองของใบนี้ — ทนข้อมูลเพี้ยนทุกแบบ"""
+    mark = (run or {}).get("manual")
+    return mark if isinstance(mark, dict) else {}
+
+
+def manual_on(run: dict | None) -> bool:
+    """ใบนี้ติ๊กทำเองไว้และ **ยังไม่ได้กดเสร็จ** ใช่ไหม
+
+    กดเสร็จแล้วใบจะไหลไปกองตรวจคลิปตามปกติ จึงต้องหลุดจากกอง Manual ทันที
+    ไม่งั้นจะค้างอยู่สองกองพร้อมกัน
+    """
+    mark = manual_state(run)
+    return mark.get("on") is True and not str(mark.get("done_at") or "").strip()
+
+
+def manual_why(run: dict | None) -> str:
+    """ค้างตรงไหนในโหมดทำเอง — ภาษาที่อ่านแล้วรู้ว่าต้องทำอะไรต่อ"""
+    mark = manual_state(run)
+    boards = len([n for n in (mark.get("storyboards") or []) if n])
+    has_clip = bool(str(mark.get("video") or "").strip())
+    if not boards and not has_clip:
+        return f"รออัปสตอรีบอร์ด (ได้ถึง {MANUAL_STORYBOARD_MAX} ใบ) และคลิป"
+    if not boards:
+        return f"อัปคลิปแล้ว — รออัปสตอรีบอร์ด (ได้ถึง {MANUAL_STORYBOARD_MAX} ใบ)"
+    if not has_clip:
+        return f"อัปสตอรีบอร์ดแล้ว {boards} ใบ — รออัปคลิป"
+    return f"ครบแล้ว (สตอรีบอร์ด {boards} ใบ + คลิป) — กดเสร็จได้เลย"
+
+
+def manual_fields(run: dict | None) -> dict:
+    """ข้อมูลโหมดทำเองที่หน้าเว็บใช้วาดกล่อง — คิดจากจุดเดียวเหมือน confirm_fields"""
+    mark = manual_state(run)
+    boards = [str(n) for n in (mark.get("storyboards") or []) if n]
+    video = str(mark.get("video") or "")
+    return {
+        "manual_on": manual_on(run),
+        "manual_ticked": mark.get("on") is True,
+        "manual_why": manual_why(run) if manual_on(run) else "",
+        "manual_storyboards": boards,
+        "manual_storyboard_max": MANUAL_STORYBOARD_MAX,
+        "manual_video": video,
+        "manual_ready": bool(boards and video),
+        "manual_done_at": str(mark.get("done_at") or ""),
+        "manual_at": str(mark.get("at") or ""),
+    }
 
 
 def confirm_fields(run: dict | None) -> dict:
@@ -451,14 +533,22 @@ def bucket_of(job: dict, run: dict | None = None) -> tuple[str, str]:
             if target == skipped_target:
                 state = ((run or {}).get("publish") or {}).get(target) or {}
                 return key, str(state.get("error") or "ข้ามอัตโนมัติจนกว่าจะแก้ลิงก์")
+    # ---- ติ๊กทำเองแล้วไปกอง Manual ทันที (เพิ่ม 19 ก.ย. 2569) --------------
+    #
+    # ต้องดักก่อนการจัดกองตามขั้น เพราะใบที่ติ๊กยังค้างขั้น "รอตรวจชุดรูป" อยู่
+    # ถ้าไม่ดัก มันจะไปโผล่กอง Picture ทั้งที่เจ้าของเอาไปทำเองแล้ว
+    if manual_on(run):
+        return MANUAL, manual_why(run)
     if stage in LINK_STAGES:
         return LINK, clip_queue.STAGE_LABEL.get(stage, stage)
     if stage in PICTURE_STAGES:
         return PICTURE, clip_queue.STAGE_LABEL.get(stage, stage)
     if stage in STORY_STAGES:
         return STORY, clip_queue.STAGE_LABEL.get(stage, stage)
-    if stage in CLIP_STAGES:
-        return CLIP, clip_queue.STAGE_LABEL.get(stage, stage)
+    if stage in GEN_CLIP_STAGES:
+        return GEN_CLIP, clip_queue.STAGE_LABEL.get(stage, stage)
+    if stage in CHECK_CLIP_STAGES:
+        return CHECK_CLIP, clip_queue.STAGE_LABEL.get(stage, stage)
 
     # ---- เลยขั้นคลิปแล้ว = ตัดสินจาก **ของที่มีอยู่จริงในโฟลเดอร์** -------
     #
@@ -498,6 +588,8 @@ def bucket_of_run(run: dict) -> str:
     """
     if not run or run.get("banned"):
         return ""
+    if manual_on(run):
+        return MANUAL
     # คลิปที่มีไฟล์จริงคือหลักฐานว่าผ่านขั้นต้นน้ำมาแล้ว แม้ metadata เก่าบางใบ
     # จะไม่มี storyboard เหลืออยู่ก็ตาม ต้องส่งต่อไปกองโพสต์ตามสถานะเดิมก่อน
     # ตรวจความครบของรูป/Storyboard ไม่เช่นนั้นงานที่มีคลิปแล้วจะถอยหลังผิดกอง
@@ -520,7 +612,7 @@ def bucket_of_run(run: dict) -> str:
     # แค่บทพูดแต่ไม่มีสตอรีบอร์ดหลุดไปกอง Clip ทั้งที่ยังเจนไม่ได้
     if not (run.get("storyboard") or []) or not (run.get("script") or []):
         return STORY
-    return CLIP
+    return GEN_CLIP
 
 
 def _existing_video_names(run: dict) -> list[str]:
@@ -676,8 +768,8 @@ FOLDER_OF_BUCKET = {
 
 # ใบที่พักไว้ — ต้นน้ำทั้งสามขั้นรวมเป็น waitstory ตามที่ผู้ใช้ตั้งชื่อมา
 PARKED_FOLDER_OF_BUCKET = {
-    LINK: "waitstory", PICTURE: "waitstory", STORY: "waitstory",
-    CLIP: "waitstory",
+    LINK: "waitstory", PICTURE: "waitstory", MANUAL: "waitstory",
+    STORY: "waitstory", GEN_CLIP: "waitstory", CHECK_CLIP: "waitstory",
     SHOPEE: "waitclips",
     REELS: "waitclipsfb",
     TIKTOK: "waitclipstiktok",
@@ -710,7 +802,7 @@ def folder_of_run(run: dict, stage: str = "") -> str:
             return PARKED_FOLDER_OF_BUCKET[came]
         # จดมาเป็นขั้นในคิว ไม่ใช่ชื่อกอง — แปลก่อน
         key, _why = bucket_of({"stage": came}, None)
-        return PARKED_FOLDER_OF_BUCKET.get(key or CLIP, "waitstory")
+        return PARKED_FOLDER_OF_BUCKET.get(key or GEN_CLIP, "waitstory")
     key = bucket_of_run(run)
     if not key:
         return FINISHED_FOLDER          # ลงครบทั้งสามที่แล้ว
@@ -761,8 +853,8 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 key, _why = bucket_of(parked_job, None)
             if not key:
                 # ค้างที่ขั้นที่แมปกองไม่ได้ (เช่นล้มตอนโพสต์ หรือล้มก่อนได้รูป)
-                # ลงกองคลิปไว้ก่อน ดีกว่าหายเงียบจากทุกกองแล้วไม่มีใครเห็น
-                key = CLIP
+                # ลงกองเจนคลิปไว้ก่อน ดีกว่าหายเงียบจากทุกกองแล้วไม่มีใครเห็น
+                key = GEN_CLIP
             group = fix_group_of(came)
             title, hint = fix_group_meta(group)
             parked_piles[key].append({
@@ -788,6 +880,7 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 # /api/board กับ /api/clips จะติดธงไม่ตรงกัน (วัดจริง 14 ก.ย.
                 # 2569: clips 8 ใบ · board 4 ใบ ต่างกัน 4 ใบที่อยู่ในถังพักทั้งหมด)
                 **confirm_fields(candidate),
+                **manual_fields(candidate),
                 # ใบที่พักไว้ไม่มีปุ่มลง — ต้องเอากลับก่อนถึงจะลงได้
                 "can_publish": [],
             })
@@ -829,6 +922,7 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
             # สำหรับแถวที่มาจากคิว แต่ `candidate` มีข้อมูลอยู่ในหน่วยความจำแล้ว
             # จึงไม่ต้องอ่านไฟล์เพิ่มสักไฟล์
             **confirm_fields(candidate),
+            **manual_fields(candidate),
         })
 
     # ---- เติมงานที่ **จบจากคิวไปแล้ว** เข้ากองปลายทาง -----------------------
@@ -887,6 +981,7 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 "can_publish": publish_options(run),
                 **clip_info(run),
                 **confirm_fields(run),
+                **manual_fields(run),
                 "updated_at": run.get("video_at") or run.get("storyboard_at") or "",
             }
             park = run.get("parked") or {}
@@ -907,16 +1002,16 @@ def build(jobs: list[dict], load_run, runs: list[dict] | None = None) -> dict:
                 piles[key].append(row)
 
     counts = {key: len(rows) for key, rows in piles.items()}
-    clip_waiting_generation = sum(
-        1 for row in piles[CLIP] if row.get("clip_state") == "generation")
-    clip_waiting_approval = sum(
-        1 for row in piles[CLIP] if row.get("clip_state") == "approval")
+    # แยกกองแล้ว จำนวนที่รอเจนกับรอตรวจคือจำนวนของกองนั้นเอง
+    # (ใช้ .get เพราะกองที่ไม่มีแถวเลยจะไม่มีคีย์ใน piles)
+    clip_waiting_generation = len(piles.get(GEN_CLIP) or [])
+    clip_waiting_approval = len(piles.get(CHECK_CLIP) or [])
     return {
         "buckets": [
             {"key": key, "title": title, "hint": hint,
              "count": counts[key],
-             "waiting_generation": clip_waiting_generation if key == CLIP else 0,
-             "waiting_approval": clip_waiting_approval if key == CLIP else 0,
+             "waiting_generation": clip_waiting_generation if key == GEN_CLIP else 0,
+             "waiting_approval": clip_waiting_approval if key == CHECK_CLIP else 0,
              # กองรอแก้ไม่มีเส้นวัด — ยิ่งน้อยยิ่งดี ไม่ใช่ของที่ต้องมีสำรอง
              "target": 0 if key in NO_TARGET else STOCK_TARGET,
              # ขาดอีกกี่ใบถึงจะถึงเส้นวัด — 0 = ถึงแล้วหรือเกินแล้ว
@@ -975,13 +1070,18 @@ def refill_hint(key: str, counts: dict[str, int]) -> str:
         if waiting:
             return f"มีลิงก์รอดึงอยู่ {waiting} ใบ — ระบบกำลังทยอยทำให้"
         return f"ส่งลิงก์สินค้าเพิ่มอีก {short} ใบ (ต้นน้ำว่าง)"
-    if key == CLIP:
+    if key == GEN_CLIP:
         ready = counts.get(STORY, 0)
         if ready:
             return f"กดผ่านสตอรีบอร์ด + บทพูดอีก {min(short, ready)} ใบ"
         return f"ต้นน้ำว่าง — ส่งลิงก์เพิ่มอีก {short} ใบก่อน"
+    if key == CHECK_CLIP:
+        ready = counts.get(GEN_CLIP, 0)
+        if ready:
+            return f"รอเจนคลิปอีก {min(short, ready)} ใบ"
+        return f"ต้นน้ำว่าง — ส่งลิงก์เพิ่มอีก {short} ใบก่อน"
     if key == SHOPEE:
-        ready = counts.get(CLIP, 0)
+        ready = counts.get(CHECK_CLIP, 0)
         if ready:
             return f"กดอนุมัติคลิปอีก {min(short, ready)} ใบ"
         return f"ยังไม่มีคลิปให้อนุมัติ — เติมต้นน้ำก่อน"

@@ -1966,12 +1966,37 @@ def _clip_finish_collect(job: dict, data: dict) -> None:
             # "เลือกแบบกระจาย" คือหยิบตามลำดับเว้นช่วง **ไม่ได้ดูรูปเลยสักใบ**
             # จึงหยิบตารางสเปกหรือใบรับประกันมาเป็นฉากโฆษณาได้เต็มที่ ซึ่งเป็น
             # การข้ามขั้นที่ 2 เงียบๆ แบบเดียวกับที่ขั้นที่ 3 เคยโดน
-            raise _step_block(
-                2, "ให้ AI ดูรูปแล้วเลือกไม่สำเร็จ (มักเป็นเพราะ Gemini "
-                   "เต็มโควตาหรือเครดิตหมด)",
-                item_id=str(data.get("item_id") or job.get("item_id") or ""),
-                chat_id=chat_id,
-                fix="รอโควตา Gemini คืนแล้วสั่งใบนี้ใหม่ หรือกด 🖼 เลือกรูปเอง")
+            # ---- เก็บของที่ดึงมาแล้วไว้ แล้วพักใบนี้ (แก้ 19 ก.ย. 2569) ------
+            #
+            # **ของเดิมโยนทิ้งทั้งใบ** ทั้งที่รายละเอียดสินค้าและรูปโหลดมาครบแล้ว
+            # แล้วใบนั้นนับเป็น "ล้ม" ไปเพิ่มตัวนับล้มซ้ำ พอครบ 3 ใบติดกัน
+            # คิวถูกสั่งหยุด **ทั้งคิว** รวมขั้นดึงลิงก์ที่ไม่ได้มีปัญหาอะไรเลย
+            #
+            # เกิดจริง 2 ครั้ง: 15 ก.ย. 00:30 หยุด 43 นาที · 19 ก.ย. 08:55
+            # หยุด 1 ชั่วโมง 20 นาที ทั้งสองครั้งเพราะ Ollama ตายและ Gemini
+            # ใช้ไม่ได้ **แต่การดึงลิงก์ทำสำเร็จทุกใบ** (log "ดึงสินค้าแล้ว...
+            # โหลดรูป 13 ใบ" ขึ้นก่อนบรรทัดที่ล้มทุกครั้ง)
+            #
+            # เจ้าของถามตรงๆ ว่า *"แค่ดึงลิงก์เกี่ยวอะไรกับ ollama"* — ไม่เกี่ยว
+            # จึงไม่ควรพากันหยุด
+            #
+            # **ไม่ใช่การข้ามขั้นที่ 2** (กติกา 2.9) — ตรงข้ามเลย: ไม่มีการเดา
+            # เลือกรูปแทน ไม่เดินต่อไปขั้นสตอรีบอร์ด ใบนี้ไปนอนรอในถังพักของ
+            # กองดึงลิงก์จนกว่า AI จะกลับมา แล้วตัวเฝ้า Ollama จะปลุกกลับเอง
+            data["picked"] = []
+            data["saved_images"] = []       # ยังไม่ได้เลือก รูปทั้งหมดเข้าคลังสำรอง
+            _clip_keep(lambda: clip_store.save_product(DATA_DIR, data),
+                       "ข้อมูลสินค้าที่ดึงมาแล้ว")
+            why_park = ("AI เลือกรูป/เขียนจุดเด่นไม่ได้ (Ollama หรือ Gemini "
+                        "ใช้ไม่ได้) — ข้อมูลและรูปที่ดึงมาเก็บไว้ครบแล้ว "
+                        "รอ AI กลับมาแล้วระบบจะทำต่อเอง")
+            try:
+                clip_jobs.park(job["id"], why=why_park)
+            except Exception as park_error:                   # noqa: BLE001
+                _clip_log(f"พักใบ {data.get('item_id')} ไม่สำเร็จ: {park_error}")
+            _clip_log(f"🅿 พักใบ {data.get('item_id')} ไว้ก่อน — {why_park} "
+                      "(การดึงลิงก์ใบอื่นเดินต่อตามปกติ)")
+            return
         picked = picked[:want]
         # **ต้องดัง** ใบที่เดินมาทางนี้ จุดเด่นเขียนจากรูปคนละชุดกับที่เลือกใหม่
         # ปล่อยเงียบแล้วไม่มีใครรู้ว่าใบไหนตรงใบไหนไม่ตรง
@@ -8732,6 +8757,127 @@ def sync_clip_extra_watchers() -> None:
         _clip_log(f"เปิดตัวเฝ้าข้อความของบอทสายคลิป {name}")
 
 
+# ---------------------------------------------- ตัวเฝ้า Ollama (AI ในเครื่อง)
+#
+# **เจ้าของสั่ง 19 ก.ย. 2569** หลัง Ollama ตายเงียบเป็นครั้งที่สอง
+#
+#     15 ก.ย. 00:30   ตาย -> คิวหยุด 43 นาที
+#     19 ก.ย. 08:55   ตาย -> คิวหยุด 1 ชั่วโมง 20 นาที
+#
+# ทั้งสองครั้ง **ไม่มีอะไรปลุกมันกลับมาเอง** และไม่มีอะไรฟ้อง — รู้ตอนเจ้าของ
+# มาถามเองว่าทำไมไม่ทำงาน ซึ่งคือความพังชนิดที่แย่ที่สุด (เงียบ + ยาว)
+#
+# ตัวนี้ทำสามอย่าง
+#   1. ถามทุก OLLAMA_CHECK_SECONDS ว่ายังตอบอยู่ไหม
+#   2. ตายแล้วปลุกกลับ โดยเว้นระยะกันยิงรัวถ้าปลุกไม่ขึ้น
+#   3. ฟื้นแล้ว **ปลุกใบที่ถูกพักเพราะ AI ใช้ไม่ได้กลับเข้าคิวเอง**
+#
+# ห้ามเขียน log ทุกรอบ — เขียนเฉพาะ **ตอนสถานะเปลี่ยน** ไม่งั้น log จะท่วมจน
+# ของจริงหาไม่เจอ (นาทีละบรรทัด = วันละ 1,440 บรรทัด)
+OLLAMA_CHECK_SECONDS = 60.0
+# เว้นระยะก่อนปลุกซ้ำ — ปลุกแล้วไม่ขึ้นแปลว่ามีอย่างอื่นผิด ยิงรัวไม่ช่วย
+OLLAMA_REVIVE_GAP_SECONDS = 180.0
+# ป้ายเหตุผลที่ใช้ตอนพักใบเพราะ AI ใช้ไม่ได้ — ตัวเฝ้าใช้คำนี้หาใบที่ต้องปลุกกลับ
+OLLAMA_PARK_MARK = "AI เลือกรูป/เขียนจุดเด่นไม่ได้"
+
+_ollama_state: dict = {
+    "alive": None,          # None = ยังไม่เคยตรวจ (ห้ามแปลว่า "ตาย")
+    "checked_at": "",
+    "changed_at": "",
+    "revived": 0,
+    "last_try_at": "",
+    "last_error": "",
+    "model": "",
+}
+_ollama_state_lock = threading.Lock()
+
+
+def _ollama_status() -> dict:
+    """สถานะ AI ในเครื่องสำหรับหน้าเว็บ — คืนสำเนา ไม่ให้ใครแก้ของจริง"""
+    with _ollama_state_lock:
+        state = dict(_ollama_state)
+    alive = state.get("alive")
+    state["label"] = ("ยังไม่ได้ตรวจ" if alive is None
+                      else "พร้อมใช้งาน" if alive else "ไม่ตอบ — กำลังปลุกให้")
+    state["ok"] = alive is True
+    state["unknown"] = alive is None
+    return state
+
+
+def _ollama_wake_parked() -> int:
+    """เอาใบที่พักไว้เพราะ AI ใช้ไม่ได้กลับเข้าคิว — คืนจำนวนใบที่ปลุก"""
+    woke = 0
+    for job in clip_jobs.all():
+        park = job.get("parked") or {}
+        if OLLAMA_PARK_MARK not in str(park.get("why") or ""):
+            continue
+        try:
+            clip_jobs.unpark(job["id"])
+            woke += 1
+        except Exception as error:                               # noqa: BLE001
+            _clip_log(f"ปลุกใบ {job.get('item_id')} กลับเข้าคิวไม่สำเร็จ: {error}")
+    return woke
+
+
+def _ollama_check_once() -> None:
+    """ตรวจหนึ่งรอบ — ตายแล้วปลุก ฟื้นแล้วปลุกใบที่พักไว้"""
+    import clip_pickimg                                         # noqa: PLC0415
+    import tiktok_product_link as _tpl                          # noqa: PLC0415
+
+    alive = bool(_tpl.ollama_alive())
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _ollama_state_lock:
+        before = _ollama_state["alive"]
+        _ollama_state["checked_at"] = now
+        _ollama_state["model"] = clip_pickimg.OLLAMA_MODEL
+        if alive != before:
+            _ollama_state["alive"] = alive
+            _ollama_state["changed_at"] = now
+    if alive:
+        if before is False:
+            woke = _ollama_wake_parked()
+            with _ollama_state_lock:
+                _ollama_state["revived"] += 1
+                _ollama_state["last_error"] = ""
+            _clip_log(f"✅ AI ในเครื่อง (Ollama) กลับมาแล้ว — "
+                      f"ปลุกใบที่พักไว้กลับเข้าคิว {woke} ใบ")
+            _wake_runners()
+        elif before is None:
+            _clip_log("ตัวเฝ้า AI ในเครื่อง: Ollama พร้อมใช้งาน")
+        return
+
+    if before is not False:
+        _clip_log("⚠️ AI ในเครื่อง (Ollama) ไม่ตอบ — จะปลุกกลับให้เอง")
+    with _ollama_state_lock:
+        last = _ollama_state.get("last_try_at") or ""
+    if last:
+        try:
+            gap = (datetime.now() - datetime.strptime(
+                last, "%Y-%m-%d %H:%M:%S")).total_seconds()
+        except ValueError:
+            gap = OLLAMA_REVIVE_GAP_SECONDS
+        if gap < OLLAMA_REVIVE_GAP_SECONDS:
+            return                      # เพิ่งปลุกไป รอให้ครบระยะก่อนลองใหม่
+    with _ollama_state_lock:
+        _ollama_state["last_try_at"] = now
+    try:
+        _tpl.ensure_ollama(log=lambda m: _clip_log(f"  {m}"))
+    except Exception as error:                                   # noqa: BLE001
+        with _ollama_state_lock:
+            _ollama_state["last_error"] = f"{type(error).__name__}: {error}"[:200]
+        _clip_log(f"ปลุก Ollama ไม่สำเร็จ: {type(error).__name__}: "
+                  f"{str(error)[:120]}")
+
+
+def _ollama_keeper() -> None:
+    while True:
+        try:
+            _ollama_check_once()
+        except Exception as error:                               # noqa: BLE001
+            _clip_log(f"ตัวเฝ้า AI ในเครื่องสะดุด: {type(error).__name__}: {error}")
+        time.sleep(OLLAMA_CHECK_SECONDS)
+
+
 def _extra_sync_loop() -> None:
     while True:
         try:
@@ -9747,6 +9893,10 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
         board["quota_note"] = ("โควตานับเป็นวันที่เริ่มตี 4 — "
                                "ลงตอนตี 3 ถือว่ายังเป็นยอดของเมื่อวาน")
         board["auto_note"] = "งานที่กด 🅿 พักไว้รอแก้ จะไม่ถูกอนุมัติอัตโนมัติ"
+        # สถานะ AI ในเครื่อง + ปุ่มคุมคิวดึงลิงก์ — แนบมากับกระดานที่หน้าเว็บ
+        # ดึงอยู่แล้ว จะได้ไม่ต้องยิงเพิ่มอีกสองที่อยู่ทุกรอบ (เจ้าของสั่ง 19 ก.ย.)
+        board["ollama"] = _ollama_status()
+        board["link_queue"] = _link_queue_state()
 
         dup = clip_store.duplicates(DATA_DIR)
         board["duplicates"] = dup
@@ -10274,6 +10424,121 @@ async def browser_show(request: Request) -> dict:
                         if opened else
                         f"ยก Chrome ของขั้น \"{spec['label']}\" ขึ้นมาด้านหน้าแล้ว")}
 
+
+@app.get("/api/ai/status")
+async def ai_status() -> dict:
+    """AI ในเครื่อง (Ollama) พร้อมใช้งานไหม — ให้หน้าเว็บโชว์สถานะ
+
+    เจ้าของสั่ง 19 ก.ย. 2569: *"ollama ให้มีสถานะโชว์ที่หน้าเว็ปด้วย"*
+
+    **แยก "ยังไม่ได้ตรวจ" ออกจาก "ตรวจแล้วไม่ตอบ"** (กติกา 2.3.1) —
+    `unknown` เป็นจริงได้เฉพาะช่วงไม่กี่วินาทีแรกหลังเซิร์ฟเวอร์ขึ้น
+    """
+    return {"ok": True, "ollama": _ollama_status()}
+
+
+@app.post("/api/ai/wake")
+async def ai_wake() -> dict:
+    """ปลุก AI ในเครื่องเดี๋ยวนี้ ไม่ต้องรอรอบตรวจถัดไป"""
+    await asyncio.to_thread(_ollama_check_once)
+    state = _ollama_status()
+    return {"ok": True, "ollama": state,
+            "message": ("AI ในเครื่องพร้อมใช้งานแล้ว" if state.get("ok")
+                        else "ปลุกแล้วแต่ยังไม่ตอบ — ดู log ว่าติดอะไร")}
+
+
+# ---- ปุ่มคุมคิวดึงลิงก์ (เจ้าของสั่ง 19 ก.ย. 2569) -------------------------
+#
+# *"ตรงดึงลิ้งให้มีปุ่ม start กับ resume กับ ยกเลิกได้ด้วย"*
+#
+# `start` กับ `resume` ทำงานอย่างเดียวกัน (ปลดการหยุดแล้วปลุกตัวรัน) แต่รับ
+# ทั้งสองชื่อเพราะเจ้าของเรียกทั้งสองแบบ — ให้หน้าเว็บเลือกใช้คำที่อ่านเข้าใจ
+# ตามสถานการณ์ได้ โดยไม่ต้องมีสองเส้นทางในโค้ดให้เพี้ยนกันวันหลัง
+#
+# เพิ่ม `pause` เข้ามาด้วยเพราะถ้าไม่มี ปุ่ม start/resume จะกดได้เฉพาะตอนที่
+# ระบบหยุดตัวเองเท่านั้น เจ้าของสั่งหยุดเองไม่ได้เลย
+LINK_QUEUE_ACTIONS = ("start", "resume", "pause", "cancel")
+
+
+def _link_queue_state() -> dict:
+    """สถานะคิวดึงลิงก์ที่หน้าเว็บใช้ตัดสินว่าปุ่มไหนกดได้"""
+    jobs = clip_jobs.all()
+    waiting = sum(1 for j in jobs
+                  if j.get("stage") == clip_queue.STAGE_QUEUED
+                  and not j.get("parked"))
+    parked = sum(1 for j in jobs
+                 if j.get("stage") == clip_queue.STAGE_QUEUED and j.get("parked"))
+    held = bool(clip_jobs.held())
+    return {
+        "held": held,
+        "why": str(getattr(clip_jobs, "hold_why", "") or ""),
+        "scope": str(getattr(clip_jobs, "hold_scope", "") or ""),
+        "since": str(getattr(clip_jobs, "hold_at", "") or ""),
+        "waiting": waiting,
+        "parked": parked,
+        "running": (not held) and waiting > 0,
+        "can_start": held,
+        "can_pause": (not held) and waiting > 0,
+        "can_cancel": waiting > 0,
+    }
+
+
+# **ห้ามย้ายไปอยู่ใต้ /api/clips/** — เส้นทาง /api/clips/{item_id} ที่ประกาศ
+# ก่อนหน้าจะจับคำว่า "link-queue" ไปเป็นรหัสสินค้า แล้วตอบ "ไม่พบงานนี้"
+# (เจอจริง 19 ก.ย. 2569 ตอนเทสครั้งแรก)
+@app.get("/api/link-queue")
+async def link_queue_view() -> dict:
+    """ตอนนี้คิวดึงลิงก์เป็นยังไง — ให้หน้าเว็บวาดปุ่มตามสถานะจริง"""
+    return {"ok": True, "link_queue": await asyncio.to_thread(_link_queue_state)}
+
+
+@app.post("/api/link-queue")
+async def link_queue_control(request: Request) -> dict:
+    """เริ่ม / หยุด / ยกเลิก คิวดึงลิงก์"""
+    payload = await request.json() if await request.body() else {}
+    action = str((payload or {}).get("action") or "").strip().lower()
+    if action not in LINK_QUEUE_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="action ต้องเป็น " + " · ".join(LINK_QUEUE_ACTIONS))
+
+    def work() -> dict:
+        if action in ("start", "resume"):
+            if not clip_jobs.held():
+                return {"message": "คิวเดินอยู่แล้ว ไม่ได้ถูกหยุดไว้",
+                        "changed": False}
+            why = str(getattr(clip_jobs, "hold_why", "") or "")
+            clip_jobs.release_hold()
+            _wake_runners()
+            _clip_log(f"เจ้าของสั่งให้คิวดึงลิงก์ทำงานต่อ (ก่อนหน้านี้หยุดเพราะ: {why[:120]})")
+            return {"message": "ทำงานต่อแล้ว", "changed": True}
+        if action == "pause":
+            if clip_jobs.held():
+                return {"message": "คิวถูกหยุดอยู่แล้ว", "changed": False}
+            # scope="new" = หยุดรับใบใหม่ ใบที่เริ่มไปแล้วเดินจนจบ
+            # ไม่ใช้ "all" เพราะจะไปหยุดขั้นอื่นที่ไม่เกี่ยวด้วย
+            clip_jobs.hold("เจ้าของกดหยุดเอง", scope="new")
+            _clip_log("เจ้าของสั่งหยุดคิวดึงลิงก์ — ใบที่เริ่มไปแล้วเดินต่อจนจบ")
+            return {"message": "หยุดรับใบใหม่แล้ว — ใบที่กำลังทำอยู่เดินต่อจนจบ",
+                    "changed": True}
+        dropped = 0
+        for job in clip_jobs.all():
+            if job.get("stage") != clip_queue.STAGE_QUEUED or job.get("parked"):
+                continue
+            try:
+                clip_jobs.update(job["id"], stage=clip_queue.STAGE_CANCELLED)
+                dropped += 1
+            except clip_queue.ClipQueueError:
+                pass
+        if clip_jobs.held():
+            clip_jobs.release_hold()
+        _clip_log(f"เจ้าของสั่งยกเลิกคิวดึงลิงก์ที่เหลือ — ยกเลิก {dropped} ใบ")
+        return {"message": f"ยกเลิกแล้ว {dropped} ใบ (กู้คืนได้ที่ /trash)",
+                "changed": bool(dropped), "cancelled": dropped}
+
+    result = await asyncio.to_thread(work)
+    return {"ok": True, "action": action,
+            "link_queue": await asyncio.to_thread(_link_queue_state), **result}
 
 @app.get("/api/auto-approve")
 async def auto_approve_view() -> dict:
@@ -11395,6 +11660,8 @@ async def _startup() -> None:
     # บอทเพิ่มเติมที่ตั้งหน้าที่เป็นสายคลิป — อ่านที่นี่ที่เดียว กันชน 409 กับ 8866
     sync_clip_extra_watchers()
     threading.Thread(target=_extra_sync_loop, daemon=True).start()
+    # ตัวเฝ้า AI ในเครื่อง — ตายแล้วปลุกเอง ฟื้นแล้วปลุกใบที่พักไว้กลับเข้าคิว
+    threading.Thread(target=_ollama_keeper, daemon=True).start()
     # สรุปประจำวันส่งเข้าแชทเอง — อยู่ที่นี่เพราะคิวกับคลังคลิปอยู่ในโปรเซสนี้
     threading.Thread(target=_digest_keeper, daemon=True).start()
     # บทสนทนาแชท + log ระบบ ขึ้น Drive เอง — ไม่ต้องรอให้มีคลิปใหม่

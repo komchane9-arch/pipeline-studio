@@ -8985,14 +8985,53 @@ async def health() -> dict:
     }
 
 
+def _open_jobs() -> dict:
+    """ใบงานที่ยังเปิดอยู่ในคิว เรียงตามรหัสสินค้า — ใบล่าสุดชนะถ้ามีซ้ำ"""
+    out: dict[str, dict] = {}
+    for job in clip_jobs.all():
+        if job.get("stage") not in clip_queue.OPEN_STAGES:
+            continue
+        item_id = str(job.get("item_id") or "")
+        if item_id:
+            out[item_id] = job
+    return out
+
+
+def _bucket_now(run: dict, open_jobs: dict) -> str:
+    """ใบนี้อยู่กองไหน **ให้ตรงกับกระดานเสมอ**
+
+    ---- ทำไมต้องมีตัวนี้ (แก้ 19 ก.ย. 2569) ------------------------------
+
+    สายกลางจับได้ตอนทดสอบปุ่ม "เสร็จแล้ว" ของโหมดทำเอง: ใบงานถูกย้ายไปขั้น
+    `video_review` เรียบร้อย กระดานแสดงในกอง 🔍 ตรวจ Clip ถูกต้อง **แต่
+    `/api/clips` ตอบว่า `shopee_video`** เพราะเรียก `bucket_of_run()` ตรงๆ
+
+    `bucket_of_run()` ตัดสินจาก **ของที่มีอยู่ในโฟลเดอร์** อย่างเดียว — เห็นว่า
+    มีไฟล์คลิปแล้วก็สรุปว่าพร้อมลง Shopee ซึ่งถูกสำหรับงานที่ **ออกจากคิวไปแล้ว**
+    (ไม่มีสถานะคิวให้ดู) แต่ผิดสำหรับงานที่ยังเปิดอยู่และค้างอยู่ที่ขั้นรอคนตรวจ
+
+    ยังเป็นอาการเดิมที่เคยเจอ 14 ก.ย.: **ที่อยู่สองตัวตอบคนละอย่างเรื่องใบเดียวกัน**
+    อันตรายกว่าไม่มีคำตอบ เพราะไม่มีใครรู้ว่าฝั่งไหนถูก (กติกา 2.3.1)
+    """
+    job = open_jobs.get(str(run.get("item_id") or ""))
+    if job:
+        key, _why = clip_board.bucket_of(job, run)
+        if key:
+            return key
+    return clip_board.bucket_of_run(run)
+
+
 @app.get("/api/clips")
 async def clips_list() -> dict:
     """รายการงานเจนคลิปที่เก็บไว้ ใหม่สุดขึ้นก่อน"""
     runs = await asyncio.to_thread(clip_store.list_runs, DATA_DIR)
     # ติดป้ายว่างานแต่ละชิ้นอยู่ขั้นไหน เพื่อให้หน้าเว็บกรองตามหัวข้อได้
     # (ผู้ใช้สั่ง 26 ส.ค. 2026: "แยกงานที่เก็บไว้ตามแต่ละขั้นเลย")
+    # อ่านคิวครั้งเดียวนอกลูป — ถ้าอ่านในลูปจะกลายเป็นอ่าน 694 ครั้งต่อการกด
+    # หนึ่งครั้ง แบบเดียวกับที่เพิ่งแก้ไปที่กระดานเมื่อกี้
+    open_jobs = await asyncio.to_thread(_open_jobs)
     for run in runs:
-        run["bucket"] = clip_board.bucket_of_run(run)
+        run["bucket"] = _bucket_now(run, open_jobs)
         # ---- ด่านยืนยันสินค้า TikTok (เพิ่ม 14 ก.ย. 2569) -------------------
         #
         # **ต้องแปะตรงนี้ ไม่ใช่ใน `clip_board.clip_info()`** — รอบแรกผมไปเพิ่ม
@@ -9060,7 +9099,7 @@ async def clips_detail(item_id: str) -> dict:
     run.update(clip_board.confirm_fields(run))
     run.update(clip_board.manual_fields(run))
     run.update(clip_board.up1080_fields(run))
-    run["bucket"] = clip_board.bucket_of_run(run)
+    run["bucket"] = await asyncio.to_thread(_bucket_now, run, _open_jobs())
     return {
         "ok": True, **run,
         # ประโยคปกติไว้โชว์ — ของจริงที่ส่งเข้า Flow ยังเป็น `script` เหมือนเดิม

@@ -608,6 +608,39 @@ const clipFile = (itemId, name) =>
 const jobPost = (path, body) =>
   api(`${CLIP_API}/api/jobs/${path}`, { method: "POST", body: JSON.stringify(body || {}) });
 
+/* โหมดทำเอง — เจ้าของอัปสตอรีบอร์ดกับคลิปเอง แทนที่จะให้ระบบเจน
+ * (สายคลิปส่งสเปคมา 19 ก.ย. 2569 · เจ้าของสั่งเอง)
+ *
+ * **ทำไมต้องมีที่เก็บแยก แทนที่จะอ่านจากใบงานตรงๆ** — สถานะนี้มีอยู่ที่เดียว
+ * คือแถวใน `/api/clips` ส่วน `/api/clips/<id>` ที่การ์ดใบงานใช้เปิด **ไม่มี
+ * ฟิลด์ manual เลยสักตัว** (วัดแล้ว 0 จาก 9) และ `/api/board` ก็ไม่มีแถวรายใบ
+ * ขอให้สายคลิปเติมไปแล้ว พอเติมมาตัวนี้จะอ่านจากใบงานตรงๆ ได้เลย
+ *
+ * ค่า `undefined` = **ยังไม่รู้** ซึ่งต้องหน้าตาต่างจาก "รู้แล้วว่ายังไม่ติ๊ก"
+ * (ข้อ 2.3.1 ข้อ 4) ไม่งั้นวันที่อ่านไม่ได้ ใบที่ติ๊กไว้จะขึ้นเป็นยังไม่ติ๊ก
+ * แล้วเจ้าของกดซ้ำกลายเป็นปิดโหมดทิ้งโดยไม่รู้ตัว */
+const manualTick = new Map();
+// ข้อความผลล่าสุดต่อใบ — ต้องค้างให้อ่านทัน ไม่ใช่เด้งแล้วหาย
+// (บทเรียนฝั่งโพสต์วันนี้: เหตุผลที่เริ่มงานไม่ได้ถูกส่งเป็นข้อความเด้ง
+//  ของปุ่ม เจ้าของเลยไม่เห็น แล้วนึกว่าบอทค้าง)
+const manualSaid = new Map();
+let manualTickAsked = false;
+
+/** สถานะติ๊กของใบนี้ — true/false = รู้แล้ว · undefined = ยังไม่รู้ */
+function manualTickOf(run, itemId) {
+  // ใบงานมีฟิลด์มาเองเมื่อไร ใช้ของใบงานก่อนเสมอ (สดกว่าที่เราจำไว้)
+  if (run && typeof run.manual_ticked === "boolean") return run.manual_ticked;
+  return manualTick.get(String(itemId));
+}
+
+function rememberManualTicks(rows) {
+  (rows || []).forEach((row) => {
+    if (row && row.item_id && typeof row.manual_ticked === "boolean") {
+      manualTick.set(String(row.item_id), row.manual_ticked);
+    }
+  });
+}
+
 function textBtn(label, className, handler) {
   const button = el("button", { className, type: "button", textContent: label });
   button.addEventListener("click", handler);
@@ -1382,7 +1415,9 @@ function autoToggle(bucket) {
  *  **ปุ่มชื่อเดียวกันที่ทำคนละอย่างในหน้าเดียวคือกับดัก** จึงตั้งชื่อต่างกันด้วย
  */
 function browserViewButton(browser, key, twins = []) {
-  if (key === "clip") {
+  // กองนี้เคยชื่อ "clip" — สายคลิปแยกเป็น gen_clip (เจน) กับ check_clip (ตรวจ)
+  // เมื่อ 19 ก.ย. 2569 และ **ลบชื่อเดิมทิ้งถาวร** แถบเครดิต Flow เป็นของขั้นเจน
+  if (key === "gen_clip") {
     const toggle = el("button", {
       type: "button",
       className: "board-browser" + (chromeOpen ? " is-on" : ""),
@@ -1870,12 +1905,12 @@ function paintBoard() {
       // เพราะยิ่งน้อยยิ่งดี ไม่ใช่ของที่ต้องมีสำรอง ถ้าใช้รูปแบบเดียวกับกองอื่น
       // จะขึ้นว่า "(3/0)" ซึ่งอ่านแล้วเหมือน "3 จาก 0" — ไม่มีความหมาย
       // และขัดกับข้อความข้างล่างที่บอกว่ากองนี้ไม่มีเส้นวัด
+      // เดิมกอง "clip" กองเดียวโชว์สองตัวเลข "(n เจน/n ตรวจ)" เพราะสองขั้นอยู่
+      // รวมกัน ตอนนี้แยกเป็นคนละกองแล้ว แต่ละกองจึงนับของตัวเองตามปกติ
       el("span", { className: "board-count",
-                   textContent: bucket.key === "clip"
-                     ? `(${bucket.waiting_generation || 0} เจน/${bucket.waiting_approval || 0} ตรวจ)`
-                     : (bucket.target ?? 10)
-                       ? `(${bucket.count}/${bucket.target ?? 10})`
-                       : `(${bucket.count})` }),
+                   textContent: (bucket.target ?? 10)
+                     ? `(${bucket.count}/${bucket.target ?? 10})`
+                     : `(${bucket.count})` }),
     );
     if (bucket.short) button.classList.add("is-short");
     // ห่อเป็นช่องเดียวกัน: สวิตช์อยู่บน · กล่องอยู่กลาง · โควตาอยู่ล่าง
@@ -1933,13 +1968,9 @@ function paintBoard() {
    * — หน้าเว็บกับแชทต้องเห็นรายการเดียวกัน ไม่ใช่คนละชุด
    *   ตอนนี้ลิงก์ไป /wait ย้ายไปอยู่ที่หัวเรื่อง "รอแก้ในขั้นนี้" ใต้แต่ละกองแทน
    *   เพราะกองรวม "รอแก้" ถูกยกเลิกไปแล้ว (ผู้ใช้สั่งใหม่ 27 ส.ค. เย็น) */
-  if (picked?.key === "clip") {
-    const generation = picked.waiting_generation || 0;
-    const approval = picked.waiting_approval || 0;
-    short.textContent = `🎬 รอเจนคลิป ${generation} ใบ · มีคลิปแล้วรออนุมัติ ${approval} ใบ`
-      + (picked.short ? ` — เส้นวัด ${picked.target} ใบ ขาดอีก ${picked.short} · ${picked.refill || ""}` : "");
-    short.hidden = false;
-  } else if (picked?.short) {
+  // เดิมมีข้อความพิเศษของกอง "clip" ที่กางสองตัวเลขให้ดู — ไม่ต้องแล้ว
+  // เพราะแยกเป็นกอง gen_clip กับ check_clip ซึ่งใช้ข้อความมาตรฐานได้ตรงกว่า
+  if (picked?.short) {
     short.textContent = `⚠️ ขั้นนี้ค้างอยู่ ${picked.count} ใบ `
       + `— เส้นวัดคือ ${picked.target} ใบ ขาดอีก ${picked.short} · ${picked.refill || ""}`;
     short.hidden = false;
@@ -2013,9 +2044,38 @@ function paintBoard() {
   list.replaceChildren(...rows);
 }
 
+/* **รอบเก่ายังไม่กลับ ห้ามยิงรอบใหม่** (19 ก.ย. 2569)
+ *
+ * ตัวจับเวลาข้างล่างเรียกทุก 6 วินาที ส่วนตัวนี้ยิง `/api/board` ซึ่งวัดจริง
+ * แล้วใช้ **22 วินาที** ต่อรอบแม้ตอนไม่มีใครกวน คำขอจึงกองทับกันเรื่อยๆ
+ * แล้วยิ่งกองยิ่งช้า กลายเป็นวงจรที่ซ้ำเติมตัวเอง
+ *
+ * วัดจริงบนเซิร์ฟเวอร์สายคลิปตัวเดียวกัน
+ *
+ *     ขณะหน้าเว็บยิงทุก 6 วิ     หลังหยุดยิง
+ *     /api/board   เกิน 120 วิ       22.0 วิ
+ *     /api/jobs         64.3 วิ        5.6 วิ
+ *     /api/clips         9.3 วิ        1.6 วิ
+ *
+ * ช้าขึ้น 6–11 เท่าเพราะการทับกันล้วนๆ **ตัวที่อยู่ช้า 22 วินาทีเป็นคนละเรื่อง
+ * และยังต้องแก้ที่ฝั่งสายคลิป** — ตัวกันนี้แค่ทำให้ของช้าไม่ขยายตัวเอง
+ * ไม่ได้ทำให้มันเร็วขึ้น อย่าเข้าใจผิดว่าแก้จบแล้ว
+ */
+let queueBusy = false;
+
 export async function loadJobQueue() {
   const list = $("#storyQueueList");
   if (!list) return;
+  if (queueBusy) return;          // รอบก่อนยังไม่กลับ — ข้ามรอบนี้ไปเลย
+  queueBusy = true;
+  try {
+    return await loadJobQueueOnce(list);
+  } finally {
+    queueBusy = false;
+  }
+}
+
+async function loadJobQueueOnce(list) {
   let payload;
   try {
     payload = await api(`${CLIP_API}/api/jobs`);
@@ -2328,15 +2388,70 @@ async function saveDraft(job, draft) {
 
 /** กล่องตรวจชุดรูป+จุดเด่น — วาดใหม่ในเครื่องทุกครั้งที่กด ไม่ยิงเซิร์ฟเวอร์
  *  จนกว่าจะกดบันทึก (นั่นคือทั้งหมดของ "แก้ให้ครบก่อนแล้วส่งทีเดียว") */
+/** ปุ่มติ๊ก "ทำเอง" — วางคู่ปุ่ม "ใช้ชุดรูปนี้ ไปต่อ" เพราะเป็นจุดตัดสินใจเดียวกัน
+ *  จะให้เครื่องทำต่อ หรือจะอัปสตอรีบอร์ดกับคลิปเอง
+ *
+ *  **ต้องกดได้ตั้งแต่ใบงานมีรูปแล้ว ไม่ต้องรออนุมัติรูปก่อน** เจ้าของสั่งไว้ชัด
+ *  (*"ตอนดึงรูปเสร็จแล้วขึ้นเป็นใบงานโชว์รูปและรายละเอียดสินค้า
+ *  ยังไม่ต้องมีการอนุมัติ"*) การ์ดนี้โผล่ตั้งแต่ขั้น image_review อยู่แล้ว
+ *  จึงวางตรงนี้ได้พอดี
+ */
+function manualTickButton(itemId, paint, run = null) {
+  const state = manualTickOf(run, itemId);
+  const box = el("label", { className: "manual-tick" });
+  const tick = el("input", { type: "checkbox" });
+  tick.checked = state === true;
+  // ยังไม่รู้สถานะ = ห้ามให้หน้าตาเหมือน "รู้แล้วว่ายังไม่ติ๊ก"
+  tick.indeterminate = state === undefined;
+  tick.disabled = state === undefined;
+  const word = el("span", { textContent: state === undefined
+    ? "ทำเอง — กำลังอ่านสถานะ…"
+    : "ทำเอง (อัปสตอรีบอร์ด + คลิปเอง)" });
+  box.append(tick, word);
+  if (state === undefined) {
+    box.classList.add("is-unknown");
+    // ดึงรายการ**ครั้งเดียว**ต่อการโหลดหน้า แล้ววาดใหม่ — รายการหนัก 8 MB
+    // ยิงซ้ำทุกการ์ดจะกลายเป็นถล่มเซิร์ฟเวอร์สายคลิปเอง
+    if (!manualTickAsked) {
+      manualTickAsked = true;
+      loadStoryRuns().then(paint).catch(() => { manualTickAsked = false; });
+    }
+    return box;
+  }
+  tick.addEventListener("change", async () => {
+    const want = tick.checked;
+    tick.disabled = true;
+    word.textContent = want ? "กำลังเข้าโหมดทำเอง…" : "กำลังออกจากโหมดทำเอง…";
+    try {
+      const reply = await api(`${CLIP_API}/api/clips/${encodeURIComponent(itemId)}/manual`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: want }),
+      });
+      // อ่าน `on` จากผลตอบตรงๆ ไม่คิดสถานะอื่นเอง — ค่าที่ต้องคำนวณ
+      // (พร้อมกดเสร็จไหม · ค้างตรงไหน) ปล่อยให้รอบโหลดรายการเอามาให้
+      const on = reply?.manual?.on === true;
+      manualTick.set(String(itemId), on);
+      manualSaid.set(String(itemId), { text: reply?.message || "", bad: false });
+    } catch (error) {
+      // ข้อความไทยมาจากเซิร์ฟเวอร์อยู่แล้ว แสดงตรงๆ ไม่ต้องแปลเอง
+      manualSaid.set(String(itemId), {
+        text: `ติ๊กไม่สำเร็จ: ${error.message}`, bad: true });
+    }
+    paint();
+  });
+  return box;
+}
+
 function imageReview(job, run, meta) {
   const draft = draftFor(job, run);
   const box = el("div", { className: "img-review" });
-  const paint = () => box.replaceChildren(...imageReviewParts(job, meta, draft, paint));
+  const paint = () => box.replaceChildren(...imageReviewParts(job, meta, draft, paint, run));
   paint();
   return [box];
 }
 
-function imageReviewParts(job, meta, draft, paint) {
+function imageReviewParts(job, meta, draft, paint, run = null) {
   const itemId = job.item_id || "";
   const images = draft.images;
   const pool = draft.pool;
@@ -2452,7 +2567,13 @@ function imageReviewParts(job, meta, draft, paint) {
   // สีจึงกลายเป็นข้อมูลว่า "มีอะไรรออยู่ไหม" แทนที่จะเป็นแค่การตกแต่ง
   out.push(el("div", { className: "inline-row" },
     textBtn("✅ ใช้ชุดรูปนี้ ไปต่อ", draftDirty(draft) ? "primary" : "ghost",
-            () => commitDraft(job, draft, "img_ok"))));
+            () => commitDraft(job, draft, "img_ok")),
+    manualTickButton(itemId, paint, run)));
+  const said = manualSaid.get(String(itemId));
+  if (said?.text) {
+    out.push(el("p", { className: `note${said.bad ? " fail" : ""}`,
+                       textContent: said.text }));
+  }
 
   // ── จุดเด่น: ซ้ายคือที่เลือกไว้ · ขวาคือจุดขายทั้งหมดที่ AI ไล่ไว้ ─────
   out.push(el("h4", { textContent: `✨ จุดเด่นที่จะส่งเข้า GPT (${highlights.length} ข้อ)` }));
@@ -3660,6 +3781,8 @@ export async function loadStoryRuns() {
   try {
     const payload = await api(`${CLIP_API}/api/clips`);
     storyRuns = payload.runs || [];
+    // แถวพวกนี้เป็น**ที่เดียว**ที่มีสถานะโหมดทำเอง เก็บไว้ให้การ์ดใบงานใช้
+    rememberManualTicks(storyRuns);
     if (!storyRuns.length) {
       list.replaceChildren();
       $("#storyNote").textContent = "ยังไม่มีงานที่เก็บไว้";

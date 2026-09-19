@@ -824,6 +824,86 @@ dialog .block[open] > summary { border-bottom: 0.5px solid var(--line); }
 .fb-group a, .fb-job a { color: var(--accent-text); text-decoration: none; }
 .fb-group a:hover, .fb-job a:hover { text-decoration: underline; }
 
+/* รายชื่อกลุ่มที่ผูกกับโปรไฟล์ — อยู่บนหน้า Group Facebook โดยตรง */
+.gf-linked {
+  margin: 10px 0 18px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--shade);
+}
+.gf-linked-head { align-items: center; gap: 8px; }
+.gf-linked-head h3 { margin: 0; }
+.gf-linked-head .ghost { margin-left: auto; }
+.gf-linked-count {
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  background: var(--panel);
+  color: var(--ink-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.gf-linked-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 8px 0;
+}
+.gf-linked-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--panel);
+}
+.gf-linked-group.is-off { opacity: 0.62; }
+.gf-linked-name {
+  min-width: 0;
+  color: var(--accent-text);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+.gf-linked-name:hover { text-decoration: underline; }
+.gf-linked-id {
+  grid-column: 1;
+  color: var(--ink-3);
+  font: 11px Consolas, monospace;
+}
+.gf-linked-state {
+  grid-column: 2;
+  grid-row: 2;
+  color: var(--ink-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.gf-linked-group .danger { grid-column: 3; grid-row: 1 / span 2; }
+.gf-linked-empty {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 14px;
+  color: var(--ink-3);
+  text-align: center;
+  border: 1px dashed var(--line);
+  border-radius: 11px;
+}
+.gf-linked-add {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.5fr) minmax(160px, 1fr) auto;
+  gap: 7px;
+  margin-top: 9px;
+}
+.gf-linked-add input { min-width: 0; }
+
+@media (max-width: 700px) {
+  .gf-linked-list { grid-template-columns: 1fr; }
+  .gf-linked-add { grid-template-columns: 1fr; }
+  .gf-linked-add button { width: 100%; }
+}
+
 /* ---------------- Group Facebook: ช่องทางสร้างงานจากหน้าเว็บ */
 .gfp-studio {
   border: 1px solid var(--line);
@@ -2248,7 +2328,38 @@ button:disabled { opacity: 0.5; }
    ไม่ใช่ขั้นในสายพาน (ที่พัก · ไม่มีสินค้า) — กองนี้เป็นขั้นจริง ต้องดูเป็นขั้น */
 .board-tab[data-key="picture"]        { --stage: #f472b6; }  /* ชมพู — อนุมัติชุดรูป */
 .board-tab[data-key="story"]          { --stage: #a78bfa; }  /* ม่วง — ช่วงคิดงาน */
-.board-tab[data-key="clip"]           { --stage: #fb923c; }  /* ส้ม — ได้ของแล้ว */
+/* ✋ Manual — เขียวมะนาว **ต้องมีสีจริง ไม่ใช่เทา** ถึงจะเป็นทางแยกที่คนทำเอง
+   มันก็เป็นขั้นในสายพานเหมือนกัน (เจ้าของสั่ง 19 ก.ย. 2569 ว่า "โชว์สถานะ
+   เหมือนกล่องอื่นทุกอย่าง") เทาจองไว้ให้กองที่ไม่ใช่ขั้น เช่นที่พัก
+   เลือกเขียวมะนาวเพราะกองข้างเคียงคือชมพู (Picture) กับม่วง (Storyboard)
+   — แถบสีสูงแค่ 3px ต้องต่างกันคนละโทนถึงจะแยกออก */
+
+/* ปุ่มติ๊ก "ทำเอง" บนการ์ดใบงาน — วางคู่ปุ่ม "ใช้ชุดรูปนี้ ไปต่อ"
+   เพราะเป็นจุดตัดสินใจเดียวกัน: ให้เครื่องทำต่อ หรือจะทำเอง
+   ใช้สีเดียวกับกอง Manual บนกระดาน เพื่อให้โยงกันได้ด้วยตา */
+.manual-tick {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel);
+  font-size: 13px; cursor: pointer; user-select: none;
+}
+.manual-tick:hover { border-color: #84cc16; }
+.manual-tick input { accent-color: #84cc16; cursor: pointer; margin: 0; }
+.manual-tick:has(input:checked) {
+  border-color: #84cc16; font-weight: 700;
+  background: color-mix(in srgb, #84cc16 12%, var(--panel));
+}
+/* ยังอ่านสถานะไม่ได้ — **ต้องดูต่างจาก "รู้แล้วว่ายังไม่ติ๊ก"** (ข้อ 2.3.1)
+   ไม่งั้นใบที่ติ๊กไว้จะขึ้นเป็นช่องว่าง แล้วกดซ้ำกลายเป็นปิดโหมดทิ้งโดยไม่ตั้งใจ */
+.manual-tick.is-unknown { opacity: .55; cursor: progress; font-style: italic; }
+.manual-tick.is-unknown input { cursor: progress; }
+.board-tab[data-key="manual"]         { --stage: #84cc16; }  /* เขียวมะนาว — คนทำเอง */
+/* กองเดิมชื่อ "clip" ถูกแยกเป็นสองกองเมื่อ 19 ก.ย. 2569 และชื่อเดิมถูกลบถาวร
+   เจน Clip รับสีส้มของกองเดิมมาต่อ เพราะเป็นขั้นที่ได้ของจริงออกมา
+   ส่วน ตรวจ Clip ใช้คราม — **จงใจไม่ใช้ส้มอีกเฉด** เพราะกองมันอยู่ติดกัน
+   และอีกข้างเป็นส้มแดงของ Shopee ส้มสามเฉดเรียงกันจะแยกด้วยตาไม่ออก */
+.board-tab[data-key="gen_clip"]       { --stage: #fb923c; }  /* ส้ม — ได้ของแล้ว */
+.board-tab[data-key="check_clip"]     { --stage: #6366f1; }  /* คราม — ขั้นตรวจ */
 .board-tab[data-key="shopee_video"]   { --stage: #f97362; }  /* ส้มแดง — Shopee */
 .board-tab[data-key="facebook_reels"] { --stage: #60a5fa; }  /* ฟ้า — Facebook */
 .board-tab[data-key="tiktok"]         { --stage: #2dd4bf; }  /* เขียวน้ำทะเล — TikTok */
@@ -3262,6 +3373,7 @@ body.typing-through {
 .fc-btn:disabled { opacity: 0.5; cursor: default; }
 .fc-stop { border-color: var(--slow); color: var(--slow); }
 .fc-resume { border-color: var(--ok); color: var(--ok-ink); }
+.fc-complete { border-color: var(--ok); background: var(--ok); color: white; }
 .fc-cancel { border-color: var(--bad); color: var(--bad-ink); }
 
 /* ============ 🗣 ประโยคปกติเหนือช่องแก้บทพูด (9 ก.ย. 2569) */
@@ -3328,6 +3440,7 @@ body.typing-through {
 .fc-stamp { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .fc-cancelled { border-left-color: var(--none); }
+.fc-manual_done { border-left-color: var(--ok); }
 .fc-waiting_caption, .fc-waiting_image { border-left-color: var(--info); }
 
 .fc-src { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
@@ -3511,12 +3624,26 @@ body.typing-through {
    จึงเยื้องคอมเมนต์เข้ามาและขีดเส้นตั้งด้านซ้ายให้เห็นว่าอยู่ใต้โพสต์ไหน */
 
 .eg-list { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 4px; }
+.eg-group {
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); color: var(--ink); overflow: clip;
+}
+.eg-g-summary { cursor: pointer; padding: 10px 12px; background: var(--shade); }
+.eg-g-summary:hover { background: color-mix(in srgb, var(--shade) 72%, var(--panel)); }
+.eg-g-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.eg-g-name { font-size: 13.5px; overflow-wrap: anywhere; }
+.eg-g-active { background: var(--info-chip); color: var(--info-ink); font-weight: 700; }
+.eg-g-shown { color: var(--ink-3); background: var(--panel); }
+.eg-group-body { display: flex; flex-direction: column; gap: 7px; padding: 8px; }
 .eg-post {
   border: 1px solid var(--line); border-radius: 10px;
-  padding: 10px 12px; background: var(--panel); color: var(--ink);
+  background: var(--panel); color: var(--ink); overflow: clip;
 }
+.eg-p-summary { cursor: pointer; padding: 8px 10px; }
+.eg-p-summary:hover { background: color-mix(in srgb, var(--shade) 62%, var(--panel)); }
+.eg-post-body { padding: 0 10px 10px; border-top: 1px solid var(--line); }
 .eg-p-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.eg-p-group { font-size: 13px; overflow-wrap: anywhere; }
+.eg-p-title { font-size: 12.5px; overflow-wrap: anywhere; }
 .eg-p-link { margin-left: auto; color: var(--link); text-decoration: none; white-space: nowrap; font-size: 11px; }
 .eg-p-link:hover { text-decoration: underline; }
 .eg-p-stat { margin: 3px 0 0; font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
@@ -3525,10 +3652,33 @@ body.typing-through {
 .eg-wait { background: var(--warn-chip); color: var(--warn-ink); font-weight: 700; }
 .eg-draft { background: var(--info-chip); color: var(--info-ink); }
 .eg-done { background: var(--shade); color: var(--ink-3); }
+.eg-stopped { background: var(--bad-bg); color: var(--bad-ink); }
+.eg-watch {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  margin: 6px 0 0; padding: 6px 8px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--shade);
+}
+.eg-watch.is-suggested { border-color: var(--warn-chip); background: var(--warn-bg); }
+.eg-watch.is-stopped {
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--line));
+  background: color-mix(in srgb, var(--bad) 7%, var(--panel));
+}
+.eg-watch-note { flex: 1 1 260px; font-size: 10.5px; color: var(--ink-3); }
+.eg-watch.is-suggested .eg-watch-note { color: var(--warn-ink); font-weight: 700; }
+.eg-watch.is-stopped .eg-watch-note { color: var(--bad-ink); }
+.eg-watch-note.is-bad { color: var(--bad-ink); font-weight: 700; }
+.eg-watch-stop, .eg-watch-keep {
+  font-size: 10.5px; padding: 3px 11px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink-2);
+}
+.eg-watch-stop { border-color: var(--bad); color: var(--bad-ink); }
+.eg-watch-keep { border-color: var(--ok); color: var(--ok-ink); font-weight: 700; }
+.eg-watch-stop:disabled, .eg-watch-keep:disabled { opacity: 0.5; cursor: default; }
 
 /* เยื้องเข้ามา + เส้นตั้ง = "อันนี้อยู่ใต้โพสต์ข้างบน" แบบเดียวกับที่ Facebook ทำ */
 /* กล่องเนื้อหาโพสต์ — รูป · แคปชัน · คอมเมนต์ของเราเอง (เจ้าของสั่ง 15 ก.ย. 2569)
    วางไว้เหนือคอมเมนต์ของคนอื่น เพราะคนอื่นคือของที่ต้องตอบ ต้องอยู่ใกล้มือที่สุด */
+.eg-content { margin: 7px 0 0; font-size: 11px; }
 .eg-drop { margin: 7px 0 0; font-size: 11px; }
 .eg-drop > summary { cursor: pointer; color: var(--ink-3); }
 .eg-drop > summary:hover { color: var(--ink); }
@@ -3586,6 +3736,26 @@ body.typing-through {
 .eg-note { font-size: 10.5px; color: var(--warn-ink); overflow-wrap: anywhere; }
 .eg-note.is-sent { color: var(--ok-ink); }
 .eg-note.is-bad { color: var(--bad-ink); font-weight: 700; }
+.eg-daily {
+  margin: 5px 0 8px; padding: 7px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel-2);
+  color: var(--ink-2); font-size: 12px; font-weight: 700;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.eg-daily.is-full {
+  border-color: var(--bad); background: color-mix(in srgb, var(--bad) 9%, var(--panel));
+  color: var(--bad-ink);
+}
+.eg-timer {
+  margin: 5px 0 8px; padding: 7px 10px; border-radius: 8px;
+  border: 1px solid var(--warn-chip); background: var(--warn-bg);
+  color: var(--warn-ink); font-size: 12px; font-weight: 700;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.eg-timer.is-bad {
+  border-color: var(--bad); background: color-mix(in srgb, var(--bad) 9%, var(--panel));
+  color: var(--bad-ink);
+}
 .eg-empty { margin: 6px 0; font-size: 11.5px; color: var(--ink-3); }
 
 /* ============ 🔎 ด่านยืนยันสินค้า TikTok ก่อนลงคลิป (14 ก.ย. 2569) */

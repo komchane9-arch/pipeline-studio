@@ -3910,6 +3910,174 @@ export async function loadStoryRuns() {
   }
 }
 
+/** ปุ่มแนบไฟล์ — ซ่อน input จริงไว้ กดปุ่มแล้วเปิดหน้าต่างเลือกไฟล์
+ *
+ *  ส่งเป็น FormData ช่อง `file` ตามที่ฝั่งงานกำหนด — `api()` เห็น FormData
+ *  แล้วจะไม่ใส่ Content-Type เอง ปล่อยให้เบราว์เซอร์ใส่ boundary ให้ถูก
+ */
+function uploadBtn(label, accept, onPick, className = "ghost") {
+  const wrap = el("span", { className: "mn-upload" });
+  const input = el("input", { type: "file", accept, hidden: true });
+  const button = textBtn(label, className, () => input.click());
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
+    input.value = "";                 // เลือกไฟล์เดิมซ้ำได้ ไม่งั้น change ไม่ยิงรอบสอง
+    if (!file) return;
+    button.disabled = true;
+    const was = button.textContent;
+    button.textContent = "กำลังส่งไฟล์…";
+    try {
+      await onPick(file);
+    } finally {
+      button.disabled = false;
+      button.textContent = was;
+    }
+  });
+  wrap.append(button, input);
+  return wrap;
+}
+
+/** กล่อง ✋ ทำเอง — เจ้าของอัปสตอรีบอร์ดกับคลิปเอง แทนที่จะให้ระบบเจน
+ *
+ *  **เจ้าของสั่ง 19 ก.ย. 2569** *"หลังจากย้ายไปงานไป กล่อง manual ให้คงรูป
+ *  และ จุดเด่น เหมือนเดิม ให้มีปุ่ม อัพโหลด storyboard และ คลิป"*
+ *
+ *  รูปกับจุดเด่นจึงต้องอยู่ในกล่องนี้ด้วย ไม่ใช่หายไปตอนใบย้ายกอง —
+ *  คนที่กำลังวาดสตอรีบอร์ดเองต้องเห็นว่าสินค้าหน้าตายังไง และจะขายจุดไหน
+ *  ถ้าต้องกดสลับไปดูที่อื่นแล้วกดกลับมา ก็เท่ากับทำงานไม่ได้จริง
+ */
+function manualBox(run, reload) {
+  const id = run.item_id;
+  const box = el("div", { className: "mn-box" });
+  const say = el("p", { className: "note mn-say" });
+
+  /* **ข้อความผลต้องรอดจากการวาดกล่องใหม่** (เจอจริงตอนทดสอบ 19 ก.ย. 2569)
+   *
+   * ทุกปุ่มในกล่องนี้สั่งเสร็จแล้วต้องโหลดใบงานใหม่ ซึ่งวาดกล่องทั้งอันใหม่
+   * ถ้าเขียนข้อความลงช่องเดิมแล้วค่อยโหลด ช่องนั้นจะถูกทิ้งไปพร้อมกล่องเก่า
+   * ผลคืออัปไฟล์สำเร็จแต่**ไม่มีอะไรบอกว่าสำเร็จ** เห็นแค่ตัวเลขขยับเงียบๆ
+   *
+   * เก็บไว้นอกกล่องแล้ววาดกลับเข้าไปทุกครั้ง — บทเรียนเดียวกับฝั่งโพสต์
+   * ที่เหตุผลถูกส่งเป็นข้อความเด้งแล้วหาย จนเจ้าของนึกว่าบอทค้าง
+   */
+  const said = manualSaid.get(String(id));
+  if (said?.text) {
+    say.textContent = said.text;
+    say.classList.toggle("is-bad", !!said.bad);
+  }
+
+  const post = async (path, options, okWord) => {
+    say.classList.remove("is-bad");
+    try {
+      const out = await api(`${CLIP_API}/api/clips/${encodeURIComponent(id)}${path}`, options);
+      manualSaid.set(String(id), { text: out.message || okWord || "", bad: false });
+      await reload();
+      loadJobQueue();
+    } catch (error) {
+      // ข้อความไทยมาจากเซิร์ฟเวอร์ครบทุกเคสแล้ว แสดงตรงๆ ไม่ต้องแปลเอง
+      manualSaid.set(String(id), { text: error.message, bad: true });
+      say.textContent = error.message;
+      say.classList.add("is-bad");
+    }
+  };
+
+  box.append(el("h4", { textContent: "✋ ทำเอง — อัปสตอรีบอร์ดและคลิปเอง" }));
+  if (run.manual_why) {
+    box.append(el("p", { className: "mn-why", textContent: run.manual_why }));
+  }
+
+  // ---- รูปสินค้า (เจ้าของสั่งให้คงไว้) ----
+  const shots = run.images || [];
+  if (shots.length) {
+    box.append(el("h5", { className: "mn-head", textContent: `🖼 รูปที่เลือกไว้ (${shots.length} ใบ)` }));
+    const grid = el("div", { className: "mn-shots" });
+    // **ห้ามใส่ loading="lazy" กับรูปในกล่องนี้** วัดจริง 19 ก.ย. 2569:
+    // รูป 4 ใบที่ใส่ lazy ไม่เริ่มโหลดเลยแม้จะอยู่กลางจอ (complete=false ·
+    // currentSrc ว่าง) ทั้งที่ URL เดียวกันโหลดได้ปกติเมื่อสร้าง Image() ใหม่
+    // และรูปอีก 14 ใบในหน้าเดียวกันที่ไม่ใส่ lazy โหลดครบ
+    // กล่องนี้อยู่ในแผงที่ตั้ง overflow:auto ซึ่งทำให้ตัวตัดสินของเบราว์เซอร์
+    // มองว่ายังไม่ต้องโหลด — รูปแค่ไม่กี่ใบไม่คุ้มที่จะเสี่ยงกับเรื่องนี้
+    shots.forEach((name, at) => grid.append(el("img", {
+      className: "mn-shot", alt: `รูปที่ ${at + 1}`,
+      src: clipFile(id, name),
+    })));
+    box.append(grid);
+  }
+
+  // ---- จุดเด่น (เจ้าของสั่งให้คงไว้) ----
+  const points = run.highlights || [];
+  if (points.length) {
+    box.append(el("h5", { className: "mn-head", textContent: `✨ จุดเด่น (${points.length} ข้อ)` }));
+    const ol = el("ol", { className: "story-highlights mn-points" });
+    points.forEach((text) => ol.append(el("li", { textContent: text })));
+    box.append(ol);
+  }
+
+  // ---- สตอรีบอร์ดที่อัปแล้ว ----
+  const boards = run.manual_storyboards || [];
+  const max = run.manual_storyboard_max || 2;
+  box.append(el("h5", { className: "mn-head",
+                        textContent: `🎨 สตอรีบอร์ดที่อัปเอง (${boards.length}/${max} ใบ)` }));
+  if (boards.length) {
+    const grid = el("div", { className: "mn-shots" });
+    boards.forEach((name, at) => grid.append(el("img", {
+      className: "mn-shot", alt: `สตอรีบอร์ดใบที่ ${at + 1}`,
+      src: clipFile(id, name),
+    })));
+    box.append(grid);
+  } else {
+    box.append(el("p", { className: "note", textContent: "ยังไม่ได้อัปสักใบ" }));
+  }
+  // เพดานอ่านจากเซิร์ฟเวอร์ **ห้ามเขียนเลข 2 ตายในหน้าเว็บ** (ฝั่งงานกำชับ)
+  if (boards.length < max) {
+    box.append(uploadBtn("＋ อัปสตอรีบอร์ด", ".png,.jpg,.jpeg,.webp", async (file) => {
+      const form = new FormData();
+      form.append("file", file);
+      await post("/manual/storyboard", { method: "POST", body: form });
+    }));
+  }
+
+  // ---- คลิปที่อัปแล้ว ----
+  box.append(el("h5", { className: "mn-head", textContent: "🎬 คลิปที่อัปเอง" }));
+  if (run.manual_video) {
+    box.append(el("video", {
+      className: "story-video", controls: true, preload: "metadata",
+      src: clipFile(id, run.manual_video),
+    }));
+  } else {
+    box.append(el("p", { className: "note", textContent: "ยังไม่ได้อัปคลิป" }));
+  }
+  box.append(uploadBtn(run.manual_video ? "🔄 เปลี่ยนคลิป" : "＋ อัปคลิป",
+                       ".mp4,.mov,.m4v,.webm", async (file) => {
+    const form = new FormData();
+    form.append("file", file);
+    await post("/manual/video", { method: "POST", body: form });
+  }));
+
+  // ---- ปุ่มจบงาน ----
+  const row = el("div", { className: "inline-row mn-row" });
+  const done = textBtn("✅ เสร็จแล้ว", run.manual_ready ? "primary" : "ghost", async () => {
+    done.disabled = true;
+    // วัดจริง 20–60 วินาที เพราะตัวตรวจต้องฟังเสียงในคลิป **ต้องบอกว่ากำลังทำ**
+    // ไม่งั้นดูเหมือนค้างแล้วคนจะกดซ้ำ
+    say.classList.remove("is-bad");
+    say.textContent = "กำลังส่งเข้าตัวตรวจ… (ปกติ 20–60 วินาที) อย่าปิดหน้านี้";
+    await post("/manual/done", { method: "POST" });
+    done.disabled = false;
+  });
+  done.disabled = !run.manual_ready;
+  done.title = run.manual_ready
+    ? "ส่งเข้าตัวตรวจแล้วย้ายไปกองตรวจคลิป"
+    : "ต้องอัปสตอรีบอร์ดอย่างน้อย 1 ใบ และอัปคลิปก่อน";
+  row.append(done, textBtn("เอาติ๊กออก", "ghost", async () => {
+    await post("/manual", {
+      method: "POST", body: JSON.stringify({ on: false }),
+    });
+  }));
+  box.append(row, say);
+  return box;
+}
+
 async function showStoryRun(itemId) {
   const box = $("#storyDetail");
   document.querySelectorAll(".story-item").forEach((el) => {
@@ -3933,7 +4101,12 @@ async function showStoryRun(itemId) {
   head.textContent = run.name || run.item_id;
   parts.push(head);
 
-  if (run.highlights?.length) {
+  // ใบที่อยู่โหมดทำเองใช้กล่องของตัวเอง ซึ่งมีรูปกับจุดเด่นอยู่ข้างในแล้ว
+  // ถ้าวาดจุดเด่นซ้ำข้างนอกอีกชุด จะเห็นสองชุดติดกันแล้วงงว่าอันไหนของจริง
+  const manual = run.manual_on === true;
+  if (manual) parts.push(manualBox(run, () => showStoryRun(run.item_id)));
+
+  if (!manual && run.highlights?.length) {
     const ol = document.createElement("ol");
     ol.className = "story-highlights";
     run.highlights.forEach((text) => {

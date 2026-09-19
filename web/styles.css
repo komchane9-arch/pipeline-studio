@@ -3884,3 +3884,27 @@ body.typing-through {
   border-color: var(--bad); background: color-mix(in srgb, var(--bad) 8%, var(--panel));
 }
 .up1080-row.is-bad .up1080-row-why { color: var(--bad-ink); font-weight: 700; }
+
+/* กล่อง ✋ ทำเอง — เจ้าของอัปสตอรีบอร์ดกับคลิปเอง (19 ก.ย. 2569)
+   ใช้เขียวมะนาวเดียวกับกอง Manual บนกระดาน เพื่อให้โยงกันได้ด้วยตา
+   รูปกับจุดเด่นอยู่ในกล่องนี้ด้วย ตามที่เจ้าของสั่งว่าย้ายกองแล้วต้องยังเห็น */
+.mn-box {
+  margin: 10px 0; padding: 12px 14px; border-radius: 12px;
+  border: 1px solid color-mix(in srgb, #84cc16 45%, var(--line));
+  background: color-mix(in srgb, #84cc16 6%, var(--panel));
+}
+.mn-box > h4 { margin: 0 0 6px; color: #5f9e0f; }
+.mn-head { margin: 12px 0 5px; font-size: 12.5px; color: var(--ink-2); font-weight: 700; }
+.mn-why { margin: 0 0 4px; font-size: 12px; font-weight: 700; color: #5f9e0f; }
+/* รูปเรียงเป็นแถวเลื่อนได้ ไม่ดันความกว้างของแผงรายละเอียด */
+.mn-shots { display: flex; gap: 7px; flex-wrap: wrap; }
+.mn-shot {
+  width: 92px; height: 92px; object-fit: cover;
+  border-radius: 9px; border: 1px solid var(--line); background: var(--panel);
+}
+.mn-points { margin: 0; padding-left: 20px; font-size: 12.5px; }
+.mn-upload { display: inline-block; margin-top: 6px; }
+.mn-row { margin-top: 12px; gap: 8px; }
+/* ข้อความผลค้างไว้ให้อ่าน ไม่ใช่เด้งแล้วหาย */
+.mn-say { margin: 8px 0 0; overflow-wrap: anywhere; }
+.mn-say.is-bad { color: var(--bad-ink); font-weight: 700; }

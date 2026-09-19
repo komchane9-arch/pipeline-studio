@@ -1864,6 +1864,83 @@ function quotaLine(bucket) {
   return node;
 }
 
+/* กล่อง 🎞️ Auto 1080P — ขยายคลิปที่ยังไม่ถึง 1080p ก่อนเอาไปลง
+ * (สเปค SPEC-กล่อง-auto-1080p.md · เจ้าของสั่ง 19 ก.ย. 2569)
+ *
+ * **สวิตช์ตัวนี้ทำเองแทนที่จะใช้ `autoToggle`** เพราะกองนี้ไม่มีช่อง `auto`
+ * มาจากกระดาน สถานะอยู่ชั้นบนสุดที่ `boardData.up1080` และยิงคนละที่อยู่
+ * (`/api/up1080` ไม่ใช่ `/api/auto-approve`) — ยัดให้ใช้ตัวเดียวกันจะกลายเป็น
+ * ฟังก์ชันที่มีข้อยกเว้นอยู่ข้างใน ซึ่งอ่านยากกว่าเขียนแยก
+ *
+ * **ไม่ต้องถามก่อนเปิด** ต่างจากกองที่โพสต์ขึ้นจริง เพราะการขยายคลิปไม่ได้
+ * ส่งอะไรออกไปข้างนอก และฝั่งงานเก็บไฟล์เดิมไว้เป็น `-ก่อนขยาย.mp4` ทุกใบ
+ */
+function up1080Toggle(status) {
+  const button = el("button", {
+    type: "button",
+    className: "board-auto" + (status.on ? " is-on" : ""),
+  });
+  button.setAttribute("role", "switch");
+  const paint = (on) => {
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-checked", on ? "true" : "false");
+    const waiting = status.waiting || 0;
+    button.textContent = `${on ? "☑" : "☐"} อัตโนมัติ${waiting ? ` · รอ ${waiting}` : ""}`;
+    button.title = on
+      ? `เปิดอยู่ — จะไล่ขยายใบที่ยังไม่ถึง ${status.min_side || 1080}p ให้เอง`
+      : "ปิดอยู่ — ใบที่รอขยายจะค้างอยู่จนกว่าจะเปิดหรือกดทีละใบ";
+  };
+  paint(status.on);
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();          // ห้ามทะลุไปเปลี่ยนกองที่เลือกอยู่
+    const next = !button.classList.contains("is-on");
+    button.disabled = true;
+    paint(next);                      // ขยับให้เห็นทันที แล้วค่อยยืนยันกับเซิร์ฟเวอร์
+    try {
+      const out = await api(`${CLIP_API}/api/up1080`, {
+        method: "POST", body: JSON.stringify({ on: next }),
+      });
+      $("#storyNote").textContent = out.message || "";
+      loadJobQueue();
+    } catch (error) {
+      paint(!next);                   // **ดีดกลับ** ห้ามดูเหมือนเปิดแล้วทั้งที่ไม่ได้เปิด
+      $("#storyNote").textContent = `สั่งไม่สำเร็จ — ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+/** บรรทัดสถานะใต้กล่อง Auto 1080P — กำลังทำอะไร ล่าสุดได้อะไร ล้มไปกี่ใบ */
+function up1080Line(status) {
+  const wrap = el("div", { className: "up1080-line" });
+  // `label` เป็นข้อความไทยพร้อมแสดงจากเซิร์ฟเวอร์ ไม่ต้องประกอบเอง
+  wrap.append(el("span", {
+    className: "up1080-label" + (status.on ? "" : " is-off"),
+    textContent: status.label || "",
+  }));
+  if (status.busy) {
+    wrap.append(el("span", { className: "up1080-busy",
+                             textContent: `⏳ กำลังขยายใบ ${status.busy}` }));
+  }
+  if (status.done || status.failed) {
+    wrap.append(el("span", { className: "up1080-tally",
+      textContent: `ทำแล้ว ${status.done || 0} ใบ`
+        + (status.failed ? ` · ล้ม ${status.failed} ใบ` : "") }));
+  }
+  if (status.last) {
+    wrap.append(el("small", { className: "up1080-last",
+                              textContent: `ล่าสุด: ${status.last}` }));
+  }
+  // **เหตุผลที่ล้มต้องขึ้นให้เห็น ไม่ใช่ซ่อนไว้ในคำอธิบายปุ่ม**
+  if (status.why) {
+    wrap.append(el("small", { className: "up1080-why", textContent: `⚠️ ${status.why}` }));
+  }
+  wrap.title = status.note || "";
+  return wrap;
+}
+
 function paintBoard() {
   const box = boardBox();
   const list = $("#storyQueueList");
@@ -1925,7 +2002,11 @@ function paintBoard() {
     // เขียนแบบอ่านจาก API ตั้งแต่แรก พอเซิร์ฟเวอร์ใส่ `auto` ให้ ปุ่มก็ขึ้นเอง
     const cell = el("div", { className: "board-cell" });
     if (bucket.auto) cell.append(autoToggle(bucket));
+    // กอง Auto 1080P มีสวิตช์ของตัวเองที่ไม่ได้มาในช่อง `auto` ของกอง
+    const up1080 = bucket.key === "up1080" ? (boardData.up1080 || null) : null;
+    if (up1080) cell.append(up1080Toggle(up1080));
     cell.append(button);
+    if (up1080) cell.append(up1080Line(up1080));
     if (bucket.browser) {
       // กองอื่นที่เปิดหน้าต่างเดียวกัน — เอาไปบอกในคำอธิบายของปุ่ม
       const twins = buckets

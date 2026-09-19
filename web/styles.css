@@ -2360,6 +2360,10 @@ button:disabled { opacity: 0.5; }
    และอีกข้างเป็นส้มแดงของ Shopee ส้มสามเฉดเรียงกันจะแยกด้วยตาไม่ออก */
 .board-tab[data-key="gen_clip"]       { --stage: #fb923c; }  /* ส้ม — ได้ของแล้ว */
 .board-tab[data-key="check_clip"]     { --stage: #6366f1; }  /* คราม — ขั้นตรวจ */
+/* 🎞️ Auto 1080P — เขียวมรกต แทรกอยู่ระหว่างครามของขั้นตรวจกับส้มแดงของ Shopee
+   จงใจไม่ใช้เขียวมะนาวของกอง Manual เพราะถึงจะห่างกัน 4 กอง แต่ทั้งคู่เป็น
+   กองแทรกใหม่ที่คนยังไม่ชิน ถ้าสีใกล้กันจะจำสลับกันตั้งแต่แรก */
+.board-tab[data-key="up1080"]         { --stage: #10b981; }  /* เขียวมรกต — ขยายคลิป */
 .board-tab[data-key="shopee_video"]   { --stage: #f97362; }  /* ส้มแดง — Shopee */
 .board-tab[data-key="facebook_reels"] { --stage: #60a5fa; }  /* ฟ้า — Facebook */
 .board-tab[data-key="tiktok"]         { --stage: #2dd4bf; }  /* เขียวน้ำทะเล — TikTok */
@@ -3840,3 +3844,19 @@ body.typing-through {
    ข้างกันตอนจอกว้าง จอจริงกว้าง 1920px เงื่อนไขจึงเข้า แล้วรูปกลับไปเหลือ
    75px เท่าเดิม ทั้งที่คอลัมน์ยังแคบเหมือนเดิมทุกประการ
    (บทเรียนเดียวกับที่เคยทำกระดานพังเมื่อ 27 ส.ค. — วัดผิดตัว) */
+
+/* บรรทัดสถานะใต้กล่อง 🎞️ Auto 1080P — บอกว่ากำลังทำอะไร ล่าสุดได้อะไร ล้มกี่ใบ
+   ตัวเลขกับข้อความอยู่ในช่องเดียวกับกล่อง ไม่ลอยออกมาดันความกว้างกระดาน */
+.up1080-line {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: 4px; font-size: 10.5px; line-height: 1.35;
+  text-align: center; overflow-wrap: anywhere;
+}
+.up1080-label { font-weight: 700; color: #10b981; }
+/* ปิดสวิตช์อยู่ = เทา **และยังต้องอ่านออก** ไม่ใช่จางจนมองไม่เห็น
+   เพราะ "ปิดอยู่" คือข้อมูลที่ต้องเห็น ไม่ใช่สถานะที่ควรซ่อน */
+.up1080-label.is-off { color: var(--ink-3); font-weight: 600; }
+.up1080-busy  { color: var(--accent); font-weight: 700; }
+.up1080-tally { color: var(--ink-2); }
+.up1080-last  { color: var(--ink-3); }
+.up1080-why   { color: var(--bad-ink); font-weight: 700; }

@@ -4150,7 +4150,7 @@ def _auto_tiktok_link_device() -> tuple[str, str]:
     return ready[0], ""
 
 
-def _auto_publish_ready(target: str) -> list[dict]:
+def _auto_publish_ready(target: str, every: list[dict] | None = None) -> list[dict]:
     """คลิปที่ลงปลายทางนี้ได้เดี๋ยวนี้ เรียงตัวที่รอนานสุดก่อน
 
     ใช้ `publish_order.ready_now()` ซึ่งเรียก `check()` ตัวเดียวกับด่านที่กั้น
@@ -4160,7 +4160,10 @@ def _auto_publish_ready(target: str) -> list[dict]:
     ตัดงานที่กด พักไว้รอแก้ ออกทั้งสองแบบ — ที่พักในคิว และที่พักหลังออกจากคิว
     ไปแล้ว เพราะคลิปขั้นโพสต์ส่วนใหญ่จบจากคิวไปแล้ว เช็คแค่คิวจะข้ามไม่ครบ
     """
-    runs = clip_store.list_runs(DATA_DIR) + clip_store.list_done(DATA_DIR)
+    # `every` = รายการงานที่ผู้เรียกโหลดมาแล้ว — ส่งมาได้เพื่อไม่ต้องอ่านดิสก์ซ้ำ
+    # (กระดานเรียกตัวนี้ 3 ครั้งต่อการกดดูหนึ่งครั้ง ครั้งละ 680 ไฟล์)
+    runs = every if every is not None else (
+        clip_store.list_runs(DATA_DIR) + clip_store.list_done(DATA_DIR))
     # โฟลเดอร์เป็นเพียงเงาของสถานะและในอดีตเคยเกิดสำเนา item_id เดียวกัน
     # อยู่คนละกองได้. ห้ามใช้ dict แบบ last-wins เพราะสำเนาเก่าที่ pending อาจ
     # ทับสำเนาที่ posted แล้วทำให้ตัวเลือกหยิบคลิปเดิมขึ้นมาโพสต์ซ้ำ.
@@ -4245,16 +4248,25 @@ def _already_posted_conflict(status_code: int, detail: str) -> bool:
     return int(status_code or 0) == 409 and "ลงไปแล้ว" in str(detail or "")
 
 
-def _tiktok_link_batch_rows() -> list[dict]:
+def _tiktok_link_batch_rows(every: list[dict] | None = None) -> list[dict]:
     """คืนใบงานชุดเดิม 55 ใบโดยไม่ให้กองที่โตภายหลังเปลี่ยนสมาชิกชุด.
 
     การใช้ ``bucket[:55]`` ทุกครั้งดูเหมือนตรึงจำนวน แต่ไม่ได้ตรึง *ตัวงาน*:
     ถ้ามีใบหนึ่งหลุดจากกอง ใบใหม่ลำดับ 56 จะเลื่อนเข้ามาแทนและบอตไม่มีวันจบ
     ชุดเดิม. จึง snapshot item_id ครั้งแรกลงไฟล์สถานะและอ่านชุดเดิมตลอด.
     """
-    runs = clip_store.list_runs(DATA_DIR)
+    # ---- ห้ามประกอบกระดานใหม่ทั้งอันถ้าผู้เรียกมีของอยู่แล้ว ---------------
+    #
+    # ตัวนี้ถูกเรียกจาก `_auto_view` ซึ่งถูกเรียกจากที่อยู่กระดานอีกที ผลคือ
+    # **กระดานถูกประกอบสองรอบต่อการกดดูหนึ่งครั้ง** และรอบในนี้ยังใช้ตัวโหลด
+    # แบบอ่านดิสก์ทีละใบด้วย วัดได้ 2.06 วินาทีจาก 7.7 วินาทีของ `_auto_view`
+    runs = [r for r in every if r.get("folder")] if every is not None else (
+        clip_store.list_runs(DATA_DIR))
+    ready = {str(r.get("item_id") or ""): r for r in runs if r.get("item_id")}
     board = clip_board.build(
-        clip_jobs.all(), lambda item: clip_store.load_run(DATA_DIR, item), runs)
+        clip_jobs.all(),
+        lambda item: ready.get(str(item)) or clip_store.load_run(DATA_DIR, item),
+        runs)
     bucket = next((row for row in board.get("buckets") or []
                    if row.get("key") == clip_board.TIKTOK), {})
     jobs = list(bucket.get("jobs") or [])
@@ -4279,12 +4291,18 @@ def _tiktok_link_batch_rows() -> list[dict]:
     return [by_id[item_id] for item_id in ids if item_id in by_id]
 
 
-def _auto_tiktok_link_ready() -> list[dict]:
+def _auto_tiktok_link_ready(every: list[dict] | None = None) -> list[dict]:
     """ใบในชุด 55 ที่ยังไม่เพิ่มโชว์เคส/รอตรวจ เรียงตามชุดเดิม."""
+    # อ่านจากรายการที่ผู้เรียกโหลดมาแล้วถ้ามี — ของเดิมเรียก `load_run` ทีละใบ
+    # ซึ่งอ่านไฟล์พ่วงอีก 4 ไฟล์ต่อใบทั้งที่ตรงนี้ใช้แค่สองช่อง
+    known = ({str(r.get("item_id") or ""): r for r in every if r.get("item_id")}
+             if every is not None else {})
     ready = []
-    for row in _tiktok_link_batch_rows():
+    for row in _tiktok_link_batch_rows(every):
         item_id = str(row.get("item_id") or "")
-        run = clip_store.load_run(DATA_DIR, item_id) or {}
+        run = known.get(item_id)
+        if run is None:
+            run = clip_store.load_run(DATA_DIR, item_id) or {}
         # ใบที่ล้มเหลวถูกย้ายเข้ากองรอแก้ด้วย ``park_run``; ชุด snapshot ยังมี
         # item_id เดิมอยู่โดยตั้งใจ แต่ worker ต้องข้ามจนกว่าผู้ใช้กดเอากลับ.
         if run.get("parked") or row.get("parked"):
@@ -4757,7 +4775,7 @@ def _auto_on() -> dict:
             for k, v in saved.items() if k in AUTO_STEPS}
 
 
-def _auto_eligible(step: str) -> list[dict]:
+def _auto_eligible(step: str, every: list[dict] | None = None) -> list[dict]:
     """งานที่ขั้นนี้อนุมัติแทนได้เดี๋ยวนี้
 
     **ข้ามงานที่พักไว้รอแก้เสมอ** (เจ้าของสั่งไว้ตรงๆ) — การพักคือการบอกว่า
@@ -4765,9 +4783,9 @@ def _auto_eligible(step: str) -> list[dict]:
     """
     if AUTO_STEPS[step].get("kind") == "publish":
         # ขั้นโพสต์นับ "คลิปที่ลงได้เดี๋ยวนี้" ไม่ใช่ "ใบงานที่ค้างในคิว"
-        return _auto_publish_ready(AUTO_STEPS[step]["target"])
+        return _auto_publish_ready(AUTO_STEPS[step]["target"], every)
     if AUTO_STEPS[step].get("kind") == "product_link":
-        return _auto_tiktok_link_ready()
+        return _auto_tiktok_link_ready(every)
     stages = set(AUTO_STEPS[step]["stages"])
     return [job for job in clip_jobs.all()
             if job.get("stage") in stages and not job.get("parked")]
@@ -4871,12 +4889,25 @@ def _auto_keeper() -> None:
         time.sleep(20)
 
 
-def _auto_view() -> dict:
-    """สถานะที่หน้าเว็บเอาไปวาดปุ่มได้เลย ไม่ต้องคิดเอง"""
+def _auto_view(every: list[dict] | None = None) -> dict:
+    """สถานะที่หน้าเว็บเอาไปวาดปุ่มได้เลย ไม่ต้องคิดเอง
+
+    ---- ทำไมต้องรับ `every` (แก้ 19 ก.ย. 2569) ------------------------
+
+    สายกลางวัดมาว่ากระดานใช้ 22 วินาทีตอนไม่มีใครกวน จับเวลาทีละชิ้นแล้ว
+    พบว่า **7.7 วินาทีอยู่ในตัวนี้ตัวเดียว** เพราะมันอ่านไฟล์งานทั้ง 680 ใบ
+    ซ้ำ **6 รอบต่อการกดดูกระดานหนึ่งครั้ง** — สามรอบจากบล็อกนับใบที่พักไว้
+    ข้างล่าง และอีกสามรอบจาก `_auto_publish_ready` ที่โหลดเองข้างใน
+    บวกกับ `_auto_tiktok_link_ready` ที่เปิดไฟล์ทีละใบอีก 55 ใบ
+
+    โหลดครั้งเดียวแล้วแจกต่อ ได้คำตอบเดิมเป๊ะ เพราะทั้งหมดอ่านชุดเดียวกันอยู่แล้ว
+    """
     on = _auto_on()
     steps = []
+    if every is None:
+        every = clip_store.list_runs(DATA_DIR) + clip_store.list_done(DATA_DIR)
     for key, meta in AUTO_STEPS.items():
-        waiting = _auto_eligible(key)
+        waiting = _auto_eligible(key, every)
         if meta.get("kind") == "publish":
             # งานโพสต์ส่วนใหญ่จบออกจาก clip_queue ไปแล้วและพักอยู่ใน run.json
             # ถ้านับเฉพาะคิว จะขึ้น "พัก 0" ทั้งที่กองจริงถูกพักทั้งหมด
@@ -4884,8 +4915,7 @@ def _auto_view() -> dict:
             target = str(meta.get("target") or "")
             parked_ids = {
                 str(run.get("item_id") or "")
-                for run in (clip_store.list_runs(DATA_DIR)
-                            + clip_store.list_done(DATA_DIR))
+                for run in every
                 if run.get("parked")
                 and str(((run.get("parked") or {}).get("from") or "")) == target
                 and str(run.get("item_id") or "")
@@ -10191,9 +10221,10 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
             "story": {"stage": "storyboard", "label": "Chrome Storyboard"},
             "gen_clip": {"stage": "clip", "label": "Chrome เจนคลิป"},
         }
-        auto = {s["key"]: s for s in _auto_view()["steps"]}
-        # โควตา 70/วัน มีเฉพาะสามปลายทางที่โพสต์จริง
+        # ใช้ชุดเดียวกับที่โควตาข้างล่างใช้ — ของเดิมต่างคนต่างอ่านดิสก์เอง
         all_runs = runs + clip_store.list_done(DATA_DIR)
+        auto = {s["key"]: s for s in _auto_view(all_runs)["steps"]}
+        # โควตา 70/วัน มีเฉพาะสามปลายทางที่โพสต์จริง
         quota_of = {}
         for target in ("shopee_video", "facebook_reels", "tiktok"):
             used = publish_order.day_used(all_runs, target)

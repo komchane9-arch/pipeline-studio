@@ -9015,6 +9015,17 @@ async def clips_detail(item_id: str) -> dict:
         raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
     # ผลตรวจคลิปกับลำดับการลง ต้องมาที่หน้ารายละเอียดของ **งานที่เก็บไว้** ด้วย
     # ไม่ใช่เฉพาะงานที่ยังอยู่ในคิว — ตอนจะโพสต์จริงผู้ใช้เปิดดูจากตรงนี้
+    # ---- ธงต้องมาที่ **ทุกที่อยู่ที่คืนใบงาน** ไม่ใช่เฉพาะที่อยู่รายการ ----
+    #
+    # สายกลางจับได้ 19 ก.ย. 2569: การ์ดใบงานที่เจ้าของเปิดดูใช้ที่อยู่ **เดี่ยว**
+    # ตัวนี้ ซึ่งคืนมา 0 จาก 9 ฟิลด์ และ `bucket` เป็น None ทั้งที่ที่อยู่รายการ
+    # คืนครบ 9/9 — หน้าเว็บจึงวาดปุ่มติ๊กไม่ได้ ต้องไปหยิบจากรายการที่โหลดไว้แทน
+    #
+    # พลาดแบบเดียวกับ 14 ก.ย. ที่ใส่ธงไว้ที่เดียวแล้วอีกที่อยู่ไม่มี — ที่อยู่สองตัว
+    # ที่คืนใบงานเดียวกันแต่ตอบไม่เหมือนกัน อันตรายกว่าไม่มีธงเลย (กติกา 2.3.1)
+    run.update(clip_board.confirm_fields(run))
+    run.update(clip_board.manual_fields(run))
+    run["bucket"] = clip_board.bucket_of_run(run)
     return {
         "ok": True, **run,
         # ประโยคปกติไว้โชว์ — ของจริงที่ส่งเข้า Flow ยังเป็น `script` เหมือนเดิม
@@ -9262,6 +9273,10 @@ async def manual_toggle(item_id: str, request: Request) -> dict:
     did = "เข้าโหมดทำเอง" if want else "ออกจากโหมดทำเอง"
     _clip_log(f"ใบ {item_id}: {did}")
     return {"ok": True, "item_id": item_id, "manual": mark,
+            # คืนชุดเดียวกับที่รายการคืน หน้าเว็บจะได้อัปเดตการ์ดได้ตรงๆ ไม่ต้อง
+            # คิด manual_ready / manual_why เองเป็นสูตรที่สอง (สองสูตรจะไม่ตรงกัน
+            # วันใดวันหนึ่งเสมอ — ต้นเหตุเดียวกับที่ /api/clips เคยตอบไม่ตรงกระดาน)
+            **clip_board.manual_fields({"manual": mark}),
             "message": ("เข้าโหมดทำเองแล้ว — อัปสตอรีบอร์ดได้ถึง "
                         f"{clip_board.MANUAL_STORYBOARD_MAX} ใบ แล้วอัปคลิป")
             if want else ("ออกจากโหมดทำเองแล้ว — ใบนี้กลับเข้าสายปกติ"
@@ -9304,6 +9319,10 @@ async def manual_upload_storyboard(item_id: str,
     _clip_log(f"ใบ {item_id}: อัปสตอรีบอร์ดเอง ใบที่ {count} "
               f"({len(blob) / 1024:.0f} KB)")
     return {"ok": True, "item_id": item_id, "manual": mark,
+            # คืนชุดเดียวกับที่รายการคืน หน้าเว็บจะได้อัปเดตการ์ดได้ตรงๆ ไม่ต้อง
+            # คิด manual_ready / manual_why เองเป็นสูตรที่สอง (สองสูตรจะไม่ตรงกัน
+            # วันใดวันหนึ่งเสมอ — ต้นเหตุเดียวกับที่ /api/clips เคยตอบไม่ตรงกระดาน)
+            **clip_board.manual_fields({"manual": mark}),
             "message": f"เก็บสตอรีบอร์ดใบที่ {count} แล้ว "
                        f"(อัปได้อีก {top - count} ใบ)"}
 
@@ -9335,6 +9354,10 @@ async def manual_upload_video(item_id: str,
     mark = await asyncio.to_thread(work)
     _clip_log(f"ใบ {item_id}: อัปคลิปเอง {len(blob) / 1048576:.1f} MB")
     return {"ok": True, "item_id": item_id, "manual": mark,
+            # คืนชุดเดียวกับที่รายการคืน หน้าเว็บจะได้อัปเดตการ์ดได้ตรงๆ ไม่ต้อง
+            # คิด manual_ready / manual_why เองเป็นสูตรที่สอง (สองสูตรจะไม่ตรงกัน
+            # วันใดวันหนึ่งเสมอ — ต้นเหตุเดียวกับที่ /api/clips เคยตอบไม่ตรงกระดาน)
+            **clip_board.manual_fields({"manual": mark}),
             "message": "เก็บคลิปแล้ว — กดเสร็จเพื่อส่งเข้าตัวตรวจ"}
 
 
@@ -9402,7 +9425,9 @@ async def manual_done(item_id: str) -> dict:
                "ตรวจแล้วไม่ผ่าน: " + " / ".join(checked.get("problems") or []))
     _clip_log(f"ใบ {item_id}: กดเสร็จโหมดทำเอง — {verdict} · "
               f"ย้ายเข้ากองตรวจคลิป {got['moved']} ใบงาน")
+    fresh = await asyncio.to_thread(clip_store.load_run, DATA_DIR, item_id)
     return {"ok": True, "item_id": item_id, "check": checked,
+            **clip_board.manual_fields(fresh),
             "moved": got["moved"],
             "message": f"ส่งเข้ากองตรวจคลิปแล้ว — {verdict}"}
 
@@ -10118,8 +10143,28 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
         # **ส่งไฟล์งานเข้าไปด้วย** ไม่งั้นกองปลายทางจะนับได้แค่ใบที่ยังอยู่ในคิว
         # วัดจริง 27 ส.ค. 2569: `/clips` บอก 25 ใบ แต่กระดานบอก 8 ใบ — หายไป 17
         runs = clip_store.list_runs(DATA_DIR)
-        board = clip_board.build(
-            jobs, lambda item: clip_store.load_run(DATA_DIR, item), runs)
+        # ---- ใช้ไฟล์ที่โหลดมาแล้วซ้ำ อย่าไปอ่านดิสก์ใหม่ทีละใบ ------------
+        #
+        # สายกลางวัดมา 19 ก.ย. 2569: กระดานใช้ **10.8 วินาที** ส่วนรายการใช้
+        # 0.7 วินาที ทั้งที่ข้อมูลที่ส่งกลับเล็กกว่า 8 เท่า และหน้าเว็บดึงกระดาน
+        # ทุก 6 วินาที — รอบใหม่จึงออกก่อนรอบเก่ากลับ ทับกันไปเรื่อยๆ
+        #
+        # ไล่จับเวลาแล้วพบว่า 2.0 จาก 2.4 วินาทีของตัวประกอบกระดานหมดไปกับการ
+        # เรียก `load_run` **303 ครั้ง** ทั้งที่ `runs` ข้างบนโหลดมาครบ 680 ใบ
+        # อยู่แล้ว และ `load_run` ยังอ่านไฟล์พ่วงอีก 4 ไฟล์ต่อใบ (คำตอบดิบของ
+        # GPT + รายละเอียดสินค้า) ซึ่ง **กระดานไม่ได้ใช้เลยสักตัว**
+        # รวมเป็นการเปิดไฟล์ 1,513 ครั้งต่อการกดดูกระดานหนึ่งครั้ง
+        #
+        # ยังต้องมีทางถอยไปอ่านดิสก์ เพราะ `list_runs` อ่านเฉพาะโฟลเดอร์ที่ยัง
+        # ทำอยู่ ส่วนงานที่จบแล้วอยู่คนละโฟลเดอร์ — ถ้าตัดทิ้งเลย ใบพวกนั้นจะ
+        # หายจากกระดานเงียบๆ ซึ่งแย่กว่าช้า
+        ready = {str(r.get("item_id") or ""): r for r in runs if r.get("item_id")}
+
+        def load_one(item: str) -> dict:
+            got = ready.get(str(item))
+            return got if got else clip_store.load_run(DATA_DIR, item)
+
+        board = clip_board.build(jobs, load_one, runs)
         # **ของซ้ำต้องดังขึ้นบนหน้าจอ ไม่ใช่รอให้คนมานั่งนับโฟลเดอร์เอง**
         # สินค้าที่มีโฟลเดอร์สองชุด ชุดที่มีคลิปจะหายจากทุกรายการเงียบๆ
         # (เจอจริง 4 คู่ เมื่อ 27 ส.ค. 2569 — กว่าจะรู้ก็ตอนย้ายโฟลเดอร์)
@@ -10144,7 +10189,7 @@ async def clip_board_view() -> dict:      # ห้ามตั้งชื่อ
             # เจ้าของสั่ง 14 ก.ย. 2569: "แล้วก็ปุ่มเปิด chrome ที่ใช้ดึงรูปด้วย"
             "picture": {"stage": "link", "label": "Chrome ดึงรูป"},
             "story": {"stage": "storyboard", "label": "Chrome Storyboard"},
-            "clip": {"stage": "clip", "label": "Chrome เจนคลิป"},
+            "gen_clip": {"stage": "clip", "label": "Chrome เจนคลิป"},
         }
         auto = {s["key"]: s for s in _auto_view()["steps"]}
         # โควตา 70/วัน มีเฉพาะสามปลายทางที่โพสต์จริง

@@ -4105,6 +4105,29 @@ async function showStoryRun(itemId) {
   // ถ้าวาดจุดเด่นซ้ำข้างนอกอีกชุด จะเห็นสองชุดติดกันแล้วงงว่าอันไหนของจริง
   const manual = run.manual_on === true;
   if (manual) parts.push(manualBox(run, () => showStoryRun(run.item_id)));
+  /* **กดเสร็จแล้วกล่องหายไปทั้งอัน พร้อมข้อความยืนยัน** (เจอจริง 19 ก.ย. 2569)
+   *
+   * พอกด "เสร็จแล้ว" เซิร์ฟเวอร์ตั้ง `manual_on` เป็น false ใบจึงออกจากกอง
+   * ทำเอง — ถูกต้องแล้ว แต่ผลคือกล่องไม่ถูกวาดอีก ข้อความว่าสำเร็จหรือไม่
+   * จึงไม่มีที่ให้แสดง คนกดต้องรอ 11 วินาที (วัดจริง) แล้วเห็นกล่องหายไปเฉยๆ
+   * โดยไม่รู้ว่าผ่านตัวตรวจไหม หรือกดไม่ติด
+   *
+   * `manual_ticked` ยังเป็น true อยู่เพื่อให้รู้ว่าใบนี้ทำมือ — ใช้ตัวนี้แหละ
+   * เป็นเงื่อนไขขึ้นป้ายสรุปแทน (นี่คือเหตุผลที่ฝั่งงานแยกสองฟิลด์นี้ไว้)
+   */
+  else if (run.manual_ticked === true) {
+    const said = manualSaid.get(String(run.item_id));
+    const when = String(run.manual_done_at || "").slice(11, 16);
+    const done = el("div", { className: "mn-done" });
+    done.append(el("span", { textContent:
+      `✋ ใบนี้ทำเอง — ส่งเข้าตัวตรวจแล้ว${when ? ` เมื่อ ${when}` : ""}` }));
+    // ข้อความจริงจากเซิร์ฟเวอร์บอกผลตรวจด้วย เช่น "ตรวจแล้วไม่ผ่าน: ..."
+    // เก็บไว้ตั้งแต่ตอนกด แล้วเอามาแสดงตรงนี้ เพราะกล่องเดิมหายไปแล้ว
+    if (said?.text) {
+      done.append(el("small", { className: "mn-done-say", textContent: said.text }));
+    }
+    parts.push(done);
+  }
 
   if (!manual && run.highlights?.length) {
     const ol = document.createElement("ol");

@@ -9007,6 +9007,9 @@ async def clips_list() -> dict:
         run.update(clip_board.confirm_fields(run))
         # กล่องโหมดทำเองใช้ฟิลด์ชุดเดียวกับกระดาน ห้ามคิดเองซ้ำเหมือนกัน
         run.update(clip_board.manual_fields(run))
+        # กล่อง Auto 1080P — สายกลางใช้ `needs_1080` ตัดสินว่าใบไหนขึ้นปุ่ม
+        # "ขยายเลย" ถ้าไม่มี ปุ่มจะโผล่ทุกใบแล้วกดไปก็ได้แค่ skipped
+        run.update(clip_board.up1080_fields(run))
     return {"ok": True, "runs": runs}
 
 
@@ -9056,6 +9059,7 @@ async def clips_detail(item_id: str) -> dict:
     # ที่คืนใบงานเดียวกันแต่ตอบไม่เหมือนกัน อันตรายกว่าไม่มีธงเลย (กติกา 2.3.1)
     run.update(clip_board.confirm_fields(run))
     run.update(clip_board.manual_fields(run))
+    run.update(clip_board.up1080_fields(run))
     run["bucket"] = clip_board.bucket_of_run(run)
     return {
         "ok": True, **run,

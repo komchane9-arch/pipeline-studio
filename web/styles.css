@@ -3908,3 +3908,12 @@ body.typing-through {
 /* ข้อความผลค้างไว้ให้อ่าน ไม่ใช่เด้งแล้วหาย */
 .mn-say { margin: 8px 0 0; overflow-wrap: anywhere; }
 .mn-say.is-bad { color: var(--bad-ink); font-weight: 700; }
+
+/* มีคลิปแล้วแต่วัดความละเอียดไม่ได้ — **เหลืองอำพัน ไม่ใช่แดง**
+   แดงแปลว่า "พัง" ส่วนอันนี้คือ "ยังไม่รู้ ต้องมีคนไปดู" ซึ่งคนละเรื่อง
+   ถ้าใช้สีเดียวกับของพัง คนจะเลิกแยกสองอย่างนี้ออกจากกันภายในไม่กี่วัน */
+.up1080-row.is-unknown {
+  border-color: color-mix(in srgb, #eab308 55%, var(--line));
+  background: color-mix(in srgb, #eab308 10%, var(--panel));
+}
+.up1080-row.is-unknown .up1080-row-why { font-weight: 700; }

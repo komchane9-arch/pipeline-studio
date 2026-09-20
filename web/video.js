@@ -602,6 +602,20 @@ const el = (tag, props = {}, ...kids) => {
   return node;
 };
 
+/* ⛔ **ห้ามใส่ `loading: "lazy"` กับรูปในหน้านี้ ไม่ว่าที่ไหน**
+ *
+ * หน้านี้วางเนื้อหาไว้ในแผงที่ตั้ง `overflow:auto` ซึ่งทำให้ตัวตัดสินของ
+ * เบราว์เซอร์มองว่า "ยังไม่ต้องโหลด" **แล้วไม่โหลดเลยตลอดไป** ต่อให้รูป
+ * อยู่กลางจอแล้วก็ตาม
+ *
+ * วัดจริง 19–20 ก.ย. 2569 บนการ์ดขั้นตรวจชุดรูป
+ *     รูปในการ์ด 9 ใบ · เลื่อนจนอยู่ในจอครบ 9 ใบ · โหลดสำเร็จ 0 ใบ
+ *     URL เดียวกันโหลดได้ทันทีเมื่อสร้าง Image() ใหม่ (1000×1000)
+ *
+ * บั๊กนี้เคยโดนมาแล้วอย่างน้อย 3 ครั้งในโปรเจกต์นี้ (engage.js · fbcontrol.js
+ * · กล่องทำเอง) ทุกครั้งแก้เฉพาะจุดแล้วมันกลับมาใหม่ที่จุดถัดไป
+ * — รูปในหน้านี้มีหลักสิบใบ ไม่ใช่หลักพัน การประหยัดที่ได้ไม่คุ้มเลย
+ */
 const clipFile = (itemId, name) =>
   `${CLIP_API}/api/clips/${encodeURIComponent(itemId)}/file/${name}`;
 
@@ -2607,7 +2621,7 @@ function imageReviewParts(job, meta, draft, paint, run = null) {
     }
     grid.append(el("figure", { className: "story-cell" },
       el("img", {
-        className: "story-thumb", loading: "lazy", alt: `รูปที่ ${index + 1}`,
+        className: "story-thumb", alt: `รูปที่ ${index + 1}`,
         src: clipFile(itemId, name),
       }), tools));
   });
@@ -2622,7 +2636,7 @@ function imageReviewParts(job, meta, draft, paint, run = null) {
     pool.forEach((name, spot) => {
       const cell = el("figure", { className: `story-cell pick${full ? " off" : ""}` },
         el("img", {
-          className: "story-thumb", loading: "lazy", alt: name,
+          className: "story-thumb", alt: name,
           src: clipFile(itemId, name),
         }));
       cell.append(el("span", { className: "story-cell-tools" },
@@ -3087,7 +3101,7 @@ function storyboardReview(job, run, meta = {}) {
     }
     return el("figure", { className: "story-shot" },
       el("img", {
-        className: "story-frame", loading: "lazy",
+        className: "story-frame",
         alt: `สตอรีบอร์ดใบที่ ${index + 1}`,
         src: clipFile(run.item_id, name),
       }), tools);
@@ -3119,7 +3133,7 @@ function storedStoryboard(job, run) {
   if (!frames.length) return null;
   const shots = frames.map((name, index) => el("figure", { className: "story-shot" },
     el("img", {
-      className: "story-frame", loading: "lazy",
+      className: "story-frame",
       alt: `สตอรีบอร์ดใบที่ ${index + 1}`,
       src: clipFile(run.item_id, name),
     }),
@@ -4142,7 +4156,7 @@ async function showStoryRun(itemId) {
 
   (run.storyboard || []).forEach((name) => {
     parts.push(el("img", {
-      className: "story-frame", loading: "lazy", alt: "สตอรีบอร์ด",
+      className: "story-frame", alt: "สตอรีบอร์ด",
       src: clipFile(run.item_id, name),
     }));
   });

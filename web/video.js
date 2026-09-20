@@ -625,34 +625,54 @@ const jobPost = (path, body) =>
 /* โหมดทำเอง — เจ้าของอัปสตอรีบอร์ดกับคลิปเอง แทนที่จะให้ระบบเจน
  * (สายคลิปส่งสเปคมา 19 ก.ย. 2569 · เจ้าของสั่งเอง)
  *
- * **ทำไมต้องมีที่เก็บแยก แทนที่จะอ่านจากใบงานตรงๆ** — สถานะนี้มีอยู่ที่เดียว
- * คือแถวใน `/api/clips` ส่วน `/api/clips/<id>` ที่การ์ดใบงานใช้เปิด **ไม่มี
- * ฟิลด์ manual เลยสักตัว** (วัดแล้ว 0 จาก 9) และ `/api/board` ก็ไม่มีแถวรายใบ
- * ขอให้สายคลิปเติมไปแล้ว พอเติมมาตัวนี้จะอ่านจากใบงานตรงๆ ได้เลย
+ * **ทำไมต้องเก็บสถานะแยก** — การ์ดใบงานเปิดด้วย `/api/jobs/<id>` ซึ่ง
+ * **ไม่มีฟิลด์ manual เลยสักตัว** (วัดแล้ว 0 จาก 9 เมื่อ 20 ก.ย. 2569)
+ * ส่วน `/api/clips/<id>` มีครบ จึงต้องดึงเพิ่มเองแล้วจำไว้
+ * ขอให้สายคลิปเติมเข้า `/api/jobs/<id>` แล้ว พอเติมมาตัวนี้จะอ่านจากใบงาน
+ * ตรงๆ ได้เลยโดยไม่ต้องยิงเพิ่ม (`manualStateOf` เลือกของใบงานก่อนเสมอ)
  *
- * ค่า `undefined` = **ยังไม่รู้** ซึ่งต้องหน้าตาต่างจาก "รู้แล้วว่ายังไม่ติ๊ก"
- * (ข้อ 2.3.1 ข้อ 4) ไม่งั้นวันที่อ่านไม่ได้ ใบที่ติ๊กไว้จะขึ้นเป็นยังไม่ติ๊ก
- * แล้วเจ้าของกดซ้ำกลายเป็นปิดโหมดทิ้งโดยไม่รู้ตัว */
-const manualTick = new Map();
+ * ค่า `undefined` = **ยังไม่รู้** ซึ่งต้องหน้าตาต่างจาก "รู้แล้วว่ายังไม่ทำเอง"
+ * (ข้อ 2.3.1 ข้อ 4) ไม่งั้นวันที่อ่านไม่ได้ ใบที่อยู่ในโหมดทำเองจะขึ้นปุ่ม
+ * "ไปทำเอง" ให้กดซ้ำ ทั้งที่มันอยู่ในโหมดนั้นอยู่แล้ว */
+const MANUAL_FIELDS = [
+  "manual_ticked", "manual_on", "manual_why", "manual_storyboards",
+  "manual_storyboard_max", "manual_video", "manual_ready",
+  "manual_at", "manual_done_at",
+];
+const manualState = new Map();
 // ข้อความผลล่าสุดต่อใบ — ต้องค้างให้อ่านทัน ไม่ใช่เด้งแล้วหาย
-// (บทเรียนฝั่งโพสต์วันนี้: เหตุผลที่เริ่มงานไม่ได้ถูกส่งเป็นข้อความเด้ง
-//  ของปุ่ม เจ้าของเลยไม่เห็น แล้วนึกว่าบอทค้าง)
+// (บทเรียนฝั่งโพสต์: เหตุผลที่เริ่มงานไม่ได้ถูกส่งเป็นข้อความเด้งของปุ่ม
+//  เจ้าของเลยไม่เห็น แล้วนึกว่าบอทค้าง)
 const manualSaid = new Map();
-let manualTickAsked = false;
+const manualAsked = new Set();
 
-/** สถานะติ๊กของใบนี้ — true/false = รู้แล้ว · undefined = ยังไม่รู้ */
-function manualTickOf(run, itemId) {
-  // ใบงานมีฟิลด์มาเองเมื่อไร ใช้ของใบงานก่อนเสมอ (สดกว่าที่เราจำไว้)
-  if (run && typeof run.manual_ticked === "boolean") return run.manual_ticked;
-  return manualTick.get(String(itemId));
+/** หยิบเฉพาะฟิลด์โหมดทำเองออกมา — คืน null เมื่อแถวนั้นไม่มีข้อมูลโหมดทำเอง
+ *  ใช้ `manual_on` เป็นตัวชี้ว่า "แถวนี้มีข้อมูลจริง" เพราะเป็น boolean เสมอ
+ *  เมื่อฝั่งงานใส่มา — ต่างจากฟิลด์อื่นที่ค่าว่างแยกไม่ออกจากไม่มี */
+function pickManual(row) {
+  if (!row || typeof row.manual_on !== "boolean") return null;
+  const out = { item_id: String(row.item_id || "") };
+  MANUAL_FIELDS.forEach((key) => { out[key] = row[key]; });
+  return out;
 }
 
-function rememberManualTicks(rows) {
+/** สถานะโหมดทำเองของใบนี้ — undefined = ยังไม่รู้ (ต่างจากรู้แล้วว่าไม่ได้ทำเอง) */
+function manualStateOf(run, itemId) {
+  return pickManual(run) || manualState.get(String(itemId));
+}
+
+function rememberManualStates(rows) {
   (rows || []).forEach((row) => {
-    if (row && row.item_id && typeof row.manual_ticked === "boolean") {
-      manualTick.set(String(row.item_id), row.manual_ticked);
-    }
+    const state = pickManual(row);
+    if (state && state.item_id) manualState.set(state.item_id, state);
   });
+}
+
+async function fetchManualState(itemId) {
+  const row = await api(`${CLIP_API}/api/clips/${encodeURIComponent(itemId)}`);
+  const state = pickManual(row) || { item_id: String(itemId) };
+  manualState.set(String(itemId), state);
+  return state;
 }
 
 function textBtn(label, className, handler) {
@@ -2487,59 +2507,53 @@ async function saveDraft(job, draft) {
 
 /** กล่องตรวจชุดรูป+จุดเด่น — วาดใหม่ในเครื่องทุกครั้งที่กด ไม่ยิงเซิร์ฟเวอร์
  *  จนกว่าจะกดบันทึก (นั่นคือทั้งหมดของ "แก้ให้ครบก่อนแล้วส่งทีเดียว") */
-/** ปุ่มติ๊ก "ทำเอง" — วางคู่ปุ่ม "ใช้ชุดรูปนี้ ไปต่อ" เพราะเป็นจุดตัดสินใจเดียวกัน
+/** ปุ่ม "ไปทำเอง" — วางคู่ปุ่ม "ใช้ชุดรูปนี้ ไปต่อ" เพราะเป็นจุดตัดสินใจเดียวกัน
  *  จะให้เครื่องทำต่อ หรือจะอัปสตอรีบอร์ดกับคลิปเอง
  *
+ *  **เจ้าของสั่งเปลี่ยนจากสวิตช์ติ๊กเป็นปุ่มกด 20 ก.ย. 2569** —
+ *  *"แก้ให้เป็นปุ่มกด ไปทำเอง พอกดเสร็จไปงานต้องไปอยู่ในโหมด manual"*
+ *  สวิตช์ติ๊กสื่อว่า "ตั้งค่าไว้เฉยๆ" ส่วนปุ่มสื่อว่า "กดแล้วเกิดอะไรขึ้นทันที"
+ *  ซึ่งตรงกับความจริงมากกว่า เพราะกดแล้วใบย้ายกองเลย
+ *
  *  **ต้องกดได้ตั้งแต่ใบงานมีรูปแล้ว ไม่ต้องรออนุมัติรูปก่อน** เจ้าของสั่งไว้ชัด
- *  (*"ตอนดึงรูปเสร็จแล้วขึ้นเป็นใบงานโชว์รูปและรายละเอียดสินค้า
- *  ยังไม่ต้องมีการอนุมัติ"*) การ์ดนี้โผล่ตั้งแต่ขั้น image_review อยู่แล้ว
- *  จึงวางตรงนี้ได้พอดี
+ *  คืน null เมื่ออยู่ในโหมดทำเองอยู่แล้ว — ตอนนั้นแผงอัปโหลดจะขึ้นแทนข้างล่าง
  */
-function manualTickButton(itemId, paint, run = null) {
-  const state = manualTickOf(run, itemId);
-  const box = el("label", { className: "manual-tick" });
-  const tick = el("input", { type: "checkbox" });
-  tick.checked = state === true;
-  // ยังไม่รู้สถานะ = ห้ามให้หน้าตาเหมือน "รู้แล้วว่ายังไม่ติ๊ก"
-  tick.indeterminate = state === undefined;
-  tick.disabled = state === undefined;
-  const word = el("span", { textContent: state === undefined
-    ? "ทำเอง — กำลังอ่านสถานะ…"
-    : "ทำเอง (อัปสตอรีบอร์ด + คลิปเอง)" });
-  box.append(tick, word);
+function manualEntry(itemId, paint, run = null) {
+  const state = manualStateOf(run, itemId);
   if (state === undefined) {
-    box.classList.add("is-unknown");
-    // ดึงรายการ**ครั้งเดียว**ต่อการโหลดหน้า แล้ววาดใหม่ — รายการหนัก 8 MB
-    // ยิงซ้ำทุกการ์ดจะกลายเป็นถล่มเซิร์ฟเวอร์สายคลิปเอง
-    if (!manualTickAsked) {
-      manualTickAsked = true;
-      loadStoryRuns().then(paint).catch(() => { manualTickAsked = false; });
+    // ยังไม่รู้สถานะ — ดึงครั้งเดียวต่อใบ แล้ววาดใหม่ ห้ามขึ้นปุ่มมั่วระหว่างรอ
+    if (!manualAsked.has(String(itemId))) {
+      manualAsked.add(String(itemId));
+      fetchManualState(itemId)
+        .then(paint)
+        .catch(() => manualAsked.delete(String(itemId)));
     }
-    return box;
+    return el("span", { className: "mn-go-wait",
+                        textContent: "กำลังอ่านสถานะโหมดทำเอง…" });
   }
-  tick.addEventListener("change", async () => {
-    const want = tick.checked;
-    tick.disabled = true;
-    word.textContent = want ? "กำลังเข้าโหมดทำเอง…" : "กำลังออกจากโหมดทำเอง…";
+  if (state.manual_on === true) return null;
+
+  const button = textBtn("✋ ไปทำเอง", "ghost mn-go", async () => {
+    button.disabled = true;
+    button.textContent = "กำลังเข้าโหมดทำเอง…";
     try {
-      const reply = await api(`${CLIP_API}/api/clips/${encodeURIComponent(itemId)}/manual`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ on: want }),
-      });
-      // อ่าน `on` จากผลตอบตรงๆ ไม่คิดสถานะอื่นเอง — ค่าที่ต้องคำนวณ
-      // (พร้อมกดเสร็จไหม · ค้างตรงไหน) ปล่อยให้รอบโหลดรายการเอามาให้
-      const on = reply?.manual?.on === true;
-      manualTick.set(String(itemId), on);
-      manualSaid.set(String(itemId), { text: reply?.message || "", bad: false });
+      const out = await api(
+        `${CLIP_API}/api/clips/${encodeURIComponent(itemId)}/manual`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ on: true }) });
+      manualSaid.set(String(itemId), { text: out.message || "", bad: false });
+      // อ่านสถานะจริงกลับมา ไม่คิดเอาเองจากผลตอบ — ค่าที่ต้องคำนวณ
+      // (พร้อมกดเสร็จไหม · ค้างตรงไหน) ให้ฝั่งงานเป็นคนบอกที่เดียว
+      await fetchManualState(itemId);
+      loadJobQueue();
     } catch (error) {
-      // ข้อความไทยมาจากเซิร์ฟเวอร์อยู่แล้ว แสดงตรงๆ ไม่ต้องแปลเอง
-      manualSaid.set(String(itemId), {
-        text: `ติ๊กไม่สำเร็จ: ${error.message}`, bad: true });
+      manualSaid.set(String(itemId), { text: error.message, bad: true });
+      button.disabled = false;
     }
     paint();
   });
-  return box;
+  button.title = "อัปสตอรีบอร์ดกับคลิปเอง แทนที่จะให้ระบบเจนให้";
+  return button;
 }
 
 function imageReview(job, run, meta) {
@@ -2667,11 +2681,26 @@ function imageReviewParts(job, meta, draft, paint, run = null) {
   out.push(el("div", { className: "inline-row" },
     textBtn("✅ ใช้ชุดรูปนี้ ไปต่อ", draftDirty(draft) ? "primary" : "ghost",
             () => commitDraft(job, draft, "img_ok")),
-    manualTickButton(itemId, paint, run)));
+    manualEntry(itemId, paint, run)));
   const said = manualSaid.get(String(itemId));
   if (said?.text) {
     out.push(el("p", { className: `note${said.bad ? " fail" : ""}`,
                        textContent: said.text }));
+  }
+
+  /* อยู่ในโหมดทำเองแล้ว = แผงอัปโหลดต้องอยู่**ตรงนี้เลย** ไม่ใช่ให้ไปหาที่อื่น
+   *
+   * **เจ้าของสั่ง 20 ก.ย. 2569** *"พอใบงานอยู่ในโหมด manual ให้มีปุ่มอัพโหลด
+   * storyboard กับคลิปด้วย"* — ของเดิมกดเข้าโหมดได้จากการ์ดนี้ แต่ต้องไปกด
+   * กองอื่นแล้วหาใบเดิมอีกทีถึงจะอัปไฟล์ได้ ซึ่งเท่ากับทำงานไม่ได้จริง
+   *
+   * ไม่โชว์รูปกับจุดเด่นซ้ำในแผง เพราะการ์ดนี้มีอยู่ข้างบนแล้ว */
+  const manual = manualStateOf(run, itemId);
+  if (manual?.manual_on === true) {
+    out.push(manualPanel(manual, async () => {
+      await fetchManualState(itemId);
+      paint();
+    }, { showMedia: false }));
   }
 
   // ── จุดเด่น: ซ้ายคือที่เลือกไว้ · ขวาคือจุดขายทั้งหมดที่ AI ไล่ไว้ ─────
@@ -3880,8 +3909,8 @@ export async function loadStoryRuns() {
   try {
     const payload = await api(`${CLIP_API}/api/clips`);
     storyRuns = payload.runs || [];
-    // แถวพวกนี้เป็น**ที่เดียว**ที่มีสถานะโหมดทำเอง เก็บไว้ให้การ์ดใบงานใช้
-    rememberManualTicks(storyRuns);
+    // แถวพวกนี้มีสถานะโหมดทำเองครบ เก็บไว้ให้การ์ดใบงานใช้โดยไม่ต้องยิงเพิ่ม
+    rememberManualStates(storyRuns);
     if (!storyRuns.length) {
       list.replaceChildren();
       $("#storyNote").textContent = "ยังไม่มีงานที่เก็บไว้";
@@ -3960,21 +3989,27 @@ function uploadBtn(label, accept, onPick, className = "ghost") {
  *  คนที่กำลังวาดสตอรีบอร์ดเองต้องเห็นว่าสินค้าหน้าตายังไง และจะขายจุดไหน
  *  ถ้าต้องกดสลับไปดูที่อื่นแล้วกดกลับมา ก็เท่ากับทำงานไม่ได้จริง
  */
-function manualBox(run, reload) {
-  const id = run.item_id;
+/** แผงโหมดทำเอง — ใช้ชุดเดียวกันทั้งบนการ์ดใบงานและในหน้ารายละเอียด
+ *
+ *  `showMedia` = true  → โชว์รูปสินค้ากับจุดเด่นด้วย (หน้ารายละเอียด ไม่มีให้ดูที่อื่น)
+ *  `showMedia` = false → ไม่โชว์ (การ์ดใบงาน มีอยู่ข้างบนแล้ว โชว์ซ้ำจะงงว่าอันไหนจริง)
+ *
+ *  **เขียนเป็นชุดเดียวโดยตั้งใจ** ถ้าแยกเป็นสองชุดตามที่วาง วันหลังแก้ที่เดียว
+ *  แล้วอีกที่จะเพี้ยนโดยไม่มีใครรู้ — เพดานจำนวนสตอรีบอร์ดอ่านจากเซิร์ฟเวอร์
+ *  ไม่เขียนเลข 2 ตายในหน้าเว็บ (ฝั่งงานกำชับไว้)
+ */
+function manualPanel(state, reload, { showMedia = true, media = null } = {}) {
+  const id = String(state.item_id || "");
   const box = el("div", { className: "mn-box" });
   const say = el("p", { className: "note mn-say" });
 
-  /* **ข้อความผลต้องรอดจากการวาดกล่องใหม่** (เจอจริงตอนทดสอบ 19 ก.ย. 2569)
+  /* **ข้อความผลต้องรอดจากการวาดกล่องใหม่** (เจอจริง 19 ก.ย. 2569)
    *
-   * ทุกปุ่มในกล่องนี้สั่งเสร็จแล้วต้องโหลดใบงานใหม่ ซึ่งวาดกล่องทั้งอันใหม่
-   * ถ้าเขียนข้อความลงช่องเดิมแล้วค่อยโหลด ช่องนั้นจะถูกทิ้งไปพร้อมกล่องเก่า
-   * ผลคืออัปไฟล์สำเร็จแต่**ไม่มีอะไรบอกว่าสำเร็จ** เห็นแค่ตัวเลขขยับเงียบๆ
-   *
-   * เก็บไว้นอกกล่องแล้ววาดกลับเข้าไปทุกครั้ง — บทเรียนเดียวกับฝั่งโพสต์
-   * ที่เหตุผลถูกส่งเป็นข้อความเด้งแล้วหาย จนเจ้าของนึกว่าบอทค้าง
+   * ทุกปุ่มในแผงนี้สั่งเสร็จแล้วต้องโหลดใหม่ ซึ่งวาดแผงทั้งอันใหม่
+   * ถ้าเขียนข้อความลงช่องเดิมแล้วค่อยโหลด ช่องนั้นจะถูกทิ้งไปพร้อมของเก่า
+   * ผลคืออัปไฟล์สำเร็จแต่ไม่มีอะไรบอกว่าสำเร็จ เห็นแค่ตัวเลขขยับเงียบๆ
    */
-  const said = manualSaid.get(String(id));
+  const said = manualSaid.get(id);
   if (said?.text) {
     say.textContent = said.text;
     say.classList.toggle("is-bad", !!said.bad);
@@ -3984,65 +4019,58 @@ function manualBox(run, reload) {
     say.classList.remove("is-bad");
     try {
       const out = await api(`${CLIP_API}/api/clips/${encodeURIComponent(id)}${path}`, options);
-      manualSaid.set(String(id), { text: out.message || okWord || "", bad: false });
+      manualSaid.set(id, { text: out.message || okWord || "", bad: false });
       await reload();
       loadJobQueue();
     } catch (error) {
       // ข้อความไทยมาจากเซิร์ฟเวอร์ครบทุกเคสแล้ว แสดงตรงๆ ไม่ต้องแปลเอง
-      manualSaid.set(String(id), { text: error.message, bad: true });
+      manualSaid.set(id, { text: error.message, bad: true });
       say.textContent = error.message;
       say.classList.add("is-bad");
     }
   };
 
   box.append(el("h4", { textContent: "✋ ทำเอง — อัปสตอรีบอร์ดและคลิปเอง" }));
-  if (run.manual_why) {
-    box.append(el("p", { className: "mn-why", textContent: run.manual_why }));
+  if (state.manual_why) {
+    box.append(el("p", { className: "mn-why", textContent: state.manual_why }));
   }
 
-  // ---- รูปสินค้า (เจ้าของสั่งให้คงไว้) ----
-  const shots = run.images || [];
-  if (shots.length) {
-    box.append(el("h5", { className: "mn-head", textContent: `🖼 รูปที่เลือกไว้ (${shots.length} ใบ)` }));
-    const grid = el("div", { className: "mn-shots" });
-    // **ห้ามใส่ loading="lazy" กับรูปในกล่องนี้** วัดจริง 19 ก.ย. 2569:
-    // รูป 4 ใบที่ใส่ lazy ไม่เริ่มโหลดเลยแม้จะอยู่กลางจอ (complete=false ·
-    // currentSrc ว่าง) ทั้งที่ URL เดียวกันโหลดได้ปกติเมื่อสร้าง Image() ใหม่
-    // และรูปอีก 14 ใบในหน้าเดียวกันที่ไม่ใส่ lazy โหลดครบ
-    // กล่องนี้อยู่ในแผงที่ตั้ง overflow:auto ซึ่งทำให้ตัวตัดสินของเบราว์เซอร์
-    // มองว่ายังไม่ต้องโหลด — รูปแค่ไม่กี่ใบไม่คุ้มที่จะเสี่ยงกับเรื่องนี้
-    shots.forEach((name, at) => grid.append(el("img", {
-      className: "mn-shot", alt: `รูปที่ ${at + 1}`,
-      src: clipFile(id, name),
-    })));
-    box.append(grid);
+  // ---- รูปสินค้า + จุดเด่น (เฉพาะที่ที่ไม่มีให้ดูอยู่แล้ว) ----
+  if (showMedia && media) {
+    const shots = media.images || [];
+    if (shots.length) {
+      box.append(el("h5", { className: "mn-head",
+                            textContent: `🖼 รูปที่เลือกไว้ (${shots.length} ใบ)` }));
+      const grid = el("div", { className: "mn-shots" });
+      shots.forEach((name, at) => grid.append(el("img", {
+        className: "mn-shot", alt: `รูปที่ ${at + 1}`, src: clipFile(id, name),
+      })));
+      box.append(grid);
+    }
+    const points = media.highlights || [];
+    if (points.length) {
+      box.append(el("h5", { className: "mn-head",
+                            textContent: `✨ จุดเด่น (${points.length} ข้อ)` }));
+      const ol = el("ol", { className: "story-highlights mn-points" });
+      points.forEach((text) => ol.append(el("li", { textContent: text })));
+      box.append(ol);
+    }
   }
 
-  // ---- จุดเด่น (เจ้าของสั่งให้คงไว้) ----
-  const points = run.highlights || [];
-  if (points.length) {
-    box.append(el("h5", { className: "mn-head", textContent: `✨ จุดเด่น (${points.length} ข้อ)` }));
-    const ol = el("ol", { className: "story-highlights mn-points" });
-    points.forEach((text) => ol.append(el("li", { textContent: text })));
-    box.append(ol);
-  }
-
-  // ---- สตอรีบอร์ดที่อัปแล้ว ----
-  const boards = run.manual_storyboards || [];
-  const max = run.manual_storyboard_max || 2;
+  // ---- สตอรีบอร์ดที่อัปเอง ----
+  const boards = state.manual_storyboards || [];
+  const max = state.manual_storyboard_max || 2;
   box.append(el("h5", { className: "mn-head",
                         textContent: `🎨 สตอรีบอร์ดที่อัปเอง (${boards.length}/${max} ใบ)` }));
   if (boards.length) {
     const grid = el("div", { className: "mn-shots" });
     boards.forEach((name, at) => grid.append(el("img", {
-      className: "mn-shot", alt: `สตอรีบอร์ดใบที่ ${at + 1}`,
-      src: clipFile(id, name),
+      className: "mn-shot", alt: `สตอรีบอร์ดใบที่ ${at + 1}`, src: clipFile(id, name),
     })));
     box.append(grid);
   } else {
     box.append(el("p", { className: "note", textContent: "ยังไม่ได้อัปสักใบ" }));
   }
-  // เพดานอ่านจากเซิร์ฟเวอร์ **ห้ามเขียนเลข 2 ตายในหน้าเว็บ** (ฝั่งงานกำชับ)
   if (boards.length < max) {
     box.append(uploadBtn("＋ อัปสตอรีบอร์ด", ".png,.jpg,.jpeg,.webp", async (file) => {
       const form = new FormData();
@@ -4051,17 +4079,17 @@ function manualBox(run, reload) {
     }));
   }
 
-  // ---- คลิปที่อัปแล้ว ----
+  // ---- คลิปที่อัปเอง ----
   box.append(el("h5", { className: "mn-head", textContent: "🎬 คลิปที่อัปเอง" }));
-  if (run.manual_video) {
+  if (state.manual_video) {
     box.append(el("video", {
       className: "story-video", controls: true, preload: "metadata",
-      src: clipFile(id, run.manual_video),
+      src: clipFile(id, state.manual_video),
     }));
   } else {
     box.append(el("p", { className: "note", textContent: "ยังไม่ได้อัปคลิป" }));
   }
-  box.append(uploadBtn(run.manual_video ? "🔄 เปลี่ยนคลิป" : "＋ อัปคลิป",
+  box.append(uploadBtn(state.manual_video ? "🔄 เปลี่ยนคลิป" : "＋ อัปคลิป",
                        ".mp4,.mov,.m4v,.webm", async (file) => {
     const form = new FormData();
     form.append("file", file);
@@ -4070,22 +4098,23 @@ function manualBox(run, reload) {
 
   // ---- ปุ่มจบงาน ----
   const row = el("div", { className: "inline-row mn-row" });
-  const done = textBtn("✅ เสร็จแล้ว", run.manual_ready ? "primary" : "ghost", async () => {
+  const done = textBtn("✅ เสร็จแล้ว", state.manual_ready ? "primary" : "ghost", async () => {
     done.disabled = true;
-    // วัดจริง 20–60 วินาที เพราะตัวตรวจต้องฟังเสียงในคลิป **ต้องบอกว่ากำลังทำ**
+    // วัดจริง 11–60 วินาที เพราะตัวตรวจต้องฟังเสียงในคลิป **ต้องบอกว่ากำลังทำ**
     // ไม่งั้นดูเหมือนค้างแล้วคนจะกดซ้ำ
     say.classList.remove("is-bad");
     say.textContent = "กำลังส่งเข้าตัวตรวจ… (ปกติ 20–60 วินาที) อย่าปิดหน้านี้";
     await post("/manual/done", { method: "POST" });
     done.disabled = false;
   });
-  done.disabled = !run.manual_ready;
-  done.title = run.manual_ready
+  done.disabled = !state.manual_ready;
+  done.title = state.manual_ready
     ? "ส่งเข้าตัวตรวจแล้วย้ายไปกองตรวจคลิป"
     : "ต้องอัปสตอรีบอร์ดอย่างน้อย 1 ใบ และอัปคลิปก่อน";
-  row.append(done, textBtn("เอาติ๊กออก", "ghost", async () => {
+  row.append(done, textBtn("ออกจากโหมดทำเอง", "ghost", async () => {
     await post("/manual", {
-      method: "POST", body: JSON.stringify({ on: false }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on: false }),
     });
   }));
   box.append(row, say);
@@ -4118,7 +4147,11 @@ async function showStoryRun(itemId) {
   // ใบที่อยู่โหมดทำเองใช้กล่องของตัวเอง ซึ่งมีรูปกับจุดเด่นอยู่ข้างในแล้ว
   // ถ้าวาดจุดเด่นซ้ำข้างนอกอีกชุด จะเห็นสองชุดติดกันแล้วงงว่าอันไหนของจริง
   const manual = run.manual_on === true;
-  if (manual) parts.push(manualBox(run, () => showStoryRun(run.item_id)));
+  if (manual) {
+    parts.push(manualPanel(pickManual(run), () => showStoryRun(run.item_id),
+                           { showMedia: true,
+                             media: { images: run.images, highlights: run.highlights } }));
+  }
   /* **กดเสร็จแล้วกล่องหายไปทั้งอัน พร้อมข้อความยืนยัน** (เจอจริง 19 ก.ย. 2569)
    *
    * พอกด "เสร็จแล้ว" เซิร์ฟเวอร์ตั้ง `manual_on` เป็น false ใบจึงออกจากกอง

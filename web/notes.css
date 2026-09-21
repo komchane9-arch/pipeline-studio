@@ -1,0 +1,155 @@
+/* สมุดโน้ต — ใช้ร่วมกันสองที่ (เจ้าของสั่ง 21 ก.ย. 2569)
+
+   1. หน้าต่างเด้งในหน้า Studio (web/notes.js)
+   2. หน้าเดี่ยวเต็มจอสำหรับมือถือ /notes (web/notes-app.html)
+
+   **แยกออกมาจาก styles.css โดยตั้งใจ** เพราะ styles.css ใหญ่ 220 KB เป็นของ
+   หน้า Studio ทั้งหน้า ถ้าให้มือถือโหลดทั้งก้อนเพื่อดูโน้ตอย่างเดียวคือเปลืองเปล่า
+
+/* ===================================================== สมุดโน้ต (เจ้าของสั่ง 21 ก.ย. 2569)
+
+   หน้าตาอิงสมุดโน้ตในไอโฟน: รายการอยู่ซ้าย ตัวเขียนอยู่ขวา ชื่อโน้ตมาจาก
+   บรรทัดแรกเอง ไม่มีช่องกรอกชื่อแยก
+
+   จอแคบ (< 720px) สลับเป็นทีละหน้าเหมือนบนมือถือ — เห็นรายการก่อน
+   แตะแล้วค่อยเลื่อนไปหน้าเขียน กดปุ่ม "‹ รายการ" กลับ */
+.notes-dialog {
+  width: min(1040px, 94vw); max-width: 94vw;
+  height: min(680px, 88vh); padding: 0; overflow: hidden;
+}
+.notes-wrap { display: flex; height: 100%; min-height: 0; }
+
+/* ---- ฝั่งซ้าย: รายการโน้ต ---- */
+.notes-side {
+  flex: 0 0 272px; display: flex; flex-direction: column; min-height: 0;
+  border-right: 0.5px solid var(--separator); background: var(--panel-deep);
+}
+.notes-side-top {
+  /* ต้อง wrap ไม่งั้นปุ่ม "เปิดบนมือถือ" ไปเบียดจนคำว่า "โน้ต" ตกบรรทัด */
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 8px; padding: 12px 12px 8px;
+}
+.notes-brand { flex: 1 1 auto; font-size: 15px; white-space: nowrap; }
+.notes-new { font-size: 17px; line-height: 1; padding: 4px 11px; }
+.notes-find {
+  margin: 0 12px 10px; padding: 7px 11px; border-radius: 9px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  font-size: 13px;
+}
+.notes-list { flex: 1 1 auto; overflow: auto; padding: 0 8px 8px; }
+.notes-blank { padding: 18px 10px; line-height: 1.7; }
+
+.notes-row {
+  display: flex; flex-direction: column; gap: 3px; width: 100%;
+  padding: 9px 11px; margin-bottom: 4px; text-align: left; cursor: pointer;
+  border: 0; border-radius: 9px; background: transparent; color: inherit;
+  font: inherit;
+}
+.notes-row:hover { background: var(--tint); }
+.notes-row.is-open { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.notes-row.is-open .notes-row-title { color: var(--accent-text, var(--ink)); }
+.notes-row-title {
+  font-weight: 700; font-size: 13.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notes-row-title.is-empty { color: var(--ink-3); font-weight: 600; }
+.notes-row-sub { display: flex; gap: 8px; min-width: 0; font-size: 11.5px; }
+.notes-row-when { flex: 0 0 auto; color: var(--ink-2); }
+.notes-row-peek {
+  flex: 1 1 auto; min-width: 0; color: var(--ink-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notes-row-restore { align-self: flex-start; font-size: 11.5px; color: var(--accent); font-weight: 700; }
+.notes-trash-toggle { margin: 8px 12px 12px; font-size: 12.5px; }
+.notes-trash-toggle.is-on { border-color: var(--accent); color: var(--accent); }
+
+/* ---- ฝั่งขวา: ตัวเขียน ---- */
+.notes-main {
+  flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--panel);
+}
+.notes-main-top {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border-bottom: 0.5px solid var(--separator);
+}
+.notes-state { flex: 1 1 auto; min-width: 0; font-size: 11.5px; overflow-wrap: anywhere; }
+.notes-state.is-bad { color: var(--bad-ink); font-weight: 700; }
+.notes-back { display: none; }
+.notes-del { color: var(--bad-ink); }
+
+.notes-text {
+  flex: 1 1 auto; min-height: 0; width: 100%; resize: none;
+  padding: 16px 18px; border: 0; background: transparent; color: var(--ink);
+  font-size: 14.5px; line-height: 1.8;
+}
+.notes-text:focus { outline: none; }
+
+/* ---- ลิงก์ที่แกะออกมาจากข้อความ ---- */
+.notes-links {
+  flex: 0 0 auto; max-height: 34%; overflow: auto;
+  padding: 10px 14px 14px; border-top: 0.5px solid var(--separator);
+  background: var(--panel-deep);
+}
+.notes-links-head {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+}
+.notes-links-head .note { flex: 1 1 auto; }
+.notes-link {
+  display: flex; align-items: center; gap: 8px; padding: 5px 0; min-width: 0;
+}
+.notes-chip {
+  flex: 0 0 auto; padding: 2px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; color: #fff; background: var(--ink-3);
+}
+.notes-chip.is-shopee { background: #ee4d2d; }
+.notes-chip.is-lazada { background: #0f146d; }
+.notes-chip.is-tiktok { background: #010101; }
+.notes-chip.is-facebook { background: #1877f2; }
+.notes-chip.is-other { background: var(--ink-3); }
+.notes-link-url {
+  flex: 1 1 auto; min-width: 0; font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notes-link-copy { flex: 0 0 auto; font-size: 11.5px; padding: 3px 10px; }
+
+/* ---- จอแคบ: ทีละหน้าเหมือนบนมือถือ ---- */
+@media (max-width: 720px) {
+  .notes-dialog { width: 100vw; max-width: 100vw; height: 100vh; border-radius: 0; }
+  .notes-side { flex: 1 1 auto; border-right: 0; }
+  .notes-main { display: none; }
+  .notes-back { display: inline-flex; }
+  .notes-wrap.is-reading .notes-side { display: none; }
+  .notes-wrap.is-reading .notes-main { display: flex; }
+}
+
+/* ---- หน้าเดี่ยวบนมือถือ (/notes) ----
+   หน้านี้ไม่มีแถบบนของ Studio ไม่มีคอลัมน์อื่น มีแต่สมุดโน้ตเต็มจอ
+   จึงกางกล่องให้เต็มหน้าต่างและกันขอบรอยบากของมือถือ */
+html.notes-page, html.notes-page body {
+  margin: 0; height: 100%; background: var(--panel-deep);
+}
+html.notes-page body { display: flex; }
+.notes-page-root {
+  flex: 1 1 auto; min-height: 0; display: flex;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+           env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.notes-page-root .notes-wrap { flex: 1 1 auto; min-width: 0; }
+.notes-page-root .notes-close { display: none; }
+
+/* ---- ปุ่ม "เปิดบนมือถือ" + การ์ด QR (เฉพาะหน้า Studio) ----
+   หน้าเดี่ยวบนมือถือไม่ต้องมี เพราะมันคือปลายทางอยู่แล้ว */
+.notes-phone { flex: 1 1 100%; margin-top: 6px; font-size: 12.5px; }
+.notes-phone-sheet {
+  margin: 0 12px 10px; padding: 11px 12px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--panel);
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  text-align: center;
+}
+.notes-phone-sheet .note { text-align: left; }
+.notes-phone-sheet .note.is-bad { color: var(--bad-ink); font-weight: 700; }
+.notes-qr {
+  width: 172px; height: 172px; image-rendering: pixelated;
+  background: #fff; padding: 6px; border-radius: 8px;
+}
+.notes-phone-url { font-size: 11px; overflow-wrap: anywhere; }

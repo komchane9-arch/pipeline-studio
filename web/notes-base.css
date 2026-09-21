@@ -1,0 +1,81 @@
+/* พื้นฐานสำหรับหน้าโน้ตเดี่ยวบนมือถือ (/notes)
+ *
+ * **มีเฉพาะเท่าที่ notes.css ต้องใช้ ไม่ได้ก๊อป styles.css มาทั้งก้อน**
+ * styles.css ใหญ่ 220 KB เป็นของหน้า Studio ทั้งหน้า มือถือที่เปิดมาดูโน้ต
+ * อย่างเดียวไม่ควรต้องโหลดทั้งหมด
+ *
+ * ค่าสีลอกมาจาก :root ของ styles.css ตัวจริง ถ้าที่นั่นเปลี่ยนธีม ที่นี่ต้อง
+ * ตามด้วย — จงใจไม่ import กันเพราะจะลากไฟล์ใหญ่ทั้งก้อนมาด้วย
+ */
+:root {
+  --bg: #f2f2f7;
+  --panel: #ffffff;
+  --panel-deep: #f2f2f7;
+  --ink: #000000;
+  --ink-2: #3c3c43;
+  --ink-3: #8e8e93;
+  --line: rgba(0, 0, 0, 0.10);
+  --separator: rgba(60, 60, 67, 0.29);
+  --accent: #0b6bcb;
+  --accent-text: #0b6bcb;
+  --bad: #c0392b;
+  --bad-ink: #a02f22;
+  --warn-ink: #8a5c05;
+  --tint: rgba(0, 0, 0, 0.05);
+}
+
+/* โหมดมืดตามเครื่อง — มือถือส่วนใหญ่ตั้งไว้มืด เปิดมาเจอขาวจ้ากลางคืนคือแสบตา */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-deep: #0d1117;
+    --ink: #f0f6fc;
+    --ink-2: #c9d1d9;
+    --ink-3: #8b949e;
+    --line: rgba(240, 246, 252, 0.14);
+    --separator: rgba(240, 246, 252, 0.12);
+    --accent: #58a6ff;
+    --accent-text: #58a6ff;
+    --bad: #f85149;
+    --bad-ink: #ff7b72;
+    --warn-ink: #d29922;
+    --tint: rgba(255, 255, 255, 0.06);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* กติกาเดียวกับ styles.css — [hidden] ต้องชนะทุก class ที่ตั้ง display
+   (เคยพลาดเรื่องนี้ในโปรเจกต์นี้มาแล้ว 4 รอบ) */
+[hidden] { display: none !important; }
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+               "Noto Sans Thai", "Leelawadee UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 14px;
+  -webkit-text-size-adjust: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ghost {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: inherit;
+  border-radius: 999px;
+  padding: 7px 16px;
+}
+.ghost:hover { border-color: var(--accent); }
+
+.note { font-size: 12.5px; line-height: 1.6; color: var(--ink-2); margin: 2px 0; }
+
+a { color: var(--accent); }

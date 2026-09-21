@@ -1,0 +1,17 @@
+{
+  "name": "โน้ต · Pipeline",
+  "short_name": "โน้ต",
+  "description": "สมุดโน้ตที่ใช้กองเดียวกับ Pipeline Studio บนคอม — แปะข้อความและลิงก์ Shopee / Lazada",
+  "lang": "th",
+  "start_url": "/notes",
+  "scope": "/notes",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f2f2f7",
+  "theme_color": "#f7f7f8",
+  "icons": [
+    { "src": "/static/icons/notes-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/static/icons/notes-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/static/icons/notes-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

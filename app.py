@@ -134,6 +134,12 @@ for directory in (DATA_DIR, LOG_DIR, UPLOAD_DIR, POSITION_DIR, FB_POST_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Pipeline Studio")
+from facebook_reels_download import create_router as create_reels_download_router
+app.include_router(create_reels_download_router(DATA_DIR / "facebook_reels_downloads"))
+
+# สมุดโน้ตในหน้าเว็บ — ไว้แปะข้อความและลิงก์ Shopee/Lazada (เจ้าของสั่ง 21 ก.ย. 2569)
+from notes_store import create_router as create_notes_router
+app.include_router(create_notes_router(DATA_DIR / "notes.json"))
 
 # ทะเบียนอุปกรณ์ที่ขอเข้าใช้จากมือถือ (เครื่องหลักอนุมัติทีละเครื่อง)
 access_store = access_control.AccessStore(DATA_DIR / "access_devices.json")
@@ -5968,6 +5974,43 @@ async def remote_page() -> Response:
         content=html.replace("__VERSION__", _compute_version()),
         media_type="text/html; charset=utf-8",
         headers={"Cache-Control": "no-store, must-revalidate"},
+    )
+
+
+@app.get("/notes")
+async def notes_page() -> Response:
+    """สมุดโน้ตหน้าเดี่ยวสำหรับมือถือ — ติดตั้งเป็นแอปบนจอโฮมได้ (PWA)
+
+    เจ้าของสั่ง 21 ก.ย. 2569 — "เขียนแอพแอนดรอยที่ซิ้งข้อมูลในโน้ตขึ้นบนเว็บ
+    ให้หน่อย แล้วถ้าวางข้อมูลบนเว็ปให้สามารถเปิดดูในมือถือได้ด้วย"
+
+    ใช้กองข้อมูลเดียวกับหน้าต่างโน้ตใน Studio (/api/notes) จึงไม่มีการซิงก์
+    สองทางให้ต้องมาแก้ชนกัน
+    """
+    html = (WEB_DIR / "notes-app.html").read_text(encoding="utf-8")
+    return Response(
+        content=html.replace("__VERSION__", _compute_version()),
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store, must-revalidate"},
+    )
+
+
+@app.get("/manifest-notes.json")
+async def notes_manifest() -> FileResponse:
+    return FileResponse(
+        WEB_DIR / "manifest-notes.json",
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/sw-notes.js")
+async def notes_service_worker() -> FileResponse:
+    """ต้องเสิร์ฟจากรากเว็บ ไม่ใช่ /static/ ไม่งั้นมันคุม /notes ไม่ได้"""
+    return FileResponse(
+        WEB_DIR / "sw-notes.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
     )
 
 

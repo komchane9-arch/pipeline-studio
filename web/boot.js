@@ -1,6 +1,8 @@
 /* จุดเริ่มทำงาน — ไฟล์เดียวที่ index.html โหลด ที่เหลือถูก import ต่อกันเป็นทอดๆ */
 
 import { api, config, hooks, pollHealth, pollLogs, setConfig, setSystem, system } from "./core.js";
+import "./facebook-reels-download.js";
+import "./notes.js";
 import { loadDevices, loadTargets } from "./phone.js";
 import { loadFbGroups, loadFbJobs, renderQueue, setQueue } from "./post.js";
 import { loadGroupHealth } from "./groups.js";
@@ -40,17 +42,9 @@ hooks.reloadConfig = () => reloadConfig();
           `เซิร์ฟเวอร์ ${system.app_version}) — ปิดเซิร์ฟเวอร์แล้วเปิดใหม่ หรือกด Ctrl+F5</p>`,
       );
     }
-    // ที่เก็บงานโพสต์ถอยไปใช้โฟลเดอร์เปล่า = ทั้งสายโพสต์ตาบอด ต้องเห็นทันที
-    // ที่เปิดหน้า ไม่ใช่ไปเจอเอาตอนสั่งโพสต์แล้วขึ้นว่า "ไม่มีกลุ่ม" (31 ส.ค. 2569)
-    if (system.post_dir_ready === false) {
-      document.body.insertAdjacentHTML(
-        "afterbegin",
-        `<p style="color:#f8a0a0;background:#3a1f22;padding:10px 16px;` +
-          `border-bottom:2px solid #a2545c;line-height:1.6">` +
-          `<b>⚠️ ที่เก็บงานโพสต์ใช้ไม่ได้ — ทะเบียนกลุ่มและใบงานจะขึ้นว่าว่างทั้งที่ของจริงยังอยู่ครบ</b>` +
-          `<br>${system.post_dir_why || "ปิดเซิร์ฟเวอร์แล้วเปิดใหม่เมื่อ Google Drive พร้อม"}</p>`,
-      );
-    }
+    // เจ้าของขอปิดแบนเนอร์ Drive 20 ก.ย. 2569: ระบบยังเก็บสถานะ
+    // post_dir_ready/post_dir_why และใช้ local fallback ตามเดิม แต่ไม่แทรกคำเตือน
+    // ยาวไว้บนสุดของหน้า ซึ่งทำให้เข้าใจผิดว่า Bot8/Bot9 เป็นผู้แจ้ง.
     await reloadConfig();
     await loadDevices();
     await loadTargets();
@@ -76,8 +70,7 @@ hooks.reloadConfig = () => reloadConfig();
     // เพราะทั้งคู่ต้องรู้ว่ากำลังดูโปรไฟล์ไหนก่อนจะยิงถามข้อมูล
     await loadGfAccounts();
     onGfAccountChange(async () => {
-      await loadFbControl();
-      await loadEngage();
+      await Promise.all([loadFbControl(), loadEngage()]);
     });
     // แผงคุมบอทสายโพสต์ — ดูสดทุก 5 วิเฉพาะตอนแท็บเปิดอยู่ (ดู fbcontrol.js)
     await loadFbControl();

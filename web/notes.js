@@ -68,11 +68,12 @@ const trashToggle = $("notes-trash-toggle");
 const wrap = $("notes-wrap");
 
 // ปุ่มเปิด — เสียบไว้ในแถบบนสุด ข้างปุ่มสลับธีม
+// (เคยลองย้ายไปลอยมุมขวาล่าง 21 ก.ย. 2569 แต่เจ้าของขอให้กลับมาที่เดิม)
 const opener = document.createElement("button");
 opener.id = "openNotes";
 opener.type = "button";
 opener.className = "gear-button";
-opener.title = "โน้ต — ที่แปะข้อความและลิงก์";
+opener.title = "โน้ต — ที่แปะข้อความและลิงก์ Shopee / Lazada";
 opener.setAttribute("aria-label", "โน้ต");
 opener.textContent = "📝";
 document.querySelector(".topbar")?.insertBefore(

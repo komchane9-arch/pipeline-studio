@@ -146,11 +146,37 @@ if POST_DIR != DATA_DIR:
         print(_bar, flush=True)
         print("", flush=True)
 
+# สถานะสำคัญเก็บในเครื่องเสมอ; ระบุพาธอื่นได้ตอนย้าย/ทดสอบ แต่ห้ามเด้งตาม Drive
+# แบบเงียบ ๆ อีก การตั้ง STUDIO_DATA_DIR ทำให้สนามทดสอบแยก state ตามไปด้วย
+# จึงไม่มีเทสใดอ่านหรือเขียนทะเบียนบัญชีจริง
+_post_state_name = os.environ.get("STUDIO_POST_STATE_DIR", "").strip()
+if _post_state_name:
+    POST_STATE = (Path(_post_state_name) if Path(_post_state_name).is_absolute()
+                  else BASE_DIR / _post_state_name)
+    POST_STATE_STORAGE = "custom"
+else:
+    POST_STATE = DATA_DIR / "facebook-post-state"
+    POST_STATE_STORAGE = "local"
+
+# state ขาดไม่ได้: ถ้าสร้างไม่ได้ให้เปิดเซิร์ฟเวอร์ไม่ขึ้นแบบเห็นสาเหตุ ดีกว่าเปิด
+# ได้แต่แสดง 0 กลุ่มแล้วเสี่ยงให้ผู้ใช้สร้างงานผิดบัญชี ส่วน media ยังใช้ fallback
+# ของ POST_DIR ด้านบนได้ตามเดิม
+POST_STATE.mkdir(parents=True, exist_ok=True)
+
 # แยกโฟลเดอร์ย่อยให้หาของเจอด้วยตา ไม่ใช่กองรวมกันเป็นร้อยไฟล์
-POST_STATE = POST_DIR / "state"        # ไฟล์สถานะ (งาน · กลุ่ม · โควตา · ตาราง)
 POST_IMAGES = POST_DIR / "images"      # รูปโพสต์และรูปคอมเมนต์
-POST_EVIDENCE = POST_DIR / "evidence"  # หน้าจอตอนคอมเมนต์/โพสต์ล้ม
-for _folder in (POST_STATE, POST_IMAGES, POST_EVIDENCE):
+
+# หน้าจอตอนคอมเมนต์/โพสต์ล้ม — **เก็บในเครื่อง ไม่ใช่บน Google Drive**
+#
+# เจ้าของสั่ง 22 ก.ย. 2569 "ย้ายลงมาเก็บไว้ในเครื่องก่อน แล้วตั้งให้ลบทุกเที่ยงคืน"
+# หลังเห็นกล่องเตือนของ Google Drive ว่า **เพิ่มไฟล์ไม่ได้ ไฟล์ถูกลบทิ้ง**
+# ("removed from Google Drive because you … permission to add files")
+#
+# ของเดิมเขียนตรงลง `G:\My Drive\…` ซึ่งแปลว่าตอนไดรฟ์เต็มหรือสิทธิ์มีปัญหา
+# **หลักฐานตอนพังจะหายไปเงียบๆ พร้อมกับตอนที่เราต้องการมันที่สุด**
+# เก็บในเครื่องก่อนจึงแน่นอนกว่า แล้วค่อยล้างทิ้งเป็นรอบ (ดู `evidence.wipe`)
+POST_EVIDENCE = DATA_DIR / "evidence-post"
+for _folder in (POST_IMAGES, POST_EVIDENCE):
     try:
         _folder.mkdir(parents=True, exist_ok=True)
     except OSError:

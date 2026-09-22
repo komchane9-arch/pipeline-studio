@@ -23,6 +23,8 @@
     python evidence.py list --tag shopee     เฉพาะเรื่องที่สนใจ
     python evidence.py open <ชื่อ>    เปิดภาพนั้นด้วยโปรแกรมดูรูป
     python evidence.py clean          ลบของเก่าที่เกินเพดาน
+    python evidence.py wipe           ล้างทิ้งทั้งหมดเดี๋ยวนี้
+    python evidence.py wipe --keep 24 เก็บของ 24 ชั่วโมงล่าสุดไว้
 """
 
 from __future__ import annotations
@@ -45,6 +47,74 @@ EVIDENCE_DIR = DATA_DIR / "evidence"
 # 300 มาจาก: ล้มหนักสุดที่เคยเจอคือ 33 ใบรวดในรอบเดียว เก็บได้ราว 9 รอบแบบนั้น
 # ซึ่งครอบคลุมการไล่ย้อนหลังหลายวัน ภาพหนึ่งใบราว 200-400 KB → เต็มที่ ~120 MB
 KEEP_EVENTS = 300
+
+# ทุกโฟลเดอร์ที่เก็บหลักฐาน — ล้างพร้อมกันทีเดียว
+#
+# `evidence` คือของที่ `evidence.py` เก็บเอง ส่วน `evidence-post` คือหน้าจอ
+# ตอนคอมเมนต์/โพสต์ล้มของสายโพสต์ ซึ่งย้ายลงมาจาก Google Drive เมื่อ
+# 22 ก.ย. 2569 (ไดรฟ์ปฏิเสธไฟล์แล้วลบทิ้ง — หลักฐานหายพร้อมตอนที่ต้องใช้)
+EVIDENCE_DIRS = (EVIDENCE_DIR, DATA_DIR / "evidence-post")
+
+# เที่ยงคืนแล้วเก็บของเก่าไว้กี่ชั่วโมง — 0 = ล้างทิ้งทั้งหมด
+#
+# เจ้าของสั่ง 22 ก.ย. 2569 "ตั้งให้ลบทุกเที่ยงคืน" หลังเห็นว่ากองสะสมไปแล้ว
+# 1,498 ไฟล์ 385 MB
+#
+# **ข้อแลกที่ต้องรู้** — งานที่พังตอนกลางคืนจะไม่มีหลักฐานเหลือให้ดูตอนเช้า
+# ถ้าอยากเก็บไว้ดูย้อนหลังหนึ่งวัน เปลี่ยนเลขนี้เป็น 24
+WIPE_KEEP_HOURS = 0
+
+
+def wipe(keep_hours: float | None = None) -> dict:
+    """ล้างหลักฐานทิ้ง — คืนสรุปว่าลบไปกี่ไฟล์ กี่ MB
+
+    `keep_hours` = เก็บของที่ใหม่กว่ากี่ชั่วโมงไว้ (None = ใช้ค่าตั้งต้น)
+
+    **กลืน exception เหมือนทุกฟังก์ชันในไฟล์นี้** — การล้างของเก่าล้มเหลว
+    ห้ามทำให้ตัวตั้งเวลาของทั้งระบบสะดุด แต่ต้องรายงานกลับไปว่าล้มที่ไฟล์ไหน
+    ไม่ใช่เงียบ (ล้างไม่ได้ ≠ ล้างแล้ว — กติกาข้อ 2.3.1)
+    """
+    keep = WIPE_KEEP_HOURS if keep_hours is None else float(keep_hours)
+    edge = datetime.now().timestamp() - keep * 3600
+    out = {"files": 0, "bytes": 0, "failed": 0, "dirs": []}
+    for folder in EVIDENCE_DIRS:
+        gone = 0
+        try:
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.rglob("*"), key=lambda p: -len(p.parts)):
+                try:
+                    if path.is_dir():
+                        if not any(path.iterdir()):
+                            path.rmdir()
+                        continue
+                    if keep > 0 and path.stat().st_mtime > edge:
+                        continue
+                    size = path.stat().st_size
+                    path.unlink()
+                    out["files"] += 1
+                    out["bytes"] += size
+                    gone += 1
+                except OSError:
+                    out["failed"] += 1
+        except Exception:                      # noqa: BLE001
+            out["failed"] += 1
+        if gone:
+            out["dirs"].append(f"{folder.name} {gone} ไฟล์")
+    return out
+
+
+def wipe_text(got: dict) -> str:
+    """สรุปผลการล้างเป็นภาษาคน"""
+    if not got["files"] and not got["failed"]:
+        return "ล้างหลักฐาน: ไม่มีอะไรให้ลบ"
+    text = (f"ล้างหลักฐานแล้ว {got['files']} ไฟล์ "
+            f"({got['bytes'] / 1048576:.1f} MB)")
+    if got["dirs"]:
+        text += " — " + " · ".join(got["dirs"])
+    if got["failed"]:
+        text += f" · **ลบไม่ได้ {got['failed']} รายการ**"
+    return text
 
 
 def _stamp(now: datetime | None = None) -> str:
@@ -240,6 +310,9 @@ def main(argv: list[str] | None = None) -> int:
     p_open = sub.add_parser("open", help="เปิดภาพของเหตุการณ์นั้น")
     p_open.add_argument("stem")
     sub.add_parser("clean", help="ลบของเก่าที่เกินเพดาน")
+    p_wipe = sub.add_parser("wipe", help="ล้างหลักฐานทิ้ง (ใช้กับตัวตั้งเวลาเที่ยงคืน)")
+    p_wipe.add_argument("--keep", type=float, default=None,
+                        help="เก็บของที่ใหม่กว่ากี่ชั่วโมงไว้ (ไม่ใส่ = ตามค่าตั้งต้น)")
     args = parser.parse_args(argv)
 
     if args.cmd == "open":
@@ -255,6 +328,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "clean":
         _say(f"ลบไป {prune()} เหตุการณ์")
+        return 0
+    if args.cmd == "wipe":
+        _say(wipe_text(wipe(args.keep)))
         return 0
     _say(summary(getattr(args, "limit", 20), getattr(args, "tag", "")))
     return 0

@@ -10801,6 +10801,50 @@ def _phone_clean_run(now: datetime | None = None, force: bool = False) -> str:
     return text
 
 
+# ล้างหลักฐานตอนพังทุกเที่ยงคืน (เจ้าของสั่ง 22 ก.ย. 2569)
+#
+# จดวันที่ล้างล่าสุด **ลงไฟล์ ไม่ใช่ในหน่วยความจำ** เพราะถ้าจดในหน่วยความจำ
+# แล้วเซิร์ฟเวอร์รีสตาร์ตตอนตีหนึ่ง มันจะคิดว่าล้างไปแล้ววันนี้ แล้วข้ามคืนนั้นไป
+# ของก็กองต่อ — บั๊กที่เงียบและกว่าจะรู้ตัวคือตอนดิสก์เต็ม
+_EVIDENCE_WIPE_FILE = DATA_DIR / "evidence_wipe.json"
+
+
+def _evidence_pump(now: datetime | None = None) -> str:
+    """ข้ามวันแล้วล้างหลักฐานทิ้งหนึ่งครั้ง — คืนข้อความสรุป ว่าง = ยังไม่ถึงรอบ"""
+    import evidence                                          # noqa: PLC0415
+
+    now = now or datetime.now()
+    today = now.date().isoformat()
+    state: dict = {}
+    try:
+        state = json.loads(_EVIDENCE_WIPE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    last = str(state.get("last") or "")
+
+    def remember(text: str) -> None:
+        def change(data: dict) -> None:
+            data["last"] = today
+            data["at"] = now.strftime("%Y-%m-%d %H:%M")
+            data["note"] = text
+
+        studio_shared.update_json(_EVIDENCE_WIPE_FILE, change, default={})
+
+    # ครั้งแรกที่รู้จักไฟล์นี้ **ห้ามล้างทันที** — ของที่เก็บไว้วันนี้ยังไม่ถึงรอบ
+    # แค่จดวันไว้ แล้วรอบแรกจริงจะเกิดหลังเที่ยงคืนถัดไป
+    if not last:
+        remember("เริ่มนับรอบ ยังไม่ได้ล้าง")
+        return ""
+    if last == today:
+        return ""
+
+    got = evidence.wipe()
+    text = evidence.wipe_text(got)
+    remember(text)
+    append_log("publish", f"เที่ยงคืนแล้ว — {text}")
+    return text
+
+
 def _fb_scheduler() -> None:
     """เฝ้างานที่ตั้งเวลาไว้ ถึงเวลาแล้วเริ่มโพสต์ให้เอง
 
@@ -10821,6 +10865,10 @@ def _fb_scheduler() -> None:
                 _screen_pump()          # ดับจอตอนว่าง / ปลุกก่อนงานถึง
             except Exception as error:
                 append_log("publish", f"ดูแลจอมือถือไม่สำเร็จ: {error}")
+            try:
+                _evidence_pump()        # ล้างหลักฐานตอนพังทุกเที่ยงคืน
+            except Exception as error:
+                append_log("publish", f"ล้างหลักฐานรายวันไม่สำเร็จ: {error}")
             # **วนทุกบัญชีในสายโพสต์** (16 ก.ย. 2569)
             #
             # ของเดิมเรียก `fb_jobs.listing()` เปล่าๆ ซึ่งแปลว่า "บัญชีที่ควรใช้

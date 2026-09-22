@@ -13380,8 +13380,11 @@ def fb_page_posted() -> JSONResponse:
 
 
 @app.post("/api/fb/page-post/job/{job_id}")
-async def fb_page_post_job(job_id: str, serial: str = Form(""),
-                           page: str = Form("")) -> dict:
+async def fb_page_post_job(
+    job_id: str, serial: str = Form(""), page: str = Form(""),
+    caption: str = Form(""), comments: str = Form(""),
+    post_images: list[UploadFile] = File(default=[]),
+) -> dict:
     """สั่งเอาใบงานเดิมไปลงเพจ — ใช้รูปแบบเดียวกับใบที่ทดลองสำเร็จเมื่อ 22 ก.ย.
 
         แคปชัน = แคปชันเดิม + คอมเมนต์ทุกข้อความ คั่นด้วยบรรทัดว่าง
@@ -13399,7 +13402,10 @@ async def fb_page_post_job(job_id: str, serial: str = Form(""),
     got = fb_page_jobs.plan(job_id)
     if not got.get("found"):
         raise HTTPException(status_code=404, detail=got.get("blocked") or "ไม่พบใบงานนี้")
-    if got.get("blocked"):
+    # รูปของใบงานหายไปแล้วก็ยังลงได้ **ถ้าเลือกไฟล์รูปมาเอง** — ด่านเดิมห้ามไว้
+    # เพราะตอนนั้นยังไม่มีทางใส่รูปใหม่ ตอนนี้มีแล้วจึงไม่ควรห้ามทื่อๆ
+    picked = [u for u in (post_images or []) if u and u.filename]
+    if got.get("blocked") and not picked:
         raise HTTPException(status_code=400, detail=got["blocked"])
     if got.get("posted"):
         raise HTTPException(
@@ -13422,15 +13428,43 @@ async def fb_page_post_job(job_id: str, serial: str = Form(""),
         _PAGE_POST.update(running=True, lines=[], result=None, error="",
                           started_at=time.time(), finished_at=0.0,
                           page=page, serial=clean_serial, job_id=job_id)
+    # ค่าที่คนแก้มาจากฟอร์มชนะค่าของใบงานเสมอ — **ที่เห็นบนจอคือที่จะลงจริง**
+    # ไม่งั้นแก้แคปชันแล้วโพสต์ออกมาเป็นของเดิม ซึ่งไม่มีอะไรบอกเลย
+    use_caption = (caption or "").strip() or got["full_caption"]
+    use_comments = got["comments"]
+    if (comments or "").strip():
+        try:
+            parsed = json.loads(comments)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400,
+                                detail="รายการคอมเมนต์ไม่ถูกต้อง") from error
+        if not isinstance(parsed, list):
+            raise HTTPException(status_code=400, detail="รายการคอมเมนต์ต้องเป็น list")
+        use_comments = [str(x).strip() for x in parsed if str(x or "").strip()]
+
+    saved: list[Path] = []
+    for order, upload in enumerate(picked, 1):
+        asset = await _fb_read_web_image(upload, f"รูปโพสต์ใบที่ {order}")
+        if not asset:
+            continue
+        suffix, content = asset
+        target = FB_POST_DIR / f"page-{job_id}-{int(time.time())}-{order}{suffix}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        saved.append(target)
+    use_images = saved or [Path(p) for p in got["images"]]
+
+    with _PAGE_POST_LOCK:
+        _PAGE_POST["job_id"] = job_id
     _page_post_note(
-        f"รับใบงาน {job_id} ไปลงเพจ {page} — รูป {len(got['images'])} ใบ · "
-        f"คอมเมนต์ {len(got['comments'])} ข้อความ · "
+        f"รับใบงาน {job_id} ไปลงเพจ {page} — รูป {len(use_images)} ใบ"
+        + (" (เลือกมาใหม่)" if saved else "")
+        + f" · คอมเมนต์ {len(use_comments)} ข้อความ · "
         f"เครื่อง {device_book.label(clean_serial)}")
     threading.Thread(
         target=_page_post_worker,
-        args=(clean_serial, page, got["full_caption"],
-              [Path(p) for p in got["images"]], got["comments"]),
-        kwargs={"job_id": job_id, "keep_images": True},
+        args=(clean_serial, page, use_caption, use_images, use_comments),
+        kwargs={"job_id": job_id, "keep_images": not saved},
         daemon=True, name="page-post-job").start()
     return {"ok": True, "job_id": job_id,
             "message": f"เริ่มเอาใบงาน {job_id} ไปลงเพจ {page} แล้ว"}

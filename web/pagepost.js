@@ -184,31 +184,53 @@ async function showJob(id) {
     box.innerHTML = `<p class="note bad">${plan.blocked || "ไม่พบใบงานนี้"}</p>`;
     return;
   }
+
+  // **เติมของจริงลงช่องให้เห็นกับตา ไม่ใช่โชว์ตัวอย่างอ่านอย่างเดียว**
+  //
+  // เจ้าของทักเอง 22 ก.ย. 2569: "คอมเมนต์ไม่โชว์ รูปก็ไม่โชว์" — ของเดิมโชว์
+  // แค่กล่องตัวอย่างข้างล่าง ส่วนช่องแคปชันกับช่องคอมเมนต์ยังว่างเปล่า
+  // ซึ่งอ่านแล้วเหมือนระบบไม่มีข้อมูล ทั้งที่มีครบ
+  // เติมลงช่องแล้วยัง **แก้ได้ก่อนกด** ด้วย และสิ่งที่เห็นบนจอคือสิ่งที่จะลงจริง
+  if ($("pgCaption")) $("pgCaption").value = plan.full_caption || "";
+  const list = $("pgComments");
+  if (list) {
+    list.innerHTML = "";
+    (plan.comments || []).forEach((text) => addComment(text));
+    if (!(plan.comments || []).length) addComment();
+  }
+
   const head = `<h4>ใบงาน ${id}${plan.account ? " · " + plan.account : ""}</h4>`;
-  const facts = line("รูปที่ยังอยู่", `${plan.images.length} ใบ` +
-                     (plan.images_missing ? ` (หายไป ${plan.images_missing})` : "")) +
-                line("คอมเมนต์", `${plan.comments.length} ข้อความ`);
-  const preview = `<pre class="pg-log">${plan.full_caption
-    .replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[c])}</pre>`;
+  const thumbs = (plan.images || []).map((_, i) =>
+    `<img src="/api/fb/jobs/${encodeURIComponent(id)}/media/post/${i}" ` +
+    `alt="รูปของใบงาน ${id}" ` +
+    `style="max-width:150px;max-height:150px;border-radius:8px;` +
+    `border:1px solid var(--line);object-fit:cover" />`).join(" ");
+
+  let photoNote;
+  if (plan.images.length) {
+    photoNote = `<p class="note">ใช้รูปของใบงานนี้ ${plan.images.length} ใบ ` +
+      `— ไม่ต้องเลือกไฟล์เอง (ถ้าเลือกไฟล์ในช่องด้านบน จะใช้ไฟล์ที่เลือกแทน)</p>` +
+      `<div class="row">${thumbs}</div>`;
+  } else if (plan.images_missing) {
+    photoNote = `<p class="note bad">รูปเดิมของใบงานนี้ถูกลบไปแล้ว ` +
+      `${plan.images_missing} ใบ (ระบบเก็บรูปไว้ 300 ใบล่าสุด) ` +
+      `— <b>ถ้าจะลง ต้องเลือกไฟล์รูปในช่อง “รูป” ด้านบนก่อน</b></p>`;
+  } else {
+    photoNote = `<p class="note">ใบงานนี้ไม่มีรูป</p>`;
+  }
 
   if (plan.posted) {
-    box.innerHTML = head + facts + `<p class="note">✅ ใบนี้ลงเพจ ` +
+    box.innerHTML = head + photoNote + `<p class="note">✅ ใบนี้ลงเพจ ` +
       `${plan.posted.page} ไปแล้วเมื่อ ${plan.posted.at} · ` +
       `ไลก์${plan.posted.liked ? "ติด" : "ไม่ติด"} · ` +
       `คอมเมนต์ ${plan.posted.comment_count} ข้อความ<br>` +
       `ถ้าจะลงซ้ำ ต้องลบบันทึกก่อนด้วยคำสั่ง ` +
-      `<code>python fb_page_jobs.py clear ${id}</code></p>` + preview;
+      `<code>python fb_page_jobs.py clear ${id}</code></p>`;
     return;
   }
-  if (plan.blocked) {
-    box.innerHTML = head + facts +
-      `<p class="note bad">ยังลงไม่ได้ — ${plan.blocked}</p>` + preview;
-    return;
-  }
-  box.innerHTML = head + facts +
-    `<p class="note">แคปชันที่จะลง (แคปชันเดิม + คอมเมนต์ทุกข้อความ คั่นบรรทัดว่าง) ` +
-    `แล้วจะคอมเมนต์เดิมใต้โพสต์อีกที พร้อมกดไลก์โพสต์และไลก์คอมเมนต์</p>` +
-    preview +
+  box.innerHTML = head + photoNote +
+    `<p class="note">ช่องแคปชันกับช่องคอมเมนต์ด้านบนถูกเติมจากใบงานนี้แล้ว ` +
+    `<b>แก้ได้ก่อนกด</b> — ที่เห็นบนจอคือที่จะลงจริง</p>` +
     `<div class="row"><button id="pgJobGo" class="primary" type="button">` +
     `🚀 โพสต์ใบงาน ${id} ลงเพจ</button></div>`;
   $("pgJobGo")?.addEventListener("click", () => runJob(id));
@@ -220,6 +242,11 @@ async function runJob(id) {
   const form = new FormData();
   form.append("serial", $("pgDevice")?.value || "");
   form.append("page", $("pgPage")?.value || "");
+  // ส่งของที่อยู่บนจอไป ไม่ใช่ให้เซิร์ฟเวอร์ไปอ่านใบงานเอง
+  // ไม่งั้นแก้แคปชันแล้วโพสต์ออกมาเป็นของเดิมโดยไม่มีอะไรบอก
+  form.append("caption", $("pgCaption")?.value || "");
+  form.append("comments", JSON.stringify(comments()));
+  for (const file of $("pgImages")?.files || []) form.append("post_images", file);
   try {
     const got = await api(`/api/fb/page-post/job/${encodeURIComponent(id)}`,
                           { method: "POST", body: form });

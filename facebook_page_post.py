@@ -30,16 +30,29 @@
 
     python facebook_page_post.py --list
     python facebook_page_post.py --dry-run --caption "ทดสอบ" --image a.jpg
+    python facebook_page_post.py --caption "..." --image a.jpg            --comment "คอมเมนต์ 1" --comment "คอมเมนต์ 2"
+
+พิสูจน์กับของจริงครบทุกขั้นแล้ว 22 ก.ย. 2569 บนเพจ "ไท คัดมาแล้วครับ":
+โพสต์ขึ้น · ไลก์โพสต์ติด · คอมเมนต์ 2 ข้อความขึ้นครบพร้อมลิงก์ · ไลก์คอมเมนต์ติดทั้งคู่
+· คืนโปรไฟล์กลับ Squishy Cute Club ได้
+
+⚠️ **ยังเหลือรูที่ต้องรู้** — ด่านตรวจกติกาข้อ 2.7 (`publish_flow_check.py`) ยัง
+ไม่มีคำว่า `am start` ในรายการคำต้องห้าม ทั้งโปรเจกต์จึงมีการยิงลิงก์ลัดหน้าอยู่
+9 จุดโดยด่านมองไม่เห็น (ตัวโพสต์กลุ่ม 5 · ตัวสลับโปรไฟล์ 3 · publish_flow 1)
+ไฟล์นี้ไม่มีสักจุด แต่ `fb_profile` ที่มันเรียกใช้มี — รายงานเจ้าของไว้แล้ว 22 ก.ย.
 """
 from __future__ import annotations
 
 import argparse
+import html
+import re
 import sys
 import time
 from pathlib import Path
 
 import facebook_group_post as g
 import fb_auto_post
+import fb_comment_guard
 import fb_profile as fp
 
 # ช่องเขียนโพสต์บน **หน้าเพจ** เขียนคนละอย่างกับในกลุ่ม
@@ -306,87 +319,446 @@ def press_post(phone: g.Phone, caption: str) -> None:
 
 
 # ---------------------------------------------------------- ไลก์ + คอมเมนต์
+#
+# **ทั้งหัวข้อนี้เขียนใหม่จากการไล่ทีละขั้นกับเครื่องจริง 22 ก.ย. 2569 16:25–16:41**
+# (เจ้าของนั่งสั่งทีละขั้นแล้วดูผลทุกขั้น) ของเดิมยืมตัวไลก์/คอมเมนต์ของสายกลุ่ม
+# มาใช้ตรงๆ แล้ว **ล้มทุกรอบ** เพราะหน้าเพจกับหน้ากลุ่มใช้ป้ายกำกับคนละชุด
+# ตัวเลขในคำอธิบายข้างล่างคือค่าที่วัดได้จริงบน W4FYYPYTLFYLIFHM (720x1600)
+
+# ปุ่มคอมเมนต์ต้องตรงเป๊ะ — บนหน้าเพจมีฟอง "สร้างโน้ต: แสดงความคิดเห็น…"
+# ซึ่ง **มีคำนี้อยู่ข้างใน** ถ้าจับแบบ "มีคำนี้" จะไปโดนฟองโน้ตแทนปุ่มจริง
+# (ผังจอจริง: ฟองโน้ตอยู่ [230,176][489,292] ส่วนปุ่มจริงอยู่แถวล่างของการ์ดโพสต์)
+ACTION_COMMENT_EXACT = ("แสดงความคิดเห็น", "Comment")
+ACTION_SHARE_MARKS = ("ปุ่มแชร์", "แชร์โพสต์", "Share post")
+
+# ช่องพิมพ์คอมเมนต์ของ **เพจ** เขียนว่า "แสดงความคิดเห็นในชื่อ <ชื่อเพจ>"
+# ซึ่งไม่ตรงกับคำที่สายกลุ่มหา (เขียนความคิดเห็น / เขียนความคิดเห็นสาธารณะ) สักคำ
+COMMENT_FIELD_MARKS = ("แสดงความคิดเห็นในชื่อ", "เขียนความคิดเห็นสาธารณะ",
+                       "เขียนความคิดเห็น", "Write a public comment", "Comment as")
+
+# **ปุ่มส่งต้องตรงเป๊ะ และต้องอยู่ครึ่งล่างของจอ**
+#
+# เจอจริง 22 ก.ย. 16:33 — จับแบบ "มีคำว่า ส่ง" ไปโดนการ์ดสินค้า Shopee ที่เขียนว่า
+# "ใหม่ พร้อมส่ง 4G/5G Wifi…" ซึ่งอยู่กลางจอ (408,570) แตะแล้ว **เด้งออกไปแอป
+# Shopee ทั้งแอป** ร่างคอมเมนต์หายหมด ต้องกลับมาพิมพ์ใหม่
+# ปุ่มจริงอยู่ (672,1418) — ช่องพิมพ์กับปุ่มส่งตรึงอยู่ล่างจอเสมอ
+# (ตรงกับกติกาข้อ 3: ห้าม selector แบบ *="คำ" ในหน้าที่มีเนื้อหาผู้ใช้ปน)
+SEND_EXACT = ("ส่ง", "Send")
+SEND_MIN_RATIO = 0.6
+
+# ปุ่มถูกใจของ **คอมเมนต์** มีป้ายกำกับ ต่างจากปุ่มถูกใจของโพสต์ที่ไม่มีเลย
+COMMENT_LIKE_MARKS = ("ถูกใจปุ่มแสดงความคิดเห็นของ", "Like comment")
+COMMENT_LIKED_MARKS = ("ได้มีการกดปุ่ม ถูกใจ ไปแล้ว", "Liked")
+# ของที่มีเฉพาะตอนคอมเมนต์ **ส่งขึ้นไปแล้ว** — ยังอยู่ในช่องพิมพ์จะไม่มี
+COMMENT_POSTED_MARKS = ("ตอบกลับความคิดเห็นของ", "เมื่อสักครู่", "Reply to")
+# ของที่มีเฉพาะตอน **โพสต์ถูกไลก์แล้ว**
+POST_LIKED_MARKS = ("คุณแสดงความรู้สึก", "ได้มีการกดปุ่ม ถูกใจ ไปแล้ว")
+
+MAX_COMMENTS_PER_POST = 10      # กันวนหลุด ไม่ใช่เพดานของแพลตฟอร์ม
+SCROLL_STEP = 700               # พิกัดอ้างอิง (Phone.vswipe ย่อขยายตามจอจริงให้)
+
+
+# ---------------------------- ตัวอ่านผังจอ (ทดสอบได้โดยไม่ต้องมีมือถือ)
+
+def _clickables(xml: str):
+    """(ป้ายทั้งหมดของ node, กรอบ) ของทุกปุ่มที่กดได้"""
+    for found in re.finditer(r'<node[^>]*clickable="true"[^>]*>', xml):
+        tag = found.group(0)
+        labels = [html.unescape(v).strip()
+                  for v in re.findall(r'(?:text|content-desc)="([^"]*)"', tag)]
+        box = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', tag)
+        if box:
+            yield [label for label in labels if label], tuple(int(v) for v in box.groups())
+
+
+def find_text_box(xml: str, needle: str) -> tuple[int, int, int, int] | None:
+    """กรอบของ node แรกที่มีข้อความนี้ — None เมื่อไม่เจอ"""
+    if not needle:
+        return None
+    for found in re.finditer(r'<node[^>]*>', xml):
+        tag = found.group(0)
+        labels = " ".join(html.unescape(v)
+                          for v in re.findall(r'(?:text|content-desc)="([^"]*)"', tag))
+        if needle in labels:
+            box = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', tag)
+            if box:
+                return tuple(int(v) for v in box.groups())
+    return None
+
+
+def find_action_bar(xml: str, below: int = 0) -> dict | None:
+    """แถบ 👍 💬 ↗ ใต้โพสต์ — คืน {'like','comment','share','y'} หรือ None
+
+    **ปุ่มถูกใจของโพสต์ไม่มีป้ายกำกับเลยสักตัว** (วัดจากเครื่องจริง 22 ก.ย. 16:26)
+    ตัวหาปุ่มที่ค้นจากคำว่า "ถูกใจ" จึงไม่มีวันเจอ แล้วไล่เลื่อนจอหาจนโพสต์หลุดจอ
+    ก่อนยอมแพ้ — นี่คือสาเหตุที่กดไลก์โพสต์ไม่ได้มาตลอดสามรอบแรก
+
+        👍 ไม่มีชื่อ            x 0..88     ← ต้องคำนวณเอา
+        💬 "แสดงความคิดเห็น"    x 88..176
+        ↗  "ปุ่มแชร์ …"          x 176..264
+
+    ปุ่มทั้งแถวกว้างเท่ากันและเรียงชิดกัน จุดกึ่งกลางของ 👍 จึงคำนวณได้จาก
+    **ความกว้างของปุ่มคอมเมนต์เอง**: ขอบซ้ายของ 💬 ลบครึ่งความกว้าง
+    (88 − 44 = 44 ตรงกับที่แตะแล้วติดจริง) ไม่ฝังพิกัดตายตัว ย้ายเครื่องก็ใช้ได้
+
+    `below` = รับเฉพาะแถบที่อยู่ **ใต้** พิกัดนี้ ใช้ผูกแถบเข้ากับโพสต์ของเรา
+    ตอนที่มีหลายโพสต์อยู่บนจอเดียวกัน
+    """
+    comments, shares = [], []
+    for labels, (x1, y1, x2, y2) in _clickables(xml):
+        middle = (y1 + y2) // 2
+        if any(label in ACTION_COMMENT_EXACT for label in labels):
+            comments.append((middle, x1, x2))
+        elif any(mark in " ".join(labels) for mark in ACTION_SHARE_MARKS):
+            shares.append((middle, x1, x2))
+    best = None
+    for middle, left, right in comments:
+        if middle <= below:
+            continue
+        # ต้องมีปุ่มแชร์อยู่ขวามือในแถวเดียวกัน ถึงจะนับว่าเป็นแถบปุ่มของโพสต์จริง
+        mate = next((s for s in shares
+                     if abs(s[0] - middle) < 40 and s[1] >= right - 4), None)
+        if mate is None:
+            continue
+        if best is None or middle < best[0]:
+            width = max(1, right - left)
+            best = (middle, {
+                "like": (max(12, left - width // 2), middle),
+                "comment": ((left + right) // 2, middle),
+                "share": ((mate[1] + mate[2]) // 2, middle),
+                "y": middle,
+            })
+    return best[1] if best else None
+
+
+def find_comment_field(xml: str) -> tuple[int, int] | None:
+    """ช่องพิมพ์คอมเมนต์ — None เมื่อยังไม่ได้เปิดแผงคอมเมนต์"""
+    for labels, (x1, y1, x2, y2) in _clickables(xml):
+        joined = " ".join(labels)
+        if any(mark in joined for mark in COMMENT_FIELD_MARKS):
+            return (x1 + x2) // 2, (y1 + y2) // 2
+    return None
+
+
+def find_send_button(xml: str, height: int) -> tuple[int, int] | None:
+    """ปุ่มส่งคอมเมนต์ — **ป้ายตรงเป๊ะ และอยู่ครึ่งล่างของจอเท่านั้น**"""
+    best = None
+    for labels, (x1, y1, x2, y2) in _clickables(xml):
+        if not any(label in SEND_EXACT for label in labels):
+            continue
+        middle = (y1 + y2) // 2
+        if middle < height * SEND_MIN_RATIO:
+            continue
+        if best is None or middle > best[1]:
+            best = ((x1 + x2) // 2, middle)
+    return best
+
+
+def find_comment_like(xml: str, below: int) -> tuple[tuple[int, int], bool] | None:
+    """ปุ่มถูกใจของคอมเมนต์ตัวแรกที่อยู่ใต้พิกัดนี้ — คืน (จุดกด, ไลก์ไปแล้วไหม)
+
+    ผูกกับ **ข้อความของคอมเมนต์นั้น** ไม่ใช่ "ปุ่มตัวแรกบนจอ" ไม่งั้นพอมีหลาย
+    คอมเมนต์จะไปกดของผิดอัน และการกดซ้ำที่เดิมคือ **ยกเลิกไลก์** ไม่ใช่ไลก์เพิ่ม
+    """
+    best = None
+    for labels, (x1, y1, x2, y2) in _clickables(xml):
+        joined = " ".join(labels)
+        liked = any(mark in joined for mark in COMMENT_LIKED_MARKS)
+        if not liked and not any(mark in joined for mark in COMMENT_LIKE_MARKS):
+            continue
+        middle = (y1 + y2) // 2
+        if middle <= below:
+            continue
+        if best is None or middle < best[0]:
+            best = (middle, ((x1 + x2) // 2, middle), liked)
+    return (best[1], best[2]) if best else None
+
+
+def comment_probes(text: str) -> list[str]:
+    """ชิ้นข้อความที่ใช้ยืนยันว่าคอมเมนต์นี้อยู่บนจอจริง
+
+    ใช้สองชั้น: ท่อนแรกของข้อความ (ตัดอีโมจินำหน้าออก) กับ **รหัสท้ายลิงก์** ถ้ามี
+    ลิงก์ย่อของ Shopee/Lazada เป็นตัวอักษรผสมตัวเลขที่ไม่ซ้ำใคร จึงเป็นหลักฐาน
+    ที่ดีว่าข้อความเข้าไป **ครบ** ไม่ใช่เข้าไปแค่บรรทัดแรก
+    """
+    head = re.sub(r"^[^\w฀-๿]+", "", (text or "").strip())
+    probes = [head.split("\n")[0][:14].strip()] if head else []
+    probes += re.findall(r"/([A-Za-z0-9]{8,})", text or "")[:2]
+    return [probe for probe in probes if probe]
+
+
+# ------------------------------------------------------- ขับหน้าจอจริง
+
+def scroll_to_post(phone: g.Phone, caption: str, tries: int = 10) -> dict:
+    """เลื่อนหาโพสต์ของเราบนหน้าเพจจนเห็น **ทั้งแคปชันและแถบปุ่ม** — คืนแถบปุ่ม
+
+    เห็นแคปชันอย่างเดียวยังกดอะไรไม่ได้ เพราะแถบปุ่มอาจยังอยู่ใต้ขอบจอ
+    และเห็นแถบปุ่มอย่างเดียวก็ไม่ได้ เพราะไม่รู้ว่าเป็นแถบของโพสต์ไหน
+    """
+    probe = (caption or "").strip()[:12]
+    if not probe:
+        raise PageError("ไม่มีแคปชันให้ใช้เป็นหมุด — หาโพสต์ของเราไม่ได้")
+    seen = False
+    for attempt in range(1, tries + 1):
+        xml = phone.dump()
+        box = find_text_box(xml, probe)
+        if box is None:
+            if seen:
+                phone.log(f"  (หาโพสต์ รอบ {attempt}) แคปชันหลุดจอไปแล้ว — เลื่อนกลับขึ้น")
+                phone.vswipe(800, 800 + SCROLL_STEP // 2, 500)
+            else:
+                phone.log(f"  (หาโพสต์ รอบ {attempt}) ยังไม่เห็นแคปชัน — เลื่อนลง")
+                phone.vswipe(1500, 1500 - SCROLL_STEP, 600)
+            time.sleep(2.5)
+            continue
+        seen = True
+        bar = find_action_bar(xml, below=box[3])
+        if bar:
+            phone.log(f"  เจอโพสต์ของเราพร้อมแถบปุ่มแล้ว (รอบ {attempt}) "
+                      f"👍{bar['like']} 💬{bar['comment']}")
+            return bar
+        phone.log(f"  (หาโพสต์ รอบ {attempt}) เห็นแคปชันแล้วแต่แถบปุ่มยังไม่โผล่")
+        phone.vswipe(1300, 1300 - SCROLL_STEP // 2, 500)
+        time.sleep(2.5)
+    g.keep_failure_screen(phone, "หาแถบปุ่มของโพสต์บนหน้าเพจไม่เจอ")
+    raise PageError(
+        "เลื่อนหาโพสต์ของเราบนหน้าเพจจนครบรอบแล้วยังไม่เห็นแถบปุ่ม 👍💬↗ "
+        "— **ไม่แตะอะไรต่อ** เพราะกดมั่วอาจไปโดนโพสต์อื่น")
+
+
+def like_post(phone: g.Phone, caption: str) -> bool:
+    """กดถูกใจโพสต์ของเราเอง — คืน True เมื่อยืนยันได้ว่าติดจริง"""
+    bar = scroll_to_post(phone, caption)
+    xml = phone.dump()
+    box = find_text_box(xml, caption.strip()[:12])
+    low = box[1] - 200 if box else 0
+    high = bar["y"] + 300
+    for found in re.finditer(r'<node[^>]*>', xml):
+        tag = found.group(0)
+        labels = html.unescape(" ".join(
+            re.findall(r'(?:text|content-desc)="([^"]*)"', tag)))
+        if not any(mark in labels for mark in POST_LIKED_MARKS):
+            continue
+        spot = re.search(r'bounds="\[\d+,(\d+)\]\[\d+,(\d+)\]"', tag)
+        if spot and low <= (int(spot.group(1)) + int(spot.group(2))) // 2 <= high:
+            phone.log("  โพสต์นี้ถูกไลก์ไปแล้ว — ไม่กดซ้ำ (กดซ้ำ = ยกเลิกไลก์)")
+            return True
+
+    phone.log(f"  กดถูกใจโพสต์ที่ {bar['like']}")
+    phone.tap(bar["like"])
+    time.sleep(4.0)
+    after = html.unescape(phone.dump())
+    if any(mark in after for mark in POST_LIKED_MARKS):
+        phone.log("  ✅ ไลก์ติดแล้ว (จอขึ้นว่าเราแสดงความรู้สึกไว้)")
+        return True
+    phone.log("  ⚠️ กดไปแล้วแต่ยังไม่เห็นร่องรอยว่าไลก์ติด — รายงานว่าไม่ติด ไม่กดซ้ำ")
+    return False
+
+
+def open_comments(phone: g.Phone, caption: str, tries: int = 2) -> bool:
+    """แตะปุ่มคอมเมนต์เพื่อเปิดแผง — คืน True เมื่อเห็นช่องพิมพ์จริง"""
+    for attempt in range(1, tries + 1):
+        if find_comment_field(phone.dump()):
+            return True
+        bar = scroll_to_post(phone, caption)
+        phone.log(f"  เปิดแผงคอมเมนต์ (รอบ {attempt})")
+        phone.tap(bar["comment"])
+        time.sleep(6.0)
+        if find_comment_field(phone.dump()):
+            phone.log("  ✅ แผงคอมเมนต์เปิดแล้ว (เห็นช่องพิมพ์)")
+            return True
+    g.keep_failure_screen(phone, "เปิดแผงคอมเมนต์ไม่ได้")
+    return False
+
+
+def write_comment(phone: g.Phone, text: str) -> bool:
+    """พิมพ์คอมเมนต์หนึ่งข้อความแล้วส่ง — คืน True เมื่อยืนยันว่าขึ้นจริง
+
+    เรียกได้เฉพาะตอนแผงคอมเมนต์เปิดอยู่แล้ว (ดู `open_comments`)
+    """
+    probes = comment_probes(text)
+    if not probes:
+        return False
+    plain = html.unescape(phone.dump())
+    if all(p in plain for p in probes) and any(m in plain for m in COMMENT_POSTED_MARKS):
+        phone.log("  คอมเมนต์นี้มีอยู่แล้ว — ไม่ส่งซ้ำ")
+        return True
+
+    field = find_comment_field(phone.dump())
+    if field is None:
+        g.keep_failure_screen(phone, "หาช่องพิมพ์คอมเมนต์ไม่เจอ")
+        return False
+    phone.tap(field)
+    time.sleep(2.5)
+    phone.type_text(text)
+    time.sleep(2.0)
+
+    # **ต้องเห็นข้อความครบก่อนกดส่ง** ส่งไปครึ่งเดียวแล้วลบไม่ได้
+    plain = html.unescape(phone.dump())
+    missing = [p for p in probes if p not in plain]
+    if missing:
+        g.keep_failure_screen(phone, "พิมพ์คอมเมนต์แล้วข้อความไม่ครบบนจอ")
+        phone.log(f"  ✕ ข้อความยังไม่ครบบนจอ (ขาด {missing}) — ไม่กดส่ง")
+        return False
+
+    send = find_send_button(phone.dump(), phone.size[1])
+    if send is None:
+        g.keep_failure_screen(phone, "หาปุ่มส่งคอมเมนต์ไม่เจอ")
+        phone.log("  ✕ หาปุ่มส่งไม่เจอ — ข้อความยังอยู่ในช่อง ยังไม่ส่ง")
+        return False
+    phone.log(f"  กดส่งที่ {send}")
+    phone.tap(send)
+    time.sleep(7.0)
+
+    after = html.unescape(phone.dump())
+    posted = (all(p in after for p in probes)
+              and any(m in after for m in COMMENT_POSTED_MARKS))
+    phone.log("  ✅ คอมเมนต์ขึ้นแล้ว" if posted
+              else "  ⚠️ กดส่งไปแล้วแต่ยังยืนยันไม่ได้ว่าขึ้น — ไม่ส่งซ้ำ")
+    return posted
+
+
+def like_comment(phone: g.Phone, text: str) -> bool:
+    """กดถูกใจคอมเมนต์ของเราเอง — ผูกกับข้อความของคอมเมนต์นั้นโดยเฉพาะ"""
+    probes = comment_probes(text)
+    xml = phone.dump()
+    box = next((b for b in (find_text_box(xml, p) for p in probes) if b), None)
+    if box is None:
+        phone.log("  ไม่เห็นคอมเมนต์นั้นบนจอ — ไม่กดถูกใจ (กันกดผิดอัน)")
+        return False
+    found = find_comment_like(xml, below=box[3] - 10)
+    if found is None:
+        phone.log("  หาปุ่มถูกใจของคอมเมนต์นั้นไม่เจอ")
+        return False
+    spot, already = found
+    if already:
+        phone.log("  คอมเมนต์นี้ถูกไลก์ไปแล้ว — ไม่กดซ้ำ")
+        return True
+    phone.log(f"  กดถูกใจคอมเมนต์ที่ {spot}")
+    phone.tap(spot)
+    time.sleep(4.0)
+    again = find_comment_like(phone.dump(), below=box[3] - 10)
+    if again and again[1]:
+        phone.log("  ✅ ไลก์คอมเมนต์ติดแล้ว")
+        return True
+    phone.log("  ⚠️ กดแล้วแต่ปุ่มยังไม่เปลี่ยนสถานะ — รายงานว่าไม่ติด")
+    return False
+
+
+def close_comments(phone: g.Phone, tries: int = 3) -> bool:
+    """ปิดแผงคอมเมนต์ด้วยการ **ปัดลง** เหมือนนิ้วคน ไม่ใช่กดย้อนกลับ
+
+    ปัดจากขีดจับด้านบนของแผงลงไปล่างจอ — วัดจริง 22 ก.ย. 16:40 ปัดครั้งเดียวติด
+    """
+    width, height = phone.size
+    for attempt in range(1, tries + 1):
+        if find_comment_field(phone.dump()) is None:
+            return True
+        phone.log(f"  ปัดลงเพื่อปิดแผงคอมเมนต์ (รอบ {attempt})")
+        phone.run("shell", "input", "swipe", str(width // 2), "120",
+                  str(width // 2), str(int(height * 0.9)), "400")
+        time.sleep(3.0)
+    phone.log("  ⚠️ ปิดแผงคอมเมนต์ไม่ลง")
+    return False
+
 
 def add_comments(phone: g.Phone, caption: str, comments: list[str],
-                 photos=None, single_post: bool = False) -> dict:
+                 page_name: str = "") -> dict:
     """คอมเมนต์ใต้โพสต์ของเราแล้วไลก์ทุกข้อความ — **เกิน 2 ข้อความได้**
 
-    ตัวโพสต์กลุ่มตั้งเพดานไว้ที่ `MAX_COMMENTS` (ตอนนี้ 2) เพราะกลุ่มส่วนใหญ่
-    ไม่ให้คอมเมนต์รัว ส่วนเพจเป็นของเราเอง เจ้าของจึงขอให้ใส่ได้มากกว่านั้น
-    **ไม่แก้เพดานของเขา** เพราะไฟล์นั้นเป็นของสายโพสต์และเพดานนั้นมีเหตุผลของมัน
-    — ยิงเป็นชุดละ 2 แทน ได้ผลเท่ากันและไม่ไปแตะกติกาของอีกสาย
+    ลำดับตามที่เจ้าของกำหนด: คอมเมนต์ 1 → ไลก์ 1 → คอมเมนต์ 2 → ไลก์ 2 → …
+
+    **เพดานคอมเมนต์นับแยกในนามเพจ** ไม่ปนกับบัญชีคน — ไม่งั้นตัวนับจะไปถามว่า
+    "สายโพสต์ใช้บัญชีไหน" ซึ่งมีสองบัญชีและระบบไม่ยอมเดา (กติกาข้อ 8) แล้วล้ม
+    ทั้งที่เพจไม่เกี่ยวกับโควตาของสองบัญชีนั้นเลย (เจอจริง 22 ก.ย. 14:47)
     """
-    texts = [str(t).strip() for t in comments if str(t or "").strip()]
+    texts = [str(t).strip() for t in comments
+             if str(t or "").strip()][:MAX_COMMENTS_PER_POST]
     if not texts:
         return dict(g.NO_COMMENT)
-    page_account = getattr(phone, "page_account", "")
-    shots = g._as_photos(photos, len(texts))
+    if not open_comments(phone, caption):
+        return dict(g.NO_COMMENT)
+
     done = liked = 0
-    for start in range(0, len(texts), COMMENT_CHUNK):
-        chunk = texts[start:start + COMMENT_CHUNK]
-        phone.log(f"  คอมเมนต์ชุดที่ {start // COMMENT_CHUNK + 1} "
-                  f"({len(chunk)} ข้อความ)")
-        # **เพดานคอมเมนต์ของเพจต้องนับแยกจากบัญชีคน** — ไม่งั้นตัวนับไปถามว่า
-        # "สายโพสต์ใช้บัญชีไหน" ซึ่งมีสองบัญชีและระบบไม่ยอมเดา (กติกาข้อ 8)
-        # แล้วล้มทั้งที่เพจไม่เกี่ยวอะไรกับโควตาของสองบัญชีนั้นเลย
-        # (เจอจริง 22 ก.ย. 2569 14:47)
-        with fb_auto_post.use_account(page_account or "เพจ"):
-            got = g.comment_post_of(phone, caption, chunk, single_post=single_post,
-                                    photos=shots[start:start + COMMENT_CHUNK])
-        count = int(got.get("comment_count") or 0)
-        done += count
-        if got.get("comment_liked"):
-            liked += count
-        if count < len(chunk):
-            phone.log(f"  ชุดนี้ลงได้ {count} จาก {len(chunk)} — หยุดไว้แค่นี้")
-            break
-        time.sleep(2.5)
-    return {"commented": done > 0, "comment_liked": liked == done and done > 0,
-            "comment_count": done}
+    with fb_auto_post.use_account(page_name or "เพจ"):
+        hold = ""
+        try:
+            hold = fb_comment_guard.hold_reason(account=page_name or "เพจ")
+        except Exception as error:                          # noqa: BLE001
+            phone.log(f"  (อ่านสถานะเพดานคอมเมนต์ไม่ได้: {error} — ทำต่อ)")
+        if hold:
+            phone.log(f"  ⛔ ยังคอมเมนต์ไม่ได้: {hold}")
+            close_comments(phone)
+            return dict(g.NO_COMMENT)
+        for order, text in enumerate(texts, 1):
+            phone.log(f"  คอมเมนต์ที่ {order}/{len(texts)}")
+            if not write_comment(phone, text):
+                phone.log(f"  หยุดที่คอมเมนต์ที่ {order} — ไม่ไล่ต่อ")
+                break
+            done += 1
+            try:
+                g._note_comment_sent()
+            except Exception:                               # noqa: BLE001
+                pass        # ตัวนับพลาดต้องไม่ทำให้งานที่สำเร็จไปแล้วล้ม
+            if like_comment(phone, text):
+                liked += 1
+            if order < len(texts):
+                time.sleep(2.5)
+    close_comments(phone)
+    return {"commented": done > 0, "comment_count": done,
+            "comment_liked": done > 0 and liked == done}
 
 
 # ------------------------------------------------------------------ งานรวม
 
 def post_to_page(
     phone: g.Phone, page_name: str, caption: str, images: list[Path] | None = None,
-    comments: list[str] | None = None, comment_images=None,
-    dry_run: bool = False, restore_to: str = "", stop=lambda: False,
+    comments: list[str] | None = None, dry_run: bool = False,
+    restore_to: str = "", stop=lambda: False,
 ) -> dict:
-    """โพสต์ลงเพจหนึ่งใบ — คืนผลว่าไปถึงขั้นไหน
+    """โพสต์ลงเพจหนึ่งใบให้ครบวงจร — คืนผลว่าไปถึงขั้นไหน
 
-    `restore_to` = โปรไฟล์ที่ต้องสลับกลับไปหลังเสร็จ เว้นว่างแปลว่า "โปรไฟล์ที่
-    เครื่องใช้อยู่ก่อนเราเริ่ม" ซึ่งอ่านเอาเองตอนเริ่ม
+    ลำดับทั้งหมดคือของที่ไล่ทีละขั้นกับเครื่องจริงแล้วผ่านทุกขั้น 22 ก.ย. 2569
+
+        สลับเป็นเพจ → เปิดหน้าเพจ → ส่งรูปเข้าเครื่อง → แตะช่องเขียนโพสต์
+        → แนบรูป → พิมพ์แคปชัน → ถัดไป → แชร์ → (กล่องชวนโปรโมท = ขึ้นแล้ว)
+        → กลับหน้าเพจ → เลื่อนหาโพสต์ → ไลก์โพสต์
+        → เปิดแผงคอมเมนต์ → คอมเมนต์ 1 → ไลก์ 1 → คอมเมนต์ 2 → ไลก์ 2 → …
+        → ปิดแผงคอมเมนต์ → คืนคีย์บอร์ด → คืนโปรไฟล์
+
+    `restore_to` = โปรไฟล์ที่ต้องสลับกลับหลังเสร็จ เว้นว่าง = อ่านเอาเองว่าตอนเริ่ม
+    เครื่องใช้โปรไฟล์ไหนอยู่ ใส่ค่า `None` แปลว่า **ไม่ต้องสลับกลับ** (ใช้ตอน
+    นั่งไล่ทีละขั้น จะได้ไม่เสียเวลารอบละ 8 นาทีกับการสลับไปกลับ)
     """
     images = [Path(p) for p in (images or [])]
     comments = list(comments or [])
     result: dict = {"page": page_name, "posted": False, "liked": False,
                     **dict(g.NO_COMMENT), "restored": ""}
-
     for path in images:
         if not path.is_file():
             raise PageError(f"ไม่พบไฟล์รูป {path}")
 
     g.require_network(phone)
 
-    before = restore_to or fp.whoami(fp.adb_path(), phone.serial, phone.log)
-    if not before:
-        raise PageError(
-            "อ่านไม่ได้ว่าตอนนี้เครื่องใช้โปรไฟล์ไหนอยู่ — **ไม่สลับ** "
-            "เพราะสลับไปแล้วจะไม่รู้ทางกลับ ต้องเข้าไปดูที่เครื่องก่อน")
-    phone.log(f"  โปรไฟล์ก่อนเริ่ม: {before}")
+    keep_profile = restore_to is not None
+    before = (restore_to or "") if keep_profile else ""
+    if keep_profile and not before:
+        before = fp.whoami(fp.adb_path(), phone.serial, phone.log)
+        if not before:
+            raise PageError(
+                "อ่านไม่ได้ว่าตอนนี้เครื่องใช้โปรไฟล์ไหนอยู่ — **ไม่สลับ** "
+                "เพราะสลับไปแล้วจะไม่รู้ทางกลับ ต้องเข้าไปดูที่เครื่องก่อน")
+        phone.log(f"  โปรไฟล์ก่อนเริ่ม: {before}")
 
     # **ต้องสลับไปคีย์บอร์ด ADBKeyboard ก่อนพิมพ์** ไม่งั้นข้อความที่ส่งไปหายเงียบ
     #
     # `type_text()` ส่งข้อความด้วยการ broadcast ให้คีย์บอร์ดตัวนั้นพิมพ์แทน
-    # ถ้าคีย์บอร์ดที่ใช้อยู่เป็นตัวอื่น ไม่มีใครรับ broadcast — **ไม่มี error ด้วย**
+    # ถ้าคีย์บอร์ดที่ใช้อยู่เป็นตัวอื่น **ไม่มีใครรับ broadcast และไม่มี error ด้วย**
     # ตัวโพสต์กลุ่มสลับไว้ที่รอบนอก (`post_to_groups`) ไฟล์นี้จึงต้องสลับเอง
-    # (เจอจริง 22 ก.ย. 13:40 — พิมพ์แคปชันเสร็จแล้วช่องยังว่าง ขึ้น
-    #  "คุณกำลังคิดอะไรอยู่" เป็นคำใบ้ของช่องว่างอยู่เหมือนเดิม)
+    # (เจอจริง 22 ก.ย. 13:40 — พิมพ์แคปชันเสร็จแล้วช่องยังว่างเปล่า)
     restore_ime = ""
     try:
         restore_ime = phone.use_adb_keyboard()
-        # ส่ง `before` ไปด้วย เพราะเพิ่งอ่านมาเมื่อกี้ — ไม่งั้นด่านจะอ่านซ้ำอีกรอบ
-        # ซึ่งกินเวลาราวหนึ่งนาทีโดยไม่ได้อะไรเพิ่ม
         fp.guard(phone.serial, page_name, phone.log, now=before)
 
         if images:
@@ -409,22 +781,21 @@ def post_to_page(
             phone.log("  ผู้ใช้สั่งยกเลิก — ข้ามการไลก์/คอมเมนต์")
             return result
 
-        # Facebook รุ่นใหม่วางแคปชันไว้ใต้รูป รูปสูงดันข้อความเลยขอบจอ
-        g._reveal_caption_below_media(phone, caption)
-        phone.page_account = page_name          # ให้ตัวนับคอมเมนต์รู้ว่าเป็นของเพจนี้
-        result["liked"] = g.like_post_of(phone, caption)
-        result.update(add_comments(phone, caption, comments, comment_images))
+        # กล่องชวนโปรโมทปิดไปแล้วใน `press_post` ตอนนี้ควรอยู่หน้าเพจ
+        reach_page(phone)
+        result["liked"] = like_post(phone, caption)
+        result.update(add_comments(phone, caption, comments, page_name=page_name))
         return result
     finally:
         if restore_ime:
             phone.restore_keyboard(restore_ime)
         # **ต้องคืนโปรไฟล์เสมอ แม้ตอนล้มกลางคัน** ค้างไว้ = งานถัดไปของสายคลิป
         # โพสต์ออกในนามเพจนี้ ซึ่งถอนไม่ได้ ต้องไปลบเองในแอป
-        if not fp.same_name(before, page_name):
+        if keep_profile and before and not fp.same_name(before, page_name):
             try:
                 result["restored"] = fp.guard(phone.serial, before, phone.log)
                 phone.log(f"  คืนโปรไฟล์กลับเป็น {result['restored']} แล้ว")
-            except Exception as error:               # noqa: BLE001
+            except Exception as error:                      # noqa: BLE001
                 # กลืนไม่ได้เด็ดขาด — ต้องดังพอให้คนเห็นและเข้าไปแก้ที่เครื่อง
                 phone.log(f"  ⛔ คืนโปรไฟล์กลับไม่สำเร็จ: {error}")
                 result["restored"] = ""
@@ -442,6 +813,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--comment", action="append", default=[], help="คอมเมนต์ (ใส่ซ้ำได้)")
     parser.add_argument("--dry-run", action="store_true", help="ทำทุกขั้นยกเว้นกดโพสต์")
     parser.add_argument("--list", action="store_true", help="ดูว่ามีเพจอะไรบ้าง")
+    parser.add_argument("--stay", action="store_true",
+                        help="ค้างไว้ที่เพจ ไม่ต้องสลับโปรไฟล์กลับ (ใช้ตอนไล่ทีละขั้น)")
     args = parser.parse_args(argv)
 
     if args.list:
@@ -466,7 +839,8 @@ def main(argv: list[str] | None = None) -> int:
         phone = g.Phone(fp.adb_path(), serial)
         got = post_to_page(phone, page, args.caption,
                            images=[Path(p) for p in args.image],
-                           comments=args.comment, dry_run=args.dry_run)
+                           comments=args.comment, dry_run=args.dry_run,
+                           restore_to=None if args.stay else "")
     print(got)
     return 0 if (got.get("posted") or got.get("dry_run")) else 1
 

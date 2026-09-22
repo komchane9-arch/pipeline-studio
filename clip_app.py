@@ -9435,6 +9435,46 @@ async def manual_upload_video(item_id: str,
             "message": "เก็บคลิปแล้ว — กดเสร็จเพื่อส่งเข้าตัวตรวจ"}
 
 
+def _manual_check_later(item_id: str) -> None:
+    """ตรวจเสียงคลิปที่อัปเอง — ทำเบื้องหลังหลังตอบปุ่มไปแล้ว
+
+    ผลเก็บลง run.json เหมือนเดิมทุกอย่าง หน้าเว็บอ่านเจอตอนดึงการ์ดรอบถัดไป
+    """
+    try:
+        got = _clip_check_videos(item_id, force=True) or {}
+    except Exception as error:                               # noqa: BLE001
+        # **ตรวจไม่ได้ ไม่ใช่ตรวจแล้วไม่ผ่าน** ต้องแยกให้ชัด (กติกา 2.3.1)
+        _clip_log(f"ตรวจคลิปที่อัปเองของ {item_id} ไม่สำเร็จ: "
+                  f"{type(error).__name__}: {str(error)[:120]}")
+        return
+    _clip_log(f"ตรวจคลิปที่อัปเองของ {item_id} เสร็จแล้ว — {check_verdict(got)}")
+
+
+def check_verdict(got: dict) -> str:
+    """แปลผลตรวจเป็นข้อความ — **แยกสามทาง ไม่ใช่สองทาง**
+
+    ---- ทำไมดูแค่ `ok` ไม่พอ (เจอจริง 21 ก.ย. 2569) --------------------
+
+    ตอน Gemini ล่ม ผลตรวจที่บันทึกไว้เป็นแบบนี้
+
+        has_speech = None          ← ยังตรวจไม่ได้ (ถูกต้อง)
+        ok         = False         ← แต่ช่องนี้บอกว่า **ไม่ผ่าน**
+
+    ใครอ่านแค่ `ok` จะเข้าใจว่าคลิปเสีย ทั้งที่ความจริงคือยังไม่ได้ฟังเลย
+    ระบบจึงเคยขึ้นข้อความว่า “ตรวจแล้วไม่ผ่าน: ตรวจเสียงพูดไม่ได้”
+    ซึ่งขัดกันเองในประโยคเดียว
+
+    ตรงนี้จึงดู `has_speech` ประกอบด้วย ส่วนช่อง `ok` ใน `clip_check`
+    ยังยุบสามสถานะเหลือสองอยู่ **เป็นเรื่องที่ต้องแก้ที่ต้นทางต่อไป**
+    """
+    if got.get("ok") is True:
+        return "ตรวจผ่าน"
+    problems = " / ".join(got.get("problems") or []) or "ไม่ได้บอกเหตุผล"
+    if got.get("has_speech") is None:
+        return f"ยังตรวจเสียงไม่ได้: {problems}"
+    return f"ตรวจแล้วไม่ผ่าน: {problems}"
+
+
 @app.post("/api/clips/{item_id}/manual/done")
 async def manual_done(item_id: str) -> dict:
     """กดเสร็จ — ลงทะเบียนคลิป **ส่งผ่านตัวตรวจ** แล้วย้ายไปกองตรวจคลิป
@@ -9460,14 +9500,6 @@ async def manual_done(item_id: str) -> dict:
         # ลงทะเบียนคลิปด้วยตัวเดียวกับสายปกติ — วัดความละเอียดจากไฟล์จริงให้ด้วย
         clip_store.save_video(DATA_DIR, item_id, [folder / video],
                               note="เจ้าของอัปเอง (โหมดทำเอง)")
-        try:
-            checked = _clip_check_videos(item_id, force=True) or {}
-        except Exception as error:                           # noqa: BLE001
-            # **ตรวจไม่ได้ ไม่ใช่ตรวจแล้วไม่ผ่าน** ต้องแยกให้ชัด (กติกา 2.3.1)
-            _clip_log(f"ตรวจคลิปที่อัปเองของ {item_id} ไม่สำเร็จ: "
-                      f"{type(error).__name__}: {str(error)[:120]}")
-            checked = {"ok": None,
-                       "problems": [f"ตรวจไม่ได้: {type(error).__name__}"]}
         when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         def change(mark: dict) -> None:
@@ -9489,21 +9521,29 @@ async def manual_done(item_id: str) -> dict:
                 moved += 1
             except clip_queue.ClipQueueError as error:
                 _clip_log(f"ย้ายใบ {item_id} ไปกองตรวจคลิปไม่ได้: {error}")
-        return {"check": checked, "moved": moved}
+        return {"moved": moved}
 
     got = await asyncio.to_thread(work)
-    checked = got["check"]
-    ok = checked.get("ok")
-    verdict = ("ตรวจผ่าน" if ok is True else
-               "ยังตรวจไม่ได้" if ok is None else
-               "ตรวจแล้วไม่ผ่าน: " + " / ".join(checked.get("problems") or []))
-    _clip_log(f"ใบ {item_id}: กดเสร็จโหมดทำเอง — {verdict} · "
-              f"ย้ายเข้ากองตรวจคลิป {got['moved']} ใบงาน")
+
+    # ---- ตรวจเสียงแยกไปทำเบื้องหลัง ห้ามเอามาขวางปุ่ม -------------------
+    #
+    # ตัวตรวจต้องส่งคลิปให้ Gemini ฟัง ซึ่งช้าและล้มได้ เวลาที่ Gemini ล้ม
+    # มันลองซ้ำ 6 ครั้งห่างกัน 15→30→60→60→60→60 วินาที = รอเปล่า 285 วินาที
+    # ส่วนหน้าเว็บรอแค่ 180 วินาที แปลว่าเวลา Gemini ล้ม ปุ่มนี้จะขึ้นแดง
+    # ทุกครั้งโดยที่เซิร์ฟเวอร์ไม่ได้พังเลย (เจอจริง 21 ก.ย. 21:57)
+    #
+    # ใบไปรออยู่ในกอง “ตรวจ Clip” ซึ่งเป็นที่ที่คนไปดูผลตรวจอยู่แล้ว
+    # ผลตรวจจึงมาทีหลังได้โดยไม่เสียความหมาย **ยังผ่านตัวตรวจเหมือนเดิม**
+    threading.Thread(target=_manual_check_later, args=(item_id,),
+                     daemon=True).start()
+    _clip_log(f"ใบ {item_id}: กดเสร็จโหมดทำเอง — ย้ายเข้ากองตรวจคลิป "
+              f"{got['moved']} ใบงาน · เริ่มตรวจเสียงเบื้องหลัง")
     fresh = await asyncio.to_thread(clip_store.load_run, DATA_DIR, item_id)
-    return {"ok": True, "item_id": item_id, "check": checked,
+    return {"ok": True, "item_id": item_id, "checking": True,
             **clip_board.manual_fields(fresh),
             "moved": got["moved"],
-            "message": f"ส่งเข้ากองตรวจคลิปแล้ว — {verdict}"}
+            "message": "ส่งเข้ากองตรวจคลิปแล้ว — กำลังตรวจเสียงอยู่เบื้องหลัง "
+                       "ผลจะขึ้นบนการ์ดเมื่อตรวจเสร็จ"}
 
 
 

@@ -13236,29 +13236,39 @@ def _page_post_note(message: str) -> None:
 
 
 def _page_post_worker(serial: str, page: str, caption: str,
-                      images: list[Path], comments: list[str]) -> None:
+                      images: list[Path], comments: list[str],
+                      job_id: str = "", keep_images: bool = False) -> None:
     import phone_queue                                       # noqa: PLC0415
 
     import facebook_page_post as page_post                   # noqa: PLC0415
+    import fb_page_jobs                                      # noqa: PLC0415
     result: dict | None = None
     error = ""
     try:
         with phone_queue.slot(serial, owner="หน้าเว็บ — โพสต์ลงเพจ",
-                              task=f"โพสต์ลงเพจ {page}", lane="post"):
+                              task=f"โพสต์ลงเพจ {page}", lane="clip"):
             phone = facebook_group_post.Phone(
                 page_post.fp.adb_path(), serial, log=_page_post_note)
             result = page_post.post_to_page(
                 phone, page, caption, images=images, comments=comments)
+        # **จดว่าลงเพจแล้วเฉพาะตอนยืนยันได้ว่าโพสต์ขึ้นจริง** ไม่ใช่ตอนสั่ง
+        # (กติกาข้อ 2.3.1) — สั่งแล้วล้มกลางทางเป็นเรื่องปกติ ถ้าจดตอนสั่งจะได้
+        # ป้าย "โพสต์แล้ว" บนใบที่ไม่เคยขึ้น แล้วไม่มีใครกลับมาโพสต์ให้อีก
+        if job_id and result and result.get("posted"):
+            row = fb_page_jobs.mark_posted(job_id, page, result)
+            _page_post_note(f"จดว่าใบงาน {job_id} ลงเพจแล้วเมื่อ {row['at']}")
     except Exception as failure:                             # noqa: BLE001
         error = f"{type(failure).__name__}: {failure}"
         _page_post_note(f"✕ {error}")
     finally:
-        # ลบรูปชั่วคราวทิ้งเสมอ ไม่งั้นโฟลเดอร์บวมทุกครั้งที่โพสต์
-        for path in images:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        # รูปที่อัปมาจากฟอร์มเว็บเป็นของชั่วคราว ลบทิ้งเสมอ
+        # ส่วนรูปของใบงานเดิมเป็นของจริงในคลัง **ห้ามลบ**
+        if not keep_images:
+            for path in images:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         with _PAGE_POST_LOCK:
             _PAGE_POST.update(running=False, result=result, error=error,
                               finished_at=time.time())
@@ -13342,6 +13352,88 @@ async def fb_page_post(
         args=(clean_serial, page, caption, saved, texts),
         daemon=True, name="page-post").start()
     return {"ok": True, "message": f"เริ่มโพสต์ลงเพจ {page} แล้ว — ดูความคืบหน้าด้านล่าง"}
+
+
+@app.get("/api/fb/page-post/plan/{job_id}")
+def fb_page_plan(job_id: str) -> dict:
+    """ใบงานนี้เอาไปลงเพจได้ไหม + จะลงอะไรบ้าง — หน้าเว็บโชว์ก่อนให้กดยืนยัน"""
+    import fb_page_jobs                                     # noqa: PLC0415
+
+    return fb_page_jobs.plan(job_id)
+
+
+@app.get("/api/fb/page-post/posted")
+def fb_page_posted() -> JSONResponse:
+    """ใบงานที่ลงเพจไปแล้ว — **อ่านอย่างเดียว** ไว้ให้สรุปผลไปแสดงป้าย "โพสต์แล้ว"
+
+    เปิด CORS เฉพาะเส้นนี้เส้นเดียว เพราะหน้าสรุปผลอยู่คนละที่กับเซิร์ฟเวอร์นี้
+    **ไม่เปิดให้เส้นที่สั่งงาน** — การสั่งโพสต์ต้องเปิดหน้าเว็บนี้มากดเอง
+    จะได้เห็นว่ากำลังสั่งอะไรอยู่ และไม่มีใครสั่งจากที่อื่นได้โดยเราไม่รู้
+    ข้อมูลที่หลุดออกไปมีแค่รหัสใบงานกับเวลาที่ลง ซึ่งไม่ใช่ความลับ
+    """
+    import fb_page_jobs                                     # noqa: PLC0415
+
+    rows = fb_page_jobs.posted()
+    return JSONResponse(
+        {"ok": True, "count": len(rows), "posted": rows},
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
+
+
+@app.post("/api/fb/page-post/job/{job_id}")
+async def fb_page_post_job(job_id: str, serial: str = Form(""),
+                           page: str = Form("")) -> dict:
+    """สั่งเอาใบงานเดิมไปลงเพจ — ใช้รูปแบบเดียวกับใบที่ทดลองสำเร็จเมื่อ 22 ก.ย.
+
+        แคปชัน = แคปชันเดิม + คอมเมนต์ทุกข้อความ คั่นด้วยบรรทัดว่าง
+        แล้วยังคอมเมนต์เดิมใต้โพสต์อีกที + ไลก์โพสต์ + ไลก์คอมเมนต์
+    """
+    import fb_page_jobs                                     # noqa: PLC0415
+    import fb_profile                                       # noqa: PLC0415
+
+    with _PAGE_POST_LOCK:
+        if _PAGE_POST["running"]:
+            raise HTTPException(
+                status_code=409,
+                detail="กำลังโพสต์ลงเพจอีกใบอยู่ — มือถือมีจอเดียว ต้องรอใบนี้จบก่อน")
+
+    got = fb_page_jobs.plan(job_id)
+    if not got.get("found"):
+        raise HTTPException(status_code=404, detail=got.get("blocked") or "ไม่พบใบงานนี้")
+    if got.get("blocked"):
+        raise HTTPException(status_code=400, detail=got["blocked"])
+    if got.get("posted"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"ใบนี้ลงเพจไปแล้วเมื่อ {got['posted'].get('at')} "
+                   "— ถ้าจะลงซ้ำให้ลบบันทึกก่อนด้วย "
+                   f"`python fb_page_jobs.py clear {job_id}`")
+
+    page = (page or "").strip() or next(iter(fb_profile.pages()), "")
+    if page not in fb_profile.pages():
+        raise HTTPException(status_code=400, detail=f"ไม่รู้จักเพจ “{page}”")
+    try:
+        clean_serial = device_book.resolve(serial, lane="clip", allow_default=not serial)
+    except device_book.DeviceError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    with _PAGE_POST_LOCK:
+        if _PAGE_POST["running"]:
+            raise HTTPException(status_code=409, detail="เพิ่งมีคนสั่งโพสต์ไปก่อนหน้า")
+        _PAGE_POST.update(running=True, lines=[], result=None, error="",
+                          started_at=time.time(), finished_at=0.0,
+                          page=page, serial=clean_serial, job_id=job_id)
+    _page_post_note(
+        f"รับใบงาน {job_id} ไปลงเพจ {page} — รูป {len(got['images'])} ใบ · "
+        f"คอมเมนต์ {len(got['comments'])} ข้อความ · "
+        f"เครื่อง {device_book.label(clean_serial)}")
+    threading.Thread(
+        target=_page_post_worker,
+        args=(clean_serial, page, got["full_caption"],
+              [Path(p) for p in got["images"]], got["comments"]),
+        kwargs={"job_id": job_id, "keep_images": True},
+        daemon=True, name="page-post-job").start()
+    return {"ok": True, "job_id": job_id,
+            "message": f"เริ่มเอาใบงาน {job_id} ไปลงเพจ {page} แล้ว"}
 
 
 @app.get("/api/fb/page-post/status")

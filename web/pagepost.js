@@ -147,3 +147,92 @@ $("pgSend")?.addEventListener("click", send);
 $("pgAddComment")?.addEventListener("click", () => addComment());
 $("pgReload")?.addEventListener("click", loadPages);
 addComment();
+
+// ------------------------------------------- สั่งจากสรุปผล (ปุ่มในหน้า artifact)
+//
+// เจ้าของสั่ง 22 ก.ย. 2569 — *"เพิ่มให้มีปุ่ม post facebook … โดยปุ่มโพสต์ facebook
+// จะไปทำการโพสต์ตาม step ที่โพสต์สำเร็จเมื่อกี้"*
+//
+// **หน้าสรุปผลสั่งโพสต์ตรงๆ ไม่ได้ และไม่ควรได้** มันอยู่คนละที่กับเซิร์ฟเวอร์นี้
+// ถ้าเปิดให้ยิงคำสั่งข้ามที่มาได้ ใครก็สั่งโพสต์ลงเพจของเราได้โดยเราไม่เห็น
+// ปุ่มตรงนั้นจึงแค่ **เปิดหน้านี้พร้อมรหัสใบงาน** แล้วมากดยืนยันที่นี่
+// จะได้เห็นชัดว่ากำลังจะลงอะไร ก่อนแตะมือถือจริง
+function jobFromHash() {
+  const m = /page-post=([A-Za-z0-9_-]+)/.exec(location.hash || "");
+  return m ? m[1] : "";
+}
+
+function line(label, value) {
+  return `<div class="row"><b>${label}</b><span>${value}</span></div>`;
+}
+
+async function showJob(id) {
+  const box = $("pgJob");
+  if (!box) return;
+  box.innerHTML = `<p class="note">กำลังอ่านใบงาน ${id} …</p>`;
+  $("pgBox")?.setAttribute("open", "open");
+  document.querySelector('.tab[data-tab="groups"]')?.click();
+  $("pgBox")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  let plan;
+  try {
+    plan = await api(`/api/fb/page-post/plan/${encodeURIComponent(id)}`);
+  } catch (error) {
+    box.innerHTML = `<p class="note bad">อ่านใบงานไม่ได้ — ${error.message}</p>`;
+    return;
+  }
+  if (!plan.found) {
+    box.innerHTML = `<p class="note bad">${plan.blocked || "ไม่พบใบงานนี้"}</p>`;
+    return;
+  }
+  const head = `<h4>ใบงาน ${id}${plan.account ? " · " + plan.account : ""}</h4>`;
+  const facts = line("รูปที่ยังอยู่", `${plan.images.length} ใบ` +
+                     (plan.images_missing ? ` (หายไป ${plan.images_missing})` : "")) +
+                line("คอมเมนต์", `${plan.comments.length} ข้อความ`);
+  const preview = `<pre class="pg-log">${plan.full_caption
+    .replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[c])}</pre>`;
+
+  if (plan.posted) {
+    box.innerHTML = head + facts + `<p class="note">✅ ใบนี้ลงเพจ ` +
+      `${plan.posted.page} ไปแล้วเมื่อ ${plan.posted.at} · ` +
+      `ไลก์${plan.posted.liked ? "ติด" : "ไม่ติด"} · ` +
+      `คอมเมนต์ ${plan.posted.comment_count} ข้อความ<br>` +
+      `ถ้าจะลงซ้ำ ต้องลบบันทึกก่อนด้วยคำสั่ง ` +
+      `<code>python fb_page_jobs.py clear ${id}</code></p>` + preview;
+    return;
+  }
+  if (plan.blocked) {
+    box.innerHTML = head + facts +
+      `<p class="note bad">ยังลงไม่ได้ — ${plan.blocked}</p>` + preview;
+    return;
+  }
+  box.innerHTML = head + facts +
+    `<p class="note">แคปชันที่จะลง (แคปชันเดิม + คอมเมนต์ทุกข้อความ คั่นบรรทัดว่าง) ` +
+    `แล้วจะคอมเมนต์เดิมใต้โพสต์อีกที พร้อมกดไลก์โพสต์และไลก์คอมเมนต์</p>` +
+    preview +
+    `<div class="row"><button id="pgJobGo" class="primary" type="button">` +
+    `🚀 โพสต์ใบงาน ${id} ลงเพจ</button></div>`;
+  $("pgJobGo")?.addEventListener("click", () => runJob(id));
+}
+
+async function runJob(id) {
+  const button = $("pgJobGo");
+  if (button) button.disabled = true;
+  const form = new FormData();
+  form.append("serial", $("pgDevice")?.value || "");
+  form.append("page", $("pgPage")?.value || "");
+  try {
+    const got = await api(`/api/fb/page-post/job/${encodeURIComponent(id)}`,
+                          { method: "POST", body: form });
+    note(got.message || "เริ่มโพสต์แล้ว");
+    watch();
+  } catch (error) {
+    note(error.message, true);
+    if (button) button.disabled = false;
+  }
+}
+
+window.addEventListener("hashchange", () => {
+  const id = jobFromHash();
+  if (id) showJob(id);
+});
+if (jobFromHash()) setTimeout(() => showJob(jobFromHash()), 400);

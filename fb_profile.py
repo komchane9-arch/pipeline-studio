@@ -107,17 +107,15 @@ def rows(xml: str) -> list[tuple[str, int, int, int]]:
 
 
 def wake(sh, log=lambda _m: None) -> bool:
-    """ปลุกจอแล้ว **ยืนยันจาก dumpsys** ไม่ใช่สั่งแล้วเชื่อว่าติด"""
-    for _ in range(3):
-        sh("shell", "input", "keyevent", "KEYCODE_WAKEUP")
-        time.sleep(1.2)
-        sh("shell", "input", "swipe", "540", "1800", "540", "700", "250")
-        time.sleep(1.4)
-        state = sh("shell", "dumpsys window | grep -E 'mAwake=|mDreamingLockscreen='").stdout or ""
-        if "mAwake=true" in state and "mDreamingLockscreen=false" in state:
-            return True
-    log("  ⚠️ ปลุกจอไม่ขึ้น")
-    return False
+    """ปลุกจอ + ปัดหน้าล็อกออก แล้ว **ยืนยันจาก dumpsys** ไม่ใช่สั่งแล้วเชื่อว่าติด
+
+    ยืมตัวปลุกของ `fb_screen` มาใช้ ไม่เขียนเอง (แก้ 22 ก.ย. 2569) — ของเดิม
+    ที่นี่ **ฝังพิกัดปัดไว้ตายตัวที่ y=1800** ซึ่งอยู่นอกจอของเครื่องสูง 1600
+    (W4FYYPYTLFYLIFHM เป็น 720x1600) จึงปัดไม่ติดเลยสักครั้งบนเครื่องนั้น
+    และมันซ้ำกับของที่มีอยู่แล้ว — ของสองชุดที่ทำเรื่องเดียวกันคือหนี้
+    """
+    import fb_screen                                        # noqa: PLC0415
+    return fb_screen.wake(lambda cmd: (sh("shell", cmd).stdout or ""), log)
 
 
 def _open_page(sh, page_id: str) -> str:
@@ -167,6 +165,37 @@ def _nav_cells(xml: str) -> list[tuple[int, int, int, int]]:
     return sorted(cells)
 
 
+def menu_button(xml: str) -> tuple[int, int] | None:
+    """จุดกึ่งกลางของปุ่มเมนู — **หาจากป้ายชื่อ ไม่ใช่จากตำแหน่ง**
+
+    **แก้ 22 ก.ย. 2569 เพราะของเดิมพังกับโหมดเพจแบบมืออาชีพ**
+
+    ของเดิมกด "ช่องขวาสุดของแถบล่าง" ซึ่งถูกเฉพาะโหมดคน/เพจธรรมดา
+    พอเพจเปิดโหมดมืออาชีพ แถบล่างขวาสุดกลายเป็น**รูปโปรไฟล์เพจ** ส่วนเมนู
+    ย้ายไป ☰ มุมบนซ้าย กดแล้วจึงได้หน้าเพจ วนแบบนั้นจนหมดรอบ
+
+    วัดจากเครื่องจริง 22 ก.ย. 13:14 (Squishy Cute Club โหมดมืออาชีพ 720x1600):
+        ปุ่ม ☰ อยู่ที่ [4,74][92,158] และมี content-desc ว่า "เมนู"
+    ป้ายชื่อจึงอยู่ที่เดิมทั้งสองโหมด ต่างกันแค่ตำแหน่ง — ยึดป้ายจึงทนกว่า
+
+    ถอยไปใช้ช่องขวาสุดของแถบล่างได้ถ้าหาป้ายไม่เจอ (เครื่องที่ตั้งภาษาอื่น)
+    """
+    for m in re.finditer(r'<node[^>]*clickable="true"[^>]*>', xml):
+        tag = m.group(0)
+        labels = re.findall(r'(?:text|content-desc)="([^"]*)"', tag)
+        if not any(label.strip() in ("เมนู", "Menu") for label in labels):
+            continue
+        box = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', tag)
+        if box:
+            x1, y1, x2, y2 = (int(v) for v in box.groups())
+            return (x1 + x2) // 2, (y1 + y2) // 2
+    cells = _nav_cells(xml)
+    if cells:
+        x1, y1, x2, y2 = cells[-1]
+        return (x1 + x2) // 2, (y1 + y2) // 2
+    return None
+
+
 def read_menu_name(xml: str) -> str:
     """ชื่อโปรไฟล์ที่ใช้อยู่ อ่านจากผังจอของ **หน้าเมนู** — "" เมื่ออ่านไม่ได้
 
@@ -201,12 +230,11 @@ def menu_name(sh, log=lambda _m: None) -> str:
         sh("shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", "fb://feed", "-p", FB)
         time.sleep(7.0)
         xml = dump(sh)
-        cells = _nav_cells(xml)
-        if not cells:
-            log(f"  (เมนู รอบ {attempt}) ไม่เจอแถบนำทางล่าง")
+        spot = menu_button(xml)
+        if spot is None:
+            log(f"  (เมนู รอบ {attempt}) หาปุ่มเมนูบนจอไม่เจอ")
             continue
-        last = cells[-1]
-        sh("shell", "input", "tap", str((last[0] + last[2]) // 2), str((last[1] + last[3]) // 2))
+        sh("shell", "input", "tap", str(spot[0]), str(spot[1]))
         time.sleep(MENU_WAIT)
         menu = dump(sh)
         if not any(m in menu for m in SHORTCUT_MARKS):
@@ -237,6 +265,35 @@ def whoami(adb: str, serial: str, log=lambda _m: None) -> str:
 
 # ------------------------------------------------------------------ สลับ
 
+DRAFT_MARKS = ("ต้องการโพสต์ให้เสร็จในภายหลัง", "Finish your post later")
+DISCARD_MARKS = ("ทิ้งโพสต์", "Discard post", "ทิ้ง", "Discard")
+
+
+def drop_draft(sh, log=lambda _m: None) -> bool:
+    """ทิ้งกล่อง "บันทึกเป็นฉบับร่างหรือทิ้งโพสต์" ถ้ามันโผล่มาบัง
+
+    **จำเป็นก่อนสลับโปรไฟล์ทุกครั้ง** — งานโพสต์ที่ล้มกลางคันทิ้งฉบับร่างไว้
+    แล้วแอปเปิดกลับมาที่หน้าเขียนโพสต์เดิมทุกครั้งที่เปิดใหม่ **ต่อให้ force-stop
+    ไปแล้วก็ตาม** ตัวหารายการโปรไฟล์จึงไปอ่านข้อความในกล่องนั้นมาเป็นรายชื่อ
+    (เจอจริง 22 ก.ย. 2569 สองรอบ: ได้ "เพิ่มป้าย AI · เรากำหนดให้คุณ… ·
+     เรียนรู้เพิ่มเติม" มาเป็นรายชื่อโปรไฟล์ แล้วสรุปว่าไม่มีโปรไฟล์ที่ต้องการ
+     จบด้วยเครื่องค้างอยู่ผิดโปรไฟล์)
+    """
+    for _ in range(3):
+        xml = dump(sh)
+        if not any(mark in xml for mark in DRAFT_MARKS):
+            return False
+        spot = next((r for r in rows(xml)
+                     if any(m == r[0].strip() for m in DISCARD_MARKS)), None)
+        if spot is None:
+            log("  เจอกล่องฉบับร่างแต่หาปุ่มทิ้งไม่เจอ")
+            return False
+        log("  ทิ้งฉบับร่างที่ค้างอยู่")
+        sh("shell", "input", "tap", str(spot[1]), str(spot[2]))
+        time.sleep(2.0)
+    return True
+
+
 def _reach_sheet(sh, now: str, log) -> dict:
     """เปิดรายการสลับโปรไฟล์ — คืน {ชื่อ: (x, y)}
 
@@ -245,8 +302,18 @@ def _reach_sheet(sh, now: str, log) -> dict:
       ไม่ใช่เพจ    → เมนู → แตะชื่อบนหัวเมนู (พาไปหน้าโปรไฟล์ปัจจุบัน)
     """
     known = pages()
-    if now in known:
-        xml = _open_page(sh, known[now])
+    # **เริ่มจากสภาพที่รู้จักเสมอ** — งานที่ล้มกลางคันมักทิ้งกล่องอะไรค้างไว้บนจอ
+    # (เจอจริง 22 ก.ย. 2569: กล่อง "เพิ่มป้าย AI" ค้างอยู่ตอนจะสลับกลับ
+    #  ตัวหารายการโปรไฟล์เลยไปอ่านข้อความในกล่องนั้นมาเป็นรายชื่อโปรไฟล์)
+    drop_draft(sh, log)
+    sh("shell", "am", "force-stop", FB)
+    time.sleep(2.0)
+    sh("shell", "monkey", "-p", FB, "-c", "android.intent.category.LAUNCHER", "1")
+    time.sleep(APP_START)
+    drop_draft(sh, log)          # แอปเปิดกลับมาที่หน้าเขียนโพสต์เดิมได้
+    current = next((k for k in known if same_name(k, now)), "")
+    if current:
+        xml = _open_page(sh, known[current])
     else:
         xml = None
         for attempt in range(1, 3):
@@ -256,14 +323,16 @@ def _reach_sheet(sh, now: str, log) -> dict:
             time.sleep(APP_START)
             sh("shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", "fb://feed", "-p", FB)
             time.sleep(7.0)
-            cells = _nav_cells(dump(sh))
-            if not cells:
+            spot = menu_button(dump(sh))
+            if spot is None:
                 continue
-            last = cells[-1]
-            sh("shell", "input", "tap", str((last[0] + last[2]) // 2), str((last[1] + last[3]) // 2))
+            sh("shell", "input", "tap", str(spot[0]), str(spot[1]))
             time.sleep(MENU_WAIT)
             menu = dump(sh)
-            spot = [r for r in rows(menu) if r[0] == now]
+            # ชื่อที่ส่งมาเป็นการสะกดของทะเบียนเครื่อง ("Squishy cute club")
+            # ส่วนบนจอเป็นการสะกดของแอป ("Squishy Cute Club") — เทียบตรงตัวไม่เจอ
+            # (เจอจริง 22 ก.ย. 2569 รอบที่สาม หลังแก้ที่อื่นไปแล้วสองจุด)
+            spot = [r for r in rows(menu) if same_name(r[0], now)]
             if not spot:
                 continue
             sh("shell", "input", "tap", str(spot[0][1]), str(spot[0][2]))
@@ -273,7 +342,7 @@ def _reach_sheet(sh, now: str, log) -> dict:
         if xml is None:
             raise ProfileError("ไปหน้าโปรไฟล์ปัจจุบันไม่ได้ — เปิดรายการสลับไม่ได้")
 
-    head = [r for r in rows(xml) if r[0] == now and r[3] < 950]
+    head = [r for r in rows(xml) if same_name(r[0], now) and r[3] < 950]
     if not head:
         raise ProfileError(f"อยู่หน้าโปรไฟล์แล้วแต่ไม่เจอชื่อ {now} บนหัวหน้า")
     anchor = head[0]
@@ -292,8 +361,16 @@ def _reach_sheet(sh, now: str, log) -> dict:
     for text, cx, cy, _ in rows(sheet):
         if len(text) > 2 and text not in ("ไปที่ศูนย์บัญชี", "เพจ", "Meta"):
             found.setdefault(text, (cx, cy))
-    if len(found) < 2:
-        raise ProfileError("เปิดรายการโปรไฟล์แล้วเจอไม่ถึง 2 ชื่อ")
+    # **ของที่มีเฉพาะตอนเปิดรายการโปรไฟล์ได้จริง คือชื่อที่เราใช้อยู่ต้องอยู่ในนั้น**
+    # (กติกาข้อ 2.3.1) — "เจออย่างน้อย 2 ชื่อ" อย่างเดียวไม่พอ กล่องข้อความ
+    # ทั่วไปก็มีข้อความเกินสองบรรทัดได้ เจอจริง 22 ก.ย. 2569: กล่อง "เพิ่มป้าย AI"
+    # ผ่านด่านนี้ไปได้ แล้วระบบสรุปว่า "ไม่มีโปรไฟล์ Squishy cute club บนเครื่องนี้"
+    # ทั้งที่มี — จบด้วยเครื่องค้างอยู่ผิดโปรไฟล์ ซึ่งเป็นความเสียหายที่กันไว้อยู่แล้ว
+    if len(found) < 2 or not any(same_name(k, now) for k in found):
+        raise ProfileError(
+            f"เปิดรายการโปรไฟล์ไม่สำเร็จ — ไม่เห็นชื่อ “{now}” ที่ใช้อยู่ในรายการ "
+            f"(อ่านได้: {', '.join(list(found)[:4]) or 'ไม่มีอะไรเลย'}) "
+            "อาจมีกล่องอะไรบังอยู่")
     log("  รายการโปรไฟล์: " + " · ".join(found))
     return found
 
@@ -318,6 +395,21 @@ def switch(adb: str, serial: str, want: str, log=lambda _m: None,
     งานที่ต้องรู้ทางกลับอยู่แล้วจึงไม่ควรเสียเวลาไปฟรีๆ สองรอบ
     """
     sh = sh_for(adb, serial)
+
+    # **ปลดล็อกจอก่อนอ่านเสมอ** — ไม่งั้นทุกการแตะตกลงบนหน้าล็อกแล้วเงียบ
+    #
+    # เจอจริง 22 ก.ย. 2569 13:07 — ด่านกดเปิดเมนู 3 รอบแล้วสรุปว่า "อ่านไม่ได้"
+    # ทั้งที่แอปปกติดี ภาพหน้าจอยืนยันว่าเครื่องค้างที่หน้าล็อกตลอด
+    # (ตัวปลุกของอีกไฟล์คืน True ทันทีเพราะ "ไฟจอติด" = ตื่น ซึ่งหน้าล็อกก็ตื่น)
+    #
+    # **"ปลดล็อกไม่ได้" ต้องดังกว่า "อ่านไม่ได้"** เพราะคนละวิธีแก้คนละทาง —
+    # ปลดไม่ได้ต้องไปแตะเครื่อง ส่วนอ่านไม่ได้ต้องไปดูว่าแอปอยู่หน้าไหน
+    if not wake(sh, log):
+        raise ProfileError(
+            "ปลุกจอมือถือไม่ขึ้น หรือจอยังติดหน้าล็อกอยู่ — **ไม่สลับและไม่โพสต์** "
+            "เพราะทุกการแตะจะตกลงบนหน้าล็อกโดยไม่มีอะไรเกิดขึ้น "
+            "ให้ไปปลดล็อกที่เครื่องก่อนแล้วสั่งใหม่")
+
     now = (now or "").strip() or whoami(adb, serial, log)
     if not now:
         raise ProfileError("อ่านโปรไฟล์ปัจจุบันไม่ได้ — ไม่สลับ เพราะจะไม่รู้ทางกลับ")

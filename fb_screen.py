@@ -90,6 +90,17 @@ def make_shell(serial: str, adb: str = "adb"):
 
 # ------------------------------------------------------------------ อ่านสถานะ
 
+def screen_size(shell, fallback: tuple[int, int] = (1080, 2400)) -> tuple[int, int]:
+    """(กว้าง, สูง) ของจอเครื่องนี้ — อ่านไม่ออกใช้จออ้างอิง ดีกว่าล้มทั้งงาน"""
+    try:
+        found = re.search(r"(\d+)x(\d+)", shell("wm size"))
+        if found:
+            return int(found.group(1)), int(found.group(2))
+    except Exception:
+        pass
+    return fallback
+
+
 def wakefulness(shell) -> str:
     """Awake · Dozing · Asleep · "" ถ้าอ่านไม่ออก"""
     try:
@@ -117,8 +128,37 @@ def idle_seconds(shell) -> float:
     return int(found.group(1)) / 1000.0 if found else -1.0
 
 
+def on_lockscreen(shell) -> bool | None:
+    """ติดหน้าล็อกอยู่ไหม — None = อ่านไม่ออก (**ไม่ใช่ "ไม่ติด"**)
+
+    **เพิ่ม 22 ก.ย. 2569 เพราะทั้ง `is_awake` และ `can_touch` แยกไม่ออก**
+
+        is_awake   หน้าล็อกไฟจอติดอยู่ → ตอบ "ตื่น"          ✗
+        can_touch  หน้าล็อกก็มีผังจอของมันเอง → ตอบ "แตะได้"  ✗
+
+    วัดกับ W4FYYPYTLFYLIFHM 22 ก.ย. 13:2x ตอนเครื่องล็อกอยู่จริง:
+    `is_awake=True · can_touch=True · mDreamingLockscreen=true`
+    ตัวที่ **มีเฉพาะตอนใช้งานได้จริง** จึงมีตัวเดียวคือ `mDreamingLockscreen=false`
+    """
+    try:
+        text = shell("dumpsys window | grep mDreamingLockscreen=")
+    except Exception:
+        return None
+    if "mDreamingLockscreen=false" in text:
+        return False
+    if "mDreamingLockscreen=true" in text:
+        return True
+    return None
+
+
 def can_touch(shell) -> bool:
-    """แตะจอได้จริงไหม — จอสว่างแต่ติดหน้าล็อกจะอ่าน UI ไม่ได้"""
+    """แตะจอแล้วมีผลจริงไหม — ต้อง **อ่านผังจอได้ และไม่ติดหน้าล็อก**
+
+    เดิมเช็คแค่ว่าอ่านผังจอได้ ซึ่งหน้าล็อกก็ผ่าน (มันมีผังจอของตัวเอง)
+    ทำให้ทางลัดของ `wake()` คืน True แล้วข้ามการปัดปลดล็อกทั้งหมด
+    """
+    if on_lockscreen(shell) is not False:
+        return False
     try:
         return "<hierarchy" in shell(
             "uiautomator dump /sdcard/wake-probe.xml >/dev/null 2>&1; "
@@ -137,12 +177,25 @@ def wake(shell, log=None, tries: int = 2) -> bool:
     พิกัดบนจอที่ดับอยู่ครบทุกขั้นแล้วรายงานว่า "โพสต์แล้ว" ทั้งที่ไม่มีอะไรเกิดขึ้น
     """
     say = log or (lambda _: None)
-    # ทางลัดตอนจอเปิดอยู่แล้ว — เสีย 1 คำสั่ง (~0.1 วิ) แล้วจบ
+    # ทางลัดตอนจอ**ใช้งานได้อยู่แล้ว** — ไม่ยิง keyevent ซ้ำ
     #
-    # ห้ามยิง keyevent มั่วตอนจอเปิดอยู่ ทางนี้ถูกเรียกทุกครั้งที่สร้าง Phone
+    # ห้ามยิง keyevent มั่วตอนจอใช้งานได้อยู่ ทางนี้ถูกเรียกทุกครั้งที่สร้าง Phone
     # ซึ่งเกิดกลางงานได้ การกดปุ่มแทรกตอนแอปกำลังเปิดหน้าอื่นค้างไว้คือทำงานพัง
+    #
+    # **แต่ "ตื่น" อย่างเดียวไม่พอ** (แก้ 22 ก.ย. 2569) — ของเดิมเช็คแค่
+    # `is_awake()` ซึ่ง **หน้าล็อกก็ตอบว่าตื่น** เพราะไฟจอติดอยู่จริง ทางลัดจึง
+    # คืน True แล้วข้ามการปัดปลดล็อกทั้งหมด ผลคือทุกงานที่สร้าง Phone ตอนเครื่อง
+    # ติดหน้าล็อก จะไล่แตะพิกัดลงบนหน้าล็อกทีละขั้นโดยไม่มีอะไรฟ้อง
+    #
+    # เจอจริง 22 ก.ย. 13:07 บน W4FYYPYTLFYLIFHM — ตัวอ่านโปรไฟล์กดเปิดเมนู
+    # 3 รอบแล้วรายงานว่า "อ่านไม่ได้" ทั้งที่แอปไม่มีอะไรผิด ภาพหน้าจอยืนยันว่า
+    # เครื่องค้างอยู่ที่หน้าล็อกตลอด — ตรงกับตารางในกติกาข้อ 2.3.1 บรรทัด
+    # "จอมือถือพร้อมใช้ไหม / ไฟจอติดไหม / ติดอยู่แล้วแต่ยังล็อกหน้าจอ" เป๊ะ
+    #
+    # `can_touch()` เป็นตัวเดียวกับที่ทางช้าใช้ตัดสินว่าสำเร็จ และ**ไม่ยิง
+    # keyevent สักตัว** (แค่อ่านผังจอ) ข้อกังวลเดิมจึงยังอยู่ครบ
     try:
-        if is_awake(shell):
+        if is_awake(shell) and can_touch(shell):
             return True
     except Exception:
         pass
@@ -153,6 +206,14 @@ def wake(shell, log=None, tries: int = 2) -> bool:
                 time.sleep(1.2)
             shell("input keyevent 82")             # ปัดหน้าล็อกออก (เครื่องนี้ไม่มี PIN)
             time.sleep(0.6)
+            # เครื่องบางรุ่นไม่ยอมปลดด้วยปุ่ม 82 ต้องปัดขึ้นจริงๆ
+            # **พิกัดคิดจากขนาดจอของเครื่องนั้น ห้ามฝังตาย** (กติกาข้อ 2.7)
+            # ของเดิมที่อื่นฝัง y=1800 ไว้ ซึ่งอยู่นอกจอของเครื่องสูง 1600 → ปัดไม่ติด
+            if on_lockscreen(shell) is not False:
+                width, height = screen_size(shell)
+                shell(f"input swipe {width // 2} {int(height * 0.85)} "
+                      f"{width // 2} {int(height * 0.25)} 250")
+                time.sleep(1.0)
             if can_touch(shell):
                 if attempt > 1:
                     say(f"  ปลุกจอสำเร็จรอบที่ {attempt}")

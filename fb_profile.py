@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -166,6 +167,26 @@ def _nav_cells(xml: str) -> list[tuple[int, int, int, int]]:
     return sorted(cells)
 
 
+def read_menu_name(xml: str) -> str:
+    """ชื่อโปรไฟล์ที่ใช้อยู่ อ่านจากผังจอของ **หน้าเมนู** — "" เมื่ออ่านไม่ได้
+
+    ยึดกับโครง ไม่ใช่ลำดับ: ชื่อที่ใช้อยู่จะอยู่ **เหนือเส้นแบ่ง "ทางลัดของคุณ"**
+    เสมอ ส่วนชื่อที่อยู่ใต้เส้นเป็นแค่ทางลัด
+
+    **นี่คือจุดที่ด่านเดิมพัง** — ของเดิมเช็คแค่ว่า "ชื่อนี้โผล่บนจอไหม" แต่ใน
+    หน้าเมนูชื่อเพจโผล่สองที่เสมอ (หัวเมนู + ทางลัด) จึงตอบว่าใช่ได้ทั้งตอน
+    ใช้โปรไฟล์นั้นจริงและตอนไม่ได้ใช้ (กติกาข้อ 2.3.1)
+    """
+    got = rows(xml)
+    marks = [r[3] for r in got if any(m in r[0] for m in SHORTCUT_MARKS)]
+    if not marks:
+        return ""
+    cut = min(marks)
+    above = [r for r in got if r[3] < cut and len(r[0]) > 2
+             and not r[0].isdigit() and r[0] not in ("เมนู", "Menu")]
+    return max(above, key=lambda r: r[3])[0] if above else ""
+
+
 def menu_name(sh, log=lambda _m: None) -> str:
     """ชื่อโปรไฟล์จากหน้าเมนู — "" เมื่ออ่านไม่ได้
 
@@ -191,14 +212,11 @@ def menu_name(sh, log=lambda _m: None) -> str:
         if not any(m in menu for m in SHORTCUT_MARKS):
             log(f"  (เมนู รอบ {attempt}) กดแล้วยังไม่ใช่หน้าเมนู")
             continue
-        got = rows(menu)
-        cut = min(r[3] for r in got if any(m in r[0] for m in SHORTCUT_MARKS))
-        above = [r for r in got if r[3] < cut and len(r[0]) > 2
-                 and not r[0].isdigit() and r[0] not in ("เมนู", "Menu")]
-        if not above:
+        name = read_menu_name(menu)
+        if not name:
             log(f"  (เมนู รอบ {attempt}) ไม่เจอชื่อเหนือเส้นแบ่ง")
             continue
-        return max(above, key=lambda r: r[3])[0]
+        return name
     return ""
 
 
@@ -280,26 +298,45 @@ def _reach_sheet(sh, now: str, log) -> dict:
     return found
 
 
-def switch(adb: str, serial: str, want: str, log=lambda _m: None) -> str:
-    """สลับไป `want` แล้ว**ยืนยันว่าเปลี่ยนจริง** — ไม่สำเร็จโยน ProfileError"""
+def same_name(a: str, b: str) -> bool:
+    """ชื่อเดียวกันไหม — **ไม่สนตัวพิมพ์ใหญ่เล็กและช่องว่างหัวท้าย**
+
+    จำเป็นเพราะชื่อเดียวกันถูกเขียนคนละแบบในสองที่: ทะเบียนเครื่องจด
+    "Squishy cute club" ส่วนแอปบนจอเขียน "Squishy Cute Club" ถ้าเทียบตรงตัว
+    ด่านจะสรุปว่า "อยู่ผิดโปรไฟล์" แล้วสั่งสลับไปหาชื่อที่ไม่มีอยู่จริง
+    จบด้วยล้มทั้งที่เครื่องอยู่ถูกที่อยู่แล้ว
+    """
+    return (a or "").strip().casefold() == (b or "").strip().casefold()
+
+
+def switch(adb: str, serial: str, want: str, log=lambda _m: None,
+           now: str = "") -> str:
+    """สลับไป `want` แล้ว**ยืนยันว่าเปลี่ยนจริง** — ไม่สำเร็จโยน ProfileError
+
+    `now` = โปรไฟล์ปัจจุบันที่คนเรียก**อ่านมาแล้ว** ส่งมาได้เพื่อไม่ต้องอ่านซ้ำ
+    การอ่านหนึ่งครั้งกินเวลาราวหนึ่งนาที (ต้องปิดแอป เปิดใหม่ แล้วเปิดเมนู)
+    งานที่ต้องรู้ทางกลับอยู่แล้วจึงไม่ควรเสียเวลาไปฟรีๆ สองรอบ
+    """
     sh = sh_for(adb, serial)
-    now = whoami(adb, serial, log)
+    now = (now or "").strip() or whoami(adb, serial, log)
     if not now:
         raise ProfileError("อ่านโปรไฟล์ปัจจุบันไม่ได้ — ไม่สลับ เพราะจะไม่รู้ทางกลับ")
-    if now == want:
-        log(f"  อยู่ที่ {want} อยู่แล้ว")
+    if same_name(now, want):
+        log(f"  อยู่ที่ {now} อยู่แล้ว")
         return now
 
     log(f"  สลับ {now} → {want}")
     found = _reach_sheet(sh, now, log)
-    if want not in found:
+    # ใช้ชื่อ **ตามที่แอปสะกด** ไม่ใช่ตามที่คนเรียกมา — ปุ่มบนจอมีชื่อเดียว
+    target = next((k for k in found if same_name(k, want)), "")
+    if not target:
         raise ProfileError(f"ไม่มีโปรไฟล์ {want} บนเครื่องนี้ (มี: {', '.join(found)})")
-    sh("shell", "input", "tap", str(found[want][0]), str(found[want][1]))
+    sh("shell", "input", "tap", str(found[target][0]), str(found[target][1]))
     time.sleep(AFTER_SWITCH)
 
     for attempt in range(1, VERIFY_TRIES + 1):
         got = whoami(adb, serial, log)
-        if got == want:
+        if same_name(got, want):
             log(f"  ✅ ยืนยันแล้วว่าอยู่ที่ {want} (ตรวจรอบที่ {attempt})")
             return got
         log(f"  ยังไม่ใช่ (ได้ {got or 'อ่านไม่ได้'}) — รอ {VERIFY_GAP:.0f} วิแล้วตรวจใหม่")
@@ -309,6 +346,47 @@ def switch(adb: str, serial: str, want: str, log=lambda _m: None) -> str:
         "ห้ามโพสต์ต่อ ต้องเข้าไปดูที่เครื่อง")
 
 
-def require(adb: str, serial: str, want: str, log=lambda _m: None) -> str:
+def require(adb: str, serial: str, want: str, log=lambda _m: None,
+            now: str = "") -> str:
     """ด่านก่อนโพสต์ — ต้องอยู่โปรไฟล์นี้ให้ได้ ไม่งั้นโยน"""
-    return switch(adb, serial, want, log)
+    return switch(adb, serial, want, log, now)
+
+
+# ----------------------------------------------------- ด่านสำหรับคนที่มีแค่ serial
+
+def adb_path() -> str:
+    """หา adb.exe แบบเดียวกับ app.py — ตัวที่เราคุมได้มาก่อน PATH เสมอ
+
+    บทเรียนเดิมของโปรเจกต์: PATH เคยมี adb เก่าค้างแล้วสั่งมือถือไม่ได้
+    """
+    here = Path(__file__).resolve().parent
+    for candidate in (
+        here / "tools/platform-tools/adb.exe",
+        Path("C:/project/2.Auto gen Video/7.web app/tools/platform-tools/adb.exe"),
+        Path.home() / "AppData/Local/Android/Sdk/platform-tools/adb.exe",
+        Path("C:/platform-tools/adb.exe"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which("adb")
+    if found:
+        return found
+    raise ProfileError("ไม่พบ adb.exe — จึงตรวจโปรไฟล์ไม่ได้ (ยังไม่ได้ตรวจ ไม่ใช่ผ่าน)")
+
+
+def guard(serial: str, want: str, log=lambda _m: None, now: str = "") -> str:
+    """ด่านก่อนโพสต์ สำหรับคนเรียกที่มีแค่ serial — หา adb ให้เอง
+
+    **ไม่รู้ว่าเครื่องไหน หรือไม่รู้ว่าต้องเป็นใคร = โยนทิ้ง ห้ามเดา**
+    (กติกาข้อ 8: เดาเครื่องผิดแล้วโพสต์ออกในนามผิด กู้ไม่ได้ ส่วนล้มพร้อม
+    เหตุผลเสียแค่เวลากดใหม่)
+    """
+    serial = (serial or "").strip()
+    want = (want or "").strip()
+    if not serial:
+        raise ProfileError("ด่านตรวจโปรไฟล์ต้องรู้ว่าเครื่องไหน แต่ไม่ได้บอก serial มา")
+    if not want:
+        raise ProfileError(
+            "ไม่รู้ว่าเครื่องนี้ต้องโพสต์ในนามใคร — ไปผูกบัญชีก่อนด้วย "
+            f"`python devices.py account {serial} \"<ชื่อโปรไฟล์>\"`")
+    return require(adb_path(), serial, want, log, now)

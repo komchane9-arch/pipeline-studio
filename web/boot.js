@@ -6,6 +6,7 @@ import "./notes.js";
 import { loadDevices, loadTargets } from "./phone.js";
 import { loadFbGroups, loadFbJobs, renderQueue, setQueue } from "./post.js";
 import { loadGroupHealth } from "./groups.js";
+import { loadPages } from "./pagepost.js";
 import { loadPrompts, openPrompts } from "./prompts.js";
 import { loadBoard } from "./board.js";
 import { loadFbControl, watchFbControl } from "./fbcontrol.js";
@@ -66,6 +67,8 @@ hooks.reloadConfig = () => reloadConfig();
     // ส่วนกอง "ไม่ดี" ขอเป็นรายกองตอนกดเปิด (ดู board.js)
     await loadBoard();
     document.querySelector("#bdReload")?.addEventListener("click", loadBoard);
+
+    await loadPages();
     // แท็บโปรไฟล์ของหน้า Group Facebook — ต้องโหลด **ก่อน** สองส่วนข้างล่าง
     // เพราะทั้งคู่ต้องรู้ว่ากำลังดูโปรไฟล์ไหนก่อนจะยิงถามข้อมูล
     await loadGfAccounts();

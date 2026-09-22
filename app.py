@@ -13212,6 +13212,162 @@ async def fb_create_web_job(
     }
 
 
+# =========================================================== โพสต์ลง "เพจ"
+#
+# เจ้าของสั่ง 22 ก.ย. 2569 ให้เพิ่มการโพสต์ลงเพจเข้ามาในหมวด Group Facebook
+# งานจริงอยู่ใน `facebook_page_post.py` ตรงนี้เป็นแค่ประตูให้หน้าเว็บเรียก
+#
+# **ทำไมไม่ยัดเข้าระบบใบงานเดิม** ใบงานเดิมผูกกับ "บัญชีของเครื่อง" และ
+# "รายชื่อกลุ่ม" ซึ่งเพจไม่มีทั้งสองอย่าง — ยัดเข้าไปต้องไปแก้ที่อ่านบัญชี
+# ทุกจุดให้รองรับกรณีไม่มีกลุ่ม ซึ่งเสี่ยงกว่างานที่ได้ ตอนนี้จึงเป็นงานเดี่ยว
+# ทีละใบ ทำเสร็จแล้วรู้ผลทันที (มีใบเดียวทำได้ทีละใบเพราะมือถือมีจอเดียว)
+
+_PAGE_POST_LOCK = threading.Lock()
+_PAGE_POST: dict = {"running": False, "lines": [], "result": None,
+                    "error": "", "started_at": 0.0, "finished_at": 0.0,
+                    "page": "", "serial": ""}
+
+
+def _page_post_note(message: str) -> None:
+    with _PAGE_POST_LOCK:
+        _PAGE_POST["lines"].append(f"{time.strftime('%H:%M:%S')} {message}")
+        del _PAGE_POST["lines"][:-400]
+    append_log("publish", f"[เพจ] {message}")
+
+
+def _page_post_worker(serial: str, page: str, caption: str,
+                      images: list[Path], comments: list[str]) -> None:
+    import phone_queue                                       # noqa: PLC0415
+
+    import facebook_page_post as page_post                   # noqa: PLC0415
+    result: dict | None = None
+    error = ""
+    try:
+        with phone_queue.slot(serial, owner="หน้าเว็บ — โพสต์ลงเพจ",
+                              task=f"โพสต์ลงเพจ {page}", lane="post"):
+            phone = facebook_group_post.Phone(
+                page_post.fp.adb_path(), serial, log=_page_post_note)
+            result = page_post.post_to_page(
+                phone, page, caption, images=images, comments=comments)
+    except Exception as failure:                             # noqa: BLE001
+        error = f"{type(failure).__name__}: {failure}"
+        _page_post_note(f"✕ {error}")
+    finally:
+        # ลบรูปชั่วคราวทิ้งเสมอ ไม่งั้นโฟลเดอร์บวมทุกครั้งที่โพสต์
+        for path in images:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        with _PAGE_POST_LOCK:
+            _PAGE_POST.update(running=False, result=result, error=error,
+                              finished_at=time.time())
+
+
+@app.get("/api/fb/pages")
+def fb_pages() -> dict:
+    """เพจที่โพสต์ได้ + เครื่องที่จะใช้ — หน้าเว็บเรียกตอนเปิดแท็บ"""
+    import fb_profile                                        # noqa: PLC0415
+
+    serials = device_book.enabled_serials("clip") or device_book.enabled_serials("post")
+    return {
+        "pages": [{"name": name, "id": pid}
+                  for name, pid in fb_profile.pages().items()],
+        "devices": [{"serial": s, "label": device_book.label(s),
+                     "account": device_book.account(s)} for s in serials],
+        "busy": bool(_PAGE_POST["running"]),
+    }
+
+
+@app.post("/api/fb/page-post")
+async def fb_page_post(
+    serial: str = Form(...), page: str = Form(...), caption: str = Form(...),
+    comments: str = Form("[]"),
+    post_images: list[UploadFile] = File(default=[]),
+) -> dict:
+    """สั่งโพสต์ลงเพจหนึ่งใบ — คืนทันที แล้วให้หน้าเว็บมาถามสถานะเอง"""
+    import fb_profile                                        # noqa: PLC0415
+
+    with _PAGE_POST_LOCK:
+        if _PAGE_POST["running"]:
+            raise HTTPException(
+                status_code=409,
+                detail="กำลังโพสต์ลงเพจอีกใบอยู่ — มือถือมีจอเดียว ต้องรอใบนี้จบก่อน")
+    page = page.strip()
+    if page not in fb_profile.pages():
+        raise HTTPException(
+            status_code=400,
+            detail=f"ไม่รู้จักเพจ “{page}” — เพิ่มชื่อกับรหัสเพจใน data/fb_pages.json ก่อน")
+    if not caption.strip():
+        raise HTTPException(status_code=400, detail="ต้องมีแคปชัน")
+    try:
+        clean_serial = device_book.resolve(serial, allow_default=False)
+    except device_book.DeviceError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    try:
+        wanted = json.loads(comments)
+        if not isinstance(wanted, list):
+            raise ValueError
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="รายการคอมเมนต์ไม่ถูกต้อง") from error
+    texts = [str(x).strip() for x in wanted if str(x or "").strip()]
+
+    if len(post_images) > facebook_group_post.MAX_PHOTOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"รูปโพสต์ใส่ได้สูงสุด {facebook_group_post.MAX_PHOTOS} ใบ")
+    saved: list[Path] = []
+    for order, upload in enumerate(post_images, 1):
+        asset = await _fb_read_web_image(upload, f"รูปโพสต์ใบที่ {order}")
+        if not asset:
+            continue
+        suffix, content = asset
+        path = FB_POST_DIR / f"page-{int(time.time())}-{order}{suffix}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        saved.append(path)
+
+    with _PAGE_POST_LOCK:
+        if _PAGE_POST["running"]:                 # กันสองคนกดพร้อมกัน
+            for path in saved:
+                path.unlink(missing_ok=True)
+            raise HTTPException(status_code=409, detail="เพิ่งมีคนสั่งโพสต์ไปก่อนหน้า")
+        _PAGE_POST.update(running=True, lines=[], result=None, error="",
+                          started_at=time.time(), finished_at=0.0,
+                          page=page, serial=clean_serial)
+    _page_post_note(f"รับงาน — เพจ {page} · รูป {len(saved)} ใบ · "
+                    f"คอมเมนต์ {len(texts)} ข้อความ · เครื่อง {device_book.label(clean_serial)}")
+    threading.Thread(
+        target=_page_post_worker,
+        args=(clean_serial, page, caption, saved, texts),
+        daemon=True, name="page-post").start()
+    return {"ok": True, "message": f"เริ่มโพสต์ลงเพจ {page} แล้ว — ดูความคืบหน้าด้านล่าง"}
+
+
+@app.get("/api/fb/page-post/status")
+def fb_page_post_status() -> dict:
+    """สถานะงานโพสต์เพจใบล่าสุด — หน้าเว็บถามซ้ำทุกไม่กี่วินาที"""
+    with _PAGE_POST_LOCK:
+        state = dict(_PAGE_POST)
+        state["lines"] = list(state["lines"])[-60:]
+    if state["running"]:
+        state["headline"] = (f"⚙️ กำลังโพสต์ลงเพจ {state['page']} "
+                             f"({int(time.time() - state['started_at'])} วินาที)")
+    elif state["error"]:
+        state["headline"] = f"✕ โพสต์ลงเพจไม่สำเร็จ — {state['error']}"
+    elif state["result"]:
+        got = state["result"]
+        state["headline"] = (
+            f"✅ โพสต์ลงเพจ {got.get('page')} แล้ว · "
+            f"ไลก์โพสต์ {'ติด' if got.get('liked') else 'ไม่ติด'} · "
+            f"คอมเมนต์ {got.get('comment_count', 0)} ข้อความ"
+            + ("" if got.get("restored") or not got.get("restore_error")
+               else f" · ⛔ คืนโปรไฟล์ไม่สำเร็จ: {got.get('restore_error')}"))
+    else:
+        state["headline"] = "ยังไม่เคยสั่งโพสต์ลงเพจในรอบนี้"
+    return state
+
+
 def _fb_job_media_path(job: dict, kind: str, index: int) -> Path:
     if kind == "post":
         items = job.get("images") or ([job.get("image")] if job.get("image") else [])

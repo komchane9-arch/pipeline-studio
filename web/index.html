@@ -428,6 +428,47 @@
           </p>
           <p id="bdNote" class="note" aria-live="polite"></p>
           <div id="bdList" class="bd-list"></div>
+
+          <hr class="bd-split">
+          <!-- ---------------- โพสต์ลงเพจ (เจ้าของสั่ง 22 ก.ย. 2569)
+               "เพิ่มการโพสต์ในเพจหน่อย … แคปชั่น รูป คอมเมนต์ (มากกว่า 1)
+                แล้วกดไลก์โพสต์ กดไลก์คอมเมนต์ ทำให้เป็น function เพิ่มเข้ามา
+                ในหมวด group facebook" -->
+          <details id="pgBox" class="gf-linked">
+            <summary class="gf-linked-summary">
+              <h3>โพสต์ลงเพจ Facebook</h3>
+              <span class="gf-linked-count">แคปชัน · รูป · คอมเมนต์หลายข้อความ</span>
+            </summary>
+            <div class="gf-linked-body">
+              <p class="note">
+                ระบบจะ <b>สลับโปรไฟล์ในแอปไปเป็นเพจให้เอง</b> โพสต์ · กดไลก์โพสต์ ·
+                คอมเมนต์แล้วกดไลก์คอมเมนต์ทุกข้อความ <b>แล้วสลับกลับให้เหมือนเดิม</b>
+                ทุกขั้นเป็นการกดบนหน้าจอมือถือจริง ใช้เวลาราว 4–6 นาทีต่อใบ
+              </p>
+              <div class="inline-row">
+                <label>เพจ <select id="pgPage"></select></label>
+                <label>มือถือ <select id="pgDevice"></select></label>
+                <button id="pgReload" class="ghost" type="button">🔄 โหลดใหม่</button>
+              </div>
+              <textarea id="pgCaption" rows="4" placeholder="แคปชันของโพสต์"></textarea>
+              <div class="inline-row">
+                <label>รูป (สูงสุด 3 ใบ)
+                  <input id="pgImages" type="file" accept="image/*" multiple />
+                </label>
+              </div>
+              <div class="row">
+                <b>คอมเมนต์ใต้โพสต์</b>
+                <button id="pgAddComment" class="ghost" type="button">＋ เพิ่มคอมเมนต์</button>
+              </div>
+              <div id="pgComments"></div>
+              <div class="row">
+                <button id="pgSend" class="primary" type="button">🚀 โพสต์ลงเพจ</button>
+                <span id="pgStatus" class="note" aria-live="polite"></span>
+              </div>
+              <p id="pgNote" class="note" aria-live="polite"></p>
+              <pre id="pgLog" class="note pg-log"></pre>
+            </div>
+          </details>
         </div>
 
         <!-- ================================================== ① Input -->

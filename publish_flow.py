@@ -156,6 +156,10 @@ VERIFY_KINDS = {
     "keyboard_open":  "คีย์บอร์ดเด้งขึ้นมาแล้ว (ใช้กับการแตะช่องพิมพ์)",
     "toggle_on":      "สวิตช์ถูกเปิดแล้ว (ดูจากสีบนจอจริง)",
     "toggle_off":     "สวิตช์ถูกปิดแล้ว (ดูจากสีบนจอจริง)",
+    "cover_has_text": "ภาพหน้าปกมีตัวอักษร (หรือค้นหาจนสุดคลิป)",
+    "cover_closed":   "หน้าแก้ไขหน้าปกปิดลงแล้ว",
+    "facebook_reel_published": "Facebook ยืนยันว่าเผยแพร่ Reels แล้วจริง",
+    "profile_is":     "กำลังใช้โปรไฟล์นี้จริง (อ่านชื่อเหนือเส้น “ทางลัดของคุณ”)",
     "none":           "ไม่ตรวจ (ใช้เมื่อขั้นนั้นไม่มีผลให้เห็น)",
 }
 
@@ -308,7 +312,7 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         # แล้วตัวตรวจจะค้าง จึงเปิดเมนูมา "อ่านว่าใครอยู่" แทน ผิดเมื่อไรหยุดทันที
         _step("menu_open", "กดเมนู ☰", find="เมนู", settle=2.0),
         _step("check_page", "ยืนยันว่ากำลังใช้โปรไฟล์เพจ", kind="wait", value="0.5",
-              verify="text_appears", verify_text="Squishy Cute Club"),
+              verify="profile_is", verify_text="Squishy Cute Club"),
         _step("menu_close", "ปิดเมนู", kind="key", value="BACK", settle=1.5),
         # ปุ่มพวกนี้เลื่อนไปกับฟีด (เจอจริง: y=168 รอบหนึ่ง y=443 อีกรอบ)
         # จึงต้องเกาะ content-desc พิกัดเป็นแค่ตาข่ายรองรับ
@@ -372,7 +376,47 @@ def _upgrade_sequence(target: str, sequence: list[dict]) -> bool:
     if target != "facebook_reels":
         return False
     changed = False
+    previous_id = ""
     for entry in sequence:
+        # อัปเกรดผังที่เก็บลงเครื่องไปแล้วด้วย ไม่เช่นนั้นแก้ DEFAULT_SEQUENCES
+        # จะมีผลเฉพาะเครื่องใหม่ ส่วนเครื่องจริงยังใช้พิกัดช่อง "เพิ่มชื่อ" เดิม
+        # อยู่ การหา label มาก่อนพิกัดจึงเลือก AutoCompleteTextView ด้านล่าง
+        # ("อธิบายคลิป Reels...") ได้ตรงช่องทุกครั้งที่ UI tree อ่านได้
+        if entry.get("id") == "caption_field":
+            wanted = "อธิบายคลิป Reels"
+            if entry.get("find") != wanted:
+                entry["find"] = wanted
+                entry["name"] = "แตะช่องคำอธิบายด้านล่าง"
+                changed = True
+        if entry.get("id") == "share":
+            # ผังเก่าบางเครื่องยังใช้ left_screen ซึ่งโดน thumbnail ที่ขยับอยู่
+            # หลอกว่าหน้าเปลี่ยน ทั้งที่ปุ่มแชร์ยังอยู่ ต้องอัปเกรดของที่บันทึกแล้ว
+            # ทุกเครื่อง ไม่ใช่แก้เฉพาะ DEFAULT_SEQUENCES ของเครื่องใหม่.
+            wanted = {
+                "find": "แชร์เลย",
+                "verify": "facebook_reel_published",
+                "verify_timeout": 150.0,
+            }
+            for key, value in wanted.items():
+                if entry.get(key) != value:
+                    entry[key] = value
+                    changed = True
+        # ขั้น `check_page` ที่ยังมีขั้น "กดเมนู ☰" อยู่ข้างหน้า = ด่านเช็คโปรไฟล์
+        # ของเดิมตั้งเป็น "มีข้อความนี้โผล่บนจอ" ซึ่งตอบว่าใช่ได้ทั้งตอนถูกและตอนผิด
+        # เพราะหน้าเมนูโชว์ชื่อเพจสองที่เสมอ (หัวเมนู = โปรไฟล์ที่ใช้อยู่ ·
+        # ทางลัดข้างล่าง = เพจอื่นที่กดไปได้) → เปลี่ยนเป็นตัวตรวจที่อ่านชื่อ
+        # **เหนือเส้น "ทางลัดของคุณ"** ซึ่งมีตัวเดียวและเป็นตัวที่ใช้อยู่จริง
+        #
+        # **ห้ามดูแค่ id** — บนเครื่องสายคลิปจริง (W4FYYPYTLFYLIFHM) ขั้นชื่อ
+        # `check_page` ถูกเปลี่ยนความหมายไปเป็น "รอหน้าฟีด Facebook โหลดเสร็จ"
+        # ตั้งแต่ 28 ส.ค. และขั้นเปิด/ปิดเมนูถูกลบทิ้งไปแล้ว ถ้าอัปเกรดตาม id
+        # เฉยๆ จะไปแปลงขั้นรอฟีดให้เป็นด่านอ่านเมนูบนหน้าที่ไม่มีเมนู = ล้มทุกใบ
+        # ตั้งแต่ขั้นที่ 2 (เครื่องนั้นใช้ด่านนอกผังใน `run_flow` แทน)
+        if (entry.get("id") == "check_page" and previous_id == "menu_open"
+                and entry.get("verify") == "text_appears"):
+            entry["verify"] = "profile_is"
+            changed = True
+
         if entry.get("kind") == "type_hashtag":
             entry["kind"] = "type_tags"
             # ตัวตรวจเดิมของ type_hashtag คือ tags_present ซึ่งใช้กับตัวใหม่ได้เลย
@@ -380,6 +424,7 @@ def _upgrade_sequence(target: str, sequence: list[dict]) -> bool:
             if not entry.get("verify"):
                 entry["verify"] = "tags_present"
             changed = True
+        previous_id = str(entry.get("id") or "")
     return changed
 
 
@@ -1401,6 +1446,47 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
             else:
                 last = "หน้าจอยังเหมือนเดิม"
 
+        elif kind == "profile_is":
+            # **ยืนยันว่าแอปกำลังใช้โปรไฟล์นี้จริง ไม่ใช่แค่เห็นชื่อบนจอ**
+            #
+            # ของเดิมใช้ verify="text_appears" กับคำว่า "Squishy Cute Club"
+            # ซึ่งในหน้าเมนู **ชื่อเพจโผล่สองที่เสมอ** คือหัวเมนู (โปรไฟล์ที่ใช้อยู่)
+            # กับรายการทางลัดข้างล่าง ด่านจึงตอบว่าใช่ได้แม้ตอนที่กำลังใช้เพจอื่น
+            # = ด่านหลอก ซึ่งกติกาข้อ 2.3 บอกว่าอันตรายกว่าไม่มีด่าน
+            #
+            # ตัวใหม่อ่านชื่อที่อยู่ **เหนือเส้นแบ่ง "ทางลัดของคุณ"** ซึ่งมีตัวเดียว
+            # และเป็นโปรไฟล์ที่ใช้อยู่จริง (วัดจริง 22 ก.ย. 2569)
+            want = (step.verify_text or "").strip()
+            if not want:
+                raise StepError(
+                    "ตั้งวิธีตรวจเป็น “ต้องเป็นโปรไฟล์นี้” แต่ไม่ได้บอกว่าโปรไฟล์ไหน "
+                    "— ไปใส่ชื่อที่ปุ่ม ✎ ของขั้นนี้")
+            import fb_profile                                  # noqa: PLC0415
+            got = fb_profile.read_menu_name(xml)
+            if got and got.casefold() == want.casefold():
+                return f"ยืนยันแล้ว: กำลังใช้โปรไฟล์ “{got}”"
+
+            # **สามอย่างนี้ต้องแยกกันให้ขาด ไม่งั้นไล่ผิดทาง** (กติกาข้อ 2.3.1 ข้อ 4)
+            # อ่านจอไม่ได้ · อ่านได้แต่ไม่ใช่หน้าเมนู · อ่านได้และอยู่ผิดโปรไฟล์จริง
+            # ทั้งสามไม่ผ่านเหมือนกัน แต่**คนละวิธีแก้** อันแรกไปดูว่ามีวิดีโอเล่นอยู่ไหม
+            # อันที่สองไปดูว่าปุ่มเมนูกดติดไหม อันที่สามต้องไปสลับโปรไฟล์
+            if got:
+                last = f"ตอนนี้ใช้โปรไฟล์ “{got}” ไม่ใช่ “{want}”"
+            elif not xml:
+                last = (f"อ่านผังจอไม่ได้เลย จึงยัง**ยืนยันไม่ได้**ว่าใช้โปรไฟล์ “{want}” "
+                        "อยู่หรือเปล่า — หน้านี้อาจมีวิดีโอเล่นอยู่ ตัวอ่านจอของ Android "
+                        "เลยถ่ายผังไม่ได้ (ยังไม่ได้ตรวจ ไม่ใช่ตรวจแล้วไม่ผ่าน)")
+            elif (any(m in xml for m in fb_profile.COMPOSER_MARKS)
+                    and any(m in xml for m in fb_profile.ADMIN_MARKS)):
+                # เบาะแส ไม่ใช่คำตัดสิน: โหมดเพจแบบมืออาชีพเอาเมนูไปไว้ ☰ มุมบนซ้าย
+                # แท็บล่างขวาจึงกลายเป็นรูปเพจ กดแล้วได้หน้าเพจแทนหน้าเมนู
+                last = ("อ่านจอได้แต่ไม่ใช่หน้าเมนู — ดูเหมือนแอปอยู่ในโหมดเพจ"
+                        f"แบบมืออาชีพ ซึ่งแปลว่าน่าจะ**ไม่ได้ใช้ “{want}” อยู่** "
+                        "(เมนูของโหมดนี้ย้ายไป ☰ มุมบนซ้าย)")
+            else:
+                last = (f"อ่านจอได้แต่ยังไม่ใช่หน้าเมนู จึงยังบอกไม่ได้ว่าใช้ “{want}” "
+                        "อยู่หรือเปล่า — เช็คว่าขั้น “กดเมนู ☰” ก่อนหน้านี้กดติดจริงไหม")
+
         elif kind == "text_appears":
             pattern = (step.verify_text or "").strip()
             if not pattern and typed:
@@ -2028,6 +2114,32 @@ def run_step(context: RunContext, step: Step) -> str:
     return f"{head}{summary} · {label}: {proof}"
 
 
+# ปลายทางที่ต้อง **ยืนยันว่าแอปกำลังใช้โปรไฟล์ที่ถูกต้อง** ก่อนแตะจอขั้นแรก
+#
+# เจ้าของสั่ง 22 ก.ย. 2569 ว่าให้เอาด่านนี้มาเสียบสายคลิป เพราะมือถือเครื่องเดียว
+# ถือหลายโปรไฟล์ (คน 1 · เพจ 2) และงานอื่นสลับโปรไฟล์ทิ้งไว้ได้
+# **โพสต์ออกในนามผิด = กู้ไม่ได้ ต้องเข้าไปลบเองในแอป**
+#
+# ที่อยู่ **นอกผัง** ไม่ใช่เป็นขั้นในผัง ด้วยเหตุผลเดียวกับขั้นส่งคลิป/ปลุกจอ —
+# ขั้นในผังถูกแก้หรือลบได้จากหน้าเว็บ แล้วผังจะยังเดินจนจบโดยไม่มีด่าน
+# (เกิดขึ้นจริงแล้ว: ด่านเดิมของเครื่องสายคลิปถูกเปลี่ยนไปเป็นขั้น "รอหน้าฟีด"
+#  ตั้งแต่ 28 ส.ค. 2569 ตั้งแต่นั้นมาไม่มีอะไรตรวจโปรไฟล์เลยสักใบ)
+PROFILE_GUARD_TARGETS = {"facebook_reels"}
+
+
+def _profile_guard(context: RunContext) -> str:
+    """ยืนยันว่าแอปใช้โปรไฟล์ที่ผูกไว้กับเครื่องนี้ — ไม่ใช่ก็สลับให้แล้วพิสูจน์ซ้ำ
+
+    ชื่อโปรไฟล์มาจาก **ทะเบียนเครื่อง** ไม่ฮาร์ดโค้ด (กติกาข้อ 8) เสียบเครื่องที่ 3
+    เข้ามาแล้วผูกบัญชีไว้ ด่านนี้ใช้ได้ทันทีโดยไม่ต้องแก้โค้ด
+    """
+    import devices                                        # noqa: PLC0415
+    import fb_profile                                     # noqa: PLC0415
+    want = devices.account_for(context.serial, context.target)
+    got = fb_profile.guard(context.serial, want, context.log)
+    return f"แอป Facebook ใช้โปรไฟล์ “{got}” ตรงกับที่ผูกไว้กับเครื่องนี้"
+
+
 def run_flow(
     context: RunContext, start_at: int = 1, stop_after: int | None = None
 ) -> dict:
@@ -2046,13 +2158,45 @@ def run_flow(
     #
     # **ล้มตรงนี้ต้องหยุดทันที ห้ามเดินผังต่อ** — เดินต่อคือการกดจนถึงปุ่มโพสต์
     # โดยที่คลิปในเครื่องเป็นของสินค้าอื่น ซึ่งโพสต์ขึ้นแล้วถอนไม่ได้
+    prepare: list[tuple] = [(context.wake_screen, "ปลุกจอ")]
+
+    # ส่งคลิปเฉพาะตอนเริ่มจากขั้นแรก — เริ่มกลางผังแปลว่าคลิปอยู่ในเครื่องแล้ว
+    if start_at <= 1:
+        prepare.append((context.send_clip, "ส่งคลิปเข้าเครื่อง"))
+
+    # **ด่านโปรไฟล์ใช้เกณฑ์คนละอันกับการส่งคลิป — ห้ามรวมเป็นเงื่อนไขเดียว**
+    #
+    # เกณฑ์คือ "รอบนี้มีโอกาสไปถึงปุ่มโพสต์ไหม" ไม่ใช่ "เริ่มจากขั้นแรกไหม"
+    # การกู้งานที่ล้มกลางทาง (`start_at > 1` แต่ `stop_after` ว่าง) **เดินต่อจน
+    # กดโพสต์จริง** ถ้าผูกด่านไว้กับ start_at งานกู้ทุกใบจะโพสต์โดยไม่มีด่านเลย
+    # ซึ่งเป็นช่องที่เปิดกว้างกว่าเดิมเสียอีก เพราะงานที่ล้มกลางทางคือช่วงที่
+    # เครื่องเพิ่งโดนอะไรไปสักอย่าง — โอกาสอยู่ผิดโปรไฟล์สูงกว่าปกติ
+    #
+    # เดินทีละขั้น (`only` จากหน้าเว็บ ส่ง stop_after มาด้วย) = ไล่เทรนผัง
+    # ไม่ใช่โพสต์จริง จึงไม่เผาเวลาไปกับด่าน แต่ต้องบอกให้เห็นว่าไม่ได้ตรวจ
+    if context.target in PROFILE_GUARD_TARGETS:
+        if stop_after is None:
+            prepare.append((lambda: _profile_guard(context),
+                            "ยืนยันโปรไฟล์ Facebook"))
+        else:
+            # **ยังไม่ได้ตรวจ ต้องหน้าตาไม่เหมือนตรวจแล้วผ่าน** (กติกาข้อ 2.3.1)
+            context.log("⚠️ รอบนี้เดินทีละขั้น — ข้ามด่านยืนยันโปรไฟล์ Facebook "
+                        "(ยังไม่ได้ตรวจ ไม่ใช่ตรวจแล้วผ่าน)")
+
     ready: list[dict] = []
-    for job, label in ((context.wake_screen, "ปลุกจอ"),
-                       (context.send_clip, "ส่งคลิปเข้าเครื่อง")):
+    for job, label in prepare:
         if job is None:
             continue
+        if context.stop():
+            return {"target": context.target, "done": 0, "total": len(steps),
+                    "results": ready, "tags": [], "ads_closed": [],
+                    "ok": False, "stopped": True, "error": "ผู้ใช้กด Stop"}
         try:
             note = job()
+        except StopRequested:
+            return {"target": context.target, "done": 0, "total": len(steps),
+                    "results": ready, "tags": [], "ads_closed": [],
+                    "ok": False, "stopped": True, "error": "ผู้ใช้กด Stop"}
         except Exception as error:                       # noqa: BLE001
             why = f"{label}ไม่สำเร็จ: {type(error).__name__}: {error}"
             context.log(f"✕ {why}")

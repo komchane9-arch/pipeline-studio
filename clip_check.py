@@ -45,6 +45,23 @@ import gemini_quota
 # คือ 1080 การวัดด้านสั้นทำให้ใช้ได้ทั้งแนวตั้งและแนวนอนโดยไม่ต้องแยกเคส
 MIN_SHORT_SIDE = 1080
 
+# ---- ตัวถอดเสียง: ใช้ AI ในเครื่องก่อน (เจ้าของสั่ง 22 ก.ย. 2569) ---------
+#
+# *"ใช้ local ai ที่ถอดเสียง เอามาตรวจเสียงเลย"* · *"ใช้ large เลย"*
+#
+# ทำไมถึงเปลี่ยน — คีย์ Gemini เครดิตหมดทั้ง 4 ใบตั้งแต่ 19 ก.ย. ตัวตรวจเสียง
+# จึงตอบว่า “ยังตรวจเสียงไม่ได้” ทุกใบ และตอนล้มมันยังลองซ้ำ 6 ครั้งห่างกัน
+# 15→30→60→60→60→60 วินาที = **รอเปล่า 285 วินาทีต่อคลิปหนึ่งใบ**
+#
+# วัดกับคลิปจริง 3 ใบ เทียบกับ **บทพูดต้นฉบับใน run.json** (ไม่ใช่เทียบกับ
+# คำตอบของ AI อีกตัว ซึ่งจะไม่รู้เลยว่าใครถูก)
+#
+#     whisper large-v3 ในเครื่อง   ตรงบท 86%   15.7 วินาที/คลิป
+#     Gemini (ของเดิม)             ตรงบท 85%   ต้องใช้เครดิต + ล่มบ่อย
+#
+# **ตั้งเป็น False เมื่อไรก็กลับไปใช้ Gemini เหมือนเดิมทันที** ไม่ได้ลบทิ้ง
+USE_LOCAL_SPEECH = True
+
 # เสียงเบากว่านี้ถือว่า "เงียบ" — วัดจากของจริง คลิปที่มีเสียงปกติได้ max ราว -1 dB
 SILENT_MAX_DB = -50.0
 # เสียงเฉลี่ยเบากว่านี้ถือว่าเบาผิดปกติ (ของจริงอยู่ราว -16 ถึง -19 dB)
@@ -565,6 +582,31 @@ def compare(transcript: str, script, api_key: str, log=print) -> dict:
 
 # ---------------------------------------------------------------- รวมผล
 
+def listen_best(path, api_key: str = "", log=print) -> dict:
+    """เลือกตัวถอดเสียง — ในเครื่องก่อน ถ้าใช้ไม่ได้ค่อยส่งให้ Gemini
+
+    **บอกเสมอว่ารอบนี้ใครเป็นคนฟัง** ผ่านช่อง `speech_engine` และผ่าน log
+    ถ้าไม่บอก วันหนึ่งตัวในเครื่องจะพังเงียบๆ แล้วทุกอย่างถอยไปใช้ Gemini
+    โดยไม่มีใครรู้ จนกว่าจะมาเห็นบิลค่าใช้จ่าย (กติกา 2.9 ห้ามถอยแบบเงียบ)
+    """
+    if USE_LOCAL_SPEECH:
+        try:
+            import clip_speech_local
+        except Exception as error:                           # noqa: BLE001
+            log(f"  โหลดตัวถอดเสียงในเครื่องไม่ได้: {type(error).__name__} "
+                f"— ใช้ Gemini แทนรอบนี้")
+        else:
+            got = clip_speech_local.listen(path, log=log)
+            # ถอดได้จริง (True/False ชัดเจน) = ใช้ผลนี้เลย ไม่ต้องยุ่ง Gemini
+            if got.get("has_speech") is not None:
+                return got
+            note = got.get("speech_note") or "ไม่รู้สาเหตุ"
+            log(f"  ตัวถอดเสียงในเครื่องใช้ไม่ได้ ({note}) — ลองส่งให้ Gemini แทน")
+    got = listen(path, api_key, log=log)
+    got.setdefault("speech_engine", "Gemini")
+    return got
+
+
 def check(path, api_key: str = "", script=None, log=print) -> dict:
     """ตรวจคลิปหนึ่งไฟล์ครบทั้งสองชั้น — คืนผลเป็น dict เก็บลง run.json ได้ตรงๆ
 
@@ -626,7 +668,7 @@ def check(path, api_key: str = "", script=None, log=print) -> dict:
         result["has_speech"] = False
     else:
         try:
-            heard = listen(path, api_key, log=log)
+            heard = listen_best(path, api_key, log=log)
             # **คำตัดสิน "ไม่มีเสียงพูด" ต้องยืนยันสองรอบ** ก่อนเชื่อ
             #
             # ผิดทางนี้แพงกว่าอีกทางมาก: บอกว่าไม่มีเสียงทั้งที่มี → ผู้ใช้ไปเจน
@@ -637,7 +679,7 @@ def check(path, api_key: str = "", script=None, log=print) -> dict:
             # แต่ถามใหม่สองรอบได้บทถอดไทยครบทั้งสองรอบ
             if not heard.get("has_speech"):
                 log("  ได้คำตอบว่าไม่มีเสียงพูด — ขอฟังซ้ำอีกรอบก่อนสรุป")
-                second = listen(path, api_key, log=log)
+                second = listen_best(path, api_key, log=log)
                 if second.get("has_speech"):
                     log("  รอบสองได้ยินเสียงพูด — ใช้ผลรอบสอง")
                     heard = second
@@ -650,6 +692,8 @@ def check(path, api_key: str = "", script=None, log=print) -> dict:
             result["transcript"] = str(heard.get("transcript") or "").strip()
             result["other_sound"] = str(heard.get("other_sound") or "")
             result["speech_clear"] = bool(heard.get("clear", True))
+            # **จดไว้ว่ารอบนี้ใครเป็นคนฟัง** เวลาผลแปลกจะได้รู้ว่าต้องไปดูที่ไหน
+            result["speech_engine"] = str(heard.get("speech_engine") or "")
             # ตัวอักษรบนคลิป (ผู้ใช้สั่ง 23 ส.ค. 2026)
             #
             # Veo วาดตัวอักษรไทยพลาดบ่อย — ขาดกลางคำ สระลอย วรรณยุกต์ผิดที่

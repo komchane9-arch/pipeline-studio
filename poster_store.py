@@ -22,6 +22,17 @@
 
 `picture` = กอง Picture-post (แตกมาแล้ว รอเข้าสาย) · ใบไม่ข้ามขั้นเด็ดขาด
 (กติกาข้อ 2.9) — ขั้นก่อนหน้ายังไม่มีของ ห้ามเริ่มขั้นถัดไป
+
+## หลักการของแต่ละกล่อง — เหมือนกระดานสายคลิปทุกอย่าง (เจ้าของสั่ง 23 ก.ย. 2569)
+
+*"หลักการทำงานในแต่ละกล่องให้เหมือนกับของเดิม"*
+
+    เข้ากล่อง → ระบบทำของของกล่องนั้นเอง (queued → running)
+              → ได้ของแล้วรอคนตรวจ (review)
+              → กด ✅ อนุมัติ = ไปกล่องถัดไป  ·  ✏️ สั่งแก้ · 🔁 ทำใหม่ · 🅿 พัก
+    ☐ อัตโนมัติบนหัวกล่อง = อนุมัติแทนคนทุกใบที่รอ **ยกเว้นใบที่พักไว้**
+
+กล่อง Picture-post ไม่มีของต้องทำ ใบเข้ามาก็รอตรวจชุดรูปเลย
 """
 from __future__ import annotations
 
@@ -42,6 +53,17 @@ STAGE_LABEL = {
     "picture": "Picture-post", "poster": "Poster", "caption": "Caption",
     "comment": "Comment", "facebook": "Facebook", "done": "ลงเพจแล้ว",
 }
+
+# สถานะภายในกล่อง
+#   queued   รอคนงานหยิบไปทำ          running  กำลังคุยกับ ChatGPT
+#   review   ได้ของแล้ว รอคนอนุมัติ     failed   ทำไม่สำเร็จ (เหตุผลอยู่ใน error)
+#   blocked  กล่องนี้ยังทำเองไม่ได้ (ขั้นลงเพจยังไม่เปิด)
+STATUS_LABEL = {
+    "queued": "รอคิวทำ", "running": "กำลังทำ", "review": "รอตรวจ",
+    "failed": "ไม่สำเร็จ", "blocked": "ยังทำเองไม่ได้",
+}
+# กล่องที่ระบบต้อง "ทำของ" เอง — กล่องอื่นแค่รอตรวจ
+MAKE_BOXES = ("poster", "caption", "comment")
 
 # แตกเฉพาะใบที่ดึงรูป **ตั้งแต่วันที่เปิดสายนี้** — เจ้าของสั่ง "ทำตลอด" หมายถึง
 # ต่อจากนี้ไป ไม่ใช่ย้อนไปแตกใบเก่า 796 ใบพร้อมกัน (นับจริง 23 ก.ย. 2569)
@@ -156,6 +178,10 @@ def spawn(run: dict, source: Path) -> dict | None:
         # ยังไม่มีที่มา — เจ้าของบอก "เดวสร้างระบบหาลิ้งทีหลัง" (23 ก.ย. 2569)
         "lazada_url": "",
         "stage": "picture",
+        # สถานะ **ภายใน** กล่อง — ดู STATUS ข้างล่าง
+        "status": "review",
+        "parked": False, "park_why": "",
+        "image_pool": [],
         "poster_images": [], "poster_custom": {},
         "caption": "", "caption_custom": {},
         "comments": [], "comment_custom": {},
@@ -226,7 +252,93 @@ def move(poster_id: str, stage: str) -> dict:
         if why:
             raise PosterError(why)
         data["stage"] = stage
+        data["status"] = entry_status(stage)
         data["error"] = ""
+
+    return change(poster_id, mutate)
+
+
+def entry_status(stage: str) -> str:
+    """สถานะตอนใบเพิ่งเข้ากล่อง"""
+    if stage in MAKE_BOXES:
+        return "queued"
+    if stage == "facebook":
+        return "blocked"
+    return "review"
+
+
+def approve(poster_id: str) -> dict:
+    """✅ อนุมัติ — ของในกล่องนี้ผ่านแล้ว ส่งใบไปกล่องถัดไป
+
+    อนุมัติได้เฉพาะใบที่ **ได้ของแล้วรอตรวจ** และไม่ได้พักไว้ — ใบที่ยังทำไม่เสร็จ
+    หรือล้มอยู่ ถ้าปล่อยให้กดผ่านได้ กล่องถัดไปจะได้ของว่างไปทำต่อ (ข้อ 2.9)
+    """
+    card = load(poster_id)
+    if not card:
+        raise PosterError(f"ไม่พบใบ {poster_id}")
+    if card.get("parked"):
+        raise PosterError("ใบนี้พักไว้รอแก้อยู่ — เอากลับเข้ากล่องก่อน")
+    if card.get("status") != "review":
+        raise PosterError(
+            f"ยังอนุมัติไม่ได้ — ใบนี้{STATUS_LABEL.get(card.get('status'), 'ยังไม่พร้อม')}")
+    here = STAGES.index(card.get("stage", "picture"))
+    if here + 1 >= len(STAGES):
+        raise PosterError("ใบนี้อยู่กล่องสุดท้ายแล้ว")
+    return move(poster_id, STAGES[here + 1])
+
+
+def set_status(poster_id: str, status: str) -> dict:
+    if status not in STATUS_LABEL:
+        raise PosterError(f"ไม่รู้จักสถานะ {status}")
+
+    def mutate(data: dict) -> None:
+        data["status"] = status
+        if status in ("queued", "running"):
+            data["error"] = ""
+
+    return change(poster_id, mutate)
+
+
+def redo(poster_id: str) -> dict:
+    """🔁 ทำใหม่ทั้งกล่อง — ส่งกลับเข้าคิวทำของของกล่องนี้อีกรอบ (ของเก่ายังเก็บอยู่ใน raw/)"""
+    card = load(poster_id)
+    if card.get("stage") not in MAKE_BOXES:
+        raise PosterError(f"กล่อง {STAGE_LABEL.get(card.get('stage'))} ไม่มีของให้ทำใหม่")
+    if card.get("status") == "running":
+        raise PosterError("กำลังทำอยู่ — รอให้เสร็จก่อน")
+    return set_status(poster_id, "queued")
+
+
+def park(poster_id: str, why: str = "") -> dict:
+    """🅿 พักไว้รอแก้ — ระบบอัตโนมัติจะข้ามใบนี้ไปจนกว่าจะเอากลับ"""
+    def mutate(data: dict) -> None:
+        data["parked"] = True
+        data["park_why"] = str(why or "").strip()[:200]
+        data["parked_at"] = _now()
+
+    return change(poster_id, mutate)
+
+
+def unpark(poster_id: str) -> dict:
+    def mutate(data: dict) -> None:
+        data["parked"] = False
+        data["park_why"] = ""
+
+    return change(poster_id, mutate)
+
+
+def set_images(poster_id: str, images: list[str], pool: list[str]) -> dict:
+    """แก้ชุดรูป — ใบที่เอาออกไปอยู่ในคลัง ไม่ได้ลบไฟล์ทิ้ง กดกลับมาได้"""
+    card = load(poster_id)
+    known = set(card.get("images") or []) | set(card.get("image_pool") or [])
+    if not set(images) <= known or not set(pool) <= known:
+        raise PosterError("มีรูปที่ไม่ได้อยู่ในใบนี้")
+    if not images:
+        raise PosterError("ต้องเหลือรูปอย่างน้อย 1 ใบ")
+
+    def mutate(data: dict) -> None:
+        data["images"] = list(images)
+        data["image_pool"] = list(pool)
 
     return change(poster_id, mutate)
 
@@ -247,6 +359,8 @@ def set_result(poster_id: str, stage: str, **fields) -> dict:
     def mutate(data: dict) -> None:
         data.update(fields)
         data["error"] = ""
+        if stage in MAKE_BOXES:
+            data["status"] = "review"           # ได้ของแล้ว รอคนตรวจ
 
     return change(poster_id, mutate)
 
@@ -262,6 +376,7 @@ def fail(poster_id: str, why: str) -> dict:
     def mutate(data: dict) -> None:
         data["error"] = why
         data["error_at"] = _now()
+        data["status"] = "failed"
 
     return change(poster_id, mutate)
 

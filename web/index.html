@@ -254,7 +254,6 @@
           <button class="tab" data-tab="publish" role="tab">💰 Publish</button>
           <button class="tab" data-tab="story" role="tab">🎬 สตอรีบอร์ด</button>
           <button class="tab" data-tab="groups" role="tab">👥 Group Facebook</button>
-          <button class="tab" data-tab="poster" role="tab">🖼 โปสเตอร์</button>
           <button id="ppOpen" class="tab-gear" type="button"
                   title="ดูคำสั่งจริงที่ส่งเข้า Gemini และ ChatGPT">⚙</button>
         </nav>
@@ -808,28 +807,6 @@
           </div>
         </div>
 
-        <!-- ============================================= 🖼 สายโปสเตอร์
-             เจ้าของสั่ง 23 ก.ย. 2569 · สเปค SPEC-สายโปสเตอร์.md
-             หน้าเว็บแค่แสดงและส่งคำสั่ง — ตัดสินทุกอย่างที่เซิร์ฟเวอร์ (poster_api.py) -->
-        <div id="tab-poster" class="tab-area" hidden>
-          <div class="inline-row">
-            <h3 class="area-title">สายโปสเตอร์</h3>
-            <label class="switch-line" title="เปิดไว้ = หยิบใบในกล่อง Poster/Caption/Comment มาทำเองทีละใบ">
-              <input id="psAuto" type="checkbox" /> ทำอัตโนมัติ
-            </label>
-            <button id="psRefresh" class="ghost" type="button">↻ โหลดใหม่</button>
-          </div>
-          <p id="psNote" class="note" aria-live="polite"></p>
-          <div id="psBoard" class="ps-board"></div>
-          <details class="ps-setup">
-            <summary>ChatGPT custom · เพจ Facebook</summary>
-            <div id="psCustoms" class="ps-customs"></div>
-            <div id="psPages" class="ps-customs"></div>
-          </details>
-          <div class="log-head">Log</div>
-          <pre id="psLog"></pre>
-        </div>
-
         <!-- ============================================= 🎬 สตอรีบอร์ด -->
         <div id="tab-story" class="tab-area" hidden>
           <div class="inline-row">
@@ -863,6 +840,40 @@
             </div>
           </div>
           <p id="storyNote" class="note"></p>
+
+          <!-- ============================================= 🖼 สายโปสเตอร์
+               เจ้าของสั่ง 23 ก.ย. 2569 — "แก้หน้า flow ให้อยู่ในหน้าเดียวกับสตอรี่บอร์ด
+               หลักการทำงานในแต่ละกล่องให้เหมือนกับของเดิม" · สเปค SPEC-สายโปสเตอร์.md
+               ใช้คลาสชุดเดียวกับกระดานสายเจนคลิปข้างบน หน้าตาจึงตรงกันเอง
+               งานจริงอยู่ที่เซิร์ฟเวอร์ (poster_api.py) — web/poster.js แค่วาดกับส่งคำสั่ง -->
+          <section id="psSection" class="ps-section" aria-labelledby="psTitle">
+            <div class="inline-row">
+              <h3 id="psTitle" class="area-title">สายโปสเตอร์</h3>
+              <button id="psRefresh" class="ghost" type="button">↻ โหลดใหม่</button>
+            </div>
+            <p class="note">ใบที่ดึงรูปเสร็จจะถูกก๊อปเป็นใบ <b>ชื่อเดิม-post</b> มารอที่ Picture-post เอง
+              — อนุมัติทีละกล่อง หรือติ๊ก ☐ อัตโนมัติบนหัวกล่องให้ผ่านเอง</p>
+            <div id="psBoard" class="clip-board"></div>
+            <p id="psShort" class="note"></p>
+            <div class="story-layout">
+              <div class="story-side">
+                <h4 class="area-subtitle">ใบงาน <span id="psCount" class="pill"></span></h4>
+                <ul id="psList" class="story-queue"></ul>
+              </div>
+              <div id="psDetail" class="story-detail">
+                <p class="note">เลือกใบทางซ้าย — ใบที่รอตรวจจะมีปุ่มอนุมัติ/สั่งแก้ให้ตรงนี้</p>
+              </div>
+            </div>
+            <p id="psNote" class="note" aria-live="polite"></p>
+            <details id="psSetup" class="ps-setup">
+              <summary>ChatGPT custom · เพจ Facebook</summary>
+              <div id="psCustoms" class="ps-customs"></div>
+            </details>
+            <details class="ps-setup">
+              <summary>Log สายโปสเตอร์</summary>
+              <pre id="psLog"></pre>
+            </details>
+          </section>
         </div>
       </section>
     </main>

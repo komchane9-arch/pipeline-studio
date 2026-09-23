@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import gpt_customs
@@ -90,8 +91,15 @@ def comments_from(reply: str, card: dict) -> list[str]:
     return [text]
 
 
-def run(poster_id: str, box: str, log=print) -> dict:
-    """ทำกล่อง `box` ของใบนี้หนึ่งรอบ — สำเร็จแล้วบันทึก + ย้ายใบไปขั้นถัดไป"""
+def run(poster_id: str, box: str, log=print, instruction: str = "") -> dict:
+    """ทำกล่อง `box` ของใบนี้หนึ่งรอบ — สำเร็จแล้วบันทึกของไว้ **รอคนตรวจ**
+
+    **ไม่ย้ายใบไปกล่องถัดไปเอง** (เจ้าของสั่ง 23 ก.ย. 2569 ให้เหมือนกระดานเดิม)
+    ใบรออยู่ในกล่องจนกว่าจะมีคนกด ✅ อนุมัติ หรือเปิด ☐ อัตโนมัติของกล่องนั้น
+
+    `instruction` = ✏️ สั่งแก้ — ส่งคำสั่งแก้เข้า **แชทเดิม** ที่ทำของชิ้นนี้ออกมา
+    ไม่ใช่เปิดแชทใหม่ เพราะ GPT ต้องเห็นของเดิมถึงจะแก้ตรงจุดที่บอกได้
+    """
     if box not in BOXES:
         raise StageError(f"ไม่รู้จักกล่อง {box}")
     card = ps.load(poster_id)
@@ -103,6 +111,9 @@ def run(poster_id: str, box: str, log=print) -> dict:
             f"ไม่ใช่ {ps.STAGE_LABEL[box]} — ห้ามข้ามขั้น (ข้อ 2.9)")
     custom = _custom(box)
     here = ps.folder(poster_id)
+    chat = (card.get(f"{box}_custom") or {}).get("chat", "")
+    if instruction and not chat:
+        raise StageError("ยังไม่มีแชทเดิมให้สั่งแก้ — กด 🔁 ทำใหม่แทน")
     if box == "poster":
         files = [here / name for name in card["images"]]
         ask = ask_poster(card)
@@ -116,12 +127,17 @@ def run(poster_id: str, box: str, log=print) -> dict:
     missing = [f.name for f in files if not f.is_file()]
     if missing:
         raise StageError(f"ไฟล์รูปหาย: {', '.join(missing)}")
+    if instruction:
+        # สั่งแก้ = พิมพ์คำสั่งลงแชทเดิมอย่างเดียว ไม่แนบรูปซ้ำ (GPT เห็นรูปในแชทแล้ว)
+        ask, files = instruction.strip(), []
 
     import chatgpt_driver
     from flow_worker import open_browser, space_out
     from playwright.sync_api import sync_playwright
 
-    log(f"[{poster_id}] กล่อง {ps.STAGE_LABEL[box]} · ใช้ “{custom['name']}” · แนบรูป {len(files)} ใบ")
+    what = f"สั่งแก้: {ask[:60]}" if instruction else f"แนบรูป {len(files)} ใบ"
+    log(f"[{poster_id}] กล่อง {ps.STAGE_LABEL[box]} · ใช้ “{custom['name']}” · {what}")
+    ps.set_status(poster_id, "running")
     space_out("chatgpt", log=log)
     stamp = {"id": custom["id"], "name": custom["name"], "url": custom["url"],
              "at": ps._now()}
@@ -131,7 +147,7 @@ def run(poster_id: str, box: str, log=print) -> dict:
             page = browser.pages[0] if browser.pages else browser.new_page()
             try:
                 session = chatgpt_driver.ChatGPTSession(page, log=log)
-                session.open(custom["url"])
+                session.open(chat if instruction else custom["url"])
                 reply = session.ask(ask, files)
                 ps.save_raw(poster_id, box, f"ถาม:\n{ask}\n\n---- ตอบ:\n{reply}\n\n"
                                             f"แชท: {page.url}")
@@ -143,7 +159,9 @@ def run(poster_id: str, box: str, log=print) -> dict:
                         if chatgpt_driver.image_quota_out(last):
                             raise StageError("โควตารูปของบัญชี ChatGPT หมด — รอคืนสิทธิ์ก่อน")
                         raise StageError("ChatGPT ไม่ได้วาดรูปโปสเตอร์ออกมา")
-                    saved = session.download_reply_images(here / "poster", prefix="poster")
+                    # ตั้งชื่อตามเวลา — ของรอบก่อนไม่ถูกทับ ย้อนกลับไปใช้ได้
+                    saved = session.download_reply_images(
+                        here / "poster", prefix=f"poster-{time.strftime('%m%d-%H%M%S')}")
                     if not saved:
                         raise StageError("เห็นรูปในคำตอบแต่โหลดมาเก็บไม่ได้สักใบ")
                     ps.set_result(poster_id, "poster",
@@ -160,16 +178,14 @@ def run(poster_id: str, box: str, log=print) -> dict:
                                   comment_custom={**stamp, "chat": page.url})
             finally:
                 browser.close()
-    nxt = ps.STAGES[ps.STAGES.index(box) + 1]
-    card = ps.move(poster_id, nxt)
-    log(f"[{poster_id}] ✅ กล่อง {ps.STAGE_LABEL[box]} เสร็จ → ย้ายไป {ps.STAGE_LABEL[nxt]}")
-    return card
+    log(f"[{poster_id}] ✅ กล่อง {ps.STAGE_LABEL[box]} ได้ของแล้ว — รอตรวจ")
+    return ps.load(poster_id)
 
 
-def run_safe(poster_id: str, box: str, log=print) -> bool:
-    """เหมือน `run` แต่จดความล้มเหลวลงใบ (ป้ายแดงบนการ์ด) + เก็บหลักฐาน ไม่โยนต่อ"""
+def run_safe(poster_id: str, box: str, log=print, instruction: str = "") -> bool:
+    """เหมือน `run` แต่จดความล้มเหลวลงใบ (ป้ายแดงบนการ์ด) ไม่โยนต่อ"""
     try:
-        run(poster_id, box, log=log)
+        run(poster_id, box, log=log, instruction=instruction)
         return True
     except Exception as error:                                   # noqa: BLE001
         why = str(error) or error.__class__.__name__

@@ -383,9 +383,15 @@ class ChatGPTSession:
         files = [str(path) for path in images if Path(path).is_file()][:MAX_UPLOAD]
         if not files:
             return 0
+        # **รอให้ช่องแนบโผล่ ไม่ใช่นับครั้งเดียว** (23 ก.ย. 2569) — ช่องแนบไฟล์
+        # ขึ้นช้ากว่าช่องพิมพ์ `open()` รอแค่ช่องพิมพ์ นับทันทีจึงได้ 0 แล้วล้ม
+        # ทั้งที่อีกไม่กี่วินาทีช่องแนบก็มา (วัดจริง: ล้มตอนนับทันที ·
+        # รอ 3 วินาทีเจอ 4 ช่อง `upload-files` `upload-photos` …)
         target = self.page.locator('input[type="file"]').first
-        if not target.count():
-            raise ChatGPTError("ไม่พบช่องแนบไฟล์ในหน้าแชท")
+        try:
+            target.wait_for(state="attached", timeout=15_000)
+        except Exception:                                        # noqa: BLE001
+            raise ChatGPTError("ไม่พบช่องแนบไฟล์ในหน้าแชท (รอแล้ว 15 วินาที)") from None
         target.set_input_files(files)
         # รอให้รูปขึ้นจริงก่อนพิมพ์ข้อความ ไม่งั้นกด Enter ตอนอัปโหลดยังไม่เสร็จ
         # ข้อความจะถูกส่งไปโดยไม่มีรูปติดไปด้วย

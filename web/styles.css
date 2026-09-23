@@ -3928,3 +3928,26 @@ body.typing-through {
   font-size: 12.5px; font-weight: 700; color: #5f9e0f;
 }
 .mn-done-say { font-weight: 400; color: var(--ink-2); overflow-wrap: anywhere; }
+
+/* ---- สายโปสเตอร์ (23 ก.ย. 2569) — กระดาน 6 กองแบบเลื่อนข้าง ไม่ดันหน้ากว้างเกินจอ */
+.ps-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(220px, 1fr);
+  gap: 10px; overflow-x: auto; padding-bottom: 6px; }
+.ps-col { background: var(--panel-deep); border: 1px solid var(--line); border-radius: 12px;
+  padding: 8px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ps-col header { display: flex; justify-content: space-between; align-items: center; }
+.ps-count { font-variant-numeric: tabular-nums; opacity: .6; }
+.ps-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.ps-card.bad { border-color: var(--danger); }
+.ps-thumb { width: 100%; max-height: 220px; object-fit: contain; border-radius: 8px; background: var(--panel-deep); }
+.ps-actions { flex-wrap: wrap; gap: 6px; }
+.ps-edit { width: 100%; font: inherit; }
+.ps-field { display: flex; flex-direction: column; gap: 4px; }
+.ps-setup { margin: 12px 0; }
+.ps-customs { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; margin-top: 8px; }
+.ps-group { border: 1px solid var(--line); border-radius: 10px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.ps-group h4 { margin: 0; }
+.ps-item { gap: 8px; align-items: center; }
+.ps-in { min-width: 0; flex: 1; }
+.ps-in.wide { flex: 2; }
+#psLog { max-height: 240px; overflow: auto; }

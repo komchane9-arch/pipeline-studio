@@ -254,6 +254,7 @@
           <button class="tab" data-tab="publish" role="tab">💰 Publish</button>
           <button class="tab" data-tab="story" role="tab">🎬 สตอรีบอร์ด</button>
           <button class="tab" data-tab="groups" role="tab">👥 Group Facebook</button>
+          <button class="tab" data-tab="poster" role="tab">🖼 โปสเตอร์</button>
           <button id="ppOpen" class="tab-gear" type="button"
                   title="ดูคำสั่งจริงที่ส่งเข้า Gemini และ ChatGPT">⚙</button>
         </nav>
@@ -805,6 +806,28 @@
             <div class="log-head">Log</div>
             <pre id="log-publish"></pre>
           </div>
+        </div>
+
+        <!-- ============================================= 🖼 สายโปสเตอร์
+             เจ้าของสั่ง 23 ก.ย. 2569 · สเปค SPEC-สายโปสเตอร์.md
+             หน้าเว็บแค่แสดงและส่งคำสั่ง — ตัดสินทุกอย่างที่เซิร์ฟเวอร์ (poster_api.py) -->
+        <div id="tab-poster" class="tab-area" hidden>
+          <div class="inline-row">
+            <h3 class="area-title">สายโปสเตอร์</h3>
+            <label class="switch-line" title="เปิดไว้ = หยิบใบในกล่อง Poster/Caption/Comment มาทำเองทีละใบ">
+              <input id="psAuto" type="checkbox" /> ทำอัตโนมัติ
+            </label>
+            <button id="psRefresh" class="ghost" type="button">↻ โหลดใหม่</button>
+          </div>
+          <p id="psNote" class="note" aria-live="polite"></p>
+          <div id="psBoard" class="ps-board"></div>
+          <details class="ps-setup">
+            <summary>ChatGPT custom · เพจ Facebook</summary>
+            <div id="psCustoms" class="ps-customs"></div>
+            <div id="psPages" class="ps-customs"></div>
+          </details>
+          <div class="log-head">Log</div>
+          <pre id="psLog"></pre>
         </div>
 
         <!-- ============================================= 🎬 สตอรีบอร์ด -->

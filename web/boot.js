@@ -7,6 +7,7 @@ import { loadDevices, loadTargets } from "./phone.js";
 import { loadFbGroups, loadFbJobs, renderQueue, setQueue } from "./post.js";
 import { loadGroupHealth } from "./groups.js";
 import { loadPages } from "./pagepost.js";
+import "./poster.js";
 import { loadPrompts, openPrompts } from "./prompts.js";
 import { loadBoard } from "./board.js";
 import { loadFbControl, watchFbControl } from "./fbcontrol.js";

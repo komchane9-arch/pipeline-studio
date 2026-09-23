@@ -141,6 +141,11 @@ app.include_router(create_reels_download_router(DATA_DIR / "facebook_reels_downl
 from notes_store import create_router as create_notes_router
 app.include_router(create_notes_router(DATA_DIR / "notes.json"))
 
+# สายโปสเตอร์ — ที่อยู่ + ตัวเดินงานอยู่ในไฟล์ของมันเอง (SPEC-สายโปสเตอร์.md)
+import poster_api  # noqa: E402
+app.include_router(poster_api.create_router())
+poster_api.start()
+
 # ทะเบียนอุปกรณ์ที่ขอเข้าใช้จากมือถือ (เครื่องหลักอนุมัติทีละเครื่อง)
 access_store = access_control.AccessStore(DATA_DIR / "access_devices.json")
 class _RevalidateStatic(StaticFiles):

@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <title>Pipeline Remote · ควบคุมจอมือถือ</title>
+    <link rel="manifest" href="/static/manifest-remote.json" />
+    <meta name="theme-color" content="#161b22" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="stylesheet" href="/static/fonts/fonts.css" />
+    <style>
+      :root {
+        --bg: #090d13;
+        --panel: #161b22;
+        --panel-deep: #0d1117;
+        --card-bg: #1c2128;
+        --line: #30363d;
+        --accent: #1f6feb;
+        --accent-hover: #388bfd;
+        --green: #238636;
+        --green-glow: #2ea043;
+        --red: #da3633;
+        --amber: #d29922;
+        --ink: #f0f6fc;
+        --ink-dim: #8b949e;
+        --ink-sub: #6e7681;
+        --safe-bottom: env(safe-area-inset-bottom, 0px);
+        --safe-top: env(safe-area-inset-top, 0px);
+      }
+
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Thai", Helvetica, Arial, sans-serif;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        height: 100dvh;
+        overflow: hidden;
+        user-select: none;
+      }
+
+      /* แถบด้านบน: เลือกอุปกรณ์ */
+      header.remote-header {
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
+        padding: calc(8px + var(--safe-top)) 12px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        z-index: 20;
+      }
+
+      .top-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 15px;
+        font-weight: 700;
+        color: var(--ink);
+      }
+
+      .brand .logo-icon {
+        width: 24px;
+        height: 24px;
+        background: var(--accent);
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+      }
+
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .btn-icon {
+        background: var(--card-bg);
+        border: 1px solid var(--line);
+        color: var(--ink);
+        border-radius: 8px;
+        padding: 6px 10px;
+        font-size: 13px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .btn-icon:active { background: var(--line); }
+
+      /* รายการอุปกรณ์แบบแนวนอน */
+      .devices-scroll {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        padding-bottom: 2px;
+        scrollbar-width: none;
+      }
+      .devices-scroll::-webkit-scrollbar { display: none; }
+
+      .device-pill {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: var(--panel-deep);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 6px 14px;
+        font-size: 13px;
+        cursor: pointer;
+        color: var(--ink-dim);
+        transition: all 0.2s;
+      }
+
+      .device-pill.active {
+        background: rgba(31, 111, 235, 0.15);
+        border-color: var(--accent);
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--ink-sub);
+      }
+      .status-dot.online { background: var(--green-glow); box-shadow: 0 0 6px rgba(46, 160, 67, 0.6); }
+      .status-dot.busy { background: var(--amber); box-shadow: 0 0 6px rgba(210, 153, 34, 0.6); }
+      .status-dot.offline { background: var(--red); }
+
+      /* พื้นที่แสดงหน้าจอมือถือ (Canvas Stage) */
+      main.screen-stage {
+        flex: 1;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #000;
+        overflow: hidden;
+        touch-action: none; /* ส่ง touch event เข้า script เอง */
+      }
+
+      #screenCanvas {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        display: block;
+        box-shadow: 0 0 20px rgba(0,0,0,0.8);
+        touch-action: none;
+      }
+
+      #screenImage {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        display: block;
+        touch-action: none;
+      }
+
+      /* โหมดเต็มจอ (Fullscreen Mode) */
+      body.is-fullscreen {
+        overflow: hidden !important;
+      }
+
+      body.is-fullscreen header.remote-header,
+      body.is-fullscreen nav.nav-bar,
+      body.is-fullscreen .drawer-container {
+        display: none !important;
+      }
+
+      body.is-fullscreen main.screen-stage {
+        position: fixed !important;
+        inset: 0 !important;
+        width: 100vw !important;
+        height: 100vh !important;
+        height: 100dvh !important;
+        z-index: 9999 !important;
+        background: #000 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+
+      body.is-fullscreen #screenCanvas,
+      body.is-fullscreen #screenImage {
+        width: 100vw !important;
+        height: 100vh !important;
+        height: 100dvh !important;
+        max-width: 100% !important;
+        max-height: 100% !important;
+        object-fit: contain !important;
+      }
+
+      /* Floating Overlay ในโหมดเต็มจอ */
+      .fullscreen-overlay {
+        position: absolute;
+        top: calc(10px + var(--safe-top));
+        right: 12px;
+        z-index: 10001;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(22, 27, 34, 0.85);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 30px;
+        padding: 4px 8px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+        transition: opacity 0.3s ease, transform 0.3s ease;
+        opacity: 0.95;
+      }
+
+      .fullscreen-overlay.idle {
+        opacity: 0.25;
+      }
+
+      .fullscreen-overlay:hover,
+      .fullscreen-overlay:active {
+        opacity: 1 !important;
+      }
+
+      .fs-pill-btn {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: var(--ink);
+        border-radius: 20px;
+        padding: 6px 12px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        transition: all 0.15s ease;
+      }
+
+      .fs-pill-btn:active {
+        background: rgba(255, 255, 255, 0.25);
+        transform: scale(0.96);
+      }
+
+      .fs-pill-btn.exit {
+        background: rgba(31, 111, 235, 0.4);
+        border-color: var(--accent);
+        color: #fff;
+      }
+
+      .fs-pill-btn.exit:active {
+        background: var(--accent);
+      }
+
+      .fs-divider {
+        width: 1px;
+        height: 18px;
+        background: rgba(255, 255, 255, 0.2);
+        margin: 0 2px;
+      }
+
+      /* จัดการการแสดงผล Placeholder ป้องกันการซ้อนทับภาพสด 100% */
+      .stage-placeholder[hidden],
+      .stage-placeholder.hidden,
+      body.is-streaming .stage-placeholder {
+        display: none !important;
+      }
+
+      #screenImage[hidden],
+      #screenCanvas[hidden],
+      .fullscreen-overlay[hidden] {
+        display: none !important;
+      }
+
+      .stage-placeholder {
+        position: absolute;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        color: var(--ink-dim);
+        font-size: 14px;
+        text-align: center;
+        padding: 20px 24px;
+        background: rgba(22, 27, 34, 0.92);
+        backdrop-filter: blur(10px);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        max-width: 320px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.7);
+        z-index: 10;
+        pointer-events: auto;
+      }
+
+      .btn-start {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 20px;
+        padding: 10px 24px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      /* แถบแจ้งสถานะจอเล็กๆ */
+      .stream-badge {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        background: rgba(13, 17, 23, 0.85);
+        backdrop-filter: blur(8px);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 4px 8px;
+        font-size: 11px;
+        color: var(--ink-dim);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        pointer-events: none;
+      }
+
+      /* แถบปุ่มฮาร์ดแวร์ล่างจอ (Nav & Key Bar) */
+      nav.nav-bar {
+        background: var(--panel);
+        border-top: 1px solid var(--line);
+        padding: 6px 8px;
+        display: flex;
+        justify-content: space-around;
+        align-items: center;
+        z-index: 20;
+      }
+
+      .nav-btn {
+        background: transparent;
+        border: none;
+        color: var(--ink);
+        padding: 8px 12px;
+        font-size: 13px;
+        font-weight: 600;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .nav-btn .icon { font-size: 18px; }
+      .nav-btn:active { background: var(--line); }
+
+      /* แถบเมนูเครื่องมือล่างสุด (Tools Sheet / Expandable) */
+      .drawer-container {
+        background: var(--panel-deep);
+        border-top: 1px solid var(--line);
+        padding-bottom: var(--safe-bottom);
+        z-index: 20;
+      }
+
+      .drawer-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 14px;
+        cursor: pointer;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+      }
+
+      .drawer-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--ink-dim);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .drawer-tabs {
+        display: flex;
+        gap: 6px;
+      }
+
+      .drawer-tab {
+        background: var(--card-bg);
+        border: 1px solid var(--line);
+        color: var(--ink-dim);
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .drawer-tab.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        font-weight: 600;
+      }
+
+      .drawer-body {
+        max-height: 260px;
+        overflow-y: auto;
+        padding: 10px 14px;
+      }
+
+      .tab-pane { display: none; }
+      .tab-pane.active { display: flex; flex-direction: column; gap: 10px; }
+
+      /* Form components */
+      .input-group {
+        display: flex;
+        gap: 6px;
+      }
+
+      input[type="text"], textarea {
+        flex: 1;
+        background: var(--card-bg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--ink);
+        padding: 8px 12px;
+        font-size: 14px;
+        outline: none;
+      }
+      input[type="text"]:focus, textarea:focus { border-color: var(--accent); }
+
+      .btn-primary {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .btn-primary:active { background: var(--accent-hover); }
+
+      .btn-ghost {
+        background: var(--card-bg);
+        border: 1px solid var(--line);
+        color: var(--ink);
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-size: 13px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .btn-ghost:active { background: var(--line); }
+
+      .btn-danger {
+        background: rgba(218, 54, 51, 0.15);
+        border: 1px solid var(--red);
+        color: #f85149;
+      }
+
+      .key-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+      }
+
+      .key-grid button {
+        background: var(--card-bg);
+        border: 1px solid var(--line);
+        color: var(--ink);
+        border-radius: 6px;
+        padding: 8px 6px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .key-grid button:active { background: var(--line); }
+
+      /* Notification Toast */
+      .toast {
+        position: fixed;
+        bottom: calc(70px + var(--safe-bottom));
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(22, 27, 34, 0.95);
+        backdrop-filter: blur(10px);
+        border: 1px solid var(--line);
+        color: var(--ink);
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 12px;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.2s, transform 0.2s;
+        z-index: 100;
+        white-space: nowrap;
+      }
+      .toast.show { opacity: 1; transform: translateX(-50%) translateY(-6px); }
+    </style>
+  </head>
+  <body>
+    <!-- 1. Header & Device Pills -->
+    <header class="remote-header">
+      <div class="top-row">
+        <div class="brand">
+          <div class="logo-icon">📱</div>
+          <span>Pipeline Remote</span>
+        </div>
+        <div class="top-actions">
+          <button id="btnFullscreen" class="btn-icon" title="แสดงเต็มจอ (Fullscreen)">⛶ เต็มจอ</button>
+          <button id="btnRefreshDevices" class="btn-icon" title="รีเฟรชรายชื่อเครื่อง">🔄 รีเฟรช</button>
+          <button id="btnToggleDrawer" class="btn-icon" title="เครื่องมือเพิ่มเติม">⚡ เครื่องมือ</button>
+        </div>
+      </div>
+
+      <div id="devicesList" class="devices-scroll">
+        <!-- Device Pills populated dynamically -->
+        <div class="device-pill active">
+          <span class="status-dot online"></span>
+          <span>กำลังโหลดอุปกรณ์…</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- 2. Screen Canvas Viewer (Touch interactive) -->
+    <main id="stage" class="screen-stage">
+      <div class="stream-badge">
+        <span id="badgeDot" class="status-dot online"></span>
+        <span id="badgeText">พร้อมสตรีม</span>
+        <span id="badgeFps"></span>
+      </div>
+
+      <canvas id="screenCanvas" hidden></canvas>
+      <img id="screenImage" alt="ภาพหน้าจอมือถือ" />
+
+      <!-- Floating Controls in Fullscreen Mode -->
+      <div id="fullscreenOverlay" class="fullscreen-overlay" hidden>
+        <button class="fs-pill-btn" data-key="BACK" title="กลับ (Back)">◀</button>
+        <button class="fs-pill-btn" data-key="HOME" title="หน้าหลัก (Home)">⬤</button>
+        <button class="fs-pill-btn" data-key="RECENTS" title="สลับแอป (Recents)">◼</button>
+        <div class="fs-divider"></div>
+        <button id="btnExitFs" class="fs-pill-btn exit" title="ออกจากเต็มจอ">🗗 ย่อจอ</button>
+      </div>
+
+      <div id="placeholder" class="stage-placeholder" hidden>
+        <strong id="placeholderName">เลือกอุปกรณ์เพื่อดูจอ</strong>
+        <p id="placeholderNote">แตะปุ่มด้านล่างเพื่อเริ่มสตรีม</p>
+        <button id="btnStartStream" class="btn-start">เริ่มดูจอ</button>
+      </div>
+    </main>
+
+    <!-- 3. Hardware Virtual Keys (Nav Bar) -->
+    <nav class="nav-bar">
+      <button class="nav-btn" data-key="BACK" title="ย้อนกลับ">
+        <span class="icon">◀</span>
+        <span>กลับ</span>
+      </button>
+      <button class="nav-btn" data-key="HOME" title="หน้าหลัก">
+        <span class="icon">⬤</span>
+        <span>หน้าหลัก</span>
+      </button>
+      <button class="nav-btn" data-key="RECENTS" title="แอปล่าสุด">
+        <span class="icon">◼</span>
+        <span>สลับแอป</span>
+      </button>
+      <button class="nav-btn" id="btnWake" title="ปลุกจอและปลดล็อก">
+        <span class="icon">☀</span>
+        <span>ปลุกจอ</span>
+      </button>
+      <button class="nav-btn" data-key="POWER" title="เปิด/ปิดหน้าจอ">
+        <span class="icon">⏻</span>
+        <span>ปิดจอ</span>
+      </button>
+      <button class="nav-btn" data-key="VOLUME_DOWN" title="ลดเสียง">
+        <span class="icon">🔉</span>
+        <span>ลดเสียง</span>
+      </button>
+      <button class="nav-btn" data-key="VOLUME_UP" title="เพิ่มเสียง">
+        <span class="icon">🔊</span>
+        <span>เพิ่มเสียง</span>
+      </button>
+    </nav>
+
+    <!-- 4. Tools Bottom Drawer -->
+    <div id="drawer" class="drawer-container">
+      <div class="drawer-header" id="drawerHeader">
+        <div class="drawer-title">
+          <span>🛠️ เครื่องมือควบคุมพิเศษ</span>
+          <span id="drawerArrow">▼</span>
+        </div>
+        <div class="drawer-tabs">
+          <button class="drawer-tab active" data-tab="tab-text">พิมพ์ข้อความ</button>
+          <button class="drawer-tab" data-tab="tab-caption">แก้แคปชัน</button>
+          <button class="drawer-tab" data-tab="tab-clip">ส่งคลิป</button>
+          <button class="drawer-tab" data-tab="tab-bridge">บริดจ์ลิงก์</button>
+          <button class="drawer-tab" data-tab="tab-cam">📷 กล้องโฮสต์</button>
+        </div>
+      </div>
+
+      <div class="drawer-body" id="drawerBody">
+        <!-- Tab 1: พิมพ์ข้อความ -->
+        <div id="tab-text" class="tab-pane active">
+          <div class="input-group">
+            <input type="text" id="txtDirect" placeholder="พิมพ์ข้อความส่งลงจอ (ไทย + อีโมจิ)" />
+            <button id="btnSendDirect" class="btn-primary">ส่งทันที</button>
+          </div>
+          <div class="input-group">
+            <button id="btnRestoreKb" class="btn-ghost">คืนคีย์บอร์ดปกติของเครื่อง</button>
+            <button id="btnToggleLiveStream" class="btn-ghost">สลับหยุด/สตรีม</button>
+          </div>
+        </div>
+
+        <!-- Tab 2: แก้แคปชัน -->
+        <div id="tab-caption" class="tab-pane">
+          <textarea id="txtCaption" rows="2" placeholder="ใส่แคปชันใหม่..."></textarea>
+          <div class="input-group">
+            <button id="btnCaptionReplace" class="btn-primary">ทับทั้งหมด</button>
+            <button id="btnCaptionInsert" class="btn-ghost">แทรกตรงตัวชี้</button>
+          </div>
+          <div class="key-grid">
+            <button data-caret="ต้นบรรทัด">⤒ ต้นบรรทัด</button>
+            <button data-caret="ซ้าย">◀ ซ้าย</button>
+            <button data-caret="ขวา">ขวา ▶</button>
+            <button data-caret="ท้ายบรรทัด">ท้ายบรรทัด ⤓</button>
+            <button data-caret="ลบ">⌫ ลบหลัง</button>
+            <button data-caret="ลบหน้า">ลบหน้า ⌦</button>
+          </div>
+        </div>
+
+        <!-- Tab 3: ส่งคลิปเข้ามือถือ -->
+        <div id="tab-clip" class="tab-pane">
+          <div class="input-group">
+            <input type="file" id="fileClip" accept=".mp4,.mov,.webm,.mkv" />
+          </div>
+          <div class="input-group">
+            <button id="btnPushClip" class="btn-primary">ส่งเข้ามือถือ</button>
+            <select id="selClipTarget" style="flex:1; background:var(--card-bg); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:6px;">
+              <option value="shopee">Shopee Video</option>
+              <option value="facebook">Facebook Reels</option>
+              <option value="tiktok">TikTok</option>
+            </select>
+          </div>
+          <button id="btnLaunchClipApp" class="btn-ghost" disabled>เปิดแอปพร้อมโพสต์คลิป</button>
+        </div>
+
+        <!-- Tab 4: บริดจ์ลิงก์ -->
+        <div id="tab-bridge" class="tab-pane">
+          <div class="input-group">
+            <input type="text" id="txtBridge" placeholder="วางลิงก์ที่จะส่งเข้าคลิปบอร์ด" />
+            <button id="btnBridgeCopy" class="btn-ghost">เข้าคลิปบอร์ด</button>
+            <button id="btnBridgePaste" class="btn-primary">วางลงจอ</button>
+          </div>
+          <button id="btnCheckQueue" class="btn-ghost">ตรวจสอบสถานะคิวงานบอท</button>
+          <div id="queueResult" style="font-size:12px; color:var(--ink-dim);"></div>
+        </div>
+
+        <!-- Tab 5: กล้องโฮสต์ (Camera Injection) -->
+        <div id="tab-cam" class="tab-pane">
+          <div style="font-size:12px; color:var(--ink-dim); margin-bottom:8px; line-height:1.4;">
+            ถ่ายทอดภาพจากกล้องมือถือรีโมท เข้าสู่ Facebook / TikTok / Shopee บนเครื่องโฮสต์
+          </div>
+          <div class="input-group">
+            <button id="btnLaunchCameraSystem" class="btn-primary" style="flex:2;">🚀 เปิดระบบกล้อง & LDPlayer</button>
+            <button id="btnCheckCameraStatus" class="btn-ghost" style="flex:1;">🔄 ตรวจสอบ</button>
+          </div>
+          <div id="camStatusBox" style="background:var(--card-bg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:12px; color:var(--ink); margin-bottom:8px; line-height:1.5;">
+            กดตรวจสอบสถานะความพร้อมของระบบ
+          </div>
+          <div class="input-group">
+            <button id="btnTestCameraApp" class="btn-ghost" style="flex:1;">📷 ทดสอบเปิดแอปกล้อง</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast message -->
+    <div id="toast" class="toast"></div>
+
+    <script src="/static/remote.js?v=__VERSION__"></script>
+  </body>
+</html>

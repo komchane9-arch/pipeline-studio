@@ -1755,8 +1755,14 @@ $("#devicesPurge").addEventListener("click", async () => {
 });
 $("#copyMobileUrl").addEventListener("click", async () => {
   await navigator.clipboard.writeText($("#mobileUrl").textContent);
-  deviceNote.textContent = "คัดลอกลิงก์แล้ว";
+  deviceNote.textContent = "คัดลอกลิงก์ Wi-Fi แล้ว";
 });
+if ($("#copyTailscaleUrl")) {
+  $("#copyTailscaleUrl").addEventListener("click", async () => {
+    await navigator.clipboard.writeText($("#tailscaleRemoteUrl").textContent);
+    deviceNote.textContent = "คัดลอกลิงก์ 5G Tailscale แล้ว";
+  });
+}
 
 $("#wifiDisconnect").addEventListener("click", async () => {
   try {

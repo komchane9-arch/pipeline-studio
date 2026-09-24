@@ -27,7 +27,7 @@ DB_FILE = mf.DATA_DIR / "fb_posts.db"
 # โฟลเดอร์รูปบน Google Drive (ผู้ใช้ยืนยันโฟลเดอร์นี้ 18 ส.ค. 2569)
 MEDIA_ROOT = Path(r"G:\My Drive\Identify group post facebook")
 # พื้นที่ว่างขั้นต่ำบนไดรฟ์ที่แคชอยู่ — ต่ำกว่านี้ให้หยุดเก็บรูปทันที
-DISK_FLOOR_GB = 8.0
+DISK_FLOOR_GB = 4.0
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -206,7 +206,7 @@ def claim_group(conn: sqlite3.Connection, bot: str) -> dict | None:
                    OR (state='running' AND lease_until < ?))
               AND (claimed_by='' OR lease_until < ?)
               AND attempts < 3
-            ORDER BY attempts, COALESCE(members,0) DESC
+            ORDER BY COALESCE(priority, 0) DESC, attempts, COALESCE(members,0) DESC
             LIMIT 1""", (now, now)).fetchone()
         if row is None:
             return None

@@ -66,6 +66,10 @@ document.querySelector("#themeToggle")?.addEventListener("click", () => {
 });
 paintThemeButton();
 
+document.querySelector("#bot8LoginSettings")?.addEventListener("click", () => {
+  document.querySelector("#openSettings")?.click();
+});
+
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
@@ -996,6 +1000,21 @@ export async function pollHealth() {
   chips.push(healthChip(webOk, webOk ? "เว็บ" : "เว็บหลุด",
     webOk ? "เซิร์ฟเวอร์ 8866 ตอบปกติ"
           : "ต่อ 8866 ไม่ได้ — ที่เห็นอยู่บนจอคือข้อมูลค้าง"));
+
+  // Show the collector's confirmed login failure on every tab. The server
+  // also probes Bot8 while idle, so this does not depend on a job starting.
+  try {
+    const collector = await api("/api/fb/engage/status");
+    const lost = collector.collector_gate?.needs_login === true;
+    const alert = $("#bot8LoginAlert");
+    if (alert) alert.hidden = !lost;
+    if (lost) {
+      chips.push(healthChip(false, "Bot8 ล็อกอินหลุด",
+        "Facebook ของ Bot8 ต้องล็อกอินใหม่ — งานเก็บคอมเมนต์หยุดอยู่"));
+    }
+  } catch {
+    // An unreadable status is unknown, not proof that Facebook is logged in.
+  }
 
   // 2) สายคลิป (คนละโปรเซส คนละพอร์ต) + จำนวนงานที่รอคนตัดสิน
   let waiting = null;

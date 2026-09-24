@@ -42,7 +42,7 @@ RETRY_HOURS = 4
 # ไล่ได้มากสุดกี่ครั้งต่อกลุ่ม
 MAX_TRIES = 4
 # สถานะงานที่ไม่ไล่ตามให้เอง (ยังสั่งเองได้)
-SKIP_STATUSES = {"cancelled", "failed"}
+SKIP_STATUSES = {"cancelled", "failed", "stopped", "manual_done"}
 
 
 def _parse(value: str) -> datetime | None:
@@ -72,17 +72,17 @@ def key_of(job_id: str, group_id: str) -> str:
     return f"{job_id}:{group_id}"
 
 
-def is_stuck(result: dict) -> bool:
-    """ผลของกลุ่มนี้เข้าข่าย "โพสต์ไปแล้วแต่ยังเปิดไม่เจอ" ไหม
-
-    ใช้ "โพสต์สำเร็จ แต่ไม่มีลิงก์ และยังไม่ได้ถูกใจ" เป็นตัวชี้ เพราะทั้งสองอย่าง
-    ต้องเปิดหน้าโพสต์ให้ได้ก่อนถึงจะทำได้ — ไม่มีทั้งคู่แปลว่าเปิดไม่เคยเจอเลย
-
-    ไม่ใช้ `verified.post_visible` เป็นตัวตัดสิน เพราะค่านั้นเป็น false แม้ในกลุ่ม
-    ที่เก็บลิงก์และคอมเมนต์สำเร็จแล้ว (ดูข้อมูลจริงของ p617465263) เชื่อไม่ได้
-    """
-    return bool(result.get("posted")) and not result.get("link") \
-        and not result.get("liked")
+def is_stuck(result: dict, required_comments: int = 1) -> bool:
+    """โพสต์ขึ้นแล้วแต่ขั้นบังคับอย่างน้อยหนึ่งอย่างยังไม่ครบหรือไม่."""
+    if not result.get("posted"):
+        return False
+    return (
+        not result.get("link")
+        or not result.get("liked")
+        or int(result.get("comment_count") or 0) < max(1, required_comments)
+        or not result.get("commented")
+        or not result.get("comment_liked")
+    )
 
 
 def pending_items(jobs: list[dict], now: datetime | None = None,
@@ -102,15 +102,17 @@ def pending_items(jobs: list[dict], now: datetime | None = None,
         hours = (now - when).total_seconds() / 3600
         if hours < 0:
             continue
+        comments = job.get("comments") or ([job.get("comment", "")] if job.get("comment") else [])
+        required_comments = max(1, len([c for c in comments if str(c).strip()]))
         for result in job.get("results", []):
-            if not is_stuck(result):
+            if not is_stuck(result, required_comments):
                 continue
             group_id = str(result.get("group_id", ""))
             record = state.get(key_of(job["id"], group_id), {})
             tries = int(record.get("tries", 0))
             last = _parse(record.get("last_try", ""))
             since_try = (now - last).total_seconds() / 3600 if last else None
-            if job.get("status") in SKIP_STATUSES:
+            if job.get("status") in SKIP_STATUSES or job.get("manual_completed"):
                 # งานที่ผู้ใช้สั่งยกเลิก/ล้มไปแล้ว **ห้ามไล่เอง**
                 #
                 # ผลของมันมีโพสต์ที่ขึ้นจริงอยู่ (ยกเลิกกลางคัน) แต่การที่ระบบ
@@ -119,7 +121,10 @@ def pending_items(jobs: list[dict], now: datetime | None = None,
                 # (ข้อมูลจริง 14 ส.ค.: งานยกเลิก p551626124 มี 5 กลุ่มเข้าเงื่อนไข
                 #  ถึงเวลาไล่ทันที ทั้งที่โพสต์อายุ 38 ชม.แล้ว)
                 status = "skipped"
-                note = f"งาน{'ถูกยกเลิก' if job['status'] == 'cancelled' else 'ล้ม'}"
+                if job.get("manual_completed") or job.get("status") == "manual_done":
+                    note = "ผู้ใช้กดจบงานแล้ว"
+                else:
+                    note = f"งาน{'ถูกยกเลิก' if job['status'] == 'cancelled' else 'ล้ม'}"
             elif hours > WINDOW_HOURS:
                 status, note = "expired", f"เกิน {WINDOW_HOURS} ชม.แล้ว เลิกตาม"
             elif tries >= MAX_TRIES:

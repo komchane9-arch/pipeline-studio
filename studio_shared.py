@@ -19,10 +19,20 @@ import msvcrt
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import time as _time
 import unicodedata
+
+# ป้องกัน UnicodeEncodeError บน Windows เมื่อพิมพ์ภาษาไทย/emoji ออก console หรือ log
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 from contextlib import contextmanager
 from ctypes import wintypes
 from datetime import datetime
@@ -55,12 +65,12 @@ BROWSER_LOCK_INFO = DATA_DIR / "browser.lock.info"
 # โปรไฟล์ Chrome ที่ใช้ขับ ChatGPT / Shopee / Google Flow — **มีตัวเดียว**
 BROWSER_PROFILE = DATA_DIR / "flow_browser_profile"
 
-# ============================================ ข้อมูลงานโพสต์ (Google Drive)
+# ============================================ ข้อมูลงานโพสต์ (local state + Drive media)
 #
-# ข้อมูลของสายโพสต์ย้ายออกจาก data/ ไปอยู่บน Google Drive ตามที่เจ้าของงานสั่ง
-# (19 ส.ค. 2026) เพื่อให้สำรองอัตโนมัติและเปิดดูจากเครื่องอื่นได้
+# รูปและหลักฐานของสายโพสต์ย้ายออกจาก data/ ไปอยู่บน Google Drive ตามที่เจ้าของ
+# งานสั่ง (19 ส.ค. 2026) เพื่อประหยัดพื้นที่เครื่องและเปิดดูจากเครื่องอื่นได้
 #
-# **ย้ายเฉพาะของสายโพสต์** ไม่ใช่ทั้ง data/ — data/ มีโปรไฟล์บอท 1.7 GB กับ
+# **ย้ายเฉพาะสื่อของสายโพสต์** ไม่ใช่ทั้ง data/ — data/ มีโปรไฟล์บอท 1.7 GB กับ
 # โปรไฟล์เบราว์เซอร์อีก 500 MB ซึ่งเป็นของชั่วคราวที่เขียนรัวตลอดเวลา
 # ยัดขึ้น Drive คือเผาแบนด์วิดท์ทิ้งโดยไม่ได้ประโยชน์อะไร
 #
@@ -69,9 +79,15 @@ BROWSER_PROFILE = DATA_DIR / "flow_browser_profile"
 #     ล็อกไฟล์ข้ามโปรเซส (msvcrt)    ใช้ได้
 #     ยิงรัว 80 ครั้งเท่างานหนึ่งใบ   1.9 วินาที · ไม่ล้มเลย · ไม่ต้องลองซ้ำ
 #
+# **สถานะห้ามผูกกับ Drive อีก** — 18 ก.ย. 2569 `fb_groups.json` ของบัญชี Preaw
+# หายจาก Drive เพียงไฟล์เดียว ทั้งที่ `fb_jobs.json` ยังอยู่ ทำให้ทะเบียน 4 กลุ่ม
+# กลายเป็น 0 ทันที สำเนารายชื่อในเครื่องก็ไม่มี เพราะระบบสำรองเดิมเก็บเฉพาะ
+# `data/` ชั้นบน ดังนั้นงาน กลุ่ม โควตา และตารางทั้งหมดเก็บ local-first ใต้
+# `data/facebook-post-state/`; Drive เหลือไว้เฉพาะรูปและหลักฐานที่มีขนาดใหญ่
+#
 # **ไดรฟ์ไม่พร้อมต้องไม่ทำให้ระบบตาย** — Google Drive ไม่ได้รัน/เน็ตหลุด/ยังไม่
-# ล็อกอิน เกิดได้จริง ถ้าล้มตอน import คือทั้งระบบเปิดไม่ขึ้น จึงถอยมาใช้ data/
-# ในเครื่องแทน แล้วชูธงไว้ให้ /health กับ /quotafb เห็นว่ากำลังใช้ที่สำรองอยู่
+# ล็อกอิน เกิดได้จริง ถ้าล้มตอน import คือทั้งระบบเปิดไม่ขึ้น จึงถอยเฉพาะที่เก็บ
+# รูปมาใช้ data/ ในเครื่องแทน แล้วชูธงไว้ให้หน้าเว็บเห็น
 # **สนามทดสอบต้องลากข้อมูลโพสต์ตามไปด้วย** ใครตั้ง STUDIO_DATA_DIR แปลว่า
 # ตั้งใจแยกสนาม ถ้า POST_DIR ยังชี้ Drive อยู่ เทสจะไปอ่าน-เขียนข้อมูลจริง
 # บนคลาวด์ — กินโควตาจริง ทับงานจริง และผลเทสก็เพี้ยนตามสถานะจริงไปด้วย
@@ -131,9 +147,9 @@ if POST_DIR != DATA_DIR:
         POST_DIR_WHY = (
             f"เขียนลง {POST_DIR} ไม่ได้ ({type(_last_error).__name__}: "
             f"{_last_error}) หลังลอง {POST_DIR_TRIES} รอบ — ถอยไปใช้ {DATA_DIR} "
-            f"ซึ่ง **ไม่มีข้อมูลงานโพสต์อยู่เลย** ทะเบียนกลุ่มกับใบงานจะอ่านได้ 0 "
-            f"ทั้งที่ของจริงยังอยู่ครบบน Drive — ปิดเซิร์ฟเวอร์แล้วเปิดใหม่เมื่อ "
-            f"Drive พร้อม แล้วทุกอย่างจะกลับมาเอง"
+            f"สำหรับรูปและหลักฐานชั่วคราว ทะเบียนกลุ่มกับใบงานยังอ่านจาก "
+            f"{DATA_DIR / 'facebook-post-state'} ในเครื่องได้ตามปกติ — เปิด Drive "
+            f"แล้วรีสตาร์ตเมื่อพร้อม เพื่อให้รูปใหม่กลับไปเก็บที่เดิม"
         )
         POST_DIR = DATA_DIR
         POST_DIR_READY = False

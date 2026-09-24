@@ -39,3 +39,21 @@ desktop.ini
 # หน้าสรุปงานที่สร้างใหม่ทุกเช้า — เป็นผลลัพธ์ ไม่ใช่ซอร์ส
 web/board/
 yolo11n.pt
+
+# ---- เพิ่ม 25 ก.ย. 2569 ตอนส่งขึ้น GitHub ให้ Claude บน cloud ------------------
+# ข้อมูลลับ / ของติดตั้ง / ของที่สร้างใหม่ได้ (ตามรายการขั้นต่ำที่เจ้าของกำหนด)
+.env
+.env.*
+node_modules/
+dist/
+build/
+.DS_Store
+# ของส่วนตัว — ภาพหน้าจอมือถือมีชื่อคนและข้อความ Facebook ห้ามขึ้น repo
+diagnostics/
+scratch/
+outputs/
+backups/
+# ภาพหน้าจอชั่วคราว + ไฟล์สำรองที่ตัวแก้โค้ดทิ้งไว้
+phone_screen_temp.png
+preview_crop.png
+*.bak

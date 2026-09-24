@@ -827,13 +827,27 @@ dialog .block[open] > summary { border-bottom: 0.5px solid var(--line); }
 /* รายชื่อกลุ่มที่ผูกกับโปรไฟล์ — อยู่บนหน้า Group Facebook โดยตรง */
 .gf-linked {
   margin: 10px 0 18px;
-  padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--r-card);
   background: var(--shade);
+  overflow: clip;
 }
+.gf-linked-summary {
+  display: flex; align-items: center; gap: 8px; padding: 12px;
+  cursor: pointer; list-style: none; user-select: none;
+}
+.gf-linked-summary::-webkit-details-marker { display: none; }
+.gf-linked-summary::before {
+  content: "▶"; font-size: 9px; color: var(--ink-3); transition: transform 0.16s;
+}
+.gf-linked[open] > .gf-linked-summary::before { transform: rotate(90deg); }
+.gf-linked-summary:hover, .gf-linked[open] > .gf-linked-summary {
+  background: var(--tint);
+}
+.gf-linked[open] > .gf-linked-summary { border-bottom: 1px solid var(--line); }
+.gf-linked-summary h3 { margin: 0; }
+.gf-linked-body { padding: 10px 12px 12px; }
 .gf-linked-head { align-items: center; gap: 8px; }
-.gf-linked-head h3 { margin: 0; }
 .gf-linked-head .ghost { margin-left: auto; }
 .gf-linked-count {
   padding: 3px 9px;
@@ -1003,6 +1017,17 @@ dialog .block[open] > summary { border-bottom: 0.5px solid var(--line); }
 .gfp-group-choices span { overflow-wrap: anywhere; }
 .gfp-actions { margin-top: 12px; align-items: center; flex-wrap: wrap; }
 .gfp-actions > label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.gfp-actions > label.gfp-no-comments {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--panel);
+  font-size: 13px;
+}
+.gfp-comments.no-comments { opacity: 0.48; }
 .gfp-actions select { min-width: 260px; max-width: 100%; }
 .gfp-actions #gfpDevice { margin-left: auto; }
 .gfp-job-source {
@@ -1824,6 +1849,19 @@ button:disabled { opacity: 0.5; }
   opacity: 1;
 }
 .health-chip.down::before { content: "● "; }
+.bot8-login-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #cf5f4a;
+  background: #fff1ee;
+  color: #8d281d;
+  font-weight: 600;
+}
+.bot8-login-alert[hidden] { display: none; }
+[data-theme="dark"] .bot8-login-alert { background: #3e211f; color: #ffd0c7; }
 .health-chip.waiting {
   border-color: var(--accent);
   color: var(--accent-text);
@@ -2334,25 +2372,6 @@ button:disabled { opacity: 0.5; }
    เลือกเขียวมะนาวเพราะกองข้างเคียงคือชมพู (Picture) กับม่วง (Storyboard)
    — แถบสีสูงแค่ 3px ต้องต่างกันคนละโทนถึงจะแยกออก */
 
-/* ปุ่มติ๊ก "ทำเอง" บนการ์ดใบงาน — วางคู่ปุ่ม "ใช้ชุดรูปนี้ ไปต่อ"
-   เพราะเป็นจุดตัดสินใจเดียวกัน: ให้เครื่องทำต่อ หรือจะทำเอง
-   ใช้สีเดียวกับกอง Manual บนกระดาน เพื่อให้โยงกันได้ด้วยตา */
-.manual-tick {
-  display: inline-flex; align-items: center; gap: 7px;
-  padding: 5px 11px; border-radius: 999px;
-  border: 1px solid var(--line); background: var(--panel);
-  font-size: 13px; cursor: pointer; user-select: none;
-}
-.manual-tick:hover { border-color: #84cc16; }
-.manual-tick input { accent-color: #84cc16; cursor: pointer; margin: 0; }
-.manual-tick:has(input:checked) {
-  border-color: #84cc16; font-weight: 700;
-  background: color-mix(in srgb, #84cc16 12%, var(--panel));
-}
-/* ยังอ่านสถานะไม่ได้ — **ต้องดูต่างจาก "รู้แล้วว่ายังไม่ติ๊ก"** (ข้อ 2.3.1)
-   ไม่งั้นใบที่ติ๊กไว้จะขึ้นเป็นช่องว่าง แล้วกดซ้ำกลายเป็นปิดโหมดทิ้งโดยไม่ตั้งใจ */
-.manual-tick.is-unknown { opacity: .55; cursor: progress; font-style: italic; }
-.manual-tick.is-unknown input { cursor: progress; }
 .board-tab[data-key="manual"]         { --stage: #84cc16; }  /* เขียวมะนาว — คนทำเอง */
 /* กองเดิมชื่อ "clip" ถูกแยกเป็นสองกองเมื่อ 19 ก.ย. 2569 และชื่อเดิมถูกลบถาวร
    เจน Clip รับสีส้มของกองเดิมมาต่อ เพราะเป็นขั้นที่ได้ของจริงออกมา
@@ -3346,9 +3365,9 @@ body.typing-through {
   border: 1px solid var(--line);
   border-left: 4px solid var(--none);
   border-radius: 10px;
-  padding: 10px 12px;
   background: var(--panel);
   color: var(--ink);
+  overflow: clip;
 }
 .fc-running { border-left-color: var(--ok); }
 .fc-ready { border-left-color: var(--warn); }
@@ -3356,7 +3375,20 @@ body.typing-through {
 .fc-failed { border-left-color: var(--bad); }
 .fc-done { border-left-color: var(--none); }
 
-.fc-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.fc-summary {
+  display: block; cursor: pointer; padding: 10px 12px; list-style: none;
+  user-select: none;
+}
+.fc-summary::-webkit-details-marker { display: none; }
+.fc-summary::before {
+  content: "▶"; display: inline-block; margin-right: 7px; font-size: 9px;
+  color: var(--ink-3); transition: transform 0.16s;
+}
+.fc-job[open] > .fc-summary::before { transform: rotate(90deg); }
+.fc-summary:hover, .fc-job[open] > .fc-summary { background: var(--shade); }
+.fc-job[open] > .fc-summary { border-bottom: 1px solid var(--line); }
+.fc-head { display: inline-flex; align-items: baseline; gap: 8px; flex-wrap: wrap; max-width: calc(100% - 22px); }
+.fc-job-body { padding: 0 12px 10px; }
 .fc-badge { font-size: 12px; font-weight: 700; white-space: nowrap; }
 .fc-title { font-size: 13px; overflow-wrap: anywhere; flex: 1 1 auto; }
 .fc-prog { margin: 4px 0 0; font-size: 12px; color: var(--ink-3); }
@@ -3628,6 +3660,59 @@ body.typing-through {
    จึงเยื้องคอมเมนต์เข้ามาและขีดเส้นตั้งด้านซ้ายให้เห็นว่าอยู่ใต้โพสต์ไหน */
 
 .eg-list { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 4px; }
+.eg-job {
+  border: 1px solid color-mix(in srgb, var(--line) 74%, var(--info-ink));
+  border-radius: 14px; background: var(--panel); color: var(--ink); overflow: clip;
+}
+.eg-j-summary { cursor: pointer; padding: 12px 14px; background: var(--shade); }
+.eg-j-summary:hover { background: color-mix(in srgb, var(--shade) 70%, var(--panel)); }
+.eg-j-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.eg-j-name { font-size: 15px; color: var(--ink); }
+.eg-job-account {
+  border-radius: 999px; padding: 2px 9px; white-space: nowrap;
+  background: var(--info-chip); color: var(--info-ink); font-size: 10.5px; font-weight: 700;
+}
+.eg-j-caption { flex: 1 1 320px; color: var(--ink-2); font-size: 11.5px; overflow-wrap: anywhere; }
+.eg-job-body { display: flex; flex-direction: column; gap: 9px; padding: 10px; }
+.eg-job-groups { display: flex; flex-direction: column; gap: 8px; }
+.eg-job-links { padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.eg-job-link-row { padding: 8px 0; border-top: 1px solid var(--line); font-size: 12px; }
+.eg-job-link-row > a { margin-left: 12px; }
+.eg-job-link-row > small { display: block; }
+.eg-job-pending-preview { margin-top: 6px; padding: 8px; background: var(--shade); border-radius: 8px; }
+.eg-job-pending-preview p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; }
+.eg-job-detail {
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px;
+  background: color-mix(in srgb, var(--shade) 55%, var(--panel));
+}
+.eg-job-identity { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.eg-job-profile { color: var(--ink); font-size: 12px; }
+.eg-job-state { color: var(--ink-2); font-size: 11px; }
+.eg-job-caption {
+  margin: 8px 0 6px; padding: 7px 10px; border-radius: 7px;
+  background: var(--panel); color: var(--ink); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.eg-job-content { margin-top: 7px; color: var(--ink-2); font-size: 11px; }
+.eg-job-content > summary { cursor: pointer; }
+.eg-job-content > summary:hover { color: var(--ink); }
+.eg-job-content-body { margin: 7px 0; padding: 8px; border-left: 2px solid var(--line); }
+.eg-job-comment {
+  margin-top: 7px; padding: 7px 9px; border-radius: 7px;
+  background: var(--panel); color: var(--ink-2); overflow-wrap: anywhere;
+}
+.eg-job-comment p { margin: 3px 0 0; white-space: pre-wrap; }
+.eg-job-meta, .eg-job-times {
+  margin: 7px 0 0; color: var(--ink-3); font-size: 11px;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.eg-job-stop {
+  border: 1px solid var(--bad); border-radius: 999px; padding: 3px 10px;
+  background: var(--panel); color: var(--bad-ink); font: inherit; font-size: 10.5px;
+  white-space: nowrap; cursor: pointer;
+}
+.eg-job-stop:disabled { opacity: 0.5; cursor: wait; }
+.eg-manual-job { margin-left: auto; padding: 3px 10px; font-size: 10.5px; }
 .eg-group {
   border: 1px solid var(--line); border-radius: 12px;
   background: var(--panel); color: var(--ink); overflow: clip;
@@ -3639,6 +3724,12 @@ body.typing-through {
 .eg-g-active { background: var(--info-chip); color: var(--info-ink); font-weight: 700; }
 .eg-g-shown { color: var(--ink-3); background: var(--panel); }
 .eg-group-body { display: flex; flex-direction: column; gap: 7px; padding: 8px; }
+.eg-g-active[type="button"] { cursor: pointer; border: 0; font: inherit; }
+.eg-g-active[aria-expanded="true"] { outline: 2px solid var(--info-ink); }
+.eg-tracked-list { padding: 10px; border-bottom: 1px solid var(--line, #ddd); }
+.eg-tracked-row { padding: 10px 0; border-bottom: 1px solid var(--line, #ddd); }
+.eg-tracked-link { display: block; white-space: pre-line; overflow-wrap: anywhere; }
+.eg-tracked-row .eg-p-stat { display: block; margin: 5px 0; }
 .eg-post {
   border: 1px solid var(--line); border-radius: 10px;
   background: var(--panel); color: var(--ink); overflow: clip;
@@ -3648,7 +3739,7 @@ body.typing-through {
 .eg-post-body { padding: 0 10px 10px; border-top: 1px solid var(--line); }
 .eg-p-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .eg-p-title { font-size: 12.5px; overflow-wrap: anywhere; }
-.eg-p-link { margin-left: auto; color: var(--link); text-decoration: none; white-space: nowrap; font-size: 11px; }
+.eg-p-link { color: var(--link); text-decoration: none; white-space: nowrap; font-size: 11px; }
 .eg-p-link:hover { text-decoration: underline; }
 .eg-p-stat { margin: 3px 0 0; font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 
@@ -3678,6 +3769,19 @@ body.typing-through {
 .eg-watch-stop { border-color: var(--bad); color: var(--bad-ink); }
 .eg-watch-keep { border-color: var(--ok); color: var(--ok-ink); font-weight: 700; }
 .eg-watch-stop:disabled, .eg-watch-keep:disabled { opacity: 0.5; cursor: default; }
+.eg-manual {
+  border: 1px solid var(--ok); border-radius: 999px; padding: 4px 10px;
+  background: color-mix(in srgb, var(--ok) 10%, var(--panel));
+  color: var(--ok-ink); font: inherit; font-size: 11px; font-weight: 700;
+  white-space: nowrap; cursor: pointer;
+}
+.eg-manual:hover { background: color-mix(in srgb, var(--ok) 18%, var(--panel)); }
+.eg-manual:disabled { opacity: 0.48; cursor: wait; }
+.eg-manual-group, .eg-manual-post { margin-left: auto; padding: 2px 9px; font-size: 10.5px; }
+.eg-manual-feedback {
+  margin: -2px 0 8px; color: var(--ok-ink); font-size: 11px; font-weight: 700;
+}
+.eg-manual-feedback.is-bad { color: var(--bad-ink); }
 
 /* เยื้องเข้ามา + เส้นตั้ง = "อันนี้อยู่ใต้โพสต์ข้างบน" แบบเดียวกับที่ Facebook ทำ */
 /* กล่องเนื้อหาโพสต์ — รูป · แคปชัน · คอมเมนต์ของเราเอง (เจ้าของสั่ง 15 ก.ย. 2569)
@@ -3724,7 +3828,7 @@ body.typing-through {
 /* สองปุ่มใต้คอมเมนต์ (เจ้าของสั่ง 15 ก.ย. 2569)
    "ตอบกลับ" เป็นเส้นทางหลัก จึงเป็นปุ่มทึบ ส่วน "เพิกเฉย" เป็นทางที่ไม่ทำอะไร
    จึงเป็นปุ่มจาง — แยกด้วยน้ำหนักไม่ใช่ด้วยสีอย่างเดียว คนตาบอดสีต้องแยกออก */
-.eg-send, .eg-skip {
+.eg-send, .eg-skip, .eg-add-comment {
   font-size: 11px; padding: 3px 14px; border-radius: 999px; cursor: pointer;
   border: 1px solid var(--line); background: var(--panel); color: var(--ink-2);
 }
@@ -3735,11 +3839,69 @@ body.typing-through {
   background: color-mix(in srgb, var(--ok) 14%, var(--panel));
 }
 .eg-skip:hover { border-color: var(--ink-3); color: var(--ink); }
-.eg-send:disabled, .eg-skip:disabled { opacity: 0.5; cursor: default; }
+.eg-add-comment { margin-top: 6px; border-style: dashed; color: var(--link); }
+.eg-add-comment:hover { border-color: var(--link); }
+.eg-followup-editor { margin-top: 7px; padding: 8px; border: 1px dashed var(--line); border-radius: 8px; background: var(--panel-2); }
+.eg-followup-editor[hidden] { display: none; }
+.eg-send:disabled, .eg-skip:disabled, .eg-add-comment:disabled { opacity: 0.5; cursor: default; }
 /* **ต้องอ่านออกว่ายังไม่ได้ส่ง** ไม่งั้นเห็นข้อความในช่องแล้วนึกว่าตอบไปแล้ว */
 .eg-note { font-size: 10.5px; color: var(--warn-ink); overflow-wrap: anywhere; }
 .eg-note.is-sent { color: var(--ok-ink); }
 .eg-note.is-bad { color: var(--bad-ink); font-weight: 700; }
+.eg-mass-section {
+  margin: 8px 0 12px; padding: 10px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--panel-2);
+}
+.eg-mass-heading { gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.eg-mass-heading h3 { margin: 0 auto 0 0; font-size: 14px; }
+.eg-mass-section > .note { margin: 4px 0 8px; }
+.eg-mass-section .eg-collector-row { margin-bottom: 0; }
+.eg-mass-open { display: inline-flex; align-items: center; text-decoration: none; }
+.eg-mass-section .eg-manual-feedback { margin: 7px 0 0; }
+.eg-collector-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px;
+  align-items: stretch; margin: 5px 0 8px;
+}
+.eg-collector {
+  display: grid; gap: 3px; margin: 0; padding: 8px 10px;
+  border: 1px solid var(--line); border-left: 4px solid var(--ink-3);
+  border-radius: 8px; background: var(--panel-2); color: var(--ink-2);
+  font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere;
+}
+.eg-collector.is-active { border-left-color: var(--ok); }
+.eg-collector.is-waiting { border-left-color: var(--warn); }
+.eg-collector-top { font-variant-numeric: tabular-nums; }
+.eg-collector-detail { color: var(--ink); }
+.eg-collector-post { color: var(--ink-3); }
+.eg-collector-post a { color: var(--link); text-decoration: none; margin-left: 2px; }
+.eg-collector-post a:hover { text-decoration: underline; }
+.eg-collect-schedule {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+  min-width: 420px; max-width: 620px; padding: 7px 9px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+  font-size: 11px;
+}
+.eg-schedule-time { display: flex; align-items: center; gap: 5px; font-weight: 700; }
+.eg-schedule-time input { width: 104px; padding: 4px 7px; font-variant-numeric: tabular-nums; }
+.eg-schedule-modes {
+  display: flex; gap: 9px; align-items: center; margin: 0; padding: 0; border: 0;
+}
+.eg-schedule-modes legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.eg-schedule-modes label { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+.eg-schedule-modes input { margin: 0; accent-color: var(--ok); }
+.eg-schedule-save {
+  border: 1px solid var(--ok); border-radius: 999px; padding: 4px 10px;
+  background: color-mix(in srgb, var(--ok) 12%, var(--panel));
+  color: var(--ok-ink); font-weight: 700;
+}
+.eg-schedule-clear { padding: 4px 9px; font-size: 11px; }
+.eg-schedule-save:disabled, .eg-schedule-clear:disabled { opacity: .5; cursor: wait; }
+.eg-schedule-status { flex: 1 0 100%; color: var(--ink-3); line-height: 1.35; }
+.eg-schedule-status.is-bad { color: var(--bad-ink); font-weight: 700; }
+@media (max-width: 980px) {
+  .eg-collector-row { grid-template-columns: 1fr; }
+  .eg-collect-schedule { min-width: 0; max-width: none; }
+}
 .eg-daily {
   margin: 5px 0 8px; padding: 7px 10px; border-radius: 8px;
   border: 1px solid var(--line); background: var(--panel-2);
@@ -3760,6 +3922,21 @@ body.typing-through {
   border-color: var(--bad); background: color-mix(in srgb, var(--bad) 9%, var(--panel));
   color: var(--bad-ink);
 }
+.eg-timer-work, .eg-timer-summary { display: block; }
+.eg-timer-work {
+  margin-bottom: 5px; padding-bottom: 5px; border-bottom: 1px solid var(--line);
+  color: var(--ok-ink); overflow-wrap: anywhere;
+}
+.eg-timer-work b { margin-right: 5px; }
+.eg-timer-work a { color: var(--link); }
+.eg-reply-alerts { display: grid; gap: 6px; margin-bottom: 8px; }
+.eg-reply-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid var(--bad); border-radius: 8px; background: var(--panel); font-size: 12px; }
+.eg-notice-message { flex: 1 1 300px; overflow-wrap: anywhere; }
+.eg-reply-notice.is-done { border-color: #279354; }
+.eg-notice-retry, .eg-notice-dismiss, .eg-notice-delete { padding: 6px 12px; border: 1px solid currentColor; border-radius: 18px; cursor: pointer; }
+.eg-notice-delete { color: var(--bad-ink); background: var(--panel); }
+.eg-notice-retry:disabled, .eg-notice-delete:disabled { opacity: .55; cursor: default; }
+.eg-notice-link { white-space: nowrap; }
 .eg-empty { margin: 6px 0; font-size: 11.5px; color: var(--ink-3); }
 
 /* ============ 🔎 ด่านยืนยันสินค้า TikTok ก่อนลงคลิป (14 ก.ย. 2569) */
@@ -3928,6 +4105,146 @@ body.typing-through {
   font-size: 12.5px; font-weight: 700; color: #5f9e0f;
 }
 .mn-done-say { font-weight: 400; color: var(--ink-2); overflow-wrap: anywhere; }
+
+/* ปุ่ม "เริ่มเลย" บนแถบนับถอยหลังก่อนตอบคอมเมนต์ (เจ้าของสั่ง 20 ก.ย. 2569)
+   อยู่ในแถบเดียวกับข้อความ ไม่แยกแถวใหม่ เพราะมันคือทางเลือกของข้อความนั้น
+   ไม่ใช่คำสั่งใหม่คนละเรื่อง */
+.eg-start-now {
+  margin-left: 10px; padding: 3px 12px; border-radius: 999px;
+  border: 1px solid var(--accent); background: var(--panel);
+  color: var(--accent); font-size: 12px; font-weight: 700;
+  cursor: pointer; white-space: nowrap; vertical-align: middle;
+}
+.eg-start-now:hover { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.eg-start-now:disabled { opacity: .55; cursor: progress; }
+.reels-download-row { align-items: flex-start; }
+.reels-download-row textarea { flex: 1 1 520px; min-width: 220px; resize: vertical; }
+.reels-download-actions { display: grid; gap: 8px; min-width: 170px; }
+.reels-download-results { display: grid; gap: 12px; margin-top: 12px; }
+.reels-download-card { border: 1px solid var(--line, #ddd); border-left-width: 4px; border-radius: 10px; padding: 12px; }
+.reels-download-card.is-running { border-left-color: #8a75d1; }
+.reels-download-card.is-success { border-left-color: #35a867; }
+.reels-download-card.is-failed { border-left-color: #d85b56; }
+.reels-download-card video { display: block; width: 100%; max-width: 360px; max-height: 480px; margin: 8px 0; }
+.reels-download-source, .reels-download-path { overflow-wrap: anywhere; }
+
+/* ปุ่ม "ไปทำเอง" บนการ์ดใบงาน — วางคู่ปุ่มเขียว "ใช้ชุดรูปนี้ ไปต่อ"
+   เจ้าของสั่ง 20 ก.ย. 2569 ให้เปลี่ยนจากสวิตช์ติ๊กเป็นปุ่มกด
+   เพราะกดแล้วใบย้ายกองทันที ไม่ใช่แค่ตั้งค่าไว้เฉยๆ
+   ใช้เขียวมะนาวเดียวกับกอง Manual บนกระดาน เพื่อให้โยงกันได้ด้วยตา */
+.mn-go {
+  border-color: #84cc16; color: #5f9e0f; font-weight: 700;
+}
+.mn-go:hover { background: color-mix(in srgb, #84cc16 12%, var(--panel)); }
+.mn-go:disabled { opacity: .55; cursor: progress; }
+/* ยังอ่านสถานะไม่ได้ — **ต้องดูต่างจากปุ่มที่กดได้** (ข้อ 2.3.1)
+   ไม่งั้นใบที่อยู่ในโหมดทำเองอยู่แล้วจะขึ้นปุ่มให้กดซ้ำ */
+.mn-go-wait {
+  font-size: 12px; color: var(--ink-3); font-style: italic;
+  padding: 5px 10px; align-self: center;
+}
+
+/* แถวเลือกโฟลเดอร์เก็บคลิป (เจ้าของสั่ง 21 ก.ย. 2569)
+   ใช้ช่องพิมพ์ที่อยู่ ไม่ใช่กล่องเลือกโฟลเดอร์ เพราะหน้าเว็บเปิดจากคอมอีกเครื่อง
+   กล่องเลือกไฟล์จะได้ที่อยู่ของเครื่องที่เปิดหน้าเว็บ ซึ่งคนละเครื่องกับที่เก็บไฟล์ */
+.reels-folder-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 0 0 8px; font-size: 12.5px;
+}
+.reels-folder-row label { color: var(--ink-2); font-weight: 700; white-space: nowrap; }
+.reels-folder-row input {
+  flex: 1 1 300px; min-width: 200px;
+  padding: 5px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  font-size: 12.5px;
+}
+
+/* ถอดเสียงคลิปเป็นสคริป (เจ้าของสั่ง 21 ก.ย. 2569)
+   กล่องข้อความต้องเลือกได้และกว้างพอให้เห็นหลายบรรทัด เพราะจุดประสงค์
+   คือเอาไปใช้ต่อ ไม่ใช่แค่อ่านผ่านๆ */
+.reels-stt { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.reels-stt-go { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.reels-stt-go:disabled { opacity: .55; cursor: progress; }
+.reels-stt-state { flex: 1 1 100%; font-size: 11.5px; overflow-wrap: anywhere; }
+.reels-stt-state.is-bad { color: var(--bad-ink); font-weight: 700; }
+.reels-stt-text {
+  flex: 1 1 100%; width: 100%; resize: vertical;
+  padding: 9px 11px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  font-size: 13px; line-height: 1.6;
+}
+
+/* รายการคลิปที่เก็บไว้ — โชว์แค่หัว ที่เหลือกางเอา (เจ้าของสั่ง 21 ก.ย. 2569)
+
+   ใช้ <details> ของเบราว์เซอร์ตรงๆ ไม่เขียนตัวพับเอง เพราะกดด้วยคีย์บอร์ดได้
+   และไม่ต้องเก็บสถานะเปิด/ปิดไว้ใน JS ให้หายตอนวาดใหม่
+
+   **ทุกกฎต้องผูกกับ .reels-item เสมอ** ในไฟล์นี้มี summary ของอย่างอื่นอีก
+   หลายชุด (.block, .bd-band, .bd-cell …) ถ้าเขียนลอยๆ จะไปทับกันข้ามส่วน */
+.reels-list-bar {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 10px; margin-top: 12px;
+}
+.reels-list-bar .note { flex: 1 1 260px; }
+.reels-list-bar .note.is-bad { color: var(--warn-ink); font-weight: 700; }
+
+.reels-item { padding: 0; }
+.reels-item > summary {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; cursor: pointer; list-style: none;
+  border-radius: 9px;
+}
+.reels-item > summary::-webkit-details-marker { display: none; }
+.reels-item > summary:hover { background: var(--tint); }
+.reels-item-no {
+  flex: 0 0 auto; min-width: 20px; text-align: right;
+  color: var(--ink-3); font-weight: 700; font-size: 12.5px; padding-top: 1px;
+}
+/* ลูกศรบอกว่ากางได้ — อยู่ขวาสุด ไม่ไปเบียดเลขลำดับ */
+.reels-item > summary::after {
+  content: "▶"; flex: 0 0 auto; margin-left: auto; align-self: center;
+  font-size: 9px; color: var(--ink-3); transition: transform 0.16s;
+}
+.reels-item[open] > summary::after { transform: rotate(90deg); }
+.reels-item-head {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto;
+}
+.reels-item-state { font-size: 13px; }
+.reels-item-url { font-size: 11.5px; overflow-wrap: anywhere; }
+.reels-item-title {
+  font-size: 12.5px; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.reels-item-body {
+  padding: 10px 12px 12px; border-top: 0.5px solid var(--separator);
+}
+.reels-item-body .is-bad { color: var(--warn-ink); font-weight: 600; }
+
+/* สีขอบซ้ายบอกสถานะ — ส้มคือ "ยังตรวจไม่ได้" ซึ่งไม่เท่ากับ "พัง" */
+.reels-download-card.is-unknown { border-left-color: var(--warn); }
+
+.reels-item-danger {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 8px; margin-top: 10px; padding-top: 10px;
+  border-top: 0.5px dashed var(--separator);
+}
+.reels-item-del { color: var(--bad-ink); border-color: var(--bad-ink); }
+.reels-item-warn { flex: 1 1 240px; color: var(--bad-ink); font-weight: 700; }
+.reels-item-yes {
+  background: var(--bad); color: #fff; border: 1px solid var(--bad);
+  border-radius: 8px; padding: 6px 14px; font-weight: 700; cursor: pointer;
+}
+.reels-item-yes:disabled { opacity: .6; cursor: progress; }
+
+/* บันทึกสดของงานโพสต์ลงเพจ — ต้องอ่านง่ายและไม่ดันหน้าให้ยาวเกินจอ */
+.pg-log {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.5;
+}
+#pgComments textarea { flex: 1; }
 
 /* ---- สายโปสเตอร์ (23 ก.ย. 2569) — อยู่ในแท็บสตอรีบอร์ด ใต้สายเจนคลิป
    กล่อง · รายการ · รายละเอียด ใช้คลาสของกระดานเดิมทั้งหมด (clip-board ·

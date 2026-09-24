@@ -1,7 +1,7 @@
 """หาโพสต์แมสในกลุ่ม Facebook — ขับผ่านโปรไฟล์บอทจากฟาร์ม แล้วส่งลิงก์เข้า Telegram
 
 หลักการ (ตาม CLAUDE.md ของโปรเจกต์):
-- ใช้โปรไฟล์บอทจากฟาร์ม (ค่าปริยาย Bot10) เป็นเบราว์เซอร์ — ล็อกอิน Facebook
+- ใช้โปรไฟล์บอทจากฟาร์มที่กำหนดไว้เป็นเบราว์เซอร์ — ล็อกอิน Facebook
   ค้างอยู่ในโปรไฟล์นั้น คนละโฟลเดอร์ = คนละโปรเซส ไม่ชนกับงานอื่นของสตูดิโอ
 - **ไม่เดา DOM ของ Facebook** — ยอดรีแอคชันอ่านจาก JSON ที่ฟีดโหลดจริง
   (GraphQL ตอน scroll + JSON ที่ฝังมากับ HTML หน้าแรก) ซึ่ง key `reaction_count`
@@ -69,7 +69,10 @@ DEFAULT_GROUPS = [
 ]
 
 DEFAULT_CONFIG = {
-    "bot_profile": "Bot10",     # ชื่อหรือ id ของโปรไฟล์ในฟาร์ม
+    # Bot9 สงวนให้ตัวเก็บคอมเมนต์เท่านั้นตั้งแต่ 19 ก.ย. 2569
+    # งานหาโพสต์แมสต้องระบุโปรไฟล์อื่นเอง และเปิด browser_enabled ก่อน
+    "bot_profile": "",
+    "browser_enabled": False,
     "min_likes": 100,
     "min_shares": 0,            # 0 = ไม่ใช้เกณฑ์นี้
     "min_comments": 0,          # 0 = ไม่ใช้เกณฑ์นี้
@@ -108,6 +111,25 @@ PAIR_WINDOW = 6000
 
 class MassFinderError(RuntimeError):
     """ข้อผิดพลาดที่ตั้งใจให้ผู้ใช้อ่านแล้วรู้ว่าต้องทำอะไรต่อ"""
+
+
+COMMENT_COLLECTOR_PROFILE = "Bot9"
+
+
+def mass_browser_profile(config: dict) -> str:
+    """โปรไฟล์ที่งานแมสใช้ได้ โดยกัน Bot9 ไว้ให้เก็บคอมเมนต์แบบถาวร."""
+    if not bool(config.get("browser_enabled", True)):
+        raise MassFinderError(
+            "งานเปิด Facebook ของบอทหาโพสต์แมสถูกปิดไว้ — "
+            "Bot9 สงวนให้เก็บคอมเมนต์เท่านั้น")
+    profile = str(config.get("bot_profile") or "").strip()
+    if not profile:
+        raise MassFinderError(
+            "ยังไม่ได้กำหนด Chrome profile สำหรับบอทหาโพสต์แมส")
+    if profile.casefold() == COMMENT_COLLECTOR_PROFILE.casefold():
+        raise MassFinderError(
+            "ห้ามใช้ Bot9 กับงานหาโพสต์แมส — Bot9 สงวนให้เก็บคอมเมนต์เท่านั้น")
+    return profile
 
 
 # ------------------------------------------------------------------ ตั้งค่า
@@ -226,6 +248,9 @@ def _open_persistent(playwright, farm: ProfileFarm, entry: dict):
         no_viewport=True,
         args=[
             "--disable-blink-features=AutomationControlled",
+            # Facebook บน Chrome บางรอบตอบ ERR_QUIC_PROTOCOL_ERROR ทุกลิงก์
+            # ใน context เดียวกัน; บังคับใช้ TCP/TLS ปกติเพื่อให้บอทอ่านต่อได้.
+            "--disable-quic",
             # ปิดเสียง — คลิปในฟีดเล่นเองตอนเลื่อนหา เสียงดังใส่ผู้ใช้ทั้งวัน
             "--mute-audio",
             "--profile-directory=Default",
@@ -545,7 +570,7 @@ def join_group(url: str, log=print) -> dict:
     """
     config = load_config()
     farm = ProfileFarm(DATA_DIR)
-    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+    entry = find_bot(farm, mass_browser_profile(config))
 
     from playwright.sync_api import sync_playwright
 
@@ -701,7 +726,7 @@ def deep_scan_groups(groups: list[dict], target: int, log=print) -> list[dict]:
     config = load_config()
     min_eng = int(config.get("min_likes", 100))
     farm = ProfileFarm(DATA_DIR)
-    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+    entry = find_bot(farm, mass_browser_profile(config))
     log(f"ใช้โปรไฟล์บอท: {entry['name']} — เจาะลึกสูงสุด {target:,} โพสต์/กลุ่ม")
 
     from playwright.sync_api import sync_playwright
@@ -845,7 +870,7 @@ def _chart_html(results: list, min_eng: int) -> str:
 def render_test_chart(results: list, min_eng: int, log=print) -> "Path | None":
     """เจนกราฟผล /test เป็น PNG (ผ่าน headless chrome — ฟอนต์ไทยขึ้นครบ)
 
-    ใช้ chrome แบบไม่มีโปรไฟล์ (ไม่แตะ Bot10) render HTML แล้ว screenshot
+    ใช้ chrome แบบไม่มีโปรไฟล์ (ไม่แตะ Bot9) render HTML แล้ว screenshot
     """
     if not any(not r.get("error") for r in results):
         return None
@@ -1058,7 +1083,7 @@ def search_groups(keyword: str, exclude: set | None = None, depth: int = 0,
     exclude = exclude or set()
     config = load_config()
     farm = ProfileFarm(DATA_DIR)
-    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+    entry = find_bot(farm, mass_browser_profile(config))
     log(f'ค้นหากลุ่ม: "{keyword}" (เลื่อน {depth}+{rounds} รอบ)')
 
     from playwright.sync_api import sync_playwright
@@ -1100,7 +1125,7 @@ def search_groups(keyword: str, exclude: set | None = None, depth: int = 0,
 
 
 def inspect_groups(groups: list[dict], log=print) -> list[dict]:
-    """เปิดเบราว์เซอร์ Bot10 **รอบเดียว** แล้วไล่ตรวจ+ถ่ายรูปหลายกลุ่ม
+    """เปิดเบราว์เซอร์ Bot9 **รอบเดียว** แล้วไล่ตรวจ+ถ่ายรูปหลายกลุ่ม
 
     รับ [{gid, url, ...}] คืน list เท่ากันตามลำดับ:
     {"gid", "shot": str|None, "private": True/False/None, "page_name": str,
@@ -1110,7 +1135,7 @@ def inspect_groups(groups: list[dict], log=print) -> list[dict]:
     """
     config = load_config()
     farm = ProfileFarm(DATA_DIR)
-    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+    entry = find_bot(farm, mass_browser_profile(config))
     KW_SHOT_DIR.mkdir(parents=True, exist_ok=True)
 
     from playwright.sync_api import sync_playwright
@@ -1165,7 +1190,7 @@ LEAVE_ITEM_LABEL = re.compile(r"ออกจากกลุ่ม|Leave group|Le
 
 
 def leave_group(url: str, log=print) -> dict:
-    """ให้ Bot10 ออกจากกลุ่ม Facebook — คืน {status, name}
+    """ให้ Bot9 ออกจากกลุ่ม Facebook — คืน {status, name}
 
     status: left (ออกสำเร็จ) · not-member (ไม่ได้เป็นสมาชิกอยู่แล้ว)
             · stuck (เป็นสมาชิกแต่หาปุ่มออกไม่เจอ — ต้องออกเองในแอป)
@@ -1173,7 +1198,7 @@ def leave_group(url: str, log=print) -> dict:
     """
     config = load_config()
     farm = ProfileFarm(DATA_DIR)
-    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+    entry = find_bot(farm, mass_browser_profile(config))
 
     from playwright.sync_api import sync_playwright
 
@@ -1240,7 +1265,7 @@ def run(groups_limit: int = 0, scrolls: int = 0, use_telegram: bool = True,
         token, chat_id = telegram_target(config)
 
     farm = ProfileFarm(DATA_DIR)
-    entry = find_bot(farm, str(config.get("bot_profile") or "Bot10"))
+    entry = find_bot(farm, mass_browser_profile(config))
     log(f"ใช้โปรไฟล์บอท: {entry['name']} ({entry['id']})")
 
     from playwright.sync_api import sync_playwright

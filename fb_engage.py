@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 import urllib.request
@@ -38,8 +39,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import facebook_group_post as fb
+import fb_account_guard
 import fb_auto_post
+import fb_screen
 import studio_shared
+import devices
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -381,7 +385,7 @@ def refresh_stats(config: dict, log=print, stop=lambda: False,
             # ถืออยู่ สร้างไว้ก่อนล็อก = แตะจอนอกเขตที่จองไว้ ต่อให้ wake() มี
             # ทางลัดตอนจอเปิดอยู่แล้วก็ตาม จอที่ดับอยู่จะโดนยิง keyevent แทรก
             # ต้นทุนที่ย้ายมาสร้างทุกใบคือคำสั่งอ่าน 1 ครั้ง (~0.1 วิ) เท่านั้น
-            phone = fb.Phone("adb", serial, log=log)
+            phone = fb.Phone(fb_account_guard.ADB, serial, log=log)
             fb.require_network(phone)
             if not fb.open_post_link(phone, target["link"], target["caption"],
                                      target["group_id"], target["post_id"]):
@@ -497,9 +501,11 @@ def _scroll_into_comments(phone: fb.Phone) -> bool:
             joined = " ".join(labels)
             if any(hint in joined for hint in fb.COMMENT_FILTER_HINTS):
                 return True
-        phone.run(
-            "shell", "input", "swipe", "540", "1800",
-            "540", str(1800 - fb.SCROLL_STEP), str(fb.SCROLL_DURATION_MS),
+        # ใช้ทางผ่านที่ย่อ/ขยายจากจออ้างอิง 1080x2400 ตามขนาดจอจริงเสมอ.
+        # ห้ามยิง ``input swipe`` ตรง: y=1800 อยู่นอกจอ REDMI 15C (720x1600)
+        # ทำให้ภาพไม่เลื่อนและทุกคิวถูกพักว่า "ไม่เจอโซนคอมเมนต์".
+        phone.vswipe(
+            "1800", str(1800 - fb.SCROLL_STEP), str(fb.SCROLL_DURATION_MS),
         )
         time.sleep(1.8)
     return False
@@ -540,6 +546,411 @@ def reply_to_comment(phone: fb.Phone, comment: dict, text: str) -> bool:
     phone.tap(comment["reply"])
     time.sleep(2.5)
     return fb._write_comment(phone, text, lane=REPLY_LANE)
+
+
+def _identity_text(value: str) -> str:
+    """รูปแบบกลางสำหรับเทียบชื่อ/ข้อความจาก Chrome กับจอมือถือ"""
+    return " ".join(str(value or "").casefold().split())
+
+
+def queued_comment_matches(comment: dict, author: str, body: str) -> bool:
+    """ตรงทั้งชื่อเต็มและข้อความเดียวกันเท่านั้น; ข้อความมือถืออาจถูกตัดท้าย"""
+    if _identity_text(comment.get("author", "")) != _identity_text(author):
+        return False
+    # Chrome กับแอปมือถือแทรก metadata คนละแบบและเวลาเปลี่ยนทุกครั้งที่เปิดดู
+    # เทียบเฉพาะเนื้อคอมเมนต์จริง ไม่เอา "6 ชม." / "ติดตาม" / ยอดความรู้สึก
+    seen = _identity_text(fb.comment_text_only(comment.get("text", ""), author))
+    wanted = _identity_text(fb.comment_text_only(body, author))
+    if not seen or not wanted:
+        return False
+    return seen == wanted or (len(seen) >= 8 and wanted.startswith(seen))
+
+
+def _new_reply_target(before: str, after: str, author: str) -> str:
+    """คืนป้ายใหม่ที่ยืนยันว่าช่องพิมพ์กำลังตอบชื่อเป้าหมาย ไม่ใช่คอมเมนต์ลอย"""
+    old = {label for labels, _, _ in fb.iter_widgets(before) for label in labels}
+    wanted = _identity_text(author)
+    marks = ("ตอบกลับ", "กำลังตอบ", "replying to", "reply to")
+    for labels, _, _ in fb.iter_widgets(after):
+        for label in labels:
+            low = _identity_text(label)
+            if label in old or not any(mark in low for mark in marks):
+                continue
+            # บังคับชื่อเต็มตรงกัน — ป้ายที่มีแค่ชื่อหน้าไม่เพียงพอสำหรับการส่งจริง
+            target = re.sub(r"^.*?(?:กำลังตอบกลับ|ตอบกลับ|replying to|reply to)\s*", "", low)
+            if wanted and target == wanted:
+                return label
+    return ""
+
+
+def _all_comments(phone):
+    """Select all comments before deciding that a reply is absent."""
+    xml = phone.dump()
+    options = []
+    for labels, (x1, y1, x2, y2), clickable in fb.iter_widgets(xml):
+        if clickable and any('ตัวกรองความคิดเห็น' in label or
+                             'comment filter' in label.casefold() for label in labels):
+            if any('ความคิดเห็นทั้งหมด' in label or 'all comments' in label.casefold()
+                   for label in labels):
+                return True
+            options.append(((x1 + x2) // 2, (y1 + y2) // 2))
+    if len(set(options)) != 1:
+        return False
+    phone.tap(options[0])
+    time.sleep(1)
+    menu = phone.dump()
+    targets = []
+    for labels, (x1, y1, x2, y2), _ in fb.iter_widgets(menu):
+        if any(label.strip().casefold() in {'ความคิดเห็นทั้งหมด', 'all comments'}
+               for label in labels):
+            targets.append(((x1 + x2) // 2, (y1 + y2) // 2))
+    if len(set(targets)) != 1:
+        phone.back()
+        return False
+    phone.tap(targets[0])
+    time.sleep(2)
+    selected = phone.dump()
+    confirmed = any(clickable and any(
+        ('ตัวกรองความคิดเห็น' in label or 'comment filter' in label.casefold())
+        and ('ความคิดเห็นทั้งหมด' in label or 'all comments' in label.casefold())
+        for label in labels) for labels, _, clickable in fb.iter_widgets(selected))
+    phone.log('  ยืนยันตัวกรองความคิดเห็นทั้งหมดแล้ว' if confirmed else
+              '  ยังยืนยันตัวกรองทั้งหมดไม่ได้ — ห้ามตีความว่าไม่มีคำตอบ')
+    return confirmed
+
+
+def _find_queued_comment(phone: fb.Phone, item: dict,
+                         max_scrolls: int = 12,
+                         require_reply: bool = True,
+                         require_like: bool = False,
+                         in_comments: bool = False) -> tuple[dict | None, str]:
+    """Find the unique author+body row and all controls needed for the action."""
+    def visible_rows(xml):
+        low, high = _comment_zone(xml)
+        # After expanding/verifying an existing child, Facebook can leave the
+        # parent's avatar just above the safe content boundary while its Reply
+        # button is still visible below that boundary.  A reacquire that parses
+        # only avatars below ``low`` then scrolls away from a row already on
+        # screen.  Extend only the read area (never the tap area) for this
+        # in-comments reacquire and keep exact author+body matching below.
+        parse_low = max(0, low - fb.COMMENT_TEXT_WINDOW) if in_comments else low
+        rows = fb.visible_comments(xml, parse_low, high)
+        for row in rows:
+            for control in ("reply", "like"):
+                point = row.get(control)
+                if point is not None and not (low < point[1] < high):
+                    row[control] = None
+        return rows
+
+    def ready(row):
+        reply_ready = not require_reply or row.get("reply") is not None
+        like_ready = (not require_like or bool(row.get("liked"))
+                      or row.get("like") is not None)
+        return reply_ready and like_ready
+
+    if not in_comments and not _scroll_into_comments(phone):
+        return None, "ไม่เจอโซนคอมเมนต์"
+    if not in_comments:
+        _all_comments(phone)
+    previous = ""
+    for _ in range(max_scrolls + 1):
+        xml = phone.dump()
+        matches = [row for row in visible_rows(xml)
+                   if queued_comment_matches(row, item.get("author", ""),
+                                             item.get("body", ""))]
+        # หนึ่งจอมีสองแถวตรงกัน = แยกตัวจริงไม่ได้ ห้ามเดา
+        if len(matches) > 1:
+            return None, "พบชื่อและข้อความซ้ำมากกว่าหนึ่งแถว — ไม่ยอมเดาเป้าหมาย"
+        if matches:
+            if not require_reply and not require_like:
+                return matches[0], ""
+            if not ready(matches[0]):
+                # Put the same row at several safe heights.  Every movement is
+                # followed by a full author+body reacquisition; stale geometry
+                # is never used to tap a neighbouring comment.
+                last_seen = matches[0]
+                for desired_top in (650, 850, 500, 1000, 700):
+                    actual_top = int(last_seen.get("top", 0) or 0)
+                    try:
+                        top_ref = float(phone.to_ref_y(actual_top))
+                    except (AttributeError, TypeError, ValueError):
+                        top_ref = float(actual_top)
+                    delta = max(-450.0, min(450.0, desired_top - top_ref))
+                    if abs(delta) < 120:
+                        delta = -220.0  # reveal the lower controls of the row
+                    anchor = 1250.0 if delta < 0 else 850.0
+                    phone.vswipe(str(int(anchor)), str(int(anchor + delta)), "500")
+                    time.sleep(1)
+                    fresh = phone.dump()
+                    rows = [row for row in visible_rows(fresh)
+                            if queued_comment_matches(
+                                row, item.get("author", ""), item.get("body", ""))]
+                    if len(rows) > 1:
+                        return None, "พบชื่อและข้อความซ้ำหลังเลื่อน — ไม่ยอมเดาเป้าหมาย"
+                    if len(rows) == 1:
+                        last_seen = rows[0]
+                        if ready(rows[0]):
+                            return rows[0], ""
+                missing = []
+                if require_like and not (last_seen.get("liked") or
+                                         last_seen.get("like") is not None):
+                    missing.append("ปุ่มถูกใจหรือสถานะถูกใจ")
+                if require_reply and last_seen.get("reply") is None:
+                    missing.append("ปุ่มตอบกลับ")
+                return None, ("พบคอมเมนต์เป้าหมายแล้ว แต่จัดแถวไว้หลายตำแหน่งยังไม่เห็น "
+                              + " และ ".join(missing)
+                              + " ของแถวนั้น — ยังไม่ได้ส่งและไม่แตะแถวอื่น")
+            return matches[0], ""
+        if xml == previous:
+            break
+        previous = xml
+        phone.vswipe(
+            "1800", str(1800 - fb.SCROLL_STEP), str(fb.SCROLL_DURATION_MS),
+        )
+        time.sleep(1.8)
+    return None, (f"หาแถวของ {item.get('author', '')} ที่มีข้อความตรงกันไม่เจอ")
+
+
+def _like_queued_comment(phone: fb.Phone, item: dict,
+                         comment: dict) -> tuple[dict | None, str]:
+    """Like the exact queued parent and return freshly reacquired geometry.
+
+    A positive accessibility state on the same author+body row is required
+    before Reply is allowed.  This keeps a delayed UI update or stale point
+    from turning into a reply on a neighbouring comment.
+    """
+    if comment.get("liked"):
+        phone.log("  คอมเมนต์เป้าหมายถูกใจอยู่แล้ว — ไม่กดยกเลิก")
+        return comment, ""
+    point = comment.get("like")
+    if point is None:
+        return None, ("พบคอมเมนต์เป้าหมาย แต่ไม่เห็นปุ่มถูกใจของแถวนั้น "
+                      "— หยุดก่อนตอบเพื่อไม่แตะแถวอื่น")
+    phone.tap(point)
+    for attempt in range(3):
+        time.sleep(1.2 if attempt else 1.8)
+        xml = phone.dump()
+        low, high = _comment_zone(xml)
+        matches = [row for row in fb.visible_comments(xml, low, high)
+                   if queued_comment_matches(row, item.get("author", ""),
+                                             item.get("body", ""))]
+        if len(matches) > 1:
+            return None, ("พบชื่อและข้อความซ้ำหลังไลก์ — "
+                          "หยุดก่อนตอบและไม่ยอมเดาเป้าหมาย")
+        if len(matches) == 1 and matches[0].get("liked"):
+            phone.log("  ยืนยันว่ากดถูกใจคอมเมนต์เป้าหมายแล้ว")
+            fresh = matches[0]
+            if fresh.get("reply") is not None:
+                return fresh, ""
+            return _find_queued_comment(
+                phone, item, max_scrolls=0, require_reply=True,
+                require_like=True, in_comments=True)
+    return None, ("กดถูกใจคอมเมนต์เป้าหมายแล้ว แต่หน้าจอยังไม่ยืนยันสถานะ "
+                  "— หยุดก่อนตอบเพื่อไม่ให้ลำดับผิด")
+
+
+def _recheck_delivery(phone, item, delivery, before_retry=None):
+    """One read-only reload after inconclusive delivery; never submits again."""
+    import fb_reply_safe
+    if delivery.get('verified') or delivery.get('reason') not in {
+            'reply_not_in_thread', 'thread_closed', 'parent_not_visible',
+            'reply_not_visible_yet', 'reply_body_mismatch'}:
+        return delivery
+    phone.log('  ยังยืนยันผลไม่ชัด — เปิดโพสต์เดิมตรวจซ้ำหนึ่งรอบ ไม่ส่งซ้ำ')
+    if not fb.open_post_link(
+            phone, str(item.get('post_url') or ''), str(item.get('caption') or ''),
+            str(item.get('group_id') or ''), '', account=item['account'],
+            group_name=str(item.get('group_name') or ''), before_retry=before_retry):
+        return delivery
+    parent, _ = _find_queued_comment(phone, item, require_reply=False)
+    if parent is None:
+        return delivery
+    return fb_reply_safe.verify_on_phone_result(phone, item)
+
+
+def reply_quota_status(account: str) -> dict:
+    """ตรวจด่านรายชั่วโมงของบัญชี โดยไม่เปิดหรือแตะมือถือ."""
+    serial = devices.device_for_account(account)
+    with fb_auto_post.use_account(account):
+        guard = fb.fb_comment_guard
+        state = guard.load()
+        until = guard._held_until(state)
+        if until and until > datetime.now():
+            return {"ok": True, "sent": False, "waiting": True,
+                    "wait_seconds": max(1, int((until - datetime.now()).total_seconds())),
+                    "reason": "safety_hold",
+                    "note": guard.hold_reason(account=serial)}
+        if fb.comment_quota_left(REPLY_LANE, serial) > 0:
+            return {"waiting": False, "wait_seconds": 0}
+        seconds = max(1, int(fb.comment_quota_resets_in(REPLY_LANE, serial) + 0.999))
+        owner = fb.lane_owning_hour()
+        return {"ok": True, "sent": False, "waiting": True,
+                "wait_seconds": seconds, "reason": "hourly_quota",
+                "note": ("รอช่วงคอมเมนต์ของงานโพสต์หมดอายุ" if owner == "post"
+                         else "รอโควตาตอบคอมเมนต์รายชั่วโมง")}
+
+
+def run_queued_reply(item: dict, *, send: bool = False, log=print) -> dict:
+    """ตรวจเป้าหมายคิวบนมือถือ และส่งเมื่อ ``send=True`` เท่านั้น
+
+    ด่านบังคับก่อนพิมพ์มี 3 ชั้น: บัญชีต้องตรงมือถือ, แถวต้องตรงชื่อเต็มพร้อม
+    เนื้อหา, และหลังแตะ Reply ต้องมีป้ายใหม่ในช่องพิมพ์ที่ระบุชื่อเต็มเดียวกัน
+    ด่านใดไม่ผ่านจะหยุดก่อนพิมพ์ จึงไม่สามารถไหลไปเป็นคอมเมนต์ลอยได้
+    """
+    import fb_engagement
+    item = fb_engagement.normalize_comment_identity(item)
+    account = str(item.get("account") or "").strip()
+    author = str(item.get("author") or "").strip()
+    answer = str(item.get("reply_draft") or "").strip()
+    if not account or not author or not answer:
+        raise EngageError("คิวตอบกลับขาดบัญชี ชื่อผู้คอมเมนต์ หรือข้อความตอบ")
+    try:
+        serial = devices.device_for_account(account)
+    except devices.DeviceError as error:
+        raise EngageError(str(error)) from error
+    if devices.account(serial) != account:
+        raise EngageError(f"มือถือ {serial} ผูกกับ {devices.account(serial)} ไม่ใช่ {account}")
+    if send and not item.get('reply_submitted_at'):
+        quota = reply_quota_status(account)
+        if quota["waiting"]:
+            return quota
+
+    with fb_auto_post.use_account(account):
+        with studio_shared.phone_lock(
+                serial, timeout=120, label=f"ตอบ {author} ใน {account}",
+                owner="fb-reply-queue"):
+            phone = fb.Phone("adb", serial, log=log)
+            with fb_screen.keep_awake_while_working(phone.shell, log=log):
+                import fb_account_guard
+                import fb_reply_safe
+                import fb_engagement
+                fb.require_network(phone)
+                fb_account_guard.require("adb", serial, account, fresh_start=True, log=log)
+                def check_route():
+                    if not phone.online():
+                        raise EngageError("มือถือหลุด — หยุดก่อนลองลิงก์สำรอง")
+                    snapshot = phone.dump()
+                    packages = sorted(set(re.findall(r'package="([^"]+)"', snapshot)))
+                    log(f"  ตรวจหน้าก่อนลองเส้นทางสำรอง: {', '.join(packages)}")
+                    fb_account_guard.require("adb", serial, account, fresh_start=True, log=log)
+                if not fb.open_post_link(
+                        phone, str(item.get("post_url") or ""),
+                        str(item.get("caption") or ""),
+                        str(item.get("group_id") or ""), "",
+                        account=account,
+                        group_name=str(item.get("group_name") or ""),
+                        before_retry=check_route):
+                    return {"ok": False, "sent": False,
+                            "error": "เปิดโพสต์ที่มีคอมเมนต์เป้าหมายไม่ได้"}
+                # A submitted item must never need the parent's Reply button:
+                # it is verification-only and may already be positioned on the
+                # newly posted child.  Requiring _find_queued_comment here was
+                # the hidden reason four delivered candidates never reached
+                # the cross-viewport verifier.
+                if item.get("reply_submitted_at"):
+                    # Position on the exact parent first, but never require or
+                    # tap its Reply control for a submitted item.  Opening a
+                    # post can leave the screen at its caption, too far above
+                    # the target for the short verification scan alone.
+                    try:
+                        parent, why = _find_queued_comment(
+                            phone, item, require_reply=False)
+                    except Exception as error:
+                        return {"ok": False, "sent": False, "verification_only": True,
+                                "verification_reason": "parent_search_error",
+                                "error": (f"{fb_reply_safe.UNKNOWN} · parent_search_error: "
+                                          f"{type(error).__name__}: {error}")}
+                    if parent is None:
+                        return {"ok": False, "sent": False, "verification_only": True,
+                                "verification_reason": "parent_not_found",
+                                "error": f"{fb_reply_safe.UNKNOWN} · parent_not_found: {why}"}
+                    verification = fb_reply_safe.verify_on_phone_result(phone, item)
+                    confirmed = bool(verification["verified"])
+                    return {"ok": confirmed, "sent": confirmed, "verification_only": True,
+                            "verification_reason": verification.get("reason", ""),
+                            "error": fb_reply_safe.verification_error(verification)}
+                try:
+                    if send:
+                        comment, why = _find_queued_comment(
+                            phone, item, require_like=True)
+                    else:
+                        comment, why = _find_queued_comment(phone, item)
+                except Exception as error:
+                    # Read-only diagnosis, no replay of a timed-out swipe/tap.
+                    diagnostic = ""
+                    try:
+                        diagnostic = f"online={phone.online()} · อ่านจอใหม่ได้ {len(phone.dump())} ตัวอักษร"
+                    except Exception as probe_error:
+                        diagnostic = f"อ่านสถานะซ้ำไม่ได้: {type(probe_error).__name__}"
+                    return {"ok": False, "sent": False,
+                            "error": f"คำสั่งมือถือสะดุด: {type(error).__name__}: {error} · {diagnostic}"}
+                if comment is None:
+                    return {"ok": False, "sent": False, "error": why}
+                before = phone.dump()
+                if fb_reply_safe.verified_reply(before, item):
+                    return {"ok": True, "sent": True, "verified": True,
+                            "already_present": True, "verification_only": True}
+                expand = fb_reply_safe.target_reply_expander(before, item)
+                if expand is not None:
+                    phone.tap(expand)
+                    time.sleep(2)
+                    verification = fb_reply_safe.verify_on_phone_result(phone, item)
+                    if verification["verified"]:
+                        return {"ok": True, "sent": True, "verified": True,
+                                "already_present": True, "verification_only": True}
+                    # Expanding/verification can move the list; reacquire the row.
+                    comment, why = _find_queued_comment(
+                        phone, item, require_like=send, in_comments=True)
+                    if comment is None:
+                        return {"ok": False, "sent": False, "error": why}
+                    before = phone.dump()
+                if send:
+                    comment, why = _like_queued_comment(phone, item, comment)
+                    if comment is None:
+                        return {"ok": False, "sent": False, "error": why}
+                    # Like can redraw the row.  Use only freshly reacquired
+                    # Reply geometry and compare the composer against that UI.
+                    before = phone.dump()
+                phone.tap(comment["reply"])
+                time.sleep(2.5)
+                after = phone.dump()
+                marker = _new_reply_target(before, after, author)
+                if not marker:
+                    phone.back()
+                    return {
+                        "ok": False, "sent": False,
+                        "error": f"กด Reply ของ {author} แล้ว แต่ช่องพิมพ์ไม่ยืนยันชื่อเต็มตรงกัน",
+                    }
+                log(f"  ยืนยันเป้าหมายตอบกลับ: {marker}")
+                if not send:
+                    phone.back()
+                    return {"ok": True, "sent": False, "verified": True,
+                            "author": author, "marker": marker, "serial": serial}
+                original_ime = phone.use_adb_keyboard()
+                try:
+                    quota = reply_quota_status(account)
+                    if quota["waiting"]:
+                        phone.back()
+                        return quota
+                    hold = fb.fb_comment_guard.hold_reason(account=serial)
+                    if hold:
+                        return {"ok": False, "sent": False, "error": hold}
+                    delivery = fb_reply_safe.send_reply(
+                        phone, item,
+                        lambda: fb_engagement.mark_reply_submitted(item['comment_key'], answer),
+                        return_detail=True)
+                    delivery = _recheck_delivery(phone, item, delivery, check_route)
+                    sent = bool(delivery["verified"])
+                    if sent:
+                        fb._note_comment_sent(REPLY_LANE)
+                        fb.fb_comment_guard.note_success()
+                finally:
+                    if original_ime:
+                        phone.restore_keyboard(original_ime)
+                return {"ok": sent, "sent": sent, "verified": sent, "target_verified": True,
+                        "author": author, "marker": marker, "serial": serial,
+                        "verification_reason": delivery.get("reason", ""),
+                        "error": fb_reply_safe.verification_error(delivery)}
 
 
 def reply_round(config: dict, log=print, stop=lambda: False,

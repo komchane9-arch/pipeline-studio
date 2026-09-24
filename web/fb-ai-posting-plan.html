@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>แผนกลุ่ม Facebook และนโยบายรูป AI</title>
+  <style>
+    :root { --bg:#f4f7fb; --ink:#182230; --muted:#64748b; --line:#dce4ef; --card:#fff; --green:#087f5b; --green-bg:#dcfce7; --red:#c23636; --red-bg:#fee2e2; --amber:#9a6700; --amber-bg:#fef3c7; --blue:#245fbd; --blue-bg:#dbeafe; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { max-width:1280px; margin:auto; padding:32px 20px 56px; }
+    h1,h2,h3,p { margin-top:0; } h1 { font-size:clamp(28px,4vw,42px); margin-bottom:8px; letter-spacing:-.03em; } h2 { font-size:22px; margin:34px 0 12px; } h3 { font-size:16px; margin-bottom:6px; }
+    .lead { color:var(--muted); max-width:820px; font-size:16px; }
+    .note { border-left:4px solid var(--blue); padding:10px 14px; background:#edf4ff; margin:18px 0; color:#27436b; }
+    .stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:22px 0; }
+    .stat,.pack,.group { background:var(--card); border:1px solid var(--line); border-radius:14px; }
+    .stat { padding:18px; } .stat strong { display:block; font-size:32px; line-height:1; margin-bottom:6px; } .stat span { color:var(--muted); }
+    .stat.red strong{color:var(--red)} .stat.green strong{color:var(--green)} .stat.amber strong{color:var(--amber)}
+    .legend,.filters { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
+    .pill { display:inline-flex; align-items:center; border-radius:999px; padding:4px 9px; font-size:12px; font-weight:700; white-space:nowrap; }
+    .blocked{background:var(--red-bg);color:var(--red)} .observed{background:var(--green-bg);color:var(--green)} .unknown{background:var(--amber-bg);color:var(--amber)} .assigned{background:var(--blue-bg);color:var(--blue)}
+    button { border:1px solid var(--line); background:var(--card); color:var(--ink); padding:7px 11px; border-radius:9px; cursor:pointer; font:inherit; } button:hover,button.active { background:#eaf1ff; border-color:#90b4ef; color:#173f7d; }
+    .packs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    .pack { padding:18px; } .pack-top { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; } .pack p { color:var(--muted); margin-bottom:12px; } .pack ul { margin:0; padding-left:19px; } .pack li { margin:4px 0; }
+    .mode { border-top:1px solid var(--line); margin-top:14px; padding-top:12px; font-size:13px; }
+    .mode strong { color:#39485d; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(265px,1fr)); gap:10px; }
+    .group { padding:13px; min-height:132px; display:flex; flex-direction:column; gap:8px; }
+    .group h3 { line-height:1.35; margin:0; } .meta { color:var(--muted); font-size:12px; } .group-footer { margin-top:auto; display:flex; justify-content:space-between; gap:8px; align-items:center; }
+    .group[hidden] { display:none; }
+    .warn { color:var(--red); font-size:13px; font-weight:650; }
+    footer { color:var(--muted); font-size:12px; margin-top:30px; }
+    @media (max-width:720px) { main{padding:24px 14px 40px}.stats,.packs{grid-template-columns:1fr}.pack-top{display:block}.pack-top .pill{margin-top:8px} }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>แผนโพสต์ Facebook: รูป AI และการจัดโปรไฟล์</h1>
+    <p class="lead">ผลตรวจ 37 กลุ่มที่เลือกใช้ ผ่าน Bot10 เมื่อ 4 ก.ย. 2569 — อ่านเฉพาะหน้ากฎและฟีด ไม่โพสต์ ไม่กดปฏิสัมพันธ์ และไม่เข้ากลุ่ม</p>
+    <div class="note"><strong>กติกาการใช้งาน:</strong> “พบใช้ AI” คือพบโพสต์ล่าสุดที่ Facebook ติดป้าย AI จึงเป็นเพียงสัญญาณว่ากลุ่มยอมรับในทางปฏิบัติ ไม่ใช่ใบอนุญาตจากแอดมิน ส่วนกลุ่มที่ไม่พบหลักฐาน ให้ใช้รูปจริงเป็นค่าเริ่มต้น</div>
+
+    <section class="stats" aria-label="สรุปผลตรวจ">
+      <div class="stat red"><strong>3</strong><span>ห้ามรูป/คอนเทนต์ AI ชัดเจน</span></div>
+      <div class="stat green"><strong>5</strong><span>พบโพสต์ติดป้าย AI ในฟีดล่าสุด</span></div>
+      <div class="stat amber"><strong>29</strong><span>ยังไม่พบหลักฐานเพียงพอ</span></div>
+    </section>
+
+    <section>
+      <h2>กลุ่มที่ต้องใช้รูปจริง</h2>
+      <div class="legend"><span class="pill blocked">ห้ามชัดเจน</span><span>ตัวแม่รีวิว ผิวเป๊ะ บ้านปัง · อวดบ้านกันนะ · แม่บ้านชอบรีวิว</span></div>
+      <p class="note">ห้องอาหารลูกฯ กล่าวถึง <em>ระบบ AI คัดโพสต์</em> และรวมพลคนรักบ้านกล่าวถึง <em>AI ปฏิเสธโพสต์แชร์ภายนอก</em> — ทั้งสองกรณีไม่ใช่กฎห้ามรูป AI จึงไม่ถูกจัดเป็นกลุ่มห้าม</p>
+    </section>
+
+    <section>
+      <h2>แพ็กกลุ่มสำหรับโปรไฟล์</h2>
+      <div class="packs" id="packs"></div>
+    </section>
+
+    <section>
+      <h2>สถานะรายกลุ่ม</h2>
+      <div class="filters" aria-label="ตัวกรองสถานะ">
+        <button type="button" class="active" data-filter="all">ทั้งหมด 37</button>
+        <button type="button" data-filter="blocked">ห้าม AI</button>
+        <button type="button" data-filter="observed">พบใช้ AI</button>
+        <button type="button" data-filter="unknown">ใช้รูปจริงก่อน</button>
+        <button type="button" data-filter="hold">พักไว้</button>
+      </div>
+      <div class="grid" id="groups" aria-live="polite"></div>
+    </section>
+    <footer>แหล่งข้อมูล: artifact กลุ่มที่เลือกใช้, หน้ากฎและฟีดที่ Bot10 มองเห็น ณ เวลาตรวจ · ผลนี้ควรตรวจซ้ำก่อนโพสต์จริง หากกฎกลุ่มมีการเปลี่ยนแปลง</footer>
+  </main>
+  <script>
+    const packs = [
+      {id:'P1', title:'บ้านแต่ง–งานบ้าน', count:8, base:'เจ้าของบ้าน/คนแต่งบ้าน', mode:'ใช้รูปจริงเป็นค่าเริ่มต้น; มีหลักฐาน AI เฉพาะ “แต่งบ้านกันเถอะ”', ids:['4515260418600254','620834715525743','1769679146556247','apparelmakers','778495273564899','4847456341958739','1204787429983534','268552194655610']},
+      {id:'P2', title:'สร้างบ้าน–แบบบ้าน', count:8, base:'คนกำลังหาแบบบ้านหรือสร้างบ้าน', mode:'ใช้รูปจริงทั้งแพ็ก เพราะ “อวดบ้านกันนะ” ห้ามคอนเทนต์ AI', ids:['382463833046434','170601574971378','193808351965422','2994552050869844','749745752634449','1554095774804796','2897753960479950','4663173497116456']},
+      {id:'P3', title:'ผู้หญิง–ครอบครัว–ดูแลตัวเอง', count:7, base:'แม่บ้าน คุณแม่ บิวตี้ และสุขภาพ', mode:'ใช้รูปจริงทั้งแพ็ก เพราะมี 2 กลุ่มห้าม AI ชัดเจน', ids:['5032589546763405','1168867400202556','885430336471021','440966771947927','329007601411185','452798937653190','865690216805430']},
+      {id:'P4', title:'นักช้อปดีล', count:8, base:'สายรีวิวและดีล Shopee/Lazada', mode:'ภาพจริงเป็นค่าเริ่มต้น; “แชร์ตรงปกมาก” พบโพสต์ติดป้าย AI', ids:['1911903035616571','577202126940489','3572170672880410','3500875636862733','614313206563311','6579963342073419','382908586611299','777433313133731']},
+      {id:'P5', title:'ทาสแมว', count:4, base:'เจ้าของแมว/นักช้อปของใช้สัตว์เลี้ยง', mode:'ยังมี 4 กลุ่ม: รอเพิ่มอย่างน้อย 2 กลุ่มสายแมวก่อนเปิดโปรไฟล์เฉพาะทาง', ids:['1805266209857041','tasmaews','921435328957611','catreview']},
+      {id:'พักไว้', title:'เฉพาะทางที่ยังไม่ควรปน', count:2, base:'IT และเจ้าของร้านค้า', mode:'อย่ารวมเพื่อให้ครบจำนวน เพราะพฤติกรรมผู้ติดตามต่างจากทุกแพ็กด้านบน', ids:['Nexups','317779888381046']}
+    ];
+    const groups = [
+      ['4515260418600254','(20+) แต่งห้อง แต่งบ้าน แต่งเห๊อะ ขายทุกสิ่ง รีวิวทุกอย่าง','unknown'],['620834715525743','เยี่ยมชม','unknown'],['1911903035616571','(20+) รีวิวครอบจักรวาล','unknown'],['577202126940489','แชร์ตรงปกมาก shopee / lazada','observed'],['3572170672880410','รีวิวของดีประจำวัน','unknown'],['1769679146556247','(20+) แต่งบ้านกันเถอะ','observed'],['382463833046434','บ้านราคาไม่แพง','observed'],['Nexups','(20+) Extreme IT กลุ่มสำหรับคนรักการแต่งคอมพิวเตอร์','hold'],['1805266209857041','(20+) แมวน่ารักขาสั้น','unknown'],['apparelmakers','(20+) งานบ้านต้องมี บิวตี้ก้ต้องโดน','unknown'],['5032589546763405','(20+) ตัวแม่รีวิว ผิวเป๊ะ บ้านปัง','blocked'],['tasmaews','(20+) ทาสแมว','unknown'],['3500875636862733','(20+) รีวิวของ Shopee&Lazada ตรงปก ราคาถูก','unknown'],['1168867400202556','(20+) งานบ้านต้องแชร์ สกินแคร์ต้องครบ','unknown'],['885430336471021','(20+) ห้องอาหารลูก-จากเพจเรื่องของลูกแชร์กันได้','unknown'],['170601574971378','อวดบ้านกันนะ','blocked'],['193808351965422','อยากมีบ้าน','unknown'],['2994552050869844','แบบบ้าน','unknown'],['440966771947927','(20+) แม่บ้านชอบรีวิว','blocked'],['614313206563311','(20+) ป้ายยาเด็กหอ','unknown'],['6579963342073419','(20+) รีวิว ของกิน/ของใช้ Shopee&Lazada','unknown'],['778495273564899','(20+) แชร์ทริคงานบ้าน','unknown'],['921435328957611','(20+) รีวิวและส่งต่อของใช้สัตว์เลี้ยง','unknown'],['4847456341958739','รวมพลคนรักบ้าน','unknown'],['749745752634449','(20+) บ้านเเละสวนไอเดีย','unknown'],['1204787429983534','(20+) เรื่องบ้านบ้าน DIY','unknown'],['1554095774804796','(20+) แบบบ้านสวย ประหยัด ราคาไม่แพง','unknown'],['268552194655610','(20+) แต่งห้องนอนสไตล์มินิมอล','unknown'],['2897753960479950','(20+) แบบบ้านสวยราคาประหยัด','observed'],['329007601411185','(20+) สกินแคร์กู้หน้า ของใช้กู้บ้าน','unknown'],['382908586611299','(20+) ป้ายยานักช้อป | Candymild','unknown'],['452798937653190','(20+) แม่บ้านชอบซื้อ','unknown'],['4663173497116456','(20+) แบบบ้าน','unknown'],['777433313133731','(20+) รีวิวของดี Shopee & Lazada','unknown'],['catreview','(20+) Cat Review รีวิวอาหารแมว ของใช้แมว ของเล่นแมว','unknown'],['865690216805430','(20+) ดูแลสุขภาพเพื่อตัวเอง','observed'],['317779888381046','(20+) รวมพลคนโชห่วย-ร้านของชำ','hold']
+    ].map(([gid,name,status]) => ({gid,name,status,pack:packs.find(p=>p.ids.includes(gid))?.id || 'พักไว้'}));
+    const labels = {blocked:'ห้าม AI ชัดเจน', observed:'พบใช้ AI ในฟีด', unknown:'ใช้รูปจริงก่อน', hold:'พักไว้'};
+    const packsEl = document.getElementById('packs'), groupsEl = document.getElementById('groups');
+    packsEl.innerHTML = packs.map(p => `<article class="pack"><div class="pack-top"><div><h3>${p.id} · ${p.title}</h3><p>${p.base}</p></div><span class="pill assigned">${p.count} กลุ่ม</span></div><ul>${p.ids.map(id=>`<li>${groups.find(g=>g.gid===id)?.name || id}</li>`).join('')}</ul><div class="mode"><strong>โหมดโพสต์:</strong> ${p.mode}</div></article>`).join('');
+    function render(filter='all') { groupsEl.innerHTML = groups.filter(g=>filter==='all'||g.status===filter).map(g => `<article class="group"><span class="pill ${g.status}">${labels[g.status]}</span><h3>${g.name}</h3><div class="meta">GID: ${g.gid}</div><div class="group-footer"><span class="pill assigned">${g.pack}</span>${g.status==='blocked'?'<span class="warn">ต้องใช้รูปจริง</span>':''}</div></article>`).join(''); }
+    document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('[data-filter]').forEach(b=>b.classList.remove('active')); button.classList.add('active'); render(button.dataset.filter); }));
+    render();
+  </script>
+</body>
+</html>

@@ -12,6 +12,7 @@
  *   POST /api/fb/jobs/<id>/stop          หยุดที่จุดปลอดภัย เก็บผลไว้ทำต่อได้
  *   POST /api/fb/jobs/<id>/resume        ทำต่อเฉพาะกลุ่มที่ยังไม่สำเร็จ
  *   POST /api/fb/jobs/<id>/reset         ล้างเฉพาะกล่องสถานะ ไม่แตะมือถือ
+ *   POST /api/fb/jobs/<id>/complete      จบด้วยมือและปิดทุกคิวของใบนี้
  *   POST /api/fb/jobs/<id>/cancel        ยกเลิกทิ้ง
  *
  * **ปุ่มไหนกดได้ ให้เซิร์ฟเวอร์ตัดสิน ไม่ใช่หน้าเว็บเดาเอง** เพราะเงื่อนไขจริง
@@ -37,7 +38,7 @@
  */
 
 import { api } from "./core.js";
-import { gfQuery } from "./gfaccount.js";
+import { gfQuery, gfAccount } from "./gfaccount.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -47,17 +48,24 @@ const STATUS_LOOK = {
   ready: { icon: "🟡", label: "รอโพสต์" },
   stopped: { icon: "⏸️", label: "หยุดไว้" },
   done: { icon: "✅", label: "เสร็จครบทุกขั้น" },
+  manual_done: { icon: "☑️", label: "จบงานด้วยมือแล้ว" },
   failed: { icon: "🔴", label: "ล้มเหลว" },
   cancelled: { icon: "⚪", label: "ยกเลิกแล้ว" },
   waiting_caption: { icon: "✏️", label: "รอแคปชัน" },
   waiting_image: { icon: "🖼", label: "รอรูป" },
 };
 
+// เส้น live อาจส่งใบล่าสุดกลับมาหนึ่งใบเมื่อคิวว่าง เพื่อให้ client รุ่นเก่า
+// ยังเห็นว่าเพิ่งทำอะไรจบไป แต่ส่วนนี้คือ "งานค้าง" เท่านั้น ใบปลายทางต้องไป
+// อยู่ในประวัติด้านล่าง ไม่เช่นนั้นกดจบแล้วการ์ดยังค้างเหมือนปุ่มไม่ทำงาน.
+const TERMINAL_STATUSES = new Set(["done", "manual_done", "cancelled"]);
+
 const SOURCE_LOOK = { telegram: "📨 จาก Telegram", web: "💻 จากหน้าเว็บ" };
 
 const QUEUE_LOOK = {
   ok: { icon: "✅", label: "ครบทุกขั้น" },
   finish: { icon: "🔵", label: "โพสต์แล้ว · รอตามเก็บ" },
+  manual: { icon: "☑️", label: "จบด้วยมือ · ไม่ทำต่อ" },
   fail: { icon: "❌", label: "ไม่สำเร็จ" },
   now: { icon: "🔄", label: "กำลังโพสต์" },
   wait: { icon: "⏳", label: "รอคิว" },
@@ -124,6 +132,10 @@ function secondsSinceStamp(text) {
 // ------------------------------------------------------------------ สั่งงานบอท
 
 async function send(jobId, what, button, bar) {
+  if (what === "complete" && !window.confirm(
+    "จบงานนี้แบบ Manual ใช่ไหม?\n\nระบบจะถือว่างานเสร็จสมบูรณ์ "
+    + "หยุดโพสต์และหยุดตามเก็บที่เหลือ โดยจะ Resume งานนี้ไม่ได้",
+  )) return;
   const siblings = [...bar.children];
   siblings.forEach((b) => { b.disabled = true; });
   const original = button.textContent;
@@ -166,12 +178,16 @@ function show(node, on) {
 }
 
 function buildCard(jobId) {
-  const root = el("article", "fc-job");
+  const root = document.createElement("details");
+  root.className = "fc-job";
+  const summary = el("summary", "fc-summary");
   const head = el("div", "fc-head");
   const badge = el("span", "fc-badge");
   const title = el("span", "fc-title");
   const source = el("span", "fc-src");
   head.append(badge, title, source);
+  summary.append(head);
+  const body = el("div", "fc-job-body");
 
   const caption = el("p", "fc-caption");
   const meta = el("p", "fc-meta");
@@ -217,6 +233,7 @@ function buildCard(jobId) {
   const buttons = {};
   [["run", "🚀 โพสต์เลย", "fc-run"], ["stop", "⏸️ หยุด", "fc-stop"],
     ["resume", "▶️ ทำต่อ", "fc-resume"], ["reset", "↺ รีเซ็ต", "fc-reset"],
+    ["complete", "☑️ จบงาน", "fc-complete"],
     ["cancel", "✖️ ยกเลิก", "fc-cancel"]].forEach(([what, text, cls]) => {
     const button = el("button", `fc-btn ${cls}`, text);
     button.type = "button";
@@ -283,7 +300,7 @@ function buildCard(jobId) {
   why.hidden = true;
   const help = el("p", "fc-help",
     "ทำต่อ = โพสต์เฉพาะกลุ่มที่ยังไม่สำเร็จ · รีเซ็ต = ล้างกล่องสถานะเฉยๆ "
-    + "ไม่ลบงาน · หยุด = หยุดที่จุดปลอดภัยแล้วกลับมาทำต่อได้");
+    + "ไม่ลบงาน · หยุด = กลับมาทำต่อได้ · จบงาน = ถือว่าเสร็จและไม่ทำอะไรต่อ");
 
   /* **ลำดับสำคัญ — เนื้อหาต้องอยู่ใกล้หัวการ์ด**
    *
@@ -295,11 +312,12 @@ function buildCard(jobId) {
    * แคปชันที่ย่อเหลือบรรทัดเดียว กดกางแล้วเห็นตัวเต็มของบรรทัดนั้นพอดี
    * ของที่ต้องเลื่อนไปหา คือของที่ไม่มีใครเห็น
    */
-  root.append(head, caption, content, meta, times, alert, track, prog, step, idle,
+  body.append(caption, content, meta, times, alert, track, prog, step, idle,
     feed, queueBox, timeRow, bar, why, help);
+  root.append(summary, body);
 
   const entry = {
-    root, badge, title, source, caption, meta, times, alert,
+    root, summary, body, badge, title, source, caption, meta, times, alert,
     fill, prog, step, idle, feed, queueHead, queue, content,
     contentBody, contentHead, buttons, bar, why, job: null,
     timeRow, timeBox, clearBtn, schedNote,
@@ -394,7 +412,7 @@ function paintQueue(entry, job) {
   if (entry.queueKey === key) return;
   entry.queueKey = key;
 
-  const posted = rows.filter((r) => ["ok", "finish"].includes(r.state)).length;
+  const posted = rows.filter((r) => ["ok", "finish", "manual"].includes(r.state)).length;
   const complete = rows.filter((r) => r.state === "ok").length;
   setText(entry.queueHead,
     `คิวกลุ่ม — ${rows.length} กลุ่ม · โพสต์แล้ว ${posted} · ครบทุกขั้น ${complete}`);
@@ -406,10 +424,11 @@ function paintQueue(entry, job) {
     const tail = [look.label];
     // ❤️/💬 ติดได้เฉพาะกลุ่มที่โพสต์ขึ้นจริง — กลุ่มที่ล้มแล้วขึ้นหัวใจ
     // อ่านแล้วขัดกันเอง เหมือนบอกว่าล้มแต่ก็กดใจให้โพสต์ที่ไม่มีอยู่
-    if (["ok", "finish"].includes(row.state) && row.liked) tail.push("❤️โพสต์");
-    if (["ok", "finish"].includes(row.state) && row.commented) tail.push("💬");
-    if (["ok", "finish"].includes(row.state) && row.comment_liked) tail.push("❤️คอมเมนต์");
+    if (["ok", "finish", "manual"].includes(row.state) && row.liked) tail.push("❤️โพสต์");
+    if (["ok", "finish", "manual"].includes(row.state) && row.commented) tail.push("💬");
+    if (["ok", "finish", "manual"].includes(row.state) && row.comment_liked) tail.push("❤️คอมเมนต์");
     if (row.missing?.length) tail.push(`ขาด ${row.missing.join("/")}`);
+    if (row.accepted_missing?.length) tail.push(`ผู้ใช้รับรองจบ (${row.accepted_missing.join("/")})`);
     line.append(el("span", "fc-q-state", tail.join(" ")));
     if (row.error) line.append(el("span", "fc-q-err", `— ${row.error}`));
     if (row.link) {
@@ -548,7 +567,8 @@ function paintCard(entry, job) {
   // ที่ทำงานเหมือนกันแต่ชื่อต่างกัน มีแต่ทำให้ลังเลว่ากดอันไหนถึงจะถูก
   show(entry.buttons.resume, Boolean(job.can_resume) && !job.can_run);
   show(entry.buttons.reset, Boolean(job.can_reset));
-  show(entry.buttons.cancel, !["done", "cancelled"].includes(job.status));
+  show(entry.buttons.complete, Boolean(job.can_complete));
+  show(entry.buttons.cancel, !["done", "manual_done", "cancelled"].includes(job.status));
 
   setText(entry.why, job.why || "");
   show(entry.why, Boolean(job.why));
@@ -590,23 +610,39 @@ function paintHistory(rows) {
 
 // ------------------------------------------------------------------- ดึงข้อมูล
 
+let controlAccount = null;
+let controlRequest = 0;
 export async function loadFbControl() {
+  const account = gfAccount();
+  const request = ++controlRequest;
+  if (controlAccount !== account) {
+    controlAccount = account;
+    cards.clear();
+    for (const id of ["#fcList", "#fcHistory", "#fcStamp", "#fcNote"]) $(id)?.replaceChildren();
+  }
   const wrap = $("#fcList");
   const note = $("#fcNote");
   if (!wrap) return false;
+  if (!account) {
+    if (note) setText(note, "เลือกบัญชีก่อนอ่านใบงาน");
+    return false;
+  }
   let data;
   try {
     // เส้นเบา — ส่งเฉพาะที่แผงนี้โชว์ ราว 10 KB แทน 134 KB ของเส้นเต็ม
     // จึงถามได้ทุกวินาทีโดยไม่ทำให้หน้าหน่วง (ดู app.py /api/fb/jobs/live)
     // **ต้องบอกว่าโปรไฟล์ไหน** ไม่งั้นเห็นใบงานของอีกโปรไฟล์ปนมา
     data = await api(gfQuery(`/api/fb/jobs/live${historyOpen ? "?history=1" : ""}`));
+    if (account !== gfAccount() || request !== controlRequest) return false;
   } catch (error) {
+    if (account !== gfAccount() || request !== controlRequest) return false;
     // **แยก "อ่านไม่ได้" ออกจาก "ไม่มีงาน"** สองอย่างนี้ต่างกันสิ้นเชิง
     if (note) setText(note, `อ่านสถานะบอทไม่ได้ — ${error.message}`);
     return false;
   }
 
-  const rows = data.jobs || [];
+  const rows = (data.jobs || []).filter((job) =>
+    !TERMINAL_STATUSES.has(String(job.status || "")));
   const live = data.live_count ?? rows.length;
   if (note) {
     setText(note, data.running
@@ -620,7 +656,9 @@ export async function loadFbControl() {
 
   if (!rows.length) {
     cards.clear();
-    wrap.replaceChildren(el("p", "gh-sub", "ยังไม่เคยมีงานโพสต์ในระบบ"));
+    wrap.replaceChildren(el(
+      "p", "gh-sub", "ไม่มีงานค้าง — งานที่จบแล้วอยู่ใน “งานที่ทำจบไปแล้ว” ด้านล่าง",
+    ));
     if (historyOpen) paintHistory(data.history || []);
     return false;
   }

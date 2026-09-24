@@ -12,14 +12,16 @@ from pathlib import Path
 import studio_shared as shared
 
 
-def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
+def shopee_collect(link: str, want_all: bool = False, log=None,
+                   profile: str = "") -> dict:
     """เปิดลิงก์ → ได้ชื่อสินค้า · รูปที่คัดแล้ว · จุดเด่น 3 ข้อ
 
     รูปที่คัด = สีละ 1 ใบ + ภาพรวมมีพื้นหลัง 1 ใบ (ให้ Gemini ดูรูปจริงแล้วเลือก
     เพราะดูจากชื่อไฟล์ไม่รู้ว่าใบไหนหน้าตาซ้ำกัน)
     """
     import shopee_scrape
-    from flow_worker import load_gemini_api_key, open_browser
+    from flow_worker import (load_gemini_api_key, open_browser,
+                             profile_named as flow_worker_profile)
 
     def say(message: str) -> None:
         if log:
@@ -27,7 +29,21 @@ def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
         else:
             shared.append_log("input", message)
 
-    with shared.browser_lock(label="ดึงข้อมูล Shopee"):
+    # ---- แยกโปรไฟล์ได้ (สายคลิปขอเพิ่ม 30 ส.ค. 2569) ----------------------
+    #
+    # *"storyboard กับ ดึงลิ้ง แยกคนทำกันไม่ได้หรอ"* — แยกได้ **แต่ต้องคนละ
+    # โปรไฟล์ Chrome** เพราะ Chrome เปิดโปรไฟล์เดียวกันซ้อนไม่ได้ ของเดิมทั้ง
+    # สองงานใช้โปรไฟล์เดียวกันจึงต้องผลัดกันตลอด
+    #
+    # **ค่าปริยายว่าง = โปรไฟล์เดิมทุกอย่าง สายโพสต์จึงไม่กระทบเลย**
+    # ผู้เรียกที่อยากแยกต้องส่งชื่อโปรไฟล์เข้ามาเอง และโปรไฟล์นั้น
+    # **ต้องล็อกอิน Shopee ไว้แล้ว** ไม่งั้นหน้าสินค้าเปิดไม่ได้
+    if profile:
+        _here = flow_worker_profile(profile)
+        _open = lambda pw, hidden=False, _d=_here: open_browser(pw, hidden, _d)   # noqa: E731
+    else:
+        _open = open_browser
+    with shared.browser_lock(label="ดึงข้อมูล Shopee", profile=profile):
         # **ส่งที่เก็บรูปเข้าไปด้วย เพื่อให้ Chrome โหลดรูปเองตั้งแต่ตอนหน้ายังเปิด**
         # (ผู้ใช้สั่ง 27 ส.ค. 2026 หลังไล่หาสาเหตุที่โดน Shopee บล็อก)
         #
@@ -55,7 +71,7 @@ def shopee_collect(link: str, want_all: bool = False, log=None) -> dict:
         image_root = clip_store.target_dir(shared.DATA_DIR, item_id).parent
         if image_root.name != "shopee_products":
             say(f"สินค้านี้มีของเก่าอยู่แล้วที่ {image_root.name}/ — เขียนต่อที่เดิม")
-        data = shopee_scrape.scrape(full_url, open_browser, log=say,
+        data = shopee_scrape.scrape(full_url, _open, log=say,
                                     image_root=image_root, want_all=want_all)
         api_key = load_gemini_api_key()
         candidates = data["images"] if want_all else data["selected"]

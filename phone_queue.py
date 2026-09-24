@@ -82,6 +82,10 @@ class QueueError(RuntimeError):
     """คิวปฏิเสธคำขอ — ต้องดังเสมอ ห้ามคืนค่าว่างเงียบๆ"""
 
 
+class QueueBusy(QueueError):
+    """A live ticket owns the device; callers should wait, not fail delivery."""
+
+
 # ---------------------------------------------------------------- ด่านกันลืม
 #
 # **ทำไมต้องมีสองชั้น** ชั้นแรกคือ slot() ที่ครอบงานทั้งชิ้น (โพสต์หนึ่งกลุ่ม ·
@@ -323,7 +327,7 @@ def take(device: str, owner: str, task: str = "", lane: str = "",
         "SELECT id, state FROM ticket WHERE device=? AND owner=? AND state IN (?,?)",
         (key, who, WAITING, RUNNING)).fetchone()
     if dup:
-        raise QueueError(
+        raise QueueBusy(
             f"{who} ถือบัตรใบที่ {dup['id']} ของเครื่องนี้อยู่แล้ว ({dup['state']}) — "
             "ต้องคืนใบเดิมก่อนถึงจะกดใหม่ได้")
     now = _now()

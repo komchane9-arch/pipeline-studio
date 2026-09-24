@@ -130,9 +130,14 @@ class View:
         return any(self.has(value) for value in needles if value)
 
 
+# ซ่อนหน้าต่างคอนโซล เหตุผลเดียวกับใน fb_account_guard.py
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def _run(serial: str, *args: str, timeout: int = 60) -> bytes:
     return subprocess.run(["adb", "-s", serial, *args],
-                          capture_output=True, timeout=timeout).stdout
+                          capture_output=True, timeout=timeout,
+                          creationflags=_NO_WINDOW).stdout
 
 
 def foreground_app(serial: str) -> str:

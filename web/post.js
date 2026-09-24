@@ -614,7 +614,9 @@ const FB_STATUS_TEXT = {
   waiting_image: "รอรูป",
   ready: "พร้อมโพสต์",
   running: "กำลังโพสต์…",
-  done: "เสร็จแล้ว",
+  finishing: "กำลังตามเก็บให้ครบ",
+  done: "เสร็จครบทุกขั้นแล้ว",
+  manual_done: "จบงานด้วยมือแล้ว",
   failed: "ล้มเหลว",
   stopped: "หยุดไว้",
   cancelled: "ยกเลิก",
@@ -674,10 +676,11 @@ function updateGfpSteps() {
   const postFiles = $("#gfpPostImages").files.length;
   const comments = [$("#gfpComment1").value.trim(), $("#gfpComment2").value.trim()];
   const commentFiles = [$("#gfpCommentImage1").files.length, $("#gfpCommentImage2").files.length];
+  const noComments = $("#gfpNoComments").checked;
   const states = {
     caption: Boolean(caption),
     "post-image": postFiles > 0 && postFiles <= 3,
-    comment: comments.some(Boolean),
+    comment: comments.some(Boolean) || noComments,
     "comment-image": commentFiles.some(Boolean),
     groups: gfpSelectedGroups().length > 0 && gfpSelectedGroups().length <= 6,
   };
@@ -688,6 +691,15 @@ function updateGfpSteps() {
   $("#gfpCaptionCount").textContent = `${$("#gfpCaption").value.length.toLocaleString("th-TH")} ตัวอักษร`;
   $("#gfpGroupCount").textContent = `${gfpSelectedGroups().length}/6`;
   renderGfpDevice();
+}
+
+function syncGfpNoComments() {
+  const checked = $("#gfpNoComments").checked;
+  for (const index of [1, 2]) {
+    $("#gfpComment" + index).disabled = checked;
+    $("#gfpCommentImage" + index).disabled = checked;
+  }
+  document.querySelector(".gfp-comments").classList.toggle("no-comments", checked);
 }
 
 function previewFiles(input, wrap) {
@@ -1140,6 +1152,8 @@ function resetGfpForm() {
   $("#gfpComment2").value = "";
   $("#gfpCommentImage1").value = "";
   $("#gfpCommentImage2").value = "";
+  $("#gfpNoComments").checked = false;
+  syncGfpNoComments();
   $("#gfpPostPreview").replaceChildren();
   $("#gfpCommentPreview1").replaceChildren();
   $("#gfpCommentPreview2").replaceChildren();
@@ -1151,11 +1165,21 @@ async function submitGfp(runNow) {
   const files = [...$("#gfpPostImages").files];
   const groups = gfpSelectedGroups();
   const serial = $("#gfpPostDevice").value;
+  const noComments = $("#gfpNoComments").checked;
+  const hasComments = [1, 2].some((index) => $("#gfpComment" + index).value.trim());
   if (!serial) { fbMessage("เลือกมือถือสายโพสต์ที่ผูกบัญชีก่อน"); return; }
   if (!caption) { fbMessage("ใส่แคปชันก่อน"); return; }
   if (!files.length) { fbMessage("เลือกรูปโพสต์อย่างน้อย 1 ใบ"); return; }
   if (files.length > 3) { fbMessage("รูปโพสต์เลือกได้สูงสุด 3 ใบ"); return; }
   if (!groups.length || groups.length > 6) { fbMessage("เลือกกลุ่ม 1–6 กลุ่ม"); return; }
+  if (!hasComments && !noComments) {
+    fbMessage("ถ้าไม่ใส่คอมเมนต์ ให้ติ๊กยืนยันว่าโพสต์นี้ไม่มีคอมเมนต์ก่อน");
+    return;
+  }
+  if (hasComments && noComments) {
+    fbMessage("เลือกได้อย่างเดียว: ใส่คอมเมนต์ หรือยืนยันว่าไม่มีคอมเมนต์");
+    return;
+  }
   for (const index of [1, 2]) {
     if ($(`#gfpCommentImage${index}`).files.length && !$(`#gfpComment${index}`).value.trim()) {
       fbMessage(`รูปคอมเมนต์ช่อง ${index} ต้องมีข้อความคอมเมนต์ด้วย`);
@@ -1169,6 +1193,7 @@ async function submitGfp(runNow) {
   form.append("groups", JSON.stringify(groups));
   form.append("comment_1", $("#gfpComment1").value);
   form.append("comment_2", $("#gfpComment2").value);
+  form.append("no_comments_confirmed", String(noComments));
   form.append("run_now", String(runNow));
   files.forEach((file) => form.append("post_images", file));
   for (const index of [1, 2]) {
@@ -1196,6 +1221,17 @@ async function submitGfp(runNow) {
 $("#gfpCaption").addEventListener("input", updateGfpSteps);
 $("#gfpComment1").addEventListener("input", updateGfpSteps);
 $("#gfpComment2").addEventListener("input", updateGfpSteps);
+$("#gfpNoComments").addEventListener("change", (event) => {
+  const hasCommentContent = [1, 2].some((index) =>
+    $("#gfpComment" + index).value.trim() || $("#gfpCommentImage" + index).files.length
+  );
+  if (event.target.checked && hasCommentContent) {
+    event.target.checked = false;
+    fbMessage("ล้างข้อความและรูปคอมเมนต์ก่อน แล้วค่อยยืนยันว่าไม่มีคอมเมนต์");
+  }
+  syncGfpNoComments();
+  updateGfpSteps();
+});
 $("#gfpPostImages").addEventListener("change", (event) => {
   if (event.target.files.length > 3) {
     event.target.value = "";

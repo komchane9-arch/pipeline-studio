@@ -39,15 +39,16 @@ function mark(pass) {
 }
 
 function rowOf(g, onDecide) {
-  const box = document.createElement("div");
-  box.className = `bd-row bd-${g.status}`;
+  const det = document.createElement("details");
+  det.className = `bd-row bd-${g.status}`;
 
-  const top = document.createElement("div");
-  top.className = "bd-top";
+  // summary = ชื่อ + ลิงก์ — กดแล้วค่อยขยาย
+  const sum = document.createElement("summary");
+  sum.className = "bd-row-summary";
   const name = document.createElement("span");
   name.className = "bd-name";
   name.textContent = g.name;
-  top.append(name);
+  sum.append(name);
   if (g.url) {
     const link = document.createElement("a");
     link.className = "bd-open";
@@ -55,14 +56,19 @@ function rowOf(g, onDecide) {
     link.target = "_blank";
     link.rel = "noopener";
     link.textContent = "เปิด ↗";
-    top.append(link);
+    link.addEventListener("click", (e) => e.stopPropagation()); // ไม่ toggle
+    sum.append(link);
   }
-  box.append(top);
+  det.append(sum);
+
+  // body — แสดงเมื่อ open
+  const body = document.createElement("div");
+  body.className = "bd-row-body";
 
   const facts = document.createElement("p");
   facts.className = "bd-facts";
   facts.textContent = `${human(g.members)}${g.keyword ? ` · เจอจากคำค้น "${g.keyword}"` : ""}`;
-  box.append(facts);
+  body.append(facts);
 
   const tests = document.createElement("p");
   tests.className = "bd-tests";
@@ -72,7 +78,7 @@ function rowOf(g, onDecide) {
     `${mark(g.pass_members)} สมาชิก≥100k    ` +
     `${mark(g.pass_avg)} ไลก์เฉลี่ย ${avg} (เกณฑ์ 8)    ` +
     `${mark(g.pass_over)} โพสต์ดัง ${over} (เกณฑ์ 5)`;
-  box.append(tests);
+  body.append(tests);
 
   if (g.decision) {
     const said = document.createElement("p");
@@ -81,7 +87,7 @@ function rowOf(g, onDecide) {
       `คุณกด${g.decision === "approve" ? "รับ" : "ตัด"}เอง` +
       `${g.decided_at ? ` เมื่อ ${g.decided_at.slice(5, 16).replace("T", " ")}` : ""}` +
       ` — บอทเดิมว่า "${LOOK[g.auto_status]?.label || "?"}"`;
-    box.append(said);
+    body.append(said);
   }
 
   // ปุ่มขึ้นทั้งกองก้ำกึ่ง และกองที่เราเคยตัดสินเอง (จะได้เปลี่ยนใจได้)
@@ -99,9 +105,11 @@ function rowOf(g, onDecide) {
     if (g.decision !== "approve") add("✅ รับไว้", "approve", "bd-yes");
     if (g.decision !== "reject") add("❌ ตัดทิ้ง", "reject", "bd-no");
     if (g.decision) add("↩ ยกเลิกที่กดไป", "clear", "bd-undo");
-    box.append(bar);
+    body.append(bar);
   }
-  return box;
+
+  det.append(body);
+  return det;
 }
 
 async function sendDecision(g, decision, button) {
@@ -188,8 +196,12 @@ export async function loadBoard() {
     box.className = "bd-band";
     const head = document.createElement("summary");
     const c = band.counts;
+    let extra = "";
+    if (band.key === "big") {
+      extra = ` <a href="/static/groups-affiliate.html" target="_blank" class="bd-analysis-btn" onclick="event.stopPropagation();">📊 บทวิเคราะห์</a>`;
+    }
     head.innerHTML =
-      `<b>${band.label}</b> — 🟢 ${c.good} · ⚖️ ${c.edge} · 🔴 ${c.bad}`;
+      `<b>${band.label}</b> — 🟢 ${c.good} · ⚖️ ${c.edge} · 🔴 ${c.bad}${extra}`;
     box.append(head);
     ["good", "edge", "bad"].forEach((s) => {
       if (c[s]) box.append(cellOf(band, s, band.groups[s] || [], c));

@@ -1745,3 +1745,46 @@ Play Protect บล็อกไฟล์ติดตั้งประเภท 
 ### ยังไม่ได้พิสูจน์
 ยังไม่ได้ทดลองพิมพ์ไทยลงช่องข้อความจริงบนแอป Facebook เพราะแอปยังเป็นตัวติดตั้ง
 ล่วงหน้า (stub) ที่ยังไม่ได้เปิดใช้ — จะรู้ผลจริงตอนโพสต์ครั้งแรก
+
+## 23 ก.ย. 2569 — ไอคอน Close All Claude รายงานว่าไม่พบโปรเซสทั้งที่มีส่วนของ Claude ทำงาน
+
+- อาการ: ภาพจากผู้ใช้แสดง `No running Claude processes found.` พร้อมข้อความ WindowsApps ว่า `Another program is currently using this file.`
+- ทำไมตรวจไม่พบ: สคริปต์เดิมตรวจชื่อโปรเซส `Claude`/`claude-code` เป็นหลัก แต่ `Get-Process` พบ PID 20732 ชื่อ `chrome-native-host` อยู่ใต้ `AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\ChromeNativeHost` เริ่มตั้งแต่ 19 ก.ย.
+- สาเหตุรากของผลตรวจผิด: ใช้ชื่อโปรเซสเป็นตัวแทนของทุกองค์ประกอบ Claude ซึ่งไม่ครอบคลุมโปรเซสเสริมที่ใช้ชื่ออื่น ส่วนเจ้าของตัวล็อกไฟล์ `WindowsApps` ยังยืนยันไม่ได้; การอ่าน command line ของ Node ถูก Windows ปฏิเสธสิทธิ์
+- แก้: `tools/close_all_claude.ps1` ตรวจตำแหน่งไฟล์ของโปรเซสในแพ็กเกจ Claude เพิ่ม และเปลี่ยนข้อความกรณีตรวจไม่ครบให้บอกข้อจำกัดชัดเจน
+- ทดสอบจริง: โหมดแสดงรายการพบ PID 20732, รันคำสั่งปิดแล้วได้ `Stopped PID 20732`, ตรวจซ้ำไม่พบ PID นี้; ตรวจไวยากรณ์ PowerShell ผ่าน ยังไม่ได้พิสูจน์ว่าป๊อปอัปล็อกไฟล์หาย เพราะไม่ทราบโปรเซสเจ้าของไฟล์แน่ชัด
+
+### ตรวจต่อจากภาพที่ยังมีป๊อปอัป (23 ก.ย. 2569)
+
+- อาการ: ปิด PID 20732 แล้ว โปรแกรมรายงานว่าไม่พบ Claude แต่ป๊อปอัป `Another program is currently using this file` ยังแสดง
+- Why-Why: Event Log `Microsoft-Windows-AppModel-Runtime/Admin` พบ `0x80070020` ระหว่างสร้าง Desktop AppX container ของ `Claude_2.2553.13.0_x64__pzs8sxrjxfjjc`; `sc qc CoworkVMService` แสดงบริการชื่อ Claude เริ่มอัตโนมัติจาก `C:\Program Files\WindowsApps\Claude_2.2553.13.0_x64__pzs8sxrjxfjjc\app\resources\cowork-svc.exe`; `sc queryex` พบว่าบริการกำลังทำงานด้วย PID 552812 แม้โปรแกรมตรวจโปรเซสทั่วไปไม่พบ Claude
+- สาเหตุรากของผลตรวจผิดเพิ่มเติม: โปรแกรมไม่ได้ตรวจบริการ Windows ของ Claude; เจ้าของตัวล็อกไฟล์ที่ทำให้เกิด `0x80070020` ยังยืนยันไม่ได้จาก Event Log
+- แก้: เพิ่มการตรวจและหยุดบริการ `CoworkVMService` หลังยืนยันว่า `ImagePath` อยู่ในแพ็กเกจ Claude
+- ทดสอบจริง: เริ่มบริการแล้วโหมดแสดงรายการพบ `CoworkVMService (Running)`; รันโปรแกรมและยืนยัน ได้ `Stopped Claude background service CoworkVMService`; `sc queryex` ยืนยัน `STOPPED` และ PID 0; ยังไม่ได้ทดสอบเปิด Claude ใหม่เพราะผู้ใช้ต้องการปิด Claude
+
+### ตรวจทั้งเครื่องหลังผู้ใช้ส่งภาพป๊อปอัปซ้ำ (23 ก.ย. 2569)
+
+- ตรวจหน้าต่างจริงด้วย Windows `EnumWindows` และ `GetWindowThreadProcessId`: หัวหน้าต่างเป็น `C:\Program Files\WindowsApps\Claude_2.2553.13.0_x64__pzs8sxrjxfjjc\app\Claude.exe` แต่เจ้าของป๊อปอัปคือ `explorer.exe` PID 4456; ชื่อบนหัวหน้าต่างคือไฟล์ที่เปิดล้ม ไม่ใช่หลักฐานว่าไฟล์นั้นกำลังรัน
+- ตรวจแพ็กเกจ: `Get-AppxPackage` ระบุ Claude 2.2553.13.0 สถานะ Ok; ในแพ็กเกจมีไฟล์ `.exe` 7 ตัว; ตรวจชื่อโปรเซสตรงทั้ง 7 พบเพียง `cowork-svc.exe` ของ `CoworkVMService` PID 452440
+- ตรวจผู้ใช้ไฟล์ด้วย Windows Restart Manager ครบทั้ง 7 `.exe`: `cowork-svc.exe` มีผู้ใช้ PID 452440; `Claude.exe` และ `.exe` อีก 5 ตัวไม่มีผู้ใช้ไฟล์ที่ Restart Manager ระบุได้ ณ ตอนตรวจ
+- ตรวจบริการทั้งเครื่องพบเพียง `CoworkVMService` ที่ `ImagePath` อยู่ในแพ็กเกจ Claude; `StartMode=Auto` และมี service trigger ที่ named pipe `\pipe\cowork-vm-service`; ไม่พบ Scheduled Task หรือ Run key ที่ชี้ Claude
+- บันทึก Windows เวลา 12:09:00–12:09:02 พบ Event 215/208 รหัส `0x80070020` ขณะสร้าง Desktop AppX container และ Event 211 เพิ่ม PID 452440 ลง container; System Event 7040/7045 แสดงว่าระบบเปลี่ยนบริการเป็น disabled แล้วลงทะเบียนใหม่แบบ auto start ขณะเปิดแพ็กเกจ
+- สรุปที่พิสูจน์ได้: โปรแกรมปิดเดิมไม่ครอบคลุมบริการ Claude; ป๊อปอัปค้างอยู่ได้แม้โปรเซสปิดแล้ว; ระบบเปิดบริการกลับเมื่อมีการเรียกแพ็กเกจอีกครั้ง ส่วนสาเหตุลึกของ `0x80070020` ตอนแปลง job ของ AppX ยังไม่ยืนยันว่าเป็นไฟล์ใดหรือโปรเซสใดจับล็อก
+- หยุดบริการซ้ำแล้ว `sc queryex CoworkVMService` เป็น `STOPPED`, PID 0; ปรับข้อความในไอคอน Desktop ให้บอกสถานะ ณ ตอนตรวจและเตือนว่าการเปิด Claude ใหม่อาจเริ่มบริการอีก
+
+### ตรวจครบทั้งเครื่องตามคำขอผู้ใช้ (23 ก.ย. 2569)
+
+- ผู้ใช้ยืนยันว่ากดเปิด Claude เองเวลา 12:20; จึงแก้ข้อสงสัยเรื่องบริการเริ่มเอง: บริการ `CoworkVMService` กลับมาเพราะการเรียกเปิดแพ็กเกจ ไม่ใช่หลักฐานว่ามีงานตั้งเวลาแอบเปิดแอป
+- ตรวจ 7 ไฟล์ `.exe` ใน `WindowsApps\Claude_2.2553.13.0_x64__pzs8sxrjxfjjc\app` พบโปรเซสตรงชื่อเพียง `cowork-svc.exe`; Windows Restart Manager รายงานผู้ใช้ไฟล์ `cowork-svc.exe` เป็นบริการ Claude และไม่พบผู้ใช้ไฟล์ `Claude.exe` หรืออีก 5 ตัวขณะตรวจ
+- `EnumWindows` ระบุเจ้าของหน้าต่าง error เป็น `explorer.exe` PID 4456 ไม่ใช่ `Claude.exe`; ปิดโปรเซส Claude แล้วหน้าต่างเก่าอาจยังค้างจนกด OK
+- ไม่พบ Scheduled Task, Run key, Win32_StartupCommand ที่ชี้ Claude; `AppxManifest.xml` มี `ClaudeStartup` แต่ `Enabled="false"`; มี packaged service `CoworkVMService` ซึ่ง StartMode Auto และถูกลงทะเบียนใหม่ทุกครั้งที่แพ็กเกจถูกเรียกเปิด
+- Event Log เวลา 12:20:37–12:20:38 แสดงการทำ `RegisterByPackageFullName` พร้อม `ForceTargetApplicationShutdownOption,RepairAppRegistrationOption`, ติดตั้งบริการใหม่ และเปิด container ให้บริการ ก่อนการเปิดตัวแอปล้มด้วย `0x80070020` ระหว่าง `converting the job`; แพ็กเกจ `Get-AppxPackage` รายงาน `Status=Ok`
+- โหลด Microsoft Sysinternals Handle (ลายเซ็น Microsoft ถูกต้อง) มาตรวจชื่อแพ็กเกจทั้งเครื่อง; เมื่อบริการหยุดพบ `No matching handles found`; การตรวจขณะบริการทำงานในสิทธิ์ Medium ยังได้ผลไม่ครบเพราะเครื่องมือกำหนดให้ใช้สิทธิ์ Administrator และ `net session` ยืนยันโทเคนนี้ไม่ใช่ Administrator; เตรียมสคริปต์ `tools/diagnose_claude_handles.ps1` สำหรับตรวจแบบยกระดับสิทธิ์ แต่หน้าต่าง UAC ถูกยกเลิก จึงยังไม่มีผลสแกนระดับ Administrator
+- สรุป: ตัวที่พิสูจน์ว่ารันจากแพ็กเกจคือบริการ `CoworkVMService` และตัวแอป `Claude.exe` ไม่ได้รันค้าง; ป๊อปอัปมาจาก Explorer หลัง Windows เปิดแอปไม่สำเร็จ สาเหตุภายในของ `0x80070020` ระหว่างแปลง AppX job ยังต้องดูผล handle สิทธิ์ผู้ดูแลหรือ trace เพิ่ม ไม่ควรกล่าวว่าไฟล์ `Claude.exe` ถูกโปรเซสใดล็อกโดยไม่มีหลักฐาน
+
+### แก้ปุ่ม Close All Claude ให้ปิดกล่อง error ที่ค้าง (23 ก.ย. 2569)
+
+- อาการ: หลังผู้ใช้พิมพ์ `YES` โปรแกรมแสดงว่า `CoworkVMService` หยุดและรายการ Claude ปิดครบ แต่กล่อง `Another program is currently using this file` ยังอยู่บนจอ
+- Why-Why: คำสั่งเดิมปิดเฉพาะโปรเซสและบริการ; `EnumWindows` ตรวจพบกล่อง class `#32770` ที่หัวหน้าต่างเป็นพาธ `WindowsApps\Claude_...\app\Claude.exe` แต่เจ้าของหน้าต่างคือ `explorer.exe` PID 4456 จึงไม่หายไปเมื่อหยุดโปรเซส Claude
+- แก้: `tools/close_all_claude.ps1` ตรวจหัวหน้าต่าง, class และโปรเซสเจ้าของให้ตรงทั้งหมด แล้วส่ง `WM_CLOSE` เฉพาะกล่อง error ของ Claude หลังหยุดบริการ; กรณีไม่มีโปรเซสทำงานแล้วก็ปิดกล่องค้างได้ และโหมด `-ListOnly` ไม่เปลี่ยนหน้าต่าง
+- ทดสอบจริง: รันสคริปต์ขณะกล่อง error เปิดอยู่ ได้ `Requested closing 1 old Claude error dialog(s)`; ตรวจ `EnumWindows` ซ้ำเหลือ `Close All Claude` แต่ไม่พบหน้าต่าง error; ตรวจ syntax PowerShell และ `-ListOnly` ผ่าน

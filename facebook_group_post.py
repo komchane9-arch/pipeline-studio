@@ -209,11 +209,39 @@ def pick_photos(phone: Phone, count: int) -> int:
             break
         picked = after
     return picked
+
+
+def open_photo_picker(phone: Phone, gallery: tuple[int, int]) -> None:
+    """Confirm the gallery grid actually opened; retry only on the composer.
+
+    Facebook can ignore the first Gallery tap while the composer is settling.
+    The presence of the Gallery button alone is not proof that the grid opened.
+    """
+    point = gallery
+    for attempt in range(2):
+        phone.tap(point)
+        for _ in range(8):
+            time.sleep(1.0)
+            xml = phone.dump()
+            if photo_cell(xml, 1) is not None:
+                return
+        # A second tap is safe only if the same blank composer is still visible.
+        # A permission prompt or another screen must stop for evidence, not tap blind.
+        if attempt == 0 and phone.find(xml, CAPTION_FIELD_HINTS):
+            point = phone.find(xml, PHOTO_HINTS)
+            if point is not None:
+                phone.log("  แกลเลอรียังไม่เปิด — แตะปุ่มเดิมอีกครั้ง")
+                continue
+        break
+    keep_failure_screen(phone, "แตะแกลเลอรีแล้วไม่เปิดหน้าเลือกรูป")
+    raise PostError("แตะแกลเลอรีแล้วไม่เปิดหน้าเลือกรูป — หยุดก่อนเลือกรูป")
 # ช่องพิมพ์แคปชันหลังแนบรูป — ต้อง**แตะให้โฟกัสก่อน** ไม่งั้น ADBKeyboard
 # ส่งข้อความไปแล้วไม่มีช่องไหนรับ ข้อความหายเงียบ (เจอจริง: รูปเข้าแต่แคปชันว่าง)
 CAPTION_FIELD_HINTS = [
     "บอกอะไรสักหน่อยเกี่ยวกับรูปภาพ", "บอกอะไรสักหน่อย", "ชื่อโพสต์",
     "Say something about", "เขียนอะไรสักหน่อย",
+    # Preaw: ป้าย AutoCompleteTextView หลังแนบรูป (หลักฐาน 22 ก.ย. 2569).
+    "สร้างโพสต์สาธารณะ...", "ส่งโพสต์สาธารณะให้ผู้ดูแลอนุมัติ...",
 ]
 # กล่อง "ต้องการโพสต์ให้เสร็จในภายหลังหรือไม่" ที่โผล่เมื่อมีฉบับร่างค้างอยู่
 # ต้องกด "ทิ้งโพสต์" เสมอ — ถ้ากดบันทึกร่างไว้ รอบหน้าจะเจอกล่องนี้ซ้ำไม่จบ
@@ -715,12 +743,31 @@ class Phone:
         self._push_seq += 1
         stem, suffix = local.stem, local.suffix or ".jpg"
         remote = f"{REMOTE_DIR}/{stem}__{int(time.time())}{self._push_seq:02d}{suffix}"
-        result = self.run("push", str(local), remote, timeout=180)
-        if result.returncode != 0:
-            raise PostError(
-                f"ส่งรูปเข้ามือถือไม่สำเร็จ: "
-                f"{result.stderr.decode('utf-8', errors='replace')[:150]}"
-            )
+        push_error = ""
+        for attempt in range(2):
+            try:
+                result = self.run("push", str(local), remote, timeout=180)
+                if result.returncode == 0:
+                    push_error = ""
+                    break
+                push_error = result.stderr.decode(
+                    "utf-8", errors="replace").strip()[:150]
+            except subprocess.TimeoutExpired:
+                push_error = "ADB ไม่ตอบภายใน 180 วินาที"
+            if attempt == 0:
+                # สาย USB/adbd ของ Redmi เคยหลุดกลาง push แล้วตัวเฝ้าต่อคืนได้
+                # ไม่กี่วินาทีถัดมา การตัดทั้งใบตรงนี้ทำให้ผู้ใช้ต้อง Resume เอง
+                # ทั้งที่ยังไม่ทันโพสต์สักกลุ่ม รอเครื่องเดิมกลับมาแล้วเขียนทับ
+                # path เดิมหนึ่งครั้งจึงปลอดภัยและไม่ทำให้รูปซ้ำใน MediaStore.
+                self.log("  ⚠️ ส่งรูปสะดุด — รอ ADB ต่อคืนแล้วลองอีกครั้ง")
+                try:
+                    self.run("wait-for-device", timeout=45)
+                    self.shell("echo pipeline-ready", timeout=15)
+                except (subprocess.SubprocessError, PostError):
+                    pass
+                time.sleep(2.0)
+        else:
+            raise PostError(f"ส่งรูปเข้ามือถือไม่สำเร็จหลังลอง 2 ครั้ง: {push_error}")
         # ดันเวลาไฟล์เป็น "เดี๋ยวนี้" ก่อนสั่งสแกน — adb push รักษา mtime ของต้นทาง
         # (ตัวเรียงช่องไม่ได้ใช้ mtime แต่ที่อื่นในแอปใช้ เก็บไว้ให้ตรงกัน)
         self.shell(f"touch {remote}")
@@ -877,6 +924,57 @@ def _caption_bottom(xml: str, caption: str) -> int | None:
     return box[1] if box else None
 
 
+def _post_region(xml: str, caption: str) -> tuple[int, int] | None:
+    """เขตของโพสต์ที่มีแคปชันนี้ รองรับแคปชันทั้งเหนือและใต้รูป
+
+    Facebook รุ่นใหม่บน Xiaomi 11T Pro ย้ายลำดับเป็น
+    ``หัวโพสต์ → รูป → แถบปุ่ม → แคปชัน`` ขณะที่รุ่นเดิมเป็น
+    ``หัวโพสต์ → แคปชัน → รูป → แถบปุ่ม`` การอ้างว่า "ปุ่มต้องอยู่ใต้แคปชัน"
+    จึงใช้ไม่ได้อีกแล้ว ใช้หัวโพสต์ก่อนหน้า/ถัดไปเป็นเส้นแบ่งแทน ซึ่งยังกันไม่ให้
+    ไปแตะปุ่มของโพสต์อื่นได้เหมือนเดิม
+    """
+    box = _caption_box(xml, caption)
+    if box is None:
+        return None
+    top, bottom = box
+    headers = post_headers(xml)
+    previous = [y for y in headers if y <= top]
+    following = [y for y in headers if y > top]
+    start = previous[-1] if previous else max(0, top - POST_REGION_HEIGHT)
+    end = following[0] if following else bottom + POST_REGION_HEIGHT
+    return start, end
+
+
+def _distance_to_caption(point_y: int, box: tuple[int, int]) -> int:
+    """ระยะจากปุ่มถึงกล่องแคปชัน (0 เมื่ออยู่ระดับเดียวกัน)."""
+    top, bottom = box
+    if point_y < top:
+        return top - point_y
+    if point_y > bottom:
+        return point_y - bottom
+    return 0
+
+
+def _control_for_caption(points: list[tuple[int, int]],
+                         box: tuple[int, int]) -> tuple[int, int] | None:
+    """เลือกปุ่มของแคปชันโดยเก็บโครงเดิมไว้เป็น fallback อย่างชัดเจน
+
+    โครงเดิมของ Facebook: ``แคปชัน → รูป → ปุ่ม`` จึงเลือกปุ่มใต้แคปชันก่อน
+    เหมือนตรรกะเดิมทุกประการ หากไม่มีจึงใช้โครงใหม่:
+    ``รูป → ปุ่ม → แคปชัน`` แล้วเลือกปุ่มเหนือแคปชันที่ใกล้ที่สุด
+    """
+    if not points:
+        return None
+    top, bottom = box
+    legacy_below = [point for point in points if point[1] >= bottom]
+    if legacy_below:
+        return min(legacy_below, key=lambda point: point[1] - bottom)
+    new_above = [point for point in points if point[1] <= top]
+    if new_above:
+        return min(new_above, key=lambda point: top - point[1])
+    return min(points, key=lambda point: _distance_to_caption(point[1], box))
+
+
 # จำนวนรีแอคชันใต้โพสต์ เช่น "1 ความรู้สึก" / "37 ความรู้สึก, ความคิดเห็น 63 รายการ"
 #
 # ตัวนับนี้คือ**สัญญาณเดียวที่เชื่อได้**ว่าไลก์ติด เพราะแอปรุ่นนี้ไม่เปลี่ยนป้ายปุ่ม
@@ -931,15 +1029,11 @@ def _liked_in_post(xml: str, caption: str) -> bool:
     เหลือแต่ป้าย "ได้มีการกดปุ่ม ถูกใจ ไปแล้ว" — ถ้าไล่หาปุ่มก่อนจะได้ว่างเปล่า
     แล้วสรุปผิดว่า "หาปุ่มไม่เจอ" ทั้งที่ความจริงคือถูกใจไปแล้ว
     """
-    box = _caption_box(xml, caption)
-    if box is None:
+    region = _post_region(xml, caption)
+    if region is None:
         return False
-    limit = box[1] + POST_REGION_HEIGHT
-    for header in post_headers(xml):
-        if header > box[1]:
-            limit = min(limit, header)      # หัวโพสต์ถัดไป = สุดเขตของโพสต์เรา
-            break
-    return liked_near(xml, box[1], span=max(0, limit - box[1]))
+    start, end = region
+    return liked_near(xml, start, span=max(0, end - start))
 # แถบปุ่มของโพสต์หนึ่งอยู่ห่างจากข้อความไม่เกินความสูงรูป — เกินกว่านี้คือของโพสต์ถัดไป
 POST_REGION_HEIGHT = 2000
 # แถวตัวนับรีแอคชันอยู่ "ติดเหนือ" แถบปุ่มเสมอ (ตรวจจริง: ตัวนับ y=2128 ปุ่ม y=2265)
@@ -1010,8 +1104,12 @@ def _own_like_button(xml: str, caption: str, scrolled: bool) -> tuple[int, int] 
         return None
     box = _caption_box(xml, caption)
     if box is not None:
-        inside = [p for p in buttons if box[1] <= p[1] <= box[1] + POST_REGION_HEIGHT]
-        return inside[0] if inside else None
+        region = _post_region(xml, caption)
+        if region is None:
+            return None
+        start, end = region
+        inside = [p for p in buttons if start <= p[1] < end]
+        return _control_for_caption(inside, box)
     if not scrolled:
         return None                     # ไม่เคยเห็นข้อความเลย ห้ามเดา
     headers = post_headers(xml)
@@ -1282,6 +1380,9 @@ MAX_COMMENTS = 2        # คอมเมนต์ต่อโพสต์ได
 
 def _as_texts(comment) -> list[str]:
     """รับได้ทั้งข้อความเดียวและรายการข้อความ — ของเดิมส่งมาเป็นข้อความเดียว"""
+    # งานโพสต์รับ callback เพื่ออ่านรายการล่าสุด; ห้ามแปลง function เป็นข้อความ.
+    if callable(comment):
+        comment = comment()
     if isinstance(comment, (list, tuple)):
         items = [str(x).strip() for x in comment]
     else:
@@ -1503,13 +1604,21 @@ def comment_quota_resets_in(lane: str = DEFAULT_COMMENT_LANE,
     if comment_quota_left(lane, account) > 0:
         return 0.0
     waits: list[float] = []
+    owner = lane_owning_hour()
+    if owner and owner != lane:
+        # เลนอื่นต้องหมดทั้งหน้าต่าง ไม่ใช่แค่รายการแรกหมดอายุ.
+        occupied = _comment_times(owner)
+        if occupied:
+            waits.append(occupied[-1] + COMMENT_WINDOW_SECONDS - time.time())
     mine = _comment_times(lane)
     if mine and len(mine) >= comment_lane_limit(lane, account):
-        waits.append(mine[0] + COMMENT_WINDOW_SECONDS - time.time())
+        waits.append(mine[max(0, len(mine) - comment_lane_limit(lane, account))]
+                     + COMMENT_WINDOW_SECONDS - time.time())
     everyone = _all_comment_times()
     if everyone and len(everyone) >= comment_limit_per_hour(account):
-        waits.append(everyone[0] + COMMENT_WINDOW_SECONDS - time.time())
-    return max(0.0, min(waits)) if waits else 0.0
+        waits.append(everyone[max(0, len(everyone) - comment_limit_per_hour(account))]
+                     + COMMENT_WINDOW_SECONDS - time.time())
+    return max(0.0, max(waits)) if waits else 60.0
 
 
 def _note_comment_sent(lane: str = DEFAULT_COMMENT_LANE) -> None:
@@ -1743,6 +1852,136 @@ def _scroll_back_to_caption(phone: Phone, caption: str) -> bool:
     return False
 
 
+def _reveal_caption_below_media(phone: Phone, caption: str, tries: int = 3) -> bool:
+    """เลื่อนลงหาแคปชันที่ Facebook ย้ายไปไว้ใต้รูปของโพสต์ใหม่
+
+    หลังแตะโพสต์ แอปมักวางหัวโพสต์ไว้กลางจอ รูปสูงจึงดันแคปชันเลยขอบล่าง
+    ไปเล็กน้อย เดิมทุกขั้นอ่าน dump ครั้งเดียวแล้วสรุปว่าไม่มีข้อความ ทั้งที่
+    เลื่อนลงเพียงหนึ่งช่วงก็เจอ ใช้การเลื่อนช้าและหยุดทันทีเมื่อเจอเพื่อไม่ข้าม
+    ไปโพสต์ถัดไป
+    """
+    if _caption_box(phone.dump(), caption) is not None:
+        return True
+    for _ in range(max(0, tries)):
+        phone.vswipe("1800", "1250", str(SCROLL_DURATION_MS))
+        time.sleep(1.8)
+        if _caption_box(phone.dump(), caption) is not None:
+            phone.log("  เลื่อนลงแล้วเจอข้อความใต้รูปของโพสต์เรา")
+            return True
+    return False
+
+
+# หน้าโพสต์เดี่ยวบน Facebook รุ่นใหม่อาจไม่ส่งแคปชันกลับมาในใบงานเก่า แต่ยัง
+# แสดงชื่อเจ้าของ + ชื่อกลุ่ม + แคปชันจริงบนมือถือ เราอนุญาตทางสำรองนี้เฉพาะเมื่อ
+# ระบุตัวตนโพสต์ได้ครบก่อน เพื่อไม่ให้ข้อความยาวจากโพสต์อื่นถูกนับเป็นแคปชัน
+POST_COMMENT_BOX_HINTS = (
+    "เขียนความคิดเห็นสาธารณะ", "เขียนความคิดเห็น", "Write a public comment",
+    "Write a comment",
+)
+POST_CAPTION_JUNK = (
+    "ถูกใจ", "แสดงความคิดเห็น", "แชร์", "ส่ง", "โพสต์",
+    "Like", "Comment", "Share", "Send", "Post",
+)
+
+
+def _ui_key(value: str) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _ui_compact(value: str) -> str:
+    """คีย์ชื่อกลุ่มที่ไม่สนช่องว่าง ซึ่ง Facebook แทรกต่างจากทะเบียนได้."""
+    return "".join(_ui_key(value).split())
+
+
+def _post_identity_visible(xml: str, account: str, group_name: str = "") -> bool:
+    """เห็นเจ้าของโพสต์ (และชื่อกลุ่มเมื่อมี) บนจอเดียวกันจริงหรือไม่."""
+    owner = _ui_key(account)
+    group = _ui_compact(group_name)
+    if not owner:
+        return False
+    labels = [_ui_key(label) for node_labels, _ in iter_nodes(xml)
+              for label in node_labels]
+    if re.fullmatch(r"ลิงก์ที่สั่งเก็บ(?:\s+\d+)?", str(group_name or '').strip()):
+        # Manual-import labels are not Facebook group names. Require the single
+        # post header as additional evidence, not merely an owner in a feed.
+        if _ui_key('โพสต์ของ ' + account) not in labels:
+            return False
+        group = ''
+    owner_seen = any(label == owner or label.startswith(owner + "•")
+                     or label.startswith(owner + " ·") for label in labels)
+    group_seen = (not group or any(_ui_compact(label) == group for label in labels))
+    return owner_seen and group_seen
+
+
+def _post_caption_from_screen(xml: str, account: str,
+                              group_name: str = "") -> str:
+    """อ่านข้อความที่เป็นแคปชันบนหน้าโพสต์เดี่ยว เมื่อไม่มีต้นฉบับให้เทียบ.
+
+    ทางนี้ใช้เฉพาะหลังยืนยันชื่อเจ้าของ/กลุ่มแล้ว และต้องเห็นช่องคอมเมนต์ของ
+    โพสต์ด้วย จึงไม่รับข้อความยาวลอย ๆ จากหน้าฟีดหรือหน้าเลือกแอป
+    """
+    owner = _ui_key(account)
+    group = _ui_compact(group_name)
+    rows: list[tuple[int, str]] = []
+    comment_box_seen = False
+    for labels, (_, y1, _, _) in iter_nodes(xml):
+        for raw in labels:
+            text = " ".join(str(raw or "").split()).strip()
+            low = _ui_key(text)
+            if not text:
+                continue
+            if any(_ui_key(hint) in low for hint in POST_COMMENT_BOX_HINTS):
+                comment_box_seen = True
+                continue
+            if low == owner or _ui_compact(low) == group or low.startswith(owner + "•") \
+                    or low.startswith(owner + " ·"):
+                continue
+            if any(low == _ui_key(word) for word in POST_CAPTION_JUNK):
+                continue
+            if "แชร์กับ:" in text or "public group" in low or "กลุ่มสาธารณะ" in text:
+                continue
+            # ป้ายเวลา/สถานะสั้น ๆ ไม่ใช่แคปชัน ส่วนข้อความจริงต้องยาวพอที่จะ
+            # แยกจากชื่อปุ่มได้ ทางแคปชันที่รู้ข้อความอยู่แล้วไม่ติดข้อจำกัดนี้
+            if len(text) < 12 or COMMENT_TIME_LINE.fullmatch(text):
+                continue
+            rows.append((y1, text))
+    if not comment_box_seen or not rows:
+        return ""
+    # ในหน้าโพสต์เดี่ยว แคปชันคือข้อความสาระที่ยาวที่สุดก่อนช่องคอมเมนต์
+    # (รองรับทั้งข้อความบรรทัดเดียวและหลายบรรทัดใน node เดียว)
+    return max(rows, key=lambda row: (len(row[1]), -row[0]))[1]
+
+
+def _confirm_linked_post(phone: Phone, caption: str, account: str = "",
+                         group_name: str = "", tries: int = 3) -> str:
+    """ยืนยันหน้าโพสต์ทั้งโครงเดิมและโครงใหม่ที่แคปชันอยู่ใต้รูป.
+
+    คืนแคปชันที่ยืนยันได้; ค่าว่างคือยังยืนยันไม่ได้ การมีข้อความต้นฉบับยังเป็น
+    วิธีหลักเหมือนเดิม ส่วนใบงานเก่าที่ไม่มีแคปชันใช้ชื่อเจ้าของ+กลุ่ม+ช่อง
+    คอมเมนต์เป็นด่านบังคับก่อนอ่านข้อความจริงจากจอ
+    """
+    expected = str(caption or "").strip()
+    identity_seen = False
+    for attempt in range(max(0, tries) + 1):
+        xml = phone.dump()
+        if expected and _caption_box(xml, expected) is not None:
+            return expected
+        if not expected:
+            identity_seen = identity_seen or _post_identity_visible(
+                xml, account, group_name)
+            if identity_seen:
+                observed = _post_caption_from_screen(xml, account, group_name)
+                if observed:
+                    return observed
+        if attempt >= max(0, tries):
+            break
+        # ปัดขึ้นช้า ๆ เพื่อเปิดส่วนใต้รูป ไม่ใช้ระยะยาวแบบหาโพสต์ในฟีด เพราะ
+        # อาจข้ามแคปชันและหลุดเข้าโซนคอมเมนต์
+        phone.vswipe("1800", "1250", str(SCROLL_DURATION_MS))
+        time.sleep(1.8)
+    return ""
+
+
 def comment_post_of(phone: Phone, caption: str, comment,
                     single_post: bool = False, photos=None,
                     links_only_on_reject: bool = False) -> dict:
@@ -1773,15 +2012,17 @@ def comment_post_of(phone: Phone, caption: str, comment,
             phone.log("  ไม่เห็นข้อความโพสต์ของเราบนจอ — ไม่คอมเมนต์")
             return dict(NO_COMMENT)
         top, bottom = box
-        button = None
+        region = _post_region(xml, caption)
+        candidates: list[tuple[int, int]] = []
         for labels, (x1, y1, x2, y2) in iter_nodes(xml):
-            if not (bottom <= y1 <= bottom + POST_REGION_HEIGHT):
+            if region is None or not (region[0] <= y1 < region[1]):
                 continue
             joined = " ".join(labels).lower()
             if any(hint.lower() in joined for hint in COMMENT_OPEN_HINTS):
-                point = ((x1 + x2) // 2, (y1 + y2) // 2)
-                if button is None or point[1] < button[1]:
-                    button = point
+                candidates.append(((x1 + x2) // 2, (y1 + y2) // 2))
+        # เก็บโครงเดิม (ปุ่มอยู่ใต้ข้อความ) ไว้ก่อน แล้วจึงถอยมาใช้โครงใหม่
+        # (ปุ่มอยู่เหนือข้อความใต้รูป) เมื่อโครงเดิมหาไม่พบ
+        button = _control_for_caption(candidates, box)
         if _comment_is_live(xml, text.strip()[:10]):
             phone.log("  คอมเมนต์นี้มีอยู่แล้ว — ไม่คอมเมนต์ซ้ำ")
             return {"commented": True, "comment_liked": like_own_comment(phone, text)}
@@ -2222,6 +2463,97 @@ def open_post_from_notification(phone: Phone, group_name: str, caption: str) -> 
     return False
 
 
+# ค้นหาโพสต์ภายในกลุ่มด้วยชื่อโปรไฟล์เจ้าของโพสต์ ก่อนเลื่อนฟีดรวมซึ่งเรียงตาม
+# “เกี่ยวข้องมากที่สุด” และมักฝังโพสต์เราไว้ลึกมาก. ป้ายเหล่านี้มาจากปุ่มแว่นขยาย
+# บนหัวกลุ่มและช่องค้นหาหลังแตะปุ่ม รองรับทั้ง Facebook ภาษาไทย/อังกฤษ.
+GROUP_SEARCH_BUTTON_HINTS = [
+    "ค้นหา", "ค้นหาในกลุ่ม", "Search", "Search group",
+]
+GROUP_SEARCH_FIELD_HINTS = [
+    # หน้าจอจริง 18 ก.ย. 2569 ใช้ชื่อกลุ่มต่อท้าย เช่น
+    # ``ค้นหาใน แม่บ้านชอบรีวิว`` ไม่ได้มีคำว่า ``กลุ่ม`` อยู่ในป้ายเลย.
+    # เก็บป้ายแบบเดิมไว้ด้านล่าง เผื่อ Facebook เปลี่ยนกลับ.
+    "ค้นหาใน ", "Search in ",
+    "ค้นหาในกลุ่มนี้", "ค้นหาในกลุ่ม", "ค้นหาโพสต์",
+    "Search this group", "Search in group", "Search posts",
+]
+GROUP_SEARCH_SCROLL_TRIES = 12
+# แถบค้นหาด้านบนกินพื้นที่ถึงประมาณ y=205 บนจออ้างอิง 1080x2400.
+# ถ้าหัวโพสต์เลื่อนไปอยู่ใต้แถบนี้ uiautomator ยังรายงานปุ่ม ``...`` อยู่ แต่
+# การแตะพิกัดเดียวกันจะโดนปุ่ม ``กรอง ทั้งหมด`` ที่ลอยทับอยู่แทน.
+POST_MENU_SAFE_TOP = 230
+POST_MENU_REPOSITION_TRIES = 2
+
+
+def search_own_post_in_group(phone: Phone, account: str, caption: str,
+                             group_id: str, clipboard=None) -> dict:
+    """ค้นโพสต์ในกลุ่มด้วยชื่อโปรไฟล์ แล้วเลื่อนยืนยันด้วยแคปชัน.
+
+    คืน ``used`` เพื่อแยก “ใช้ค้นหาแล้วแต่ไม่เจอ” ออกจาก “หน้ารุ่นนี้ไม่มีปุ่ม
+    ค้นหา” และคืน ``route``/``link`` เมื่อเจอโพสต์. กดผลจากชื่ออย่างเดียวไม่ได้:
+    คนชื่อซ้ำหรือโพสต์เก่าของบัญชีเดียวกันมีได้ จึงต้องยืนยันแคปชันจริงทุกครั้ง.
+    """
+    owner = str(account or "").strip()
+    if not owner:
+        phone.log("  ไม่มีชื่อบัญชี Facebook — ข้ามการค้นหาในกลุ่ม")
+        return {"used": False, "route": "", "link": ""}
+
+    search = phone.find(phone.dump(), GROUP_SEARCH_BUTTON_HINTS)
+    if search is None:
+        phone.log("  ไม่พบปุ่มค้นหาบนหัวกลุ่ม — ใช้ฟีดแบบเดิม")
+        return {"used": False, "route": "", "link": ""}
+    phone.log("  กดค้นหาในกลุ่ม")
+    phone.tap(search)
+
+    field = None
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        xml = phone.dump()
+        field = phone.find(xml, GROUP_SEARCH_FIELD_HINTS)
+        if field:
+            break
+        time.sleep(1.0)
+    if field is None:
+        phone.log("  กดค้นหาแล้วแต่ไม่พบช่องพิมพ์ — ใช้ฟีดแบบเดิม")
+        phone.back()
+        return {"used": False, "route": "", "link": ""}
+
+    phone.tap(field)
+    current_ime = phone.shell("settings get secure default_input_method").strip()
+    restore_ime = ""
+    if ADB_KEYBOARD_IME not in current_ime:
+        restore_ime = phone.use_adb_keyboard()
+    try:
+        phone.log(f"  พิมพ์ชื่อเฟซในช่องค้นหา: {owner}")
+        phone.type_text(owner)
+        # ผลค้นหา Facebook เปลี่ยนสดตามข้อความอยู่แล้ว; ENTER ช่วยปิดคำแนะนำ
+        # บางรุ่นและเริ่มค้นหาทันที โดยไม่อาศัยพิกัดปุ่มบนคีย์บอร์ด.
+        phone.run("shell", "input", "keyevent", "KEYCODE_ENTER")
+        time.sleep(4.0)
+        phone.hide_keyboard()
+    finally:
+        # ถ้ารอบตามเก็บตั้ง ADBKeyboard ไว้เพื่อพิมพ์คอมเมนต์อยู่ก่อนแล้ว ห้ามคืน
+        # กลางงาน; คืนเฉพาะเมื่อฟังก์ชันนี้เป็นคนสลับเอง.
+        if restore_ime:
+            phone.restore_keyboard(restore_ime)
+
+    for attempt in range(GROUP_SEARCH_SCROLL_TRIES):
+        if _caption_box(phone.dump(), caption) is not None:
+            phone.log(f"  เจอโพสต์จากผลค้นหาชื่อเฟซ (เลื่อน {attempt} ครั้ง)")
+            fresh = copy_post_link(phone, group_id, caption, clipboard) if clipboard else ""
+            if fresh and open_post_link(phone, fresh, caption, group_id):
+                return {"used": True, "route": "link", "link": fresh}
+            return {"used": True, "route": "search", "link": fresh}
+        phone.vswipe("1800", str(1800 - SCROLL_STEP), str(SCROLL_DURATION_MS))
+        time.sleep(1.8)
+
+    phone.log(f"  ค้นหาด้วยชื่อเฟซแล้ว แต่ไม่เจอแคปชันหลังเลื่อน "
+              f"{GROUP_SEARCH_SCROLL_TRIES} ครั้ง")
+    phone.back()                       # กลับหน้ากลุ่มก่อนใช้ฟีดเดิมเป็นตาข่ายรอง
+    time.sleep(2.0)
+    return {"used": True, "route": "", "link": ""}
+
+
 # หน้า "เปิดด้วยแอปไหน" ที่ระบบเด้งขึ้นมาเวลายิงลิงก์ facebook.com เข้าไป
 #
 # เดิมโค้ดถือว่าเจอหน้านี้ = เปิดไม่ได้ แล้วเลิกล้มไปเลย แต่หน้านี้แค่ต้องกดเลือก
@@ -2298,7 +2630,8 @@ def post_link_forms(link: str, group_id: str = "", post_id: str = "") -> list[tu
 
 
 def open_post_link(phone: Phone, link: str, caption: str,
-                   group_id: str = "", post_id: str = "") -> bool:
+                   group_id: str = "", post_id: str = "", *,
+                   account: str = "", group_name: str = "", before_retry=None) -> bool:
     """เปิดโพสต์กลับมาจากลิงก์ที่เก็บไว้ — คืน True เมื่อเห็นแคปชันของเราจริง
 
     ยืนยันด้วย**แคปชัน**เท่านั้น ไม่เชื่อว่า "ยิง intent ผ่าน = เปิดถูกโพสต์"
@@ -2312,7 +2645,9 @@ def open_post_link(phone: Phone, link: str, caption: str,
     forms = post_link_forms(link, group_id, post_id)
     if not forms:
         return False
-    for name, url, with_package in forms:
+    for route_index, (name, url, with_package) in enumerate(forms):
+        if route_index and before_retry is not None:
+            before_retry()
         phone.log(f"  เปิดโพสต์จากลิงก์ ({name})")
         phone.shell(f"am force-stop {FB_PACKAGE}")
         time.sleep(1.5)
@@ -2323,20 +2658,33 @@ def open_post_link(phone: Phone, link: str, caption: str,
             phone.run(*args, timeout=40)
         except Exception as error:          # ยิง intent พังต้องไม่ล้มทั้งกลุ่ม
             phone.log(f"    ยิงลิงก์ไม่ผ่าน: {error}")
+            if before_retry is not None:
+                # Queued replies diagnose uncertain commands; never replay a timeout.
+                try:
+                    phone.log(f"    online={phone.online()} · อ่านจอใหม่ {len(phone.dump())} ตัวอักษร")
+                except Exception as probe_error:
+                    phone.log(f"    อ่านสถานะซ้ำไม่ได้: {probe_error}")
+                raise
             continue
         time.sleep(POST_LINK_WAIT)
         _pick_facebook_in_chooser(phone)
-        for _ in range(POST_LINK_TRIES):
-            if _caption_box(phone.dump(), caption) is not None:
-                phone.log("    เข้าหน้าโพสต์จากลิงก์แล้ว")
-                return True
-            time.sleep(3.0)
+        confirmed = _confirm_linked_post(
+            phone, caption, account=account, group_name=group_name,
+            tries=POST_LINK_TRIES)
+        if confirmed:
+            if caption:
+                phone.log("    เข้าหน้าโพสต์จากลิงก์แล้ว — ยืนยันแคปชันได้")
+            else:
+                phone.log("    เข้าหน้าโพสต์จากลิงก์แล้ว — อ่านแคปชันใต้รูปได้: "
+                          f"{confirmed[:45]}")
+            return True
     phone.log("  เปิดโพสต์จากลิงก์ไม่ได้ทุกแบบ")
     return False
 
 
 def open_own_post(phone: Phone, group_id: str, group_name: str, caption: str,
-                  clipboard=None, link: str = "", post_id: str = "") -> dict:
+                  clipboard=None, link: str = "", post_id: str = "",
+                  account: str = "") -> dict:
     """เปิดโพสต์ของเรา แล้วบอกว่าเข้าถึงได้ทางไหน + ลิงก์ที่เก็บมาได้ระหว่างทาง
 
     ลำดับที่ใช้ และเหตุผล:
@@ -2353,7 +2701,7 @@ def open_own_post(phone: Phone, group_id: str, group_name: str, caption: str,
     ("สำหรับคุณ (N)") คั่นระหว่างแคปชันกับแถบปุ่มจนระยะเพี้ยน ส่วนหน้าโพสต์เดี่ยว
     ทั้งหน้าคือโพสต์เรา ไม่มีอะไรให้กดผิดเลย
 
-    คืน {"route": "link"|"noti"|"feed"|"", "link": ลิงก์ที่เพิ่งเก็บได้ (อาจว่าง)}
+    คืน {"route": "link"|"noti"|"search"|"feed"|"", "link": ลิงก์ที่เพิ่งเก็บได้ (อาจว่าง)}
     """
     if link and open_post_link(phone, link, caption, group_id, post_id):
         return {"route": "link", "link": ""}
@@ -2365,6 +2713,12 @@ def open_own_post(phone: Phone, group_id: str, group_name: str, caption: str,
     except PostError as error:
         phone.log(f"  เปิดกลุ่มไม่ได้: {error}")
         return {"route": "", "link": ""}
+    searched = search_own_post_in_group(
+        phone, account, caption, group_id, clipboard=clipboard)
+    if searched["route"]:
+        return {"route": searched["route"], "link": searched["link"]}
+    if searched["used"]:
+        phone.log("  ผลค้นหาไม่เจอ — ลองเลื่อนฟีดกลุ่มปกติเป็นทางสำรอง")
     for _ in range(FEED_SCROLL_TRIES):
         if _caption_box(phone.dump(), caption) is not None:
             phone.log("  เจอโพสต์ในฟีดแล้ว")
@@ -2390,7 +2744,7 @@ SINGLE_POST_ROUTES = ("noti", "link")
 def followup_groups(
     adb: str, serial: str, caption: str, targets: list[dict],
     comment: str = "", log=print, stop=lambda: False, on_result=None,
-    comment_images=None, clipboard=None,
+    comment_images=None, clipboard=None, account: str = "",
 ) -> list[dict]:
     """ตามเก็บงานทีหลัง: เปิดโพสต์จากแจ้งเตือน แล้วกดถูกใจ + คอมเมนต์
 
@@ -2423,6 +2777,7 @@ def followup_groups(
             opened = open_own_post(
                 phone, entry["group_id"], name, caption, clipboard=clipboard,
                 link=item.get("link", ""), post_id=item.get("post_id", ""),
+                account=account,
             )
             route = opened["route"]
             # ลิงก์ที่เพิ่งคัดลอกระหว่างทาง (ทางฟีด) — เก็บทันทีไม่ต้องรอจบกลุ่ม
@@ -2430,7 +2785,7 @@ def followup_groups(
                 entry["link"] = opened["link"]
             have_link = bool(entry.get("link") or item.get("link"))
             if not route:
-                entry["error"] = "เปิดโพสต์ไม่ได้ (ทั้งลิงก์ แจ้งเตือน และฟีด)"
+                entry["error"] = "เปิดโพสต์ไม่ได้ (ทั้งลิงก์ แจ้งเตือน ค้นหาในกลุ่ม และฟีด)"
             else:
                 single = route in SINGLE_POST_ROUTES
                 entry["liked"] = like_post_of(phone, caption, single_post=single)
@@ -2472,30 +2827,42 @@ def copy_post_link(phone: Phone, group_id: str, caption: str, clipboard) -> str:
     probe = caption.strip()[:12]
     if not probe:
         return ""
-    xml = phone.dump()
-    caption_top = None
-    for labels, (_, y1, _, _) in iter_nodes(xml):
-        if any(probe in label for label in labels):
-            caption_top = y1
-            break
-    if caption_top is None:
-        phone.log("  ไม่เห็นโพสต์ของเราบนจอ — ข้ามการเก็บลิงก์")
-        return ""
-
     menu: tuple[int, int] | None = None
-    menu_bottom = -1
-    for labels, (x1, y1, x2, y2) in iter_nodes(xml):
-        text = " ".join(labels).lower()
-        if not any(hint.lower() in text for hint in POST_MENU_HINTS):
-            continue
-        if y2 > caption_top:
-            continue                      # อยู่ใต้ข้อความ = ของโพสต์ถัดไป
-        if y2 > menu_bottom:
-            menu_bottom = y2
-            menu = ((x1 + x2) // 2, (y1 + y2) // 2)
-    if menu is None:
-        phone.log("  หาปุ่ม … ของโพสต์ไม่เจอ — ข้ามการเก็บลิงก์")
-        return ""
+    for attempt in range(POST_MENU_REPOSITION_TRIES + 1):
+        xml = phone.dump()
+        caption_top = None
+        for labels, (_, y1, _, _) in iter_nodes(xml):
+            if any(probe in label for label in labels):
+                caption_top = y1
+                break
+        if caption_top is None:
+            phone.log("  ไม่เห็นโพสต์ของเราบนจอ — ข้ามการเก็บลิงก์")
+            return ""
+
+        menu = None
+        menu_bottom = -1
+        for labels, (x1, y1, x2, y2) in iter_nodes(xml):
+            text = " ".join(labels).lower()
+            if not any(hint.lower() in text for hint in POST_MENU_HINTS):
+                continue
+            if y2 > caption_top:
+                continue                  # อยู่ใต้ข้อความ = ของโพสต์ถัดไป
+            if y2 > menu_bottom:
+                menu_bottom = y2
+                menu = ((x1 + x2) // 2, (y1 + y2) // 2)
+        if menu is None:
+            phone.log("  หาปุ่ม … ของโพสต์ไม่เจอ — ข้ามการเก็บลิงก์")
+            return ""
+        if menu[1] >= POST_MENU_SAFE_TOP:
+            break
+        if attempt >= POST_MENU_REPOSITION_TRIES:
+            phone.log("  ปุ่ม … ถูกแถบค้นหาบัง — ไม่กดปุ่มซ้อนเพื่อกันเลือกผิด")
+            return ""
+        phone.log("  ปุ่ม … อยู่ใต้แถบค้นหา — เลื่อนการ์ดลงก่อนกด")
+        # ลากลงเพียง 200px: พอให้หัวโพสต์พ้นแถบลอย แต่แคปชันใต้รูปยังไม่
+        # หลุดขอบล่าง (วัดจริงกับโพสต์รูปแนวตั้งในกลุ่ม 440966771947927).
+        phone.vswipe("650", "850", str(SCROLL_DURATION_MS))
+        time.sleep(1.5)
 
     return _copy_link_from_menu(phone, menu, clipboard)
 
@@ -2602,6 +2969,43 @@ def _copy_link_from_menu(phone: Phone, menu: tuple[int, int], clipboard) -> str:
     return link
 
 
+def verify_existing_comments(phone: Phone, comment, account: str = "",
+                             first_xml: str | None = None) -> dict:
+    """Read across viewports. Partial visibility is unknown, never absence.
+
+    Match complete prose inside an author's comment region, not the composer
+    or the link-preview card. Accumulate expected slots rather than row counts.
+    """
+    wanted = _as_texts(comment)
+    matched: set[int] = set()
+    normalize = lambda value: " ".join(str(value or "").split())
+    for step in range(9):
+        xml = first_xml if step == 0 and first_xml is not None else phone.dump()
+        anchors = _comment_anchors(xml, 0, 10 ** 6)
+        for pos, (top, author) in enumerate(anchors):
+            if account and normalize(author).casefold() != normalize(account).casefold():
+                continue
+            end = anchors[pos + 1][0] if pos + 1 < len(anchors) else 10 ** 6
+            labels = [normalize(comment_text_only(label, author)) for values, box in iter_nodes(xml)
+                      if top < box[1] < end for label in values]
+            for index, text in enumerate(wanted):
+                prose = normalize(comment_text_only(text))
+                # URL-only content cannot be proved by a generic domain preview.
+                if prose and prose in labels:
+                    matched.add(index)
+        if len(matched) == len(wanted):
+            break
+        if step < 8:
+            phone.vswipe("1700", "1200", "500")
+            time.sleep(1.5)
+    complete = len(matched) == len(wanted)
+    return {"comments_seen": len(matched) if complete else None,
+            "comments_observed": len(matched), "comments_wanted": len(wanted),
+            "comments_complete": complete,
+            "comments_matched_indices": sorted(matched),
+            "comments_note": "" if complete else "ยังตรวจคอมเมนต์ไม่ครบ — รักษาผลเดิมไว้"}
+
+
 def verify_liked(phone: Phone, group_id: str, caption: str,
                  link: str = "", comment=None) -> dict:
     """เปิดกลุ่มซ้ำแล้วตรวจว่าโพสต์ขึ้นจริงและถูกใจไปแล้วจริง
@@ -2691,16 +3095,19 @@ def verify_liked(phone: Phone, group_id: str, caption: str,
     # นับไม่ได้แล้วต้องบอกว่า "นับไม่ได้" (None) ห้ามตอบ 0 ซึ่งแปลว่า "ไม่มี"
     wanted = _as_texts(comment) if comment else []
     seen_comments = None
+    comment_check = {}
     if on_post and wanted:
-        seen_comments = sum(
-            1 for text in wanted
-            if (probe := comment_probe(text)) and screen_has(xml, probe)
-        )
+        import fb_auto_post
+        comment_check = verify_existing_comments(
+            phone, wanted, account=fb_auto_post.active_account(), first_xml=xml)
+        seen_comments = comment_check["comments_seen"]
 
     parts = [f"เจอโพสต์={'ใช่' if found_post else 'ไม่เจอ'}",
              f"ถูกใจแล้ว={'ใช่' if liked else 'ยัง'}"]
     if seen_comments is not None:
         parts.append(f"คอมเมนต์ {seen_comments}/{len(wanted)} ใบ")
+    elif comment_check:
+        parts.append(comment_check["comments_note"])
     phone.log("  ตรวจซ้ำ: " + " · ".join(parts))
     return {
         "group_id": group_id, "post_visible": found_post, "liked": liked,
@@ -2710,6 +3117,7 @@ def verify_liked(phone: Phone, group_id: str, caption: str,
         "comments_seen": seen_comments,
         "comments_wanted": len(wanted) or None,
         "by_link": on_post,
+        **comment_check,
     }
 
 
@@ -2861,9 +3269,20 @@ COMMENT_CHROME_HINTS = (
     "เกี่ยวข้องมากที่สุด", "Action chip", "profile picture", "โพสต์ของ",
     "ใหม่ที่สุด", "ทั้งหมด",
 )
+COMMENT_META_LINES = {
+    "ติดตาม", "· ติดตาม", "Follow", "· Follow",
+    "แก้ไขแล้ว", "Edited", "ดูคำแปล", "See translation",
+}
+COMMENT_TIME_LINE = re.compile(
+    r"^(?:เมื่อสักครู่|เมื่อวาน|Just now|Yesterday|\d+\s*"
+    r"(?:วินาที|นาที|ชั่วโมง|ชม\.?|วัน|สัปดาห์|เดือน|ปี|s|m|h|d|w|y|min|mins|"
+    r"hr|hrs|hour|hours|day|days|week|weeks)(?:ที่แล้ว| ago)?)$", re.I)
+COMMENT_COUNT_LINE = re.compile(r"^\d[\d,]*$")
 # ชื่อคนเขียนคอมเมนต์โผล่เป็นป้ายเดี่ยวๆ ข้างรูปโปรไฟล์ ยาวพอจะถูกนับเป็นคอมเมนต์
 # ตัดทิ้งโดยอ่านชื่อจากป้าย "รูปโปรไฟล์ของ <ชื่อ>" ที่อยู่บนจอเดียวกัน
 AVATAR_PREFIX = "รูปโปรไฟล์ของ"
+AVATAR_STATE_SUFFIX = re.compile(
+    r",\s*(?:สตอรี่ที่ยังไม่เห็น|unseen story)$", re.I)
 # ใต้คอมเมนต์สุดท้ายมีการ์ด "กลุ่มที่แนะนำ" ต่อท้าย ซึ่งมีป้ายชื่อกลุ่มสั้นๆ เดี่ยวๆ
 # ที่ไม่ติดคำว่า "สมาชิก" เลย (เจอจริง: "🏠 แต่งไปเถอะบ้านเรา") ถ้าไม่กั้นเพดาน
 # จะถูกนับเป็นคอมเมนต์ — ใช้ป้ายแรกที่มีคำว่า "สมาชิก" เป็นเส้นตัด
@@ -2877,6 +3296,25 @@ COMMENT_COUNT_SCROLLS = 8
 COMMENT_TEXT_WINDOW = 400
 
 
+def comment_text_only(value: str, author: str = "") -> str:
+    """ตัดเวลา/ป้าย Follow/ยอดรีแอ็กชัน เหลือเฉพาะเนื้อคอมเมนต์จริง."""
+    kept: list[str] = []
+    for raw in str(value or "").splitlines():
+        text = " ".join(raw.split()).strip()
+        if not text or text == author or text.startswith("http"):
+            continue
+        if text in COMMENT_META_LINES or COMMENT_TIME_LINE.fullmatch(text):
+            continue
+        if any(hint in text for hint in COMMENT_CHROME_HINTS):
+            continue
+        # ตัวเลขเดี่ยวหลังข้อความคือยอดความรู้สึก ไม่ใช่เนื้อคอมเมนต์
+        # แต่ถ้าคนพิมพ์เพียง "1" จริง ๆ ยังเก็บไว้ได้ เพราะ kept ยังว่าง
+        if kept and COMMENT_COUNT_LINE.fullmatch(text):
+            continue
+        kept.append(text)
+    return " ".join(kept).strip()
+
+
 def _comment_anchors(xml: str, low: int, high: int) -> list[tuple[int, str]]:
     """(y ของรูปโปรไฟล์, ชื่อคนเขียน) ของทุกคอมเมนต์บนจอ — หนึ่งรูป = หนึ่งคอมเมนต์"""
     found = []
@@ -2885,30 +3323,35 @@ def _comment_anchors(xml: str, low: int, high: int) -> list[tuple[int, str]]:
             continue
         for label in labels:
             if label.startswith(AVATAR_PREFIX):
-                found.append((y1, label[len(AVATAR_PREFIX):].strip()))
+                author = AVATAR_STATE_SUFFIX.sub(
+                    "", label[len(AVATAR_PREFIX):].strip()).strip()
+                found.append((y1, author))
                 break
     return found
 
 
-def _comment_text_near(rows: list, anchor: int, name: str) -> str:
+def _comment_text_near(rows: list, anchor: int, name: str,
+                       min_length: int = COMMENT_TEXT_MIN,
+                       max_length: int | None = 60) -> str:
     """ข้อความของคอมเมนต์ที่มีรูปโปรไฟล์อยู่ที่ y นี้ ("" = หาไม่เจอ)
 
     ผูกข้อความเข้ากับรูปโปรไฟล์แทนการกวาดข้อความลอยๆ เพราะการ์ดลิงก์ที่แนบมา
     ในคอมเมนต์แตกเป็นหลาย node (ชื่อโดเมน · ชื่อสินค้า) ซึ่งกวาดแบบเดิมจะนับ
     เป็นคอมเมนต์เพิ่มอีกใบละ 2 รายการ (เจอจริง: คอมเมนต์ 2 อัน นับได้ 5)
     """
-    for y1, labels in sorted(rows):
+    # Inline mention nodes can share y with their complete comment container.
+    # At each y inspect the complete text first, not the shorter mention label.
+    by_y: dict[int, list[str]] = {}
+    for y1, labels in rows:
+        by_y.setdefault(y1, []).extend(labels)
+    for y1, labels in sorted(by_y.items()):
         if not (anchor < y1 < anchor + COMMENT_TEXT_WINDOW):
             continue
-        for label in labels:
-            text = " ".join(label.split())
-            if len(text) < COMMENT_TEXT_MIN or text.startswith("http"):
+        for label in sorted(set(labels), key=len, reverse=True):
+            text = comment_text_only(label, name)
+            if len(text) < min_length:
                 continue
-            if any(hint in text for hint in COMMENT_CHROME_HINTS):
-                continue
-            if text == name:
-                continue
-            return text[:60]
+            return text if max_length is None else text[:max_length]
     return ""
 
 
@@ -2963,10 +3406,44 @@ def count_comments(phone: Phone) -> int | None:
 REPLY_BUTTON_PREFIX = "ตอบกลับความคิดเห็นของ"
 
 
+def _is_comment_reply_label(label: str) -> bool:
+    """Facebook exposes the same Reply control with several accessibility labels."""
+    text = " ".join(str(label or "").split()).strip()
+    low = text.casefold()
+    return (text.startswith(REPLY_BUTTON_PREFIX)
+            or text == "ตอบกลับ"
+            or text.startswith("ปุ่ม, ตอบกลับ แตะสองครั้งเพื่อตอบกลับความคิดเห็น")
+            or low == "reply"
+            or low.startswith("reply to ")
+            or low.startswith("replying to "))
+
+
+def _is_comment_like_label(label: str) -> bool:
+    """Return True only for an unselected Like control on a comment row."""
+    text = " ".join(str(label or "").split()).strip()
+    low = text.casefold()
+    if not text or any(hint.casefold() in low for hint in LIKED_HINTS):
+        return False
+    if re.search(r"\d", low):
+        return False
+    if low in {"ถูกใจ", "like"}:
+        return True
+    return (("ถูกใจ" in text and "ความคิดเห็น" in text)
+            or ("like" in low and "comment" in low))
+
+
+def _is_comment_liked_label(label: str) -> bool:
+    """Return True for accessibility text that positively proves a Like."""
+    low = " ".join(str(label or "").split()).casefold()
+    return bool(low and any(hint.casefold() in low for hint in LIKED_HINTS))
+
+
 def visible_comments(xml: str, low: int = 0, high: int = 10 ** 6) -> list[dict]:
-    """คอมเมนต์ที่เห็นบนจอตอนนี้ — [{"author", "text", "reply", "top"}]
+    """คอมเมนต์ที่เห็นบนจอ — author/text/reply/like/liked/top.
 
     reply = พิกัดปุ่มตอบกลับของคอมเมนต์นั้น (None = ไม่เห็นปุ่มบนจอนี้)
+    like = พิกัดปุ่มถูกใจที่ยังไม่ถูกกด (None = ไม่เห็นหรือกดแล้ว)
+    liked = มีหลักฐานบนหน้าจอว่าคอมเมนต์แถวนั้นถูกใจแล้ว
 
     แบ่งเขตของแต่ละคอมเมนต์ด้วย "รูปโปรไฟล์ตัวถัดไป" เป็นเส้นแบ่ง ทุกอย่างที่อยู่
     ระหว่างรูปโปรไฟล์นี้กับตัวถัดไปคือของคอมเมนต์นี้
@@ -2977,6 +3454,8 @@ def visible_comments(xml: str, low: int = 0, high: int = 10 ** 6) -> list[dict]:
     """
     avatars: list[tuple[int, str]] = []
     replies: list[tuple[int, tuple[int, int]]] = []
+    likes: list[tuple[int, tuple[int, int]]] = []
+    liked_marks: list[int] = []
     rows: list[tuple[int, list[str]]] = []
     for labels, box, clickable in iter_widgets(xml):
         y1 = box[1]
@@ -2986,22 +3465,39 @@ def visible_comments(xml: str, low: int = 0, high: int = 10 ** 6) -> list[dict]:
             rows.append((y1, labels))
         for label in labels:
             if label.startswith(AVATAR_PREFIX):
-                avatars.append((y1, label[len(AVATAR_PREFIX):].strip()))
+                author = AVATAR_STATE_SUFFIX.sub(
+                    "", label[len(AVATAR_PREFIX):].strip()).strip()
+                avatars.append((y1, author))
                 break
-            if clickable and label.startswith(REPLY_BUTTON_PREFIX):
+            if clickable and _is_comment_reply_label(label):
                 replies.append(
                     (y1, ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2))
                 )
+                break
+            if clickable and _is_comment_like_label(label):
+                likes.append(
+                    (y1, ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2))
+                )
+                break
+            if _is_comment_liked_label(label):
+                liked_marks.append(y1)
                 break
     avatars.sort()
     found: list[dict] = []
     for index, (top, author) in enumerate(avatars):
         end = avatars[index + 1][0] if index + 1 < len(avatars) else high
+        # ฝั่งตอบกลับต้องเห็นข้อความสั้นอย่าง "สนใจ" / "คุ้มมากค่ะ" ด้วย
+        # เพดาน 12 ตัวใช้เฉพาะ count_comments เพื่อกันป้าย UI ถูกนับเกิน ไม่ควร
+        # เอามาใช้ตัดสินว่าคอมเมนต์เป้าหมายมีตัวตนหรือไม่
         text = _comment_text_near(
-            [(y, labels) for y, labels in rows if y < end], top, author
+            [(y, labels) for y, labels in rows if y < end], top, author,
+            min_length=1, max_length=None,
         )
         button = next((point for y, point in sorted(replies) if top < y < end), None)
-        found.append({"author": author, "text": text, "reply": button, "top": top})
+        like = next((point for y, point in sorted(likes) if top < y < end), None)
+        liked = any(top < y < end for y in liked_marks)
+        found.append({"author": author, "text": text, "reply": button,
+                      "like": like, "liked": liked, "top": top})
     return found
 
 
@@ -3044,6 +3540,7 @@ def read_post_stats(phone: Phone, caption: str, single_post: bool = True,
 def collect_groups(
     adb: str, serial: str, caption: str, targets: list[dict],
     log=print, stop=lambda: False, on_result=None, clipboard=None,
+    account: str = "",
 ) -> list[dict]:
     """เก็บยอด ถูกใจ/คอมเมนต์/แชร์ ของโพสต์ทุกกลุ่ม — ไม่แตะอะไรบนโพสต์เลย
 
@@ -3070,11 +3567,12 @@ def collect_groups(
         opened = open_own_post(
             phone, entry["group_id"], name, caption, clipboard=clipboard,
             link=item.get("link", ""), post_id=item.get("post_id", ""),
+            account=account,
         )
         if opened["link"]:
             entry["link"] = opened["link"]
         if not opened["route"]:
-            entry["error"] = "เปิดโพสต์ไม่ได้ (ทั้งลิงก์ แจ้งเตือน และฟีด)"
+            entry["error"] = "เปิดโพสต์ไม่ได้ (ทั้งลิงก์ แจ้งเตือน ค้นหาในกลุ่ม และฟีด)"
         else:
             stats = read_post_stats(
                 phone, caption,
@@ -3301,8 +3799,7 @@ def post_to_group(
     if photo is None:
         keep_failure_screen(phone, "ไม่พบปุ่มแนบรูป")
         raise PostError("ไม่พบปุ่มแนบรูปในหน้าเขียนโพสต์")
-    phone.tap(photo)
-    time.sleep(2.5)
+    open_photo_picker(phone, photo)
 
     # รูปที่เพิ่งส่งเข้าไปเป็นไฟล์ใหม่สุด จึงอยู่หัวตารางของแกลเลอรี
     picked = pick_photos(phone, photo_count)
@@ -3359,6 +3856,9 @@ def post_to_group(
                 "link": "", **dict(NO_COMMENT)}
 
     time.sleep(POST_SETTLE_SECONDS)         # รอโพสต์ขึ้นฟีดก่อน
+    # Facebook รุ่นใหม่วางแคปชันไว้ใต้รูป รูปสูงจะดันข้อความเลยขอบจอหลังโพสต์
+    # ต้องเลื่อนหาให้เห็นก่อน ทุกขั้นถัดไปจึงจะผูกกับโพสต์ของเราได้ถูกตัว
+    _reveal_caption_below_media(phone, caption)
     link = ""
     if clipboard is not None:
         link = copy_post_link(phone, group_id, caption, clipboard)
@@ -3588,6 +4088,9 @@ def post_to_groups(
                 # ทำครบหมด แต่ของจริงคอมเมนต์ไม่ครบ")
                 seen = check.get("comments_seen")
                 want = check.get("comments_wanted")
+                if check.get("comments_complete") and seen is not None:
+                    entry["comment_count"] = seen
+                    entry["commented"] = seen > 0
                 if seen is not None and want and seen < want:
                     log(f"  ⚠️ คอมเมนต์เหลือ {seen}/{want} ใบบนโพสต์จริง "
                         f"— ตอนพิมพ์รายงานว่าขึ้นครบ")

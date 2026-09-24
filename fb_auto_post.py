@@ -48,7 +48,9 @@ STATUS_WAIT_CAPTION = "waiting_caption"   # ได้รูปแล้ว ร�
 STATUS_WAIT_IMAGE = "waiting_image"       # ได้แคปชันแล้ว รอรูป
 STATUS_READY = "ready"                    # ครบแล้ว รอกดโพสต์
 STATUS_RUNNING = "running"
+STATUS_FINISHING = "finishing"            # โพสต์แล้ว กำลังเก็บลิงก์/ไลก์/คอมเมนต์ให้ครบ
 STATUS_DONE = "done"
+STATUS_MANUAL_DONE = "manual_done"        # ผู้ใช้รับรองว่าจบแล้ว ห้าม worker ทำอะไรต่อ
 STATUS_FAILED = "failed"
 STATUS_STOPPED = "stopped"                  # ผู้ใช้หยุดไว้ ทำต่อเฉพาะกลุ่มที่เหลือได้
 STATUS_CANCELLED = "cancelled"
@@ -72,6 +74,16 @@ class AutoPostError(RuntimeError):
 _GROUP_URL_RE = re.compile(r"facebook\.com/groups/([^/?#\s]+)", re.I)
 _GROUP_SCHEME_RE = re.compile(r"fb://group/([^/?#\s]+)", re.I)
 _SHARE_URL_RE = re.compile(r"(?:https?://)?(?:[\w-]+\.)?facebook\.com/share/g/[^/?#\s]+", re.I)
+
+# Vanity slug ที่ยืนยันกับประวัติโพสต์จริงแล้วว่าเป็นกลุ่มใด ใช้เป็นสะพานสำหรับ
+# ลิงก์เก่าที่ Facebook ไม่ยอม redirect เป็นเลขเมื่อยิงจากเซิร์ฟเวอร์
+#
+# 17 ก.ย. 2569: ``/groups/apparelmakers`` ถูกเก็บเป็น group_id ตรง ๆ ทำให้
+# ``fb://group/apparelmakers`` เปิดผิดปลายทางและรอบตามเก็บหาโพสต์ไม่เจอ ขณะที่
+# ประวัติเดิมของ Preaw ยืนยันว่าเลขจริงคือ 569042730582923
+VERIFIED_GROUP_ALIASES = {
+    "apparelmakers": "569042730582923",
+}
 
 # ลิงก์ย่อของแอปตอบ 400 ให้ User-Agent คอมพิวเตอร์ แต่ตอบ 302 พร้อมที่อยู่จริง
 # ให้ UA มือถือ — ตรวจจากของจริงแล้ว (desktop=400 · iPhone=302)
@@ -222,15 +234,24 @@ def resolve_group_id(text: str) -> str:
     direct = parse_group_id(text)
     if direct.isdigit():
         return direct
+    alias = VERIFIED_GROUP_ALIASES.get(direct.casefold()) if direct else ""
+    if alias:
+        return alias
     link = share_link(text)
     if link:
         return resolve_share_link(link)
     if direct:
-        # ลิงก์ชื่อกลุ่ม (vanity) — แปลงเป็นเลขให้ ถ้าแปลงไม่ได้ค่อยใช้ชื่อไปตามเดิม
+        # ลิงก์ชื่อกลุ่ม (vanity) ต้องแปลงเป็นเลขก่อนเท่านั้น การคืน slug ตรง ๆ
+        # ดูเหมือนสำเร็จตอนเพิ่ม แต่ fb://group/<slug> เปิดผิดกลุ่มได้ และงานจะ
+        # โพสต์ลงไปแล้วก่อนรู้ตัว จึงล้มตั้งแต่ตอนเพิ่มดีกว่าเสี่ยงโพสต์ผิดที่
         try:
             return resolve_share_link(f"https://mbasic.facebook.com/groups/{direct}")
-        except AutoPostError:
-            return direct
+        except AutoPostError as error:
+            raise AutoPostError(
+                f"ลิงก์กลุ่มใช้ชื่อ {direct!r} แต่แปลงเป็นรหัสตัวเลขไม่ได้ — "
+                "ระบบไม่บันทึกเพื่อป้องกันเปิดหรือโพสต์ผิดกลุ่ม กรุณาใช้ลิงก์ "
+                "facebook.com/groups/ ตามด้วยตัวเลข หรือปุ่มแชร์กลุ่มในแอป"
+            ) from error
     raise AutoPostError(
         "อ่านรหัสกลุ่มจากลิงก์นี้ไม่ได้ — ใช้ลิงก์แบบ "
         "https://www.facebook.com/groups/<รหัส> หรือปุ่มแชร์ในแอป"
@@ -722,6 +743,8 @@ class JobStore:
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "started_at": None,
             "finished_at": None,
+            "manual_completed": False,
+            "manual_completed_at": "",
             **fields,
         }
         with self.store.lock:
@@ -955,14 +978,18 @@ class PostRunner:
                       clipboard=None) -> None:
         error_text = ""
         results: list[dict] = []
+        account = active_account()
         try:
-            with self._phone(serial, f"รอบตามเก็บ {self.job_id}", adb, on_log):
-                results = facebook_group_post.followup_groups(
-                    adb=adb, serial=serial, caption=caption, targets=targets,
-                    comment=comment, log=on_log, stop=self.stop_flag.is_set,
-                    on_result=on_result, comment_images=comment_images,
-                    clipboard=clipboard,
-                )
+            import devices
+            account = devices.account(serial)
+            with use_account(account):
+                with self._phone(serial, f"รอบตามเก็บ {self.job_id}", adb, on_log):
+                    results = facebook_group_post.followup_groups(
+                        adb=adb, serial=serial, caption=caption, targets=targets,
+                        comment=comment, log=on_log, stop=self.stop_flag.is_set,
+                        on_result=on_result, comment_images=comment_images,
+                        clipboard=clipboard, account=account,
+                    )
         except studio_shared.PhoneBusy as error:
             error_text = str(error)
             on_log(f"เริ่มไม่ได้ — {error}")
@@ -972,7 +999,10 @@ class PostRunner:
         finally:
             self.job_id = ""
             try:
-                on_done(results, error_text)
+                # The phone scope has exited, but completion still reads this
+                # account's jobs. Restore it for success AND failure callbacks.
+                with use_account(account):
+                    on_done(results, error_text)
             except Exception as error:
                 on_log(f"สรุปผลไม่สำเร็จ: {error}")
 
@@ -1006,12 +1036,15 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"รอบเก็บยอด {self.job_id}", adb, on_log):
-                results = facebook_group_post.collect_groups(
-                    adb=adb, serial=serial, caption=caption, targets=targets,
-                    log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
-                    clipboard=clipboard,
-                )
+            import devices
+            account = devices.account(serial)
+            with use_account(account):
+                with self._phone(serial, f"รอบเก็บยอด {self.job_id}", adb, on_log):
+                    results = facebook_group_post.collect_groups(
+                        adb=adb, serial=serial, caption=caption, targets=targets,
+                        log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
+                        clipboard=clipboard, account=account,
+                    )
         except studio_shared.PhoneBusy as error:
             error_text = str(error)
             on_log(f"เริ่มไม่ได้ — {error}")
@@ -1051,12 +1084,14 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"รอบแก้รูป {self.job_id}", adb, on_log):
-                results = facebook_group_post.fix_images_groups(
-                    adb=adb, serial=serial, caption=caption, targets=targets,
-                    images=images, log=on_log, stop=self.stop_flag.is_set,
-                    on_result=on_result,
-                )
+            import devices
+            with use_account(devices.account(serial)):
+                with self._phone(serial, f"รอบแก้รูป {self.job_id}", adb, on_log):
+                    results = facebook_group_post.fix_images_groups(
+                        adb=adb, serial=serial, caption=caption, targets=targets,
+                        images=images, log=on_log, stop=self.stop_flag.is_set,
+                        on_result=on_result,
+                    )
         except studio_shared.PhoneBusy as error:
             error_text = str(error)
             on_log(f"เริ่มไม่ได้ — {error}")
@@ -1077,16 +1112,22 @@ class PostRunner:
         error_text = ""
         results: list[dict] = []
         try:
-            with self._phone(serial, f"งานโพสต์ {self.job_id}", adb, on_log):
-                results = facebook_group_post.post_to_groups(
-                    adb=adb, serial=serial, image=image, caption=job["caption"],
-                    group_ids=job["groups"], gap_range=gap_range,
-                    log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
-                    clipboard=clipboard, comment=comment,
-                    comment_images=comment_images,
-                    # กลุ่มที่เปิดโหมด "ถูกปฏิเสธแล้วส่งใหม่เหลือแต่ลิงก์"
-                    links_only_groups=job.get("links_only_groups") or (),
-                )
+            import devices
+            # `use_account` เป็น thread-local: บัญชีจาก Telegram ในเธรดรับคำสั่ง
+            # ไม่ตามมาในเธรดกดมือถือเอง ต้องผูกใหม่จาก serial ของเครื่องทุกครั้ง
+            # มิฉะนั้นเมื่อมีสองสาย `posting_account()` จะเห็นว่ากำกวมและหยุด
+            # กลางงาน ทั้งที่บอทกับมือถือถูกแยกไว้ถูกต้องแล้ว
+            with use_account(devices.account(serial)):
+                with self._phone(serial, f"งานโพสต์ {self.job_id}", adb, on_log):
+                    results = facebook_group_post.post_to_groups(
+                        adb=adb, serial=serial, image=image, caption=job["caption"],
+                        group_ids=job["groups"], gap_range=gap_range,
+                        log=on_log, stop=self.stop_flag.is_set, on_result=on_result,
+                        clipboard=clipboard, comment=comment,
+                        comment_images=comment_images,
+                        # กลุ่มที่เปิดโหมด "ถูกปฏิเสธแล้วส่งใหม่เหลือแต่ลิงก์"
+                        links_only_groups=job.get("links_only_groups") or (),
+                    )
         except studio_shared.PhoneBusy as error:
             error_text = str(error)
             on_log(f"เริ่มไม่ได้ — {error}")

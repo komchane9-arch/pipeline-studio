@@ -41,11 +41,14 @@ d = pq.take(DEV2, "แชท shopeefood", "ค้นหา D")
 check("เครื่องที่สองได้ทำเลยทั้งที่เครื่องแรกไม่ว่าง", pq.status(d)["state"], "running")
 
 print("=== 5. คนเดิมกดบัตรซ้ำเครื่องเดิมไม่ได้ ===")
+duplicate_state_before = pq.status(c)["state"]
 try:
     pq.take(DEV, "แชท lineman", "ซ้ำ")
     check("ต้องโยน error", "ไม่โยน", "โยน")
 except pq.QueueError as e:
     check("โยน error ตามคาด", "โยน", "โยน")
+    check("บัตรซ้ำแยกเป็น QueueBusy", isinstance(e, pq.QueueBusy), True)
+    check("ไม่ยกเลิกบัตรของงานเดิม", pq.status(c)["state"], duplicate_state_before)
 
 print("=== 6. ห้ามเว้น serial ว่าง ===")
 try:

@@ -431,8 +431,13 @@ def db_retry(what, *a, tries: int = 5):
 
 def main() -> int:
     global BOT_TAG
+    if (mf.DATA_DIR / 'posts_collect_keeper.off').exists():
+        log("งานเก็บข้อมูลกลุ่มถูกปิดโดยเจ้าของ — Bot8 ใช้เก็บคอมเมนต์เท่านั้น")
+        return 0
     args = sys.argv[1:]
     bot = next((a for a in args if not a.startswith("--")), "Bot8")
+    if bot.casefold() != "bot8":
+        raise ValueError("งานเก็บข้อมูลกลุ่มใช้ Bot8 เท่านั้น; Bot9 สงวนเก็บคอมเมนต์")
     BOT_TAG = bot
     # ชีพจร — เต้นทุก 15 วิให้ app.py รู้ว่ายังมีชีวิต ตั้งชื่อแยกรายบอท
     # (Bot8 กับ Bot9 คนละโปรเซส ตายคนละเวลา ต้องแยกกันดูให้ออก)

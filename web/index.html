@@ -36,6 +36,11 @@
       <button id="openSettings" class="gear-button" type="button" aria-label="ตั้งค่า">⚙</button>
     </header>
 
+    <div id="bot8LoginAlert" class="bot8-login-alert" role="alert" hidden>
+      <span>⛔ Bot8 หลุดล็อกอิน Facebook — งานเก็บคอมเมนต์หยุดอยู่ กรุณาเปิดตั้งค่า → Bot profiles → Bot8 → เปิดล็อกอิน</span>
+      <button id="bot8LoginSettings" type="button" class="ghost">เปิดตั้งค่า</button>
+    </div>
+
     <main class="layout">
       <!-- (A) ซ้าย: Device no. + จอมือถือ -->
       <section class="phone-panel">
@@ -286,6 +291,30 @@
           <div id="gfAccountTabs" class="fb-acct-tabs" role="tablist"></div>
           <p id="gfAccountNote" class="note"></p>
 
+          <!-- ทะเบียนกลุ่มของโปรไฟล์ที่เลือก — พับไว้เพื่อลดความยาวของหน้า
+               แต่ยังโหลดแยกตามบัญชีและทุกปุ่มแนบชื่อบัญชีเหมือนเดิม -->
+          <details class="gf-linked" aria-labelledby="gfLinkedTitle">
+            <summary class="gf-linked-summary">
+              <h3 id="gfLinkedTitle">กลุ่มที่ผูกกับบัญชีนี้</h3>
+              <span id="gfLinkedCount" class="gf-linked-count">0 กลุ่ม</span>
+            </summary>
+            <div class="gf-linked-body">
+              <div class="row gf-linked-head">
+              <button id="gfLinkedReload" class="ghost" type="button">🔄 โหลดใหม่</button>
+              </div>
+              <p id="gfLinkedNote" class="note" aria-live="polite"></p>
+              <div id="gfLinkedGroups" class="gf-linked-list"></div>
+              <div class="gf-linked-add">
+                <input id="gfLinkedUrl" type="text"
+                       placeholder="วางลิงก์กลุ่ม Facebook" />
+                <input id="gfLinkedName" type="text"
+                       placeholder="ชื่อกลุ่ม (ไม่ใส่ก็ได้)" />
+                <button id="gfLinkedAdd" class="primary" type="button">＋ เพิ่มกลุ่ม</button>
+              </div>
+              <p class="note">การลบจะเอากลุ่มออกจากบัญชีนี้เท่านั้น ไม่ลบโพสต์เดิมใน Facebook</p>
+            </div>
+          </details>
+
           <div class="row">
             <h2>บอทสายโพสต์</h2>
             <button id="fcReload" class="ghost" type="button">🔄 โหลดใหม่</button>
@@ -307,18 +336,69 @@
                โพสต์ - คอมเมนต์ใต้โพสต์") -->
           <div class="row">
             <h2>ตอบคอมเมนต์</h2>
+            <button id="egCollectAll" class="eg-manual eg-manual-all" type="button">
+              ▶ Bot8 เก็บทั้งหมดใหม่
+            </button>
             <button id="egAll" class="ghost" type="button">ดูทุกโพสต์</button>
             <button id="egReload" class="ghost" type="button">🔄 โหลดใหม่</button>
           </div>
           <p class="note">
             พิมพ์คำตอบเก็บไว้ที่นี่ก่อน — <b>ยังไม่ส่งขึ้น Facebook ทันที</b>
             บอทจะเปิดโพสต์นั้นในมือถือ หาคนจากชื่อที่บันทึกไว้
-            แล้วพิมพ์ตอบจริงบนแอปให้อีกที
+            แล้วพิมพ์ตอบจริงบนแอปให้อีกที · Bot8 ตามเก็บทุกโพสต์ที่มีลิงก์
+            ทุก 6 ชั่วโมง และเพิ่มโพสต์ใหม่เข้ารอบให้อัตโนมัติ
+            กด “ดูทุกโพสต์” เพื่อเลิกเก็บหรือกลับมาเก็บต่อเป็นรายโพสต์ได้
           </p>
           <p class="note fc-top">
             <span id="egNote" aria-live="polite"></span>
             <span id="egStamp" class="fc-stamp"></span>
           </p>
+          <section class="eg-mass-section" aria-label="Bot8 หาโพสต์แมส">
+            <div class="row eg-mass-heading">
+              <h3>🔥 Bot8 หาโพสต์แมส</h3>
+              <button id="egMassStart" class="ghost" type="button">▶ เริ่มหาโพสต์แมส</button>
+              <a id="egMassOpen" class="ghost eg-mass-open" target="_blank"
+                 rel="noopener noreferrer" hidden>📊 ดูรายงานโพสต์แมส</a>
+            </div>
+            <p class="note">ทุกกลุ่มที่ผูกกับบัญชี Facebook ที่เปิดใช้ · คัดเฉพาะโพสต์ขายของที่มียอดไลก์+คอมเมนต์+แชร์รวมเกิน 100 สูงสุดกลุ่มละ 5 โพสต์ · มีภาพและลิงก์ · รอคิวเมื่อ Bot8 กำลังเก็บคอมเมนต์</p>
+            <div class="eg-collector-row">
+              <p id="egMassStatus" class="eg-collector" aria-live="polite">กำลังโหลดสถานะ...</p>
+              <form id="egMassSchedule" class="eg-collect-schedule">
+                <label class="eg-schedule-time">เวลา
+                  <input id="egMassTime" type="time" required aria-label="เวลาเริ่มหาโพสต์แมส">
+                </label>
+                <fieldset class="eg-schedule-modes">
+                  <legend>ทำซ้ำ</legend>
+                  <label><input type="radio" name="egMassMode" value="once" checked> 1 ครั้ง</label>
+                  <label><input type="radio" name="egMassMode" value="daily"> ทุกวัน</label>
+                </fieldset>
+                <button id="egMassScheduleSave" class="eg-schedule-save" type="submit">ตั้งเวลา</button>
+                <button id="egMassScheduleClear" class="ghost eg-schedule-clear" type="button" hidden>ยกเลิกเวลา</button>
+                <span id="egMassScheduleStatus" class="eg-schedule-status" aria-live="polite"></span>
+              </form>
+            </div>
+            <p id="egMassFeedback" class="eg-manual-feedback" aria-live="polite" hidden></p>
+          </section>
+          <div class="eg-collector-row">
+            <p id="egCollector" class="eg-collector" aria-live="polite"></p>
+            <form id="egCollectSchedule" class="eg-collect-schedule">
+              <label class="eg-schedule-time">
+                เวลา
+                <input id="egScheduleTime" type="time" required aria-label="เวลาเริ่มเก็บของ Bot8">
+              </label>
+              <fieldset class="eg-schedule-modes">
+                <legend>ทำซ้ำ</legend>
+                <label><input type="radio" name="egScheduleMode" value="once" checked> 1 ครั้ง</label>
+                <label><input type="radio" name="egScheduleMode" value="daily"> ทุกวัน</label>
+              </fieldset>
+              <button id="egScheduleSave" class="eg-schedule-save" type="submit">ตั้งเวลา</button>
+              <button id="egScheduleClear" class="ghost eg-schedule-clear" type="button" hidden>ยกเลิกเวลา</button>
+              <span id="egScheduleStatus" class="eg-schedule-status" aria-live="polite"></span>
+            </form>
+          </div>
+          <p id="egManualFeedback" class="eg-manual-feedback" aria-live="polite" hidden></p>
+          <p id="egDaily" class="eg-daily" aria-live="polite" hidden></p>
+          <p id="egTimer" class="eg-timer" aria-live="polite" hidden></p>
           <div id="egList" class="eg-list"></div>
 
           <hr class="bd-split">
@@ -392,6 +472,10 @@
               <div class="inline-row gfp-actions">
                 <label>มือถือ / บัญชีที่จะโพสต์
                   <select id="gfpPostDevice"></select>
+                </label>
+                <label class="gfp-no-comments">
+                  <input id="gfpNoComments" type="checkbox" />
+                  <span>ยืนยันว่าโพสต์นี้ไม่มีคอมเมนต์</span>
                 </label>
                 <button id="gfpSave" class="ghost" type="button">บันทึกเป็นงานพร้อมโพสต์</button>
                 <button id="gfpSend" class="primary" type="button">🚀 สร้างแล้วโพสต์ทันที</button>
@@ -575,6 +659,33 @@
                 </div>
               </div>
               <p id="shopeeNote" class="note" aria-live="polite"></p>
+            </div>
+          </details>
+
+          <details class="block" open>
+            <summary>ดาวน์โหลดคลิป</summary>
+            <div class="block-body">
+              <p class="note">รับลิงก์จาก <b>Facebook · X · TikTok · Instagram · Reddit · YouTube</b> — วางได้หลายลิงก์ แยกบรรทัดหรือเว้นวรรค ระบบดาวน์โหลดคลิปสาธารณะที่คุณเป็นเจ้าของหรือได้รับอนุญาตทีละคลิป ไม่ส่งเข้าคิวโพสต์อัตโนมัติ (ครั้งละไม่เกิน 50 ลิงก์ · คลิปละไม่เกิน 500 MB · ได้เป็นไฟล์ mp4 เสมอ)</p>
+              <div class="reels-folder-row">
+                <label for="reelsFolderPath">เก็บคลิปลงโฟลเดอร์</label>
+                <input id="reelsFolderPath" type="text" spellcheck="false" placeholder="เช่น D:\คลิปที่โหลด — เว้นว่างไว้ = ใช้ที่เดิม" />
+                <button id="reelsFolderSave" class="ghost" type="button">บันทึกโฟลเดอร์</button>
+              </div>
+              <div class="inline-row reels-download-row">
+                <textarea id="reelsDownloadLinks" rows="4" aria-label="ลิงก์คลิปหลายลิงก์" placeholder="https://www.facebook.com/reel/…&#10;https://x.com/ชื่อบัญชี/status/…&#10;https://www.tiktok.com/@ชื่อบัญชี/video/…&#10;https://www.instagram.com/reel/…&#10;https://www.reddit.com/r/…/s/…&#10;https://youtu.be/…"></textarea>
+                <div class="reels-download-actions">
+                  <button id="reelsDownload" class="primary" type="button">ดาวน์โหลดคลิป</button>
+                  <button id="reelsOpenFolder" class="ghost" type="button">📂 เปิด Folder คลิป</button>
+                </div>
+              </div>
+              <p id="reelsFolderNote" class="note" aria-live="polite"></p>
+              <p id="reelsDownloadNote" class="note" aria-live="polite"></p>
+              <div id="reelsRunning" class="reels-download-results" hidden></div>
+              <div class="reels-list-bar">
+                <button id="reelsCheck" class="ghost" type="button">🔄 เช็คคลิป</button>
+                <span id="reelsListNote" class="note" aria-live="polite"></span>
+              </div>
+              <div id="reelsDownloadResults" class="reels-download-results" hidden></div>
             </div>
           </details>
 
@@ -783,8 +894,8 @@
               ครบแล้วโพสต์เลย (ไม่ต้องกดยืนยันในแชท)
             </label>
             <label class="check-row">
-              <input id="fbAutoFollowup" type="checkbox" />
-              ตามเก็บอัตโนมัติหลังโพสต์เสร็จ (ปิดแล้วยังสั่ง /followup เองได้)
+              <input id="fbAutoFollowup" type="checkbox" checked disabled />
+              ขั้นบังคับ: เก็บลิงก์ · ไลก์โพสต์ · คอมเมนต์ · ไลก์คอมเมนต์
             </label>
             <label class="check-row">
               <input id="fbPhoneClean" type="checkbox" />

@@ -74,7 +74,7 @@ class AccessStore:
             return None
         hashed = token_hash(token)
         with self.lock:
-            return next(
+            match = next(
                 (
                     record
                     for record in self.devices.values()
@@ -83,6 +83,18 @@ class AccessStore:
                 ),
                 None,
             )
+            if match is None and self.path.is_file():
+                # ลองโหลดไฟล์ใหม่เผื่อมีการอนุมัติหรือสร้างจากภายนอก
+                self.devices = self._load()
+                match = next(
+                    (
+                        record
+                        for record in self.devices.values()
+                        if secrets.compare_digest(str(record.get("token_hash", "")), hashed)
+                    ),
+                    None,
+                )
+            return match
 
     def create(self, token: str, ip: str, user_agent: str) -> dict[str, Any]:
         record = {
@@ -201,6 +213,40 @@ def is_local_request(request) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return host.lower() == "localhost"
+
+
+TAILSCALE_DOMAIN = "laptop-ipb0ansq.tailcb70ec.ts.net"
+TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+
+def is_tailscale_request(request) -> bool:
+    """ตรวจว่าคำขอวิ่งผ่านเส้นทาง Tailscale (route tail) หรือไม่
+
+    ครอบคลุมทั้ง:
+    1. วิ่งผ่าน Tailscale Serve HTTPS (Host: *.ts.net หรือ laptop-ipb0ansq)
+    2. หรือส่งมาจาก IP ในเครือข่าย Tailscale (100.64.0.0/10)
+    """
+    headers = getattr(request, "headers", {})
+    host = headers.get("host", "").lower()
+    if ".ts.net" in host or "laptop-ipb0ansq" in host:
+        return True
+
+    forwarded = headers.get("x-forwarded-for", "").split(",")[0].strip()
+    candidates = [forwarded] if forwarded else []
+    if getattr(request, "client", None) and request.client.host:
+        candidates.append(request.client.host)
+
+    for ip_str in candidates:
+        try:
+            if ipaddress.ip_address(ip_str) in TAILSCALE_NETWORK:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def tailscale_url() -> str:
+    return f"https://{TAILSCALE_DOMAIN}"
 
 
 def lan_ip() -> str | None:

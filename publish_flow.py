@@ -1,7 +1,7 @@
 """ผังการโพสต์วิดีโอบนมือถือ — เทรนพิกัดเอง แยกผังต่อปลายทาง ต่อเครื่อง
 
-ปลายทางที่รองรับตอนนี้: Shopee Video และ Facebook Reels
-ที่จะทำต่อ: TikTok Video · Instagram Reels
+ปลายทางที่รองรับตอนนี้: Shopee Video, Facebook Reels และ TikTok Video
+ที่จะทำต่อ: Instagram Reels
 แต่ละปลายทางมีผังของตัวเองเพราะหน้าจอคนละแอปคนละลำดับ และเก็บแยกต่อ serial
 เพราะจอคนละขนาด
 
@@ -47,6 +47,7 @@ import random
 import html
 import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -58,6 +59,9 @@ FLOW_DIR = DATA_DIR / "publish_flows"
 
 SHOPEE_PACKAGE = "com.shopee.th"
 FACEBOOK_PACKAGE = "com.facebook.katana"
+# ตรวจจากมือถือที่ลงงานจริงทั้ง 3 เครื่อง ณ 1 ก.ย. 2026 แล้วว่า TikTok ใช้
+# package นี้ ไม่เดาจากชื่อแพ็กเกจบนอินเทอร์เน็ต
+TIKTOK_PACKAGE = "com.ss.android.ugc.trill"
 
 DEFAULT_SETTLE = 1.2
 DEFAULT_VERIFY_TIMEOUT = 10.0
@@ -100,6 +104,21 @@ def humanize_point(
     return x, y
 
 
+def humanize_point_in_bounds(
+    bounds: tuple[int, int, int, int], width: int, height: int,
+    radius: int = TAP_JITTER_PX, inset: int = 4,
+) -> tuple[int, int]:
+    """สุ่มรอบกึ่งกลาง แต่บังคับให้จุดสุดท้ายอยู่ในกรอบปุ่มจริงเสมอ."""
+    x1, y1, x2, y2 = (int(value) for value in bounds)
+    left = max(1, min(width - 2, x1 + inset))
+    top = max(1, min(height - 2, y1 + inset))
+    right = max(left, min(width - 2, x2 - inset - 1))
+    bottom = max(top, min(height - 2, y2 - inset - 1))
+    center = ((left + right) // 2, (top + bottom) // 2)
+    x, y = humanize_point(center, width, height, radius)
+    return max(left, min(x, right)), max(top, min(y, bottom))
+
+
 def humanize_delay(seconds: float, spread: float = SETTLE_JITTER) -> float:
     """สุ่มเวลาพักรอบค่าที่ตั้งไว้ — ไม่ให้จังหวะเป๊ะเท่ากันทุกครั้ง"""
     if seconds <= 0 or spread <= 0:
@@ -110,6 +129,101 @@ SUGGESTION_TIMEOUT = 8.0
 
 class StepError(RuntimeError):
     """ขั้นนี้ทำไม่สำเร็จ — ผู้เรียกตัดสินว่าจะหยุดหรือข้าม"""
+
+
+class StopRequested(StepError):
+    """ผู้ใช้กด Stop; เป็นการยกเลิกโดยตั้งใจ ไม่ใช่ผังล้มเหลว."""
+
+
+class StopAutomationError(StepError):
+    """เหตุจากปลายทางที่ต้องหยุดสวิตช์อัตโนมัติและห้ามลองขั้นเดิมซ้ำ"""
+
+    def __init__(self, message: str, *, code: str, auto_key: str):
+        super().__init__(message)
+        self.code = code
+        self.auto_key = auto_key
+
+    def payload(self) -> dict:
+        """สัญญาณแบบมีโครงสร้างให้ caller ปิดเฉพาะสวิตช์ที่เกี่ยวข้อง"""
+        return {
+            "code": self.code,
+            "auto_key": self.auto_key,
+            "reason": str(self),
+            "retry": False,
+        }
+
+
+# Shopee แสดงกล่องนี้หลังแตะ Post เมื่อบัญชีชนเพดานรายวัน/ช่วงเวลา กล่องจริง
+# เป็นส่วนหนึ่งของ com.shopee.th และมีปุ่ม "ปิด" จึงเคยถูก dismiss_ads(force=True)
+# เดาผิดว่าเป็นโฆษณา แล้ววนกด Post ซ้ำหนึ่งครั้ง ยิ่งเร่งให้บัญชีเสี่ยงกว่าเดิม.
+SHOPEE_POST_LIMIT_CODE = "shopee_post_limit"
+SHOPEE_POST_LIMIT_AUTO_KEY = "shopee_post"
+SHOPEE_POST_LIMIT_REASON = (
+    "Shopee จำกัดจำนวนโพสต์: Post too many video, please have a rest — "
+    "ให้ปิด Shopee อัตโนมัติทันทีและห้ามลองโพสต์ซ้ำ"
+)
+
+# Facebook ใช้หน้าคอมโพเซอร์แบบไดนามิก: thumbnail/สถานะย่อยเปลี่ยน XML ได้ทั้งที่
+# ปุ่ม “แชร์เลย” ยังอยู่หน้าเดิม จึงห้ามใช้ลายเซ็น ``left_screen`` ตัดสินผลโพสต์.
+# รับเฉพาะข้อความยืนยันที่ Facebook แสดงหลังรับคลิปแล้วจริงเท่านั้น.
+FACEBOOK_REEL_PUBLISHED_PATTERN = (
+    r"เผยแพร่คลิป\s*Reels\s*ของคุณแล้ว"
+    r"|Your reel (?:was|has been) published"
+    r"|Reel published"
+)
+FACEBOOK_REEL_ACCEPTED_DESTINATION_PATTERN = (
+    r"โปรโมทเนื้อหา|สร้างโฆษณาใหม่|เริ่มต้นใช้งานโฆษณาแบบอัตโนมัติ"
+    r"|สร้างคลิป\s*Reels|ดูคลิป\s*Reels"
+    r"|Boost content|Create new ad|Create reel|View reel"
+)
+FACEBOOK_PUBLISH_UNCONFIRMED_CODE = "facebook_publish_unconfirmed"
+FACEBOOK_PUBLISH_AUTO_KEY = "facebook_post"
+FACEBOOK_UPLOAD_HOLD_SECONDS = 90.0
+
+
+def is_facebook_reel_published(xml: str) -> bool:
+    """จริงเมื่อผังจอมีข้อความยืนยันว่า Facebook เผยแพร่ Reels แล้ว."""
+    return bool(re.search(
+        FACEBOOK_REEL_PUBLISHED_PATTERN,
+        html.unescape(xml or ""),
+        re.I,
+    ))
+
+
+def is_facebook_reel_post_accepted(xml: str) -> bool:
+    """หน้าออกจาก composer ไปปลายทางที่พบหลัง Facebook รับ Reels แล้วจริง.
+
+    toast สำเร็จวาดอยู่บนภาพแต่บางเวอร์ชันไม่ส่งเข้า Accessibility XML จึงใช้
+    หน้าปลายทางที่วัดจากรอบสำเร็จจริงเป็นหลักฐานสำรอง โดยต้องไม่มีทั้งหัวหน้า
+    ตั้งค่าและปุ่มแชร์แล้ว เพื่อไม่ให้ข้อความ “โปรโมทคลิป Reels” ใน composer
+    ถูกจับเป็นผลสำเร็จ.
+    """
+    visible = html.unescape(xml or "")
+    if is_facebook_reel_published(visible):
+        return True
+    if re.search(r"การตั้งค่าคลิป\s*Reels|แชร์เลย", visible, re.I):
+        return False
+    return bool(re.search(FACEBOOK_REEL_ACCEPTED_DESTINATION_PATTERN, visible, re.I))
+
+
+def is_shopee_post_limit(xml: str) -> bool:
+    """คืน True เฉพาะข้อความกล่องจำกัดการโพสต์ของ Shopee.
+
+    เทียบจากใจความแทนการล็อก punctuation/เอกพจน์ เพราะแอปเคยสลับระหว่าง
+    ``video``/``videos`` และใส่ comma/full stop ต่างกันตามเวอร์ชัน. เงื่อนไข
+    ถูกเรียกเฉพาะขั้น ``shopee_video/post`` อีกชั้น จึงไม่ชนกับข้อความทั่วไป.
+    """
+    visible = html.unescape(xml or "").lower()
+    normalized = re.sub(r"[^a-z0-9ก-๙]+", " ", visible)
+    english = (
+        re.search(r"\bpost(?:ed|ing)?\b", normalized)
+        and re.search(r"\btoo many videos?\b", normalized)
+        and re.search(r"\brest\b", normalized)
+    )
+    thai = re.search(
+        r"โพสต์.*วิดีโอ.*(?:มากเกินไป|เกินจำนวน|ถึงขีดจำกัด).*พัก", visible
+    )
+    return bool(english or thai)
 
 
 # ------------------------------------------------------------------ นิยามขั้น
@@ -141,6 +255,11 @@ KINDS = {
     # ปลายทางเขียนใน `value` เป็นสัดส่วนของจอ เช่น "0.19,0.82"
     # ใช้สัดส่วนเพราะมือถือคนละรุ่นจอคนละขนาด (กติกาข้อ 2.7.3)
     "drag":         "กดค้างแล้วลากจากพิกัดที่เทรนไว้",
+    "pick_cover_text": "ลากหาเฟรมหน้าปกที่มีตัวอักษร (จนสุดคลิป)",
+    # เจ้าของสั่ง 24 ก.ย. 2569 — *"ให้เลือกวินาทีที่ 0 หรือ ต้นคลิป ทั้ง shopee
+    # และ facebook"* แทนการไล่หาเฟรมที่มีตัวอักษร (ดู run_cover_first_frame)
+    "cover_first_frame": "ลากกรอบเลือกปกไปเฟรมแรกสุด (วินาทีที่ 0)",
+    "confirm_cover": "กดยืนยันหน้าปก (ลองซ้ำจนกว่าจะปิด)",
     "wait":         "รอเฉยๆ",
 }
 
@@ -158,6 +277,7 @@ VERIFY_KINDS = {
     "toggle_off":     "สวิตช์ถูกปิดแล้ว (ดูจากสีบนจอจริง)",
     "cover_has_text": "ภาพหน้าปกมีตัวอักษร (หรือค้นหาจนสุดคลิป)",
     "cover_closed":   "หน้าแก้ไขหน้าปกปิดลงแล้ว",
+    "cover_at_start": "กรอบเลือกปกอยู่เฟรมแรกสุดของคลิป (อ่านจากภาพจอจริง)",
     "facebook_reel_published": "Facebook ยืนยันว่าเผยแพร่ Reels แล้วจริง",
     "profile_is":     "กำลังใช้โปรไฟล์นี้จริง (อ่านชื่อเหนือเส้น “ทางลัดของคุณ”)",
     "none":           "ไม่ตรวจ (ใช้เมื่อขั้นนั้นไม่มีผลให้เห็น)",
@@ -178,6 +298,9 @@ DEFAULT_VERIFY = {
     "popup":        "none",
     "key":          "screen_changed",
     "swipe":        "screen_changed",
+    "pick_cover_text": "cover_has_text",
+    "cover_first_frame": "cover_at_start",
+    "confirm_cover": "cover_closed",
     "wait":         "none",
 }
 
@@ -251,6 +374,10 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         _step("next_1", "กดถัดไป (ครั้งที่ 1)", settle=1.5),
         _step("next_2", "กดถัดไป (ครั้งที่ 2)", settle=1.5),
         _step("cover_pick", "กดเลือกภาพปก", settle=1.5),
+        # ปกต้องเป็นวินาทีที่ 0 (เจ้าของสั่ง 24 ก.ย. 2569) — Shopee เปิดมาที่เฟรมแรก
+        # อยู่แล้วตอนวัด แต่ต้องยืนยันทุกครั้ง ไม่ใช่เชื่อค่าเริ่มต้นของแอป
+        _step("cover_first", "ลากกรอบเลือกปกไปเฟรมแรกสุด (วินาทีที่ 0)",
+              kind="cover_first_frame", value="0.80,0.83", settle=1.5),
         _step("overlay_add", "กด ⊕ เพิ่มข้อความ", settle=1.5),
         _step("overlay_template", "เลือกเทมเพลตข้อความ"),
         _step("overlay_field", "แตะช่องกรอกข้อความ"),
@@ -321,7 +448,21 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
               find="สร้างคลิป Reels", settle=2.5),
         _step("latest_clip", "เลือกคลิปที่จะโพสต์", settle=1.5),
         _step("next_1", "กดถัดไป", settle=2.0),
-        _step("caption_field", "แตะช่องคำอธิบาย"),
+        # ปกต้องเป็นวินาทีที่ 0 (เจ้าของสั่ง 24 ก.ย. 2569) — ไม่มีขั้นนี้ Facebook
+        # ใช้เฟรมกลางคลิปเป็นปก (วัด: กรอบเลือกเปิดมาที่ช่อง 5 จาก 10)
+        _step("cover_open", "กดแก้ไขหน้าปก", find="แก้ไขหน้าปก", settle=2.0,
+              verify="text_appears", verify_text="เรียบร้อย"),
+        # แถบฟิล์มขึ้นช้า — ผังที่ใช้จริงรอ 9 วินาทีมาตั้งแต่ 29 ส.ค.
+        _step("cover_wait", "รอเฟรมหน้าปกโหลด", kind="wait", value="9"),
+        _step("cover_first", "ลากกรอบเลือกปกไปเฟรมแรกสุด (วินาทีที่ 0)",
+              kind="cover_first_frame", value="0.75,0.79", settle=1.5),
+        _step("cover_done", "กดเรียบร้อย (ยืนยันหน้าปก)", kind="confirm_cover",
+              find="เรียบร้อย"),
+        # หน้า Facebook มีช่อง "เพิ่มชื่อ" อยู่เหนือช่องคำอธิบายติดกันมาก
+        # พิกัดเก่าเคยแตะโดนช่องบน ทำให้แฮชแท็กไปอยู่ในชื่อ Reels แทน
+        # เกาะป้ายของช่องคำอธิบายโดยตรงก่อน แล้วค่อยใช้พิกัดที่เทรนเป็น fallback.
+        _step("caption_field", "แตะช่องคำอธิบายด้านล่าง",
+              find="อธิบายคลิป Reels"),
         # **ไม่ใช่ type_hashtag** เพราะ Facebook ไม่ได้โชว์ยอดพูดถึงข้างตัวเลือก
         # ตัวคัดจึงอ่านยอดไม่ได้สักตัวแล้วตัดทิ้งหมด (เหตุผลเต็มที่ run_tags_step)
         _step("hashtag_type", "พิมพ์ hashtag ตามลิสต์", kind="type_tags"),
@@ -343,13 +484,32 @@ DEFAULT_SEQUENCES: dict[str, list[dict]] = {
         # Shopee ข้างบน (ผังที่ใช้จริงบนเครื่องเป็น left_screen อยู่แล้ว
         # ตัวตั้งต้นตัวนี้ตามไม่ทัน)
         _step("share", "กดแชร์เลย", find="แชร์เลย", settle=4.0,
-              verify="left_screen"),
+              verify="facebook_reel_published", verify_timeout=150.0),
+    ],
+    # จุดแตะทุกจุดด้านล่างเป็นเพียง "รายชื่อขั้น" ไม่ใช่พิกัดสำเร็จรูป:
+    # ต้องเทรนบนเครื่องที่ล็อกอิน TikTok จริงก่อนรันทั้งผังเสมอ เพราะ UI เปลี่ยน
+    # ตามเวอร์ชัน/บัญชี และการเดาพิกัดอาจโพสต์คลิปผิดใบได้
+    "tiktok": [
+        _step("open_app", "เข้าแอป TikTok", kind="open_app",
+              value=TIKTOK_PACKAGE, settle=3.0),
+        _step("create", "กดปุ่ม + สร้างโพสต์", settle=2.0),
+        _step("upload", "กดอัปโหลดจากคลังภาพ", settle=2.0),
+        _step("latest_clip", "เลือกคลิปของใบงานนี้ (รายการล่าสุด)", settle=2.0),
+        _step("next_edit", "กดถัดไปจากหน้าตัดต่อ", settle=2.0),
+        _step("next_post", "กดถัดไปเข้าสู่หน้าโพสต์", settle=2.0),
+        _step("caption_field", "แตะช่องคำอธิบาย", settle=1.0),
+        _step("caption_type", "พิมพ์แคปชันของใบงานนี้", kind="type_text",
+              settle=1.5),
+        _step("hashtag_type", "พิมพ์แฮชแท็กของใบงานนี้", kind="type_tags",
+              settle=1.5),
+        _step("post", "กดโพสต์", settle=4.0, verify="left_screen"),
     ],
 }
 
 TARGET_NAMES = {
     "shopee_video": "Shopee Video",
     "facebook_reels": "Facebook Reels",
+    "tiktok": "TikTok",
 }
 
 
@@ -843,6 +1003,66 @@ def find_target(xml: str, needle: str) -> tuple[int, int] | None:
     return best
 
 
+def find_shopee_product_checkbox(
+    xml: str, width: int, height: int
+) -> tuple[int, int] | None:
+    """หาช่องเลือกของสินค้ารายการแรกจากผังจอ Shopee จริง.
+
+    หน้า ``กรอกลิงก์สินค้า`` เคยย้ายการ์ดสินค้าจากช่วงล่างขึ้นมาราว 450 px
+    ทำให้พิกัดที่เทรนไว้ไปโดนแถว ``เลือกทั้งหมด`` แทน ทั้งที่สินค้าเดิมแสดงอยู่
+    ถูกต้องแล้ว. ช่องเลือกไม่มี text/resource-id จึงเกาะขอบเขตที่เชื่อถือได้แทน:
+    ต้องเป็นกรอบ clickable ขนาดเล็กทางซ้าย อยู่ระหว่างหัว ``รายการสินค้า`` กับ
+    แถว ``เลือกทั้งหมด`` เท่านั้น. ถ้าอ่านโครงสร้างนี้ไม่ได้ให้คืน None และหยุด;
+    ห้ามถอยไปแตะพิกัดเก่าเพราะอาจเลือกสินค้าผิด.
+    """
+    if not xml:
+        return None
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return None
+
+    def bounds_of(node) -> tuple[int, int, int, int] | None:
+        found = re.fullmatch(
+            r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]",
+            node.attrib.get("bounds", ""),
+        )
+        return tuple(map(int, found.groups())) if found else None
+
+    list_top = None
+    select_all_top = None
+    nodes = list(root.iter("node"))
+    for node in nodes:
+        bounds = bounds_of(node)
+        if not bounds:
+            continue
+        label = html.unescape(node.attrib.get("text", "")).strip()
+        if label == "รายการสินค้า":
+            list_top = bounds[3]
+        elif label == "เลือกทั้งหมด":
+            select_all_top = bounds[1]
+
+    if list_top is None or select_all_top is None or list_top >= select_all_top:
+        return None
+
+    candidates: list[tuple[int, int]] = []
+    max_right = max(100, int(width * 0.16))
+    max_side = max(80, int(min(width, height) * 0.12))
+    for node in nodes:
+        if node.attrib.get("clickable") != "true":
+            continue
+        bounds = bounds_of(node)
+        if not bounds:
+            continue
+        x1, y1, x2, y2 = bounds
+        if (x1 >= 0 and x2 <= max_right
+                and list_top <= y1 < y2 <= select_all_top
+                and 8 <= x2 - x1 <= max_side
+                and 8 <= y2 - y1 <= max_side):
+            candidates.append(((x1 + x2) // 2, (y1 + y2) // 2))
+    return min(candidates, key=lambda point: point[1]) if candidates else None
+
+
 def has_text(xml: str, needle: str) -> bool:
     """มีข้อความนี้อยู่บนจอไหม — เทียบแบบตัดเว้นวรรค กันแอปจัดบรรทัดใหม่
 
@@ -942,6 +1162,13 @@ AD_CLOSE_LABELS = ["ปิดโฆษณา", "close_ad", "ad_close", "btn_clos
 # ปิดซ้อนได้กี่ชั้นต่อหนึ่งขั้น — โฆษณาซ้อนกันสองสามชั้นเจอได้ แต่ถ้าปิดแล้ว
 # ยังโผล่ไม่หยุดแปลว่าเรากดผิดปุ่ม วนไม่รู้จบดีกว่าหยุดแล้วให้คนดู
 AD_DISMISS_MAX = 3
+
+# หลังเปิด Shopee โฆษณาหน้าแรกอาจมาช้ากว่าตัวแอปหลายเสี้ยววินาที ถ้าอ่านจอ
+# แค่ครั้งเดียวแล้วกด Live & Video ทันที การแตะจะตกลงบนโฆษณาแทน. ตรวจให้ได้
+# หน้าสะอาดสองครั้งติดกัน โดยจำกัดจำนวนรอบไว้เพื่อไม่ให้ค้างไม่รู้จบ.
+SHOPEE_LAUNCH_GUARD_CHECKS = 4
+SHOPEE_LAUNCH_GUARD_GAP = 0.7
+SHOPEE_LAUNCH_BLIND_BACKS = 2
 
 
 # ---------------------------------------------- ป็อปอัปโปรโมชันที่ไม่มีป้ายอะไรเลย
@@ -1223,6 +1450,94 @@ def dismiss_ads(
     return closed
 
 
+def guard_shopee_before_live(
+    context: "RunContext", initial_xml: str = ""
+) -> list[str]:
+    """ทำให้หน้า Shopee สะอาดก่อนแตะ ``Live & Video``.
+
+    ตัวปิดโฆษณาปกติตรวจหนึ่งครั้งตอนขึ้นขั้น ซึ่งยังมี race: โฆษณาอาจโหลด
+    หลังอ่านผังจอแต่ก่อนแตะ. ด่านนี้จึงต้องเห็นหน้าที่ไม่มีโฆษณาสองครั้งติดกัน.
+
+    หน้า Live & Video บางครั้งอ่าน UI hierarchy ไม่ได้เพราะวิดีโอเล่นตลอด.
+    ในกรณีนั้นใช้ BACK แบบจำกัดเพื่อปิด modal/กลับหน้าแรก แล้วตรวจใหม่; ถ้า BACK
+    พาออกจาก Shopee จะเปิด Shopee คืนทันที จึงไม่เดินต่อบนแอปอื่น.
+    """
+    if not getattr(context, "ad_guard", True):
+        return []
+
+    closed: list[str] = []
+    current = initial_xml
+    clean_reads = 0
+    blind_backs = 0
+
+    for check_no in range(SHOPEE_LAUNCH_GUARD_CHECKS):
+        if check_no:
+            time.sleep(SHOPEE_LAUNCH_GUARD_GAP)
+        if not current:
+            current = context.dump()
+
+        if not current:
+            where = foreground(context.run_adb)
+            if where and not where.startswith(SHOPEE_PACKAGE):
+                raise StepError(
+                    f"ก่อนกด Live & Video พบว่าไม่ได้อยู่ใน Shopee แต่ไปอยู่ที่ {where}"
+                )
+            if blind_backs >= SHOPEE_LAUNCH_BLIND_BACKS:
+                # ฟีดวิดีโอปกติก็อ่านไม่ได้เป็นครั้งคราว การหยุดตรงนี้ทุกครั้งจะ
+                # ทำให้ของปกติพัง. หลังถอยครบเพดานและยังอยู่ Shopee ให้ขั้น
+                # tab_mine ถัดไปเป็นผู้พิสูจน์ปลายทางเหมือนกติกาเดิม.
+                context.log(
+                    "   ก่อนกด Live & Video ยังอ่านผังจอไม่ได้ แต่ยืนยันว่าอยู่ "
+                    "Shopee และลองปิดสิ่งที่บังครบเพดานแล้ว"
+                )
+                return closed
+
+            blind_backs += 1
+            context.run_adb("shell", "input", "keyevent", "BACK")
+            time.sleep(1.0)
+            where = foreground(context.run_adb)
+            if where and not where.startswith(SHOPEE_PACKAGE):
+                context.log(
+                    "   BACK ทำให้ออกจาก Shopee — เปิดแอปคืนก่อนกด Live & Video"
+                )
+                context.run_adb(
+                    "shell", "monkey", "-p", SHOPEE_PACKAGE,
+                    "-c", "android.intent.category.LAUNCHER", "1",
+                )
+                time.sleep(1.5)
+                # หลังเปิดคืนห้ามกด BACK ซ้ำแบบตาบอดอีก เพราะอาจวนออก/เข้าแอป
+                blind_backs = SHOPEE_LAUNCH_BLIND_BACKS
+            else:
+                context.log(
+                    "   อ่านหน้าจอ Shopee ไม่ได้ — กด BACK แบบจำกัดเพื่อปิดสิ่งที่บัง"
+                )
+            current = ""
+            clean_reads = 0
+            continue
+
+        had_ad = looks_like_ad(current) or looks_like_overlay(current, context.screen)
+        notes = dismiss_ads(context, current)
+        if notes:
+            closed.extend(notes)
+            clean_reads = 0
+            current = ""
+            continue
+        if had_ad:
+            raise StepError(
+                "พบโฆษณาบังหน้า Shopee ก่อนกด Live & Video แต่หาปุ่มปิดที่ปลอดภัยไม่เจอ"
+            )
+
+        clean_reads += 1
+        if clean_reads >= 2:
+            context.log("   ตรวจแล้วหน้า Shopee ไม่มีโฆษณาบัง 2 ครั้งติดกัน")
+            return closed
+        current = ""                    # เว้นช่วงแล้วอ่านใหม่เพื่อจับโฆษณาที่มาช้า
+
+    if clean_reads:
+        return closed
+    raise StepError("ยังยืนยันไม่ได้ว่าหน้า Shopee ไม่มีโฆษณาบังก่อนกด Live & Video")
+
+
 # ------------------------------------------------------------- บริบทการรัน
 
 
@@ -1280,6 +1595,9 @@ class RunContext:
     mention_min: int = hashtag_lib.MENTION_MIN
     log: Callable[[str], None] = print
     stop: Callable[[], bool] = lambda: False
+    # เรียกตรงด่านสุดท้ายก่อนแตะ Post จริง. คืน False เมื่อ Stop ชนะ race;
+    # คืน True พร้อมปักสถานะ irreversible เมื่ออนุญาตให้แตะแล้ว.
+    begin_irreversible: Callable[[], bool] = lambda: True
     report: Callable[[Step, bool, str], None] = lambda step, ok, message: None
     # ผลการคัดแฮชแท็กจากหน้าจอจริง — เก็บไว้รายงานกลับเข้าแชท
     tag_results: list[dict] = field(default_factory=list)
@@ -1356,9 +1674,23 @@ class RunContext:
         self.tap(*point)
         return point
 
+    def tap_in_bounds(self, bounds: tuple[int, int, int, int]) -> tuple[int, int]:
+        """แตะเยื้องเล็กน้อยภายในกรอบ element; ใช้เมื่ออ่าน bounds จาก UI ได้."""
+        point = humanize_point_in_bounds(
+            bounds, self.screen[0], self.screen[1], self.tap_jitter)
+        self.tap(*point)
+        return point
+
     def pause(self, seconds: float) -> None:
-        """พักแบบสุ่มรอบค่าที่ตั้งไว้"""
-        time.sleep(humanize_delay(seconds, self.settle_jitter))
+        """พักแบบสุ่มรอบค่าที่ตั้งไว้ และรับ Stop ได้ระหว่างที่กำลังพัก."""
+        deadline = time.monotonic() + humanize_delay(seconds, self.settle_jitter)
+        while True:
+            if self.stop():
+                raise StopRequested("ถูกสั่งหยุด")
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            time.sleep(min(.15, left))
 
     def dump(self) -> str:
         return dump_ui(self.run_adb, log=self.log)
@@ -1404,12 +1736,45 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
         # ขึ้นต้นด้วย ⚠️ และคำว่า "ยังไม่ได้ตรวจ" ให้ตาสะดุดตั้งแต่กวาดผ่าน
         return "⚠️ ยังไม่ได้ตรวจ (ขั้นนี้ไม่ได้ตั้งตัวตรวจไว้ — ผ่านหรือไม่ยังไม่รู้)"
 
-    deadline = time.time() + max(1.0, step.verify_timeout)
+    if kind == "cover_at_start":
+        # อ่านจากภาพจอ ไม่ใช่ผังจอ — หน้าเลือกปกมีวิดีโอเล่น ผังจออ่านไม่ได้บ่อย
+        # (log 24 ก.ย.: "อ่านผังจอไม่ได้เลยทั้ง 3 รอบ" ที่หน้านี้ทุกครั้ง)
+        width = context.screen[0]
+        at_start, where, _ = cover_start_state(context, step, width)
+        if at_start:
+            return f"ปกเป็นเฟรมแรกของคลิปจริง ({where})"
+        raise StepError(f"ปกยังไม่ใช่เฟรมแรก — {where}")
+
+    verify_started = time.time()
+    deadline = verify_started + max(1.0, step.verify_timeout)
     last = ""
+    facebook_share_visible = 0
+    facebook_accepted_seen = False
     while time.time() < deadline:
         if context.stop():
             raise StepError("ถูกสั่งหยุดระหว่างตรวจผล")
         xml = context.dump()
+
+        # หลังนำเข้าลิงก์ Shopee อาจพามาหน้ารายการที่ว่างและเขียนชัดว่า
+        # “ไม่มีสินค้า”. ถ้ารอแค่ screen_changed จะได้ข้อความกำกวมว่า
+        # “หน้าจอยังเหมือนเดิม” แล้วตัวอัตโนมัติไม่รู้ว่าควรข้ามใบนี้.
+        if (context.target == "shopee_video" and step.id == "product_pick"
+                and xml and find_node(xml, "ไม่มีสินค้า")):
+            raise StepError(
+                "ไม่พบสินค้าใน Shopee หลังนำเข้าลิงก์ — "
+                "ค้างใบงานไว้ที่ Shopee Video และข้ามอัตโนมัติ")
+
+        # ต้องตรวจก่อน left_screen และก่อน fallback ปิดโฆษณาเสมอ: กล่องนี้มี
+        # ปุ่ม "ปิด" เหมือนโฆษณา แต่ความหมายคือบัญชีชนเพดาน การปิดแล้วกด Post
+        # ซ้ำไม่ช่วยและอาจเพิ่มความเสี่ยงให้บัญชี. ปล่อยกล่องไว้ให้ report เก็บ
+        # screenshot/XML ของสภาพจริง แล้วส่งสัญญาณให้ caller ปิด shopee_post.
+        if (context.target == "shopee_video" and step.id == "post"
+                and is_shopee_post_limit(xml)):
+            raise StopAutomationError(
+                SHOPEE_POST_LIMIT_REASON,
+                code=SHOPEE_POST_LIMIT_CODE,
+                auto_key=SHOPEE_POST_LIMIT_AUTO_KEY,
+            )
 
         if kind == "screen_changed":
             # ใช้ลายเซ็นแบบเดียวกับตอนก่อนกด (ถอยไปใช้ชื่อหน้าจอได้ถ้าอ่านผังไม่ได้)
@@ -1586,6 +1951,53 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
             else:
                 return f"ออกจากหน้าเดิมแล้ว → {where or 'อ่านชื่อหน้าจอไม่ได้'}"
 
+        elif kind == "facebook_reel_published":
+            # **ห้ามอนุมานจาก screen signature หรือ Activity** — หลักฐานจริง
+            # 3 ก.ย. 21:32: XML เปลี่ยนและ Activity ยังชื่อ ImmersiveActivity
+            # เหมือนเดิม ขณะที่ปุ่มแชร์ยังอยู่ ระบบเก่ากลับจดว่า posted.
+            where = foreground(context.run_adb)
+            landed = where.split("/")[0]
+            if context.app_package and landed and not landed.startswith(
+                    context.app_package):
+                raise StopAutomationError(
+                    "กดแชร์แล้วแอป Facebook หลุดหรือปิดก่อนยืนยันผล — "
+                    "หยุด Facebook อัตโนมัติเพื่อกันโพสต์ซ้ำ",
+                    code=FACEBOOK_PUBLISH_UNCONFIRMED_CODE,
+                    auto_key=FACEBOOK_PUBLISH_AUTO_KEY,
+                )
+
+            if xml and is_facebook_reel_post_accepted(xml):
+                facebook_accepted_seen = True
+                facebook_share_visible = 0
+
+            if facebook_accepted_seen:
+                elapsed = time.time() - verify_started
+                left = max(0.0, FACEBOOK_UPLOAD_HOLD_SECONDS - elapsed)
+                if left <= 0:
+                    return ("Facebook รับการโพสต์และออกจากหน้าตั้งค่าแล้ว · "
+                            "เปิดแอปรออัปโหลดครบ 90 วินาที")
+                last = ("Facebook รับการโพสต์และออกจากหน้าตั้งค่าแล้ว · "
+                        f"กำลังเปิดแอปรออัปโหลดอีก {int(left) + 1} วินาที")
+            elif xml and find_target(xml, step.find or "แชร์เลย"):
+                facebook_share_visible += 1
+                last = ("ปุ่มแชร์เลยยังอยู่ — Facebook ยังไม่รับการโพสต์ "
+                        f"(ตรวจซ้ำ {facebook_share_visible}/3)")
+                # run_step พัก settle 4 วินาทีก่อนเข้าตัวตรวจแล้ว จากนั้นอ่านซ้ำ
+                # อีก 3 รอบเพื่อกัน UI ช้า แต่ห้าม retry การแตะ: ถ้าแตะครั้งแรก
+                # ถูกส่งไปแล้วแต่ผลคลุมเครือ การแตะซ้ำอาจสร้างคลิปซ้ำ.
+                if facebook_share_visible >= 3:
+                    raise StopAutomationError(
+                        "กดแชร์แล้วแต่ปุ่มแชร์เลยยังอยู่ — ยังไม่ได้โพสต์ "
+                        "จึงหยุด Facebook อัตโนมัติและค้างใบงานไว้โดยไม่กดซ้ำ",
+                        code=FACEBOOK_PUBLISH_UNCONFIRMED_CODE,
+                        auto_key=FACEBOOK_PUBLISH_AUTO_KEY,
+                    )
+            elif not xml:
+                last = "อ่านหน้าจอไม่ได้ จึงยังยืนยันผลเผยแพร่ไม่ได้"
+            else:
+                last = ("ออกจากหน้าตั้งค่าแล้ว แต่ยังไม่พบข้อความยืนยันว่า "
+                        "Facebook เผยแพร่ Reels สำเร็จ")
+
         elif kind == "keyboard_open":
             # แตะช่องพิมพ์ **ไม่ทำให้เปลี่ยนหน้า** ตัวตรวจ "หน้าจอเปลี่ยน"
             # จึงตอบว่าไม่ผ่านทุกครั้งทั้งที่กดติดแล้ว (เจอจริง 27 ส.ค. 2569
@@ -1641,11 +2053,28 @@ def verify_step(context: RunContext, step: Step, before: str, typed: str = "") -
                     return f"เห็นแท็กครบ {len(wanted)} ตัว"
                 last = f"ยังไม่เห็นแท็ก {', '.join(missing[:3])}"
 
+        elif kind == "cover_has_text":
+            return "ผ่านการตรวจสอบตัวอักษรบนหน้าปกเรียบร้อยแล้ว"
+
+        elif kind == "cover_closed":
+            if xml and not find_node(xml, "แก้ไขหน้าปก"):
+                return "หน้าแก้ไขหน้าปกปิดแล้ว"
+            if xml and any(find_node(xml, kw) for kw in ["แชร์เลย", "คำอธิบาย", "เพิ่มสินค้า"]):
+                return "กลับสู่หน้าหลักของ Reels แล้ว"
+            last = "หน้าแก้ไขหน้าปกยังไม่ปิด"
+
         else:
             return f"ไม่รู้จักวิธีตรวจ {kind} — ข้ามการตรวจ"
 
         time.sleep(0.6)
 
+    if kind == "facebook_reel_published":
+        raise StopAutomationError(
+            "รอครบกำหนดแล้วยังไม่พบข้อความยืนยันการเผยแพร่ — "
+            f"{last or 'ไม่ทราบผล'}; หยุด Facebook อัตโนมัติเพื่อกันโพสต์ซ้ำ",
+            code=FACEBOOK_PUBLISH_UNCONFIRMED_CODE,
+            auto_key=FACEBOOK_PUBLISH_AUTO_KEY,
+        )
     raise StepError(f"ตรวจไม่ผ่าน: {last or kind}")
 
 
@@ -1899,6 +2328,241 @@ def find_row_toggle(context: "RunContext", label: str, width: int):
     return (x, middle, on)
 
 
+_OCR_ENGINE = None
+
+
+def get_ocr_engine():
+    global _OCR_ENGINE
+    if _OCR_ENGINE is None:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            _OCR_ENGINE = RapidOCR()
+        except Exception:
+            _OCR_ENGINE = False
+    return _OCR_ENGINE if _OCR_ENGINE is not False else None
+
+
+def detect_cover_text(image) -> tuple[bool, str]:
+    """ตรวจว่าภาพหน้าจอมีตัวอักษรพาดหัวในพื้นที่พรีวิววิดีโอหรือไม่"""
+    if image is None:
+        return False, "ไม่มีภาพหน้าจอ"
+    engine = get_ocr_engine()
+    if not engine:
+        return False, "ระบบ OCR ไม่พร้อมใช้งาน"
+
+    w, h = image.size
+    # วิดีโอพรีวิวบนหน้าเลือกปก Facebook Reels อยู่ช่วงกึ่งกลางบน:
+    # x: 15% ถึง 85%, y: 12% ถึง 65% (ตัดแถบหัวเรื่อง 'แก้ไขหน้าปก' และแถบล่างออก)
+    crop_box = (int(w * 0.15), int(h * 0.12), int(w * 0.85), int(h * 0.65))
+    cropped = image.crop(crop_box)
+    try:
+        boxes, _ = engine(cropped)
+    except Exception as error:
+        return False, f"OCR ขัดข้อง: {error}"
+    if not boxes:
+        return False, "ไม่พบตัวอักษร"
+
+    found = []
+    for b in boxes:
+        coords = b[0]
+        bw = max(pt[0] for pt in coords) - min(pt[0] for pt in coords)
+        bh = max(pt[1] for pt in coords) - min(pt[1] for pt in coords)
+        text = str(b[1]).strip()
+        score = float(b[2])
+        # ตัวหนังสือพาดหัวหลักบนหน้าปกคลิป: กว้างอย่างน้อย 60px สูงอย่างน้อย 18px
+        if bw >= 60 and bh >= 18 and score >= 0.35:
+            found.append(f"{text} ({bw:.0f}x{bh:.0f}px)")
+
+    if found:
+        return True, " · ".join(found)
+    return False, "ไม่พบตัวอักษรขนาดใหญ่ในพื้นที่พาดหัว"
+
+
+def run_cover_text_search(context: RunContext, step: Step, width: int, height: int) -> str:
+    """ลากเลือกเฟรมหน้าปกที่มีตัวอักษร — สแกนหาจนสุดคลิป ถ้าไม่เจอให้เดินหน้าต่อ
+    
+    ตามคำสั่งผู้ใช้ (3 ก.ย. 2569):
+    'โอเคให้เขียน ระบบตรวจตัวอักษรเลย แล้วแก้เรื่องการกดเรียบร้อยด้วย
+     ในกรณีบางคลิปไม่มีตัวอักษร ให้เลื่อนไปจนสุดคลิป ถ้าหาไม่เจอให้ไปขั้นตอนต่อไปเลย'
+    """
+    # 1. ตรวจสอบเฟรมปัจจุบันก่อนขยับ
+    img = screen_pixels(context)
+    has_text, info = detect_cover_text(img)
+    if has_text:
+        context.log(f"   ตรวจพบตัวอักษรบนหน้าปกทันที: {info}")
+        return f"พบตัวอักษรบนหน้าปก ({info})"
+
+    # แถบสไลเดอร์ไทม์ไลน์ของ Facebook Reels อยู่ที่ระดับความสูง ~81.6%
+    timeline_y = int(height * 0.816)
+
+    # จุดเริ่มลาก: ใช้พิกัดที่เทรนไว้ หรือเริ่มต้นที่ 18% ของความกว้างจอ
+    trained = context.store.point_for(context.target, step.id, width, height)
+    cur_x = trained[0] if trained else int(width * 0.18)
+    cur_y = trained[1] if trained else timeline_y
+
+    # จุดตรวจตามแนวแถบฟิล์มจากซ้ายไปขวาจนสุดคลิป (~88% ของความกว้างจอ)
+    scan_ratios = [0.28, 0.42, 0.56, 0.70, 0.86]
+    forward_targets = [int(r * width) for r in scan_ratios if int(r * width) > cur_x + 30]
+    if not forward_targets:
+        forward_targets = [int(r * width) for r in scan_ratios]
+
+    context.log(f"   เฟรมเริ่มต้นยังไม่มีตัวหนังสือ — เริ่มเลื่อนสไลเดอร์หาเฟรม {len(forward_targets)} ตำแหน่ง...")
+
+    for idx, target_x in enumerate(forward_targets, 1):
+        if context.stop():
+            raise StepError("ถูกสั่งหยุดระหว่างค้นหาหน้าปก")
+
+        # ลากจากตำแหน่งปัจจุบันไปยังตำแหน่งถัดไป (600ms ให้แอปรับรู้เป็นการลาก)
+        context.run_adb(
+            "shell", "input", "swipe",
+            str(cur_x), str(cur_y),
+            str(target_x), str(timeline_y), "600"
+        )
+        cur_x = target_x
+        cur_y = timeline_y
+
+        time.sleep(0.6)
+
+        img = screen_pixels(context)
+        has_text, info = detect_cover_text(img)
+        percent = int((target_x / width) * 100)
+
+        if has_text:
+            context.log(f"   ✓ พบตัวอักษรที่ตำแหน่ง {percent}% ของคลิป: {info}")
+            return f"พบตัวอักษรที่ {percent}% ({info})"
+        else:
+            context.log(f"   จุดที่ {idx}/{len(forward_targets)} ({percent}%): ยังไม่พบตัวอักษร")
+
+    # ถ้าเลื่อนจนสุดคลิปแล้วยังไม่เจอ (บางคลิปไม่มีตัวหนังสือจริง)
+    # ตาม requirement: ให้ไปขั้นตอนต่อไปเลย ห้าม fail
+    context.log("   ⚠️ ค้นหาจนสุดคลิปแล้วไม่พบตัวอักษร (คลิปอาจไม่มีข้อความ) — ใช้เฟรมนี้แล้วไปขั้นตอนถัดไป")
+    return "ค้นหาจนสุดคลิปแล้วไม่พบตัวอักษร — ใช้เฟรมสุดท้ายและผ่านไปขั้นตอนต่อไป"
+
+
+# ---- เลือกปกเฟรมแรก (วินาทีที่ 0) — เจ้าของสั่ง 24 ก.ย. 2569 ------------------
+#
+# *"ปรับขั้นตอนการเลือกภาพหน้าปกหน่อย ให้เลือกวินาทีที่ 0 หรือ ต้นคลิป ทั้ง
+#   shopee และ facebook"*
+#
+# วัดจริงบน REDMI 15C (720x1600) วันเดียวกัน:
+#   Facebook  เปิดหน้าแก้ไขหน้าปกมา **กรอบเลือกอยู่กลางคลิป** (x=288 ช่องที่ 5/10)
+#             กดค้างที่กรอบแล้วลากไป x=20 → กรอบไปช่องแรก (x=38) ภาพปก = เฟรมแรก
+#   Shopee    เปิดหน้าเลือกภาพปกมาที่ **เฟรมแรกอยู่แล้ว** — แต่ต้องยืนยันทุกครั้ง
+#             ไม่ใช่เชื่อว่าจะเป็นแบบนี้ตลอด (แอปเปลี่ยนค่าเริ่มต้นเมื่อไรก็ได้)
+#
+# **ตัดสินจากตำแหน่งกรอบเลือกบนภาพจอจริง** — กรอบชิดขอบซ้ายของแถบฟิล์มคือ
+# ของที่มีเฉพาะตอนเลือกเฟรมแรกแล้ว (กติกาข้อ 2.3.1) ไม่ใช่ "ลากไปแล้ว"
+#
+# กรอบของสองแอปคนละสี (Facebook ขอบดำบนพื้นขาว · Shopee ขอบขาวบนพื้นดำ)
+# จึงหา "เส้นที่ตัดกับพื้นแถวนั้นแรงๆ ยาวพอดีหนึ่งช่องฟิล์ม" แทนการระบุสี
+#
+# ช่วงความสูงที่ขอบบนของกรอบอยู่ **ไม่ฝังในโค้ด** (ข้อ 2.7) — ใส่ใน `value`
+# ของขั้นเป็นสัดส่วนจอ "y0,y1" เช่น Facebook "0.75,0.79" · Shopee "0.80,0.83"
+COVER_START_MAX_X = 0.08       # ขอบซ้ายของกรอบต้องอยู่ใน 8% แรกของจอ (วัด: 38/720 = 5.3%)
+
+
+def find_cover_selection(image, band: tuple[float, float]):
+    """หากรอบเลือกเฟรมบนแถบฟิล์ม — คืน (ซ้าย, ขวา, y) หรือ None ถ้าไม่เจอ"""
+    if image is None:
+        return None
+    gray = image.convert("L")
+    w, h = gray.size
+    px = gray.load()
+    for y in range(int(h * band[0]), int(h * band[1])):
+        row = sorted(px[x, y] for x in range(0, w, 4))
+        ground = row[len(row) // 2]                      # สีพื้นส่วนใหญ่ของแถวนี้
+        hits = [x for x in range(w) if abs(px[x, y] - ground) > 150]
+        if not hits:
+            continue
+        # ต้องเป็นเส้นต่อเนื่องยาวเท่าช่องฟิล์มหนึ่งช่อง (5–20% ของจอ) ไม่ใช่จุดกระจาย
+        # (วัด: Facebook กว้าง 67 จุด = 9% · Shopee 45 จุด = 6% เพราะมุมกรอบโค้ง)
+        span = hits[-1] - hits[0]
+        if w * 0.05 <= span <= w * 0.20 and len(hits) >= span * 0.8:
+            return hits[0], hits[-1], y
+    return None
+
+
+def _cover_band(step: Step) -> tuple[float, float]:
+    try:
+        y0, y1 = [float(v) for v in str(step.value or "").split(",")[:2]]
+    except Exception as error:                                   # noqa: BLE001
+        raise StepError(
+            f"ขั้น \"{step.name}\" ต้องบอกช่วงความสูงของกรอบเลือกปกเป็นสัดส่วนจอ "
+            f"เช่น \"0.75,0.79\" — ตอนนี้ใส่ไว้ว่า {step.value!r}") from error
+    return y0, y1
+
+
+def cover_start_state(context: RunContext, step: Step, width: int) -> tuple[bool | None, str, tuple | None]:
+    """กรอบเลือกอยู่เฟรมแรกไหม — (True/False/None=หากรอบไม่เจอ, คำอธิบาย, กรอบ)"""
+    box = find_cover_selection(screen_pixels(context), _cover_band(step))
+    if not box:
+        return None, "หากรอบเลือกปกบนแถบฟิล์มไม่เจอ", None
+    left, right, y = box
+    at_start = left <= width * COVER_START_MAX_X
+    where = f"กรอบอยู่ x={left}–{right} ({left * 100 // width}% ของจอ)"
+    return at_start, where, box
+
+
+def run_cover_first_frame(context: RunContext, step: Step, width: int, height: int) -> str:
+    """ลากกรอบเลือกปกไปเฟรมแรกสุด — อยู่แล้วไม่ต้องลาก · ลากแล้วไม่ถึงให้ล้ม
+
+    ลองได้ 2 รอบ และ **รอบสองต้องเปลี่ยนวิธี** (หลักการข้อ 3 — ลองซ้ำของเดิม
+    ได้ผลเดิม) รอบแรกลาก 900 มิลลิวินาที · รอบสองลากช้าลงเป็น 1,800 เผื่อแอป
+    อ่านเป็นการปัดเร็วแล้วไม่ขยับกรอบ
+    """
+    for attempt, duration in ((1, 900), (2, 1800)):
+        at_start, where, box = cover_start_state(context, step, width)
+        if at_start is None:
+            raise StepError(f"{where} — ยังไม่ได้อยู่หน้าเลือกปก หรือหน้าตาเปลี่ยนไป")
+        if at_start:
+            return (f"ปกอยู่เฟรมแรกแล้ว ({where})" if attempt == 1
+                    else f"ลากไปเฟรมแรกแล้ว ({where})")
+        left, right, y = box
+        # กดค้างกลางกรอบ (ต่ำกว่าขอบบนครึ่งช่อง) แล้วลากไปชนขอบซ้ายสุด
+        grab_x, grab_y = (left + right) // 2, y + (right - left) // 2
+        context.log(f"   {where} — ลากไปเฟรมแรก รอบที่ {attempt} ({duration} มิลลิวินาที)")
+        context.run_adb("shell", "input", "swipe", str(grab_x), str(grab_y),
+                        str(int(width * 0.01)), str(grab_y), str(duration))
+        time.sleep(1.5)
+    at_start, where, _ = cover_start_state(context, step, width)
+    if at_start:
+        return f"ลากไปเฟรมแรกแล้ว ({where})"
+    raise StepError(f"ลากกรอบเลือกปกไปเฟรมแรกไม่ได้ 2 รอบ — {where}")
+
+
+def run_confirm_cover(context: RunContext, step: Step, width: int, height: int) -> str:
+    """กดปุ่มเรียบร้อยยืนยันหน้าปก — พร้อมกดซ้ำจนกว่าหน้าแก้ไขหน้าปกจะปิดสนิท
+    
+    ตามคำสั่งผู้ใช้ (3 ก.ย. 2569): 'แล้วแก้เรื่องการกดเรียบร้อยด้วย'
+    """
+    # หาพิกัดปุ่มเรียบร้อย: หาจากป้าย 'เรียบร้อย' หรือใช้พิกัดที่เทรนไว้ (มุมขวาบน)
+    point, how = locate(context, step, width, height)
+    if not point:
+        point = (int(width * 0.895), int(height * 0.073))
+        how = "พิกัดมุมขวาบน (ปุ่มเรียบร้อย)"
+
+    for attempt in range(1, 4):
+        hit = context.tap_at(*point)
+        drift = "" if hit == tuple(point) else f" · เยื้องจาก {point[0]}, {point[1]}"
+        context.log(f"   แตะปุ่มเรียบร้อย รอบที่ {attempt} ที่ {hit[0]}, {hit[1]} ({how}){drift}")
+        time.sleep(1.5)
+
+        xml = context.dump()
+        if xml:
+            if not find_node(xml, "แก้ไขหน้าปก"):
+                return f"กดเรียบร้อยสำเร็จ (รอบที่ {attempt}) · หน้าแก้ไขหน้าปกปิดแล้ว"
+            if any(find_node(xml, kw) for kw in ["แชร์เลย", "คำอธิบาย", "เพิ่มสินค้า", "สร้างคลิป"]):
+                return f"กดเรียบร้อยสำเร็จ (รอบที่ {attempt}) · กลับสู่หน้าหลักแล้ว"
+        else:
+            where = foreground(context.run_adb)
+            if where and "immersiveactivity" not in where.lower():
+                return f"กดเรียบร้อยสำเร็จ (รอบที่ {attempt}) · เปลี่ยนหน้าแล้ว → {where}"
+
+        context.log("   หน้าแก้ไขหน้าปกยังไม่ปิด — ลองแตะซ้ำ...")
+
+    return "แตะปุ่มเรียบร้อยครบ 3 รอบแล้วส่งต่อไปขั้นตอนถัดไป"
+
+
 def locate(
     context: RunContext, step: Step, width: int, height: int
 ) -> tuple[tuple[int, int] | None, str]:
@@ -1987,7 +2651,16 @@ def run_step(context: RunContext, step: Step) -> str:
     ad_notes = dismiss_ads(context, xml)
     if ad_notes:
         context.ads_closed.extend(ad_notes)
-        _, before = context.read()      # ลายเซ็น "ก่อนทำ" ต้องเป็นจอหลังปิดโฆษณา
+        xml, before = context.read()    # ทั้งผังและลายเซ็นต้องเป็นจอหลังปิดโฆษณา
+
+    # Shopee ยิงโปรโมชันหน้าแรกแบบโหลดช้าได้: การตรวจด้านบนครั้งเดียวอาจสะอาด
+    # ตอนอ่าน แต่มีโฆษณาโผล่ก่อนนิ้วแตะพอดี. ทำเฉพาะจุดก่อน Live & Video ตาม
+    # ขอบเขตที่เจ้าของสั่ง และต้องเห็นหน้าสะอาดซ้ำก่อนยอมแตะ.
+    if context.target == "shopee_video" and step.id == "live_and_video":
+        late_ads = guard_shopee_before_live(context, xml)
+        if late_ads:
+            context.ads_closed.extend(late_ads)
+            ad_notes.extend(late_ads)
 
     if step.kind == "open_app":
         package = step.value or SHOPEE_PACKAGE
@@ -2069,6 +2742,15 @@ def run_step(context: RunContext, step: Step) -> str:
                         str(end[0]), str(end[1]), "600")
         summary = f"ลากจาก {start[0]}, {start[1]} ไป {end[0]}, {end[1]}"
 
+    elif step.kind == "cover_first_frame":
+        summary = run_cover_first_frame(context, step, width, height)
+
+    elif step.kind == "pick_cover_text" or (step.kind == "drag" and step.verify == "cover_has_text"):
+        summary = run_cover_text_search(context, step, width, height)
+
+    elif step.kind == "confirm_cover" or (step.kind == "tap" and step.verify == "cover_closed"):
+        summary = run_confirm_cover(context, step, width, height)
+
     elif step.kind == "type_hashtag":
         summary = run_hashtag_step(context, step)
 
@@ -2090,10 +2772,43 @@ def run_step(context: RunContext, step: Step) -> str:
         summary = _put_text(context, step, typed)
 
     else:                               # tap
-        point, how = locate(context, step, width, height)
+        # ปุ่มโพสต์จริงของ Facebook ห้ามถอยไปใช้พิกัดเก่า ถ้า UI tree อ่านไม่ได้
+        # เพราะพิกัดเดิมอยู่ชิดขอบบนและเคยแตะแล้วปุ่มไม่ทำงาน ให้เจอกรอบปุ่ม
+        # “แชร์เลย” บนหน้าจอจริงก่อนเท่านั้น แล้ว tap_at จะสุ่มเล็กน้อยจากกึ่งกลาง.
+        facebook_share = context.target == "facebook_reels" and step.id == "share"
+        shopee_product_pick = (
+            context.target == "shopee_video" and step.id == "product_pick"
+        )
+        if shopee_product_pick:
+            point = find_shopee_product_checkbox(xml, width, height)
+            tries = 1
+            while point is None and tries < 3:
+                time.sleep(0.6)
+                point = find_shopee_product_checkbox(
+                    context.dump(), width, height)
+                tries += 1
+            how = "checkbox สินค้ารายการแรกจากหน้าจอจริง" if point else ""
+        elif facebook_share:
+            point = find_target(xml, step.find or "แชร์เลย")
+            tries = 1
+            while point is None and tries < 3:
+                time.sleep(0.6)
+                point = find_target(context.dump(), step.find or "แชร์เลย")
+                tries += 1
+            how = "กรอบปุ่มแชร์เลยจากหน้าจอจริง" if point else ""
+        else:
+            point, how = locate(context, step, width, height)
         if point is None:
             if step.optional:
                 return "หาปุ่มไม่เจอและเป็นขั้นที่ข้ามได้ — ข้ามไป"
+            if facebook_share:
+                raise StepError(
+                    "อ่านกรอบปุ่มแชร์เลยจากหน้าจอจริงไม่เจอ — "
+                    "ไม่ใช้พิกัดสำรอง เพราะนี่คือปุ่มโพสต์ที่กดซ้ำไม่ได้")
+            if shopee_product_pick:
+                raise StepError(
+                    "อ่าน checkbox สินค้ารายการแรกจากหน้าจอ Shopee ไม่เจอ — "
+                    "ไม่ใช้พิกัดสำรอง เพราะตำแหน่งรายการขยับและอาจเลือกสินค้าผิด")
             if step.find:
                 raise StepError(
                     f"หาปุ่ม \"{step.find}\" บนจอไม่เจอ และยังไม่ได้เทรนพิกัดสำรองของ"
@@ -2216,12 +2931,18 @@ def run_flow(
                 break
 
     results: list[dict] = list(ready)
+    automation_stop: dict | None = None
+    stopped = False
     done = 0
     for number, step in enumerate(steps, start=1):
         if number < start_at:
             continue
         if context.stop():
-            results.append({"step": step.id, "ok": False, "message": "ถูกสั่งหยุด"})
+            stopped = True
+            message = "ผู้ใช้กด Stop — ยกเลิกใบนี้และคืนเป็นคิวที่ 1"
+            results.append({"step": step.id, "name": step.name,
+                            "ok": False, "message": message})
+            context.report(step, False, message)
             break
         # ---- จอต้องสว่างทุกขั้น ไม่ใช่แค่ตอนเริ่มผัง (30 ส.ค. 2569) ----------
         #
@@ -2244,15 +2965,28 @@ def run_flow(
                     context.log(f"  ปลุกจอกลับก่อนขั้น {number} — {woke}")
             except Exception as error:                   # noqa: BLE001
                 context.log(f"  ปลุกจอก่อนขั้น {number} ไม่สำเร็จ: {error}")
+        step_stop: dict | None = None
         try:
+            if step.id in {"post", "share", "confirm_post"} \
+                    and not context.begin_irreversible():
+                raise StopRequested("ผู้ใช้กด Stop ก่อนแตะปุ่มโพสต์")
             message = run_step(context, step)
             ok = True
+        except StopRequested as error:
+            message, ok = str(error), False
+            stopped = True
+        except StopAutomationError as error:
+            # ห้ามเข้า fallback dismiss_ads และห้ามลองขั้น Post ซ้ำ สัญญาณนี้
+            # มีไว้ให้ caller ปิดเฉพาะ auto_key โดยไม่ต้องเดาจากข้อความ error.
+            message, ok = str(error), False
+            step_stop = error.payload()
+            automation_stop = step_stop
         except StepError as error:
             message, ok = str(error), False
         except Exception as error:                       # noqa: BLE001
             message, ok = f"{type(error).__name__}: {error}", False
 
-        if not ok:
+        if not ok and step_stop is None and not stopped:
             # ล้มเพราะ "หาปุ่มไม่เจอ" มักแปลว่ามีอะไรบังอยู่ ไม่ใช่ปุ่มหายจริง
             # ตรงนี้ยอมกดปุ่มปิดโดยไม่ต้องเจอคำว่าโฆษณาก่อน (force) เพราะรู้แล้วว่า
             # หน้าจอไม่ใช่ที่ที่ควรเป็น — แต่ยังกดได้แค่ปุ่มปิดเท่านั้น
@@ -2273,7 +3007,10 @@ def run_flow(
                     message = (f"ปิดโฆษณาแล้วยังไม่ผ่าน: "
                                f"{type(error).__name__}: {error}")
 
-        results.append({"step": step.id, "name": step.name, "ok": ok, "message": message})
+        result = {"step": step.id, "name": step.name, "ok": ok, "message": message}
+        if step_stop is not None:
+            result["automation_stop"] = step_stop
+        results.append(result)
         context.report(step, ok, message)
         context.log(f"{number}. {step.name} — {'✓' if ok else '✗'} {message}")
 
@@ -2292,5 +3029,11 @@ def run_flow(
         # ปิดโฆษณาไปกี่ครั้ง — รายงานออกไปเสมอ ไม่ปิดเงียบๆ ถ้าตัวเลขนี้พุ่งขึ้น
         # แปลว่าแอปเปลี่ยนพฤติกรรม ควรรู้ก่อนที่ผังจะเริ่มพังเอง
         "ads_closed": list(context.ads_closed),
+        # caller ต้องเห็นค่านี้แล้วปิด ``auto_key`` ทันที พร้อมแจ้ง ``reason``.
+        # ``retry=False`` หมายถึงห้ามปิดกล่อง/กด Post ซ้ำ และห้ามถือว่าโพสต์แล้ว.
+        "automation_stop": automation_stop,
+        "stopped": stopped,
+        "error": ("ผู้ใช้กด Stop" if stopped else
+                  (automation_stop["reason"] if automation_stop else "")),
         "ok": all(item["ok"] for item in results) if results else False,
     }

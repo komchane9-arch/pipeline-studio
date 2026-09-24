@@ -721,6 +721,9 @@ async def system_info() -> dict:
         # ส่งขึ้นหน้าเว็บด้วย เพราะเจ้าของดูหน้าเว็บ ไม่ได้นั่งอ่าน log
         "post_dir_ready": studio_shared.POST_DIR_READY,
         "post_dir_why": studio_shared.POST_DIR_WHY,
+        # ทะเบียนกลุ่ม/ใบงานเก็บในเครื่อง ไม่ขึ้นกับการ sync ของ Drive แล้ว
+        "post_state_dir": str(studio_shared.POST_STATE),
+        "post_state_storage": studio_shared.POST_STATE_STORAGE,
     }
 
 
@@ -6543,7 +6546,7 @@ def posts_collect_bots() -> list[str]:
                              timeout=5) as conn:
             return [r[0] for r in conn.execute(
                 "SELECT DISTINCT bot FROM collect_run WHERE bot!='' ORDER BY bot")
-                    if r[0].casefold() not in reserved]
+                    if r[0].casefold() == "bot8" and r[0].casefold() not in reserved]
     except Exception:                                          # noqa: BLE001
         return []
 
@@ -6563,9 +6566,9 @@ def posts_collect_work_left() -> int:
 
 # ธงจองคิว Chrome ของโปรไฟล์ที่ตัวตามยอดใช้ (29 ส.ค. 2569)
 #
-# **ทำไมต้องมี** — ตัวเก็บโพสต์กับตัวตามยอด engagement ใช้ Chrome โปรไฟล์
-# เดียวกัน (Bot11) และ `find_bot` โยน error ทันทีถ้าโปรไฟล์นั้นเปิดอยู่
-# ไม่ได้รอคิว
+# **ทำไมต้องมี** — กันตัวเก็บข้อมูลกลุ่มเดิมเผลอเปิด Chrome โปรไฟล์ Bot10
+# ระหว่างตัวตามยอด engagement ใช้อยู่; `find_bot` โยน error ทันทีถ้าโปรไฟล์
+# นั้นเปิดอยู่และไม่ได้รอคิว
 #
 # ตัวเก็บโพสต์ถูกปลุกทุก 60 วินาที เก็บกลุ่มละราว 12 นาที และตอนนี้มี 189 กลุ่ม
 # ค้างคิว = ยึด Chrome ต่อเนื่องราว 37 ชั่วโมง **ตัวตามยอดจึงไม่มีโอกาสได้ใช้เลย**
@@ -6574,6 +6577,731 @@ def posts_collect_work_left() -> int:
 # ให้ตัวตามยอดปักธงขอคิวไว้ แล้วตัวเก็บโพสต์ไม่ปลุกรอบใหม่จนกว่าธงจะลง
 # — รอบที่กำลังทำอยู่เดินต่อจนจบตามปกติ ไม่ตัดกลางคัน
 _chrome_wanted = threading.Event()
+_engagement_run_lock = threading.Lock()
+_engagement_manual_requested = threading.Event()
+_engagement_manual_lock = threading.Lock()
+_mass_report_worker_guard = threading.Lock()
+_mass_report_worker_thread: threading.Thread | None = None
+_engagement_manual_state: dict = {
+    "status": "idle", "active": False, "scope": "", "label": "",
+    "total": 0, "completed": 0, "remaining": 0,
+}
+_fb_reply_run_lock = threading.Lock()
+_fb_reply_activity_lock = threading.Lock()
+_fb_reply_activity: dict = {
+    "active": False, "account": "", "author": "", "job_id": "",
+    "group_name": "", "post_url": "", "comment_key": "",
+    "action": "", "started_at": "", "updated_at": "",
+}
+
+# ลำดับงาน Facebook ที่เจ้าของกำหนด 19 ก.ย. 2569 ใช้เฉพาะงานบนมือถือ:
+#   1) โพสต์และขั้นบังคับของใบงานให้จบ  2) ค่อยตอบคอมเมนต์บนมือถือ
+# Bot8 เก็บคอมเมนต์ผ่าน Chrome บนคอม เป็นคนละเครื่องและต้องเดินต่อได้ตามปกติ.
+FB_COMMENT_RESUME_MIN_SECONDS = 10 * 60
+FB_COMMENT_RESUME_MAX_SECONDS = 15 * 60
+FB_POST_REQUEST_GRACE_SECONDS = 180
+_fb_priority_lock = threading.Lock()
+_fb_post_requested_at = 0.0
+_fb_post_requested_job = ""
+_fb_post_was_active = False
+_fb_comments_resume_at = 0.0
+_fb_priority_by_account: dict[str, dict] = {}
+_fb_reply_active_account = ""
+
+
+def _set_fb_reply_activity(**changes) -> dict:
+    """สถานะสดของบอทตอบมือถือหนึ่งรายการ; ใช้ทั้งหน้าเว็บและด่านรีสตาร์ต."""
+    with _fb_reply_activity_lock:
+        _fb_reply_activity.update(changes)
+        _fb_reply_activity["updated_at"] = datetime.now().isoformat(
+            timespec="seconds")
+        return dict(_fb_reply_activity)
+
+
+def _fb_reply_activity_status(account: str = "") -> dict:
+    """คืนงานที่กำลังตอบเฉพาะบัญชีที่หน้าเว็บกำลังดูอยู่."""
+    with _fb_reply_activity_lock:
+        state = dict(_fb_reply_activity)
+    profile = str(account or "").strip()
+    if profile and state.get("account") and state["account"] != profile:
+        return {"active": False, "account": profile}
+    return state
+
+
+def _fb_post_work_active(account: str = "") -> bool:
+    """มีใบงานโพสต์ที่กำลังรัน/รอเครื่อง/รอตามเก็บขั้นบังคับอยู่หรือไม่."""
+    import devices
+    serial = devices.device_for_account(account) if account else ""
+    running = fb_runner.running()
+    if (serial and serial in running) or (not serial and running):
+        return True
+    try:
+        with _waitlist_lock:
+            if any(item.get("kind") in {"post", "followup"}
+                   and (not serial or item.get("serial") == serial)
+                   for item in _phone_waitlist):
+                return True
+    except NameError:  # ช่วง import ก่อนตัวคิวถูกสร้าง ยังไม่มีงานได้อยู่แล้ว
+        pass
+    try:
+        for profile in ([account] if account else _bound_post_accounts()):
+            with fb_auto_post.use_account(profile):
+                for job in fb_jobs.listing():
+                    # ตัวรันจริง/คิวจริงถูกตรวจด้านบนแล้ว ตรงนี้ใช้จับใบตามเก็บ
+                    # ที่ยังมีขั้นบังคับเหลือเท่านั้น ห้ามเชื่อป้าย `finishing`
+                    # อย่างเดียว: มีใบรุ่นเก่าค้างป้ายนี้ทั้งที่ pending=0 ถ้านับ
+                    # จะพักคอมเมนต์ตลอดกาลทั้งที่ไม่มีงานโพสต์ทำอยู่จริง.
+                    if (_fb_effective_status(job) == fb_auto_post.STATUS_FINISHING
+                            and _fb_pending_followup_groups(job)):
+                        return True
+    except Exception as error:                                # noqa: BLE001
+        # อ่านสถานะไม่ได้ต้องระวังไว้ก่อน แต่ไม่ปล่อย exception ฆ่าตัวเฝ้า
+        append_log("publish", f"อ่านลำดับงานโพสต์/คอมเมนต์ไม่ได้: {error}")
+        return True
+    return False
+
+
+def _fb_request_post_priority(job_id: str, now: float | None = None,
+                              account: str = "") -> None:
+    """ปักธงก่อนเริ่ม/เข้าคิวโพสต์ เพื่อกันตัวตอบคอมเมนต์มือถือหยิบใบใหม่."""
+    global _fb_post_requested_at, _fb_post_requested_job
+    if account:
+        with _fb_priority_lock:
+            state = _fb_priority_by_account.setdefault(account, {})
+            state.update(requested_at=time.time() if now is None else float(now),
+                         job_id=str(job_id or ""))
+        return
+    with _fb_priority_lock:
+        _fb_post_requested_at = time.time() if now is None else float(now)
+        _fb_post_requested_job = str(job_id or "")
+
+
+def _fb_cancel_post_request_if_idle(job_id: str, account: str = "") -> None:
+    """คำสั่งโพสต์ไม่ผ่านด่านและไม่ได้เข้าคิวจริง — ถอนธงโดยไม่สร้าง cooldown."""
+    global _fb_post_requested_at, _fb_post_requested_job
+    if _fb_post_work_active(account):
+        return
+    if account:
+        with _fb_priority_lock:
+            state = _fb_priority_by_account.setdefault(account, {})
+            if not job_id or state.get("job_id") == str(job_id):
+                state.update(requested_at=0.0, job_id="")
+        return
+    with _fb_priority_lock:
+        if not job_id or _fb_post_requested_job == str(job_id):
+            _fb_post_requested_at = 0.0
+            _fb_post_requested_job = ""
+
+
+def _fb_comment_priority_status(now: float | None = None,
+                                active: bool | None = None,
+                                delay_seconds: int | None = None,
+                                account: str = "") -> dict:
+    """บอกว่าคิวตอบมือถือเริ่มได้ไหม และตั้งพัก 10–15 นาทีหลังโพสต์จบ."""
+    global _fb_post_requested_at, _fb_post_requested_job
+    global _fb_post_was_active, _fb_comments_resume_at
+    current = time.time() if now is None else float(now)
+    if account:
+        try:
+            post_active = _fb_post_work_active(account) if active is None else bool(active)
+        except Exception as error:
+            return {"account": account, "blocked": True, "reason": "device",
+                    "wait_seconds": 0, "note": str(error)}
+        with _fb_priority_lock:
+            state = _fb_priority_by_account.setdefault(account, {})
+            fresh = bool(state.get("requested_at") and
+                         current - state["requested_at"] < FB_POST_REQUEST_GRACE_SECONDS)
+            if post_active or (fresh and not state.get("was_active")):
+                state["was_active"] = state.get("was_active", False) or post_active
+                return {"account": account, "blocked": True, "reason": "post",
+                        "wait_seconds": 0, "job_id": state.get("job_id", ""),
+                        "note": f"พักคิวตอบของ {account} — รอใบงานโพสต์ของบัญชีนี้จบ"}
+            if state.get("was_active"):
+                delay = int(delay_seconds) if delay_seconds is not None else secrets.randbelow(
+                    FB_COMMENT_RESUME_MAX_SECONDS - FB_COMMENT_RESUME_MIN_SECONDS + 1
+                ) + FB_COMMENT_RESUME_MIN_SECONDS
+                state["resume_at"] = current + delay
+                append_log("publish", f"{account}: งานโพสต์จบ — พัก {delay} วินาทีก่อนตอบคอมเมนต์")
+            state.update(was_active=False, requested_at=0.0, job_id="")
+            wait = max(0, int(state.get("resume_at", 0) - current + 0.999))
+            return {"account": account, "blocked": bool(wait),
+                    "reason": "cooldown" if wait else "", "wait_seconds": wait,
+                    "resume_at": datetime.fromtimestamp(state["resume_at"]).isoformat(
+                        timespec="seconds") if wait else "",
+                    "note": f"{account}: เว้นระยะหลังงานโพสต์" if wait else ""}
+    post_active = _fb_post_work_active() if active is None else bool(active)
+    with _fb_priority_lock:
+        request_fresh = bool(
+            _fb_post_requested_at
+            and current - _fb_post_requested_at < FB_POST_REQUEST_GRACE_SECONDS)
+        # เคยเห็นงานโพสต์ active แล้วและตอนนี้หายไป = งานจบจริง ให้เริ่ม cooldown
+        # ทันที ไม่ต้องรอ grace ของธง "กำลังเริ่ม" หมดก่อน.
+        if post_active or (request_fresh and not _fb_post_was_active):
+            _fb_post_was_active = _fb_post_was_active or post_active
+            return {
+                "blocked": True, "reason": "post", "wait_seconds": 0,
+                "job_id": _fb_post_requested_job,
+                "note": "พักคิวตอบคอมเมนต์บนมือถือ — ให้งานโพสต์จบใบงานก่อน",
+            }
+        if _fb_post_was_active:
+            delay = (int(delay_seconds) if delay_seconds is not None else
+                     FB_COMMENT_RESUME_MIN_SECONDS + secrets.randbelow(
+                         FB_COMMENT_RESUME_MAX_SECONDS
+                         - FB_COMMENT_RESUME_MIN_SECONDS + 1))
+            _fb_comments_resume_at = max(_fb_comments_resume_at, current + delay)
+            _fb_post_was_active = False
+            _fb_post_requested_at = 0.0
+            _fb_post_requested_job = ""
+            append_log(
+                "publish",
+                f"งานโพสต์จบแล้ว — พัก {delay // 60} นาที ก่อนกลับไปทำคอมเมนต์",
+            )
+        elif _fb_post_requested_at:
+            # ขอ priority แล้วเริ่มไม่ผ่านภายใน grace: ไม่ถือว่าเคยโพสต์
+            _fb_post_requested_at = 0.0
+            _fb_post_requested_job = ""
+        wait = max(0, int(_fb_comments_resume_at - current + 0.999))
+        if wait:
+            return {
+                "blocked": True, "reason": "cooldown", "wait_seconds": wait,
+                "resume_at": datetime.fromtimestamp(
+                    _fb_comments_resume_at).isoformat(timespec="seconds"),
+                "note": "งานโพสต์จบแล้ว — กำลังเว้นระยะก่อนตอบคอมเมนต์บนมือถือ",
+            }
+        _fb_comments_resume_at = 0.0
+        return {"blocked": False, "reason": "", "wait_seconds": 0, "note": ""}
+
+
+def _clear_fb_post_reply_cooldown(account: str = "") -> None:
+    """Skip only the post-finished cooldown selected by the owner.
+
+    The account-scoped priority state replaced the legacy global timer.  Start
+    Now must clear the same state that ``_fb_comment_priority_status`` reads;
+    clearing only the persisted between-reply gap leaves the UI counting down
+    and the worker blocked.  Active/requested post flags are intentionally not
+    touched, so a concurrent post still wins the phone.
+    """
+    global _fb_comments_resume_at
+    profile = str(account or "").strip()
+    with _fb_priority_lock:
+        if profile:
+            state = _fb_priority_by_account.setdefault(profile, {})
+            state["resume_at"] = 0.0
+        else:
+            _fb_comments_resume_at = 0.0
+
+
+def _wait_comment_work_yield(timeout: float = 120.0, account: str = "") -> bool:
+    """รอเฉพาะคำตอบมือถือใบปัจจุบันจบ; Bot8 บนคอมไม่ใช้ทรัพยากรนี้."""
+    edge = time.monotonic() + max(0.0, timeout)
+    while _fb_reply_run_lock.locked() and (not account or _fb_reply_active_account == account):
+        if time.monotonic() >= edge:
+            return False
+        time.sleep(0.25)
+    return True
+
+
+def _engagement_manual_status() -> dict:
+    """สำเนาสถานะคิว Manual; อ่านได้จาก polling โดยไม่แตะ Chrome."""
+    with _engagement_manual_lock:
+        return dict(_engagement_manual_state)
+
+
+def _set_engagement_manual_state(**changes) -> dict:
+    with _engagement_manual_lock:
+        _engagement_manual_state.update(changes)
+        _engagement_manual_state["updated_at"] = datetime.now().isoformat(
+            timespec="seconds")
+        return dict(_engagement_manual_state)
+
+
+def _run_engagement_locked(on_date: str = "", force: bool = False,
+                           posts_override: list[dict] | None = None,
+                           max_comment_age_hours: float | None = None,
+                           stop=None, progress=None) -> dict:
+    """รัน Bot8 เมื่อผู้เรียกถือ ``_engagement_run_lock`` อยู่แล้ว."""
+    import fb_engagement                                # noqa: PLC0415
+
+    _chrome_wanted.set()
+    try:
+        if not _wait_chrome_free(fb_engagement.COLLECTOR_PROFILE):
+            return {"busy": True, "posts": 0,
+                    "note": "Chrome Bot8 ไม่ว่างภายในเวลาที่รอ"}
+        done = fb_engagement.check_once(
+            on_date=on_date, force=force, posts_override=posts_override,
+            max_comment_age_hours=max_comment_age_hours,
+            stop=stop, progress=progress)
+        return done
+    finally:
+        # ธง Chrome ต้องคืนเสมอ ไม่งั้นตัวเก็บโพสต์อื่นจะหยุดถาวร
+        _chrome_wanted.clear()
+
+
+def _run_engagement_once(on_date: str = "", force: bool = False,
+                         posts_override: list[dict] | None = None,
+                         max_comment_age_hours: float | None = None) -> dict:
+    """จอง Bot8 แล้วเก็บหนึ่งรอบ โดยกัน keeper กับคำสั่งมือชนกัน."""
+    import bot8_mass_report
+    # หลัง app.py รีสตาร์ต งานหาโพสต์แมสซึ่งเป็นโปรเซสแยกอาจยังรันอยู่;
+    # ล็อกในหน่วยความจำตัวใหม่ไม่รู้เรื่อง ต้องดูคิวถาวรก่อนเปิด Chrome.
+    if bot8_mass_report.job_status().get("status") == "running":
+        return {"busy": True, "posts": 0, "note": "Bot8 กำลังหาโพสต์แมส"}
+    if not _engagement_run_lock.acquire(blocking=False):
+        return {"busy": True, "posts": 0,
+                "note": "Bot8 กำลังเก็บคอมเมนต์อีกรอบอยู่"}
+    automatic = not force and not on_date and posts_override is None
+    try:
+        if bot8_mass_report.job_status().get("status") == "running":
+            return {"busy": True, "posts": 0, "note": "Bot8 กำลังหาโพสต์แมส"}
+        return _run_engagement_locked(
+            on_date=on_date, force=force, posts_override=posts_override,
+            max_comment_age_hours=max_comment_age_hours,
+            # Manual ใช้ Chrome ตัวเดียวกัน จึงขอแทรกได้หลังจบโพสต์ปัจจุบัน
+            # โดยรอบอัตโนมัติยังเก็บ checkpoint ไว้กลับมาทำต่อ.
+            stop=(_engagement_manual_requested.is_set if automatic else None))
+    finally:
+        _engagement_run_lock.release()
+
+
+def _engagement_manual_worker(posts: list[dict], scope: str, label: str) -> None:
+    """รอคิว Bot8 แล้วทำคำสั่ง Manual ใน thread เบื้องหลัง."""
+    def progress(update: dict) -> None:
+        total = int(update.get("total") or len(posts))
+        completed = int(update.get("completed") or 0)
+        _set_engagement_manual_state(
+            status="running", active=True, total=total, completed=completed,
+            remaining=max(0, total - completed),
+            current_phase=str(update.get("phase") or ""),
+            current_action=str(update.get("action") or "กำลังเก็บคอมเมนต์"),
+            current_group=str(update.get("group_name") or ""),
+            current_account=str(update.get("account") or ""),
+            current_post_url=str(update.get("post_url") or ""),
+            current_caption=str(update.get("caption") or ""),
+        )
+
+    _engagement_run_lock.acquire()
+    try:
+        import bot8_mass_report
+        while bot8_mass_report.job_status().get("status") == "running":
+            _set_engagement_manual_state(
+                current_action="รอ Bot8 หาโพสต์แมสให้จบ แล้วจะเก็บคอมเมนต์ต่อ")
+            time.sleep(5)
+        # รอบอัตโนมัติคืน lock ให้แล้ว จึงถอนธงขอแทรกได้ ณ จุดนี้.
+        _engagement_manual_requested.clear()
+        started = datetime.now().isoformat(timespec="seconds")
+        _set_engagement_manual_state(
+            status="running", active=True, started_at=started,
+            current_action="กำลังเตรียม Chrome Bot8")
+        done = _run_engagement_locked(
+            force=True, posts_override=posts, progress=progress)
+        failed = bool(done.get("interrupted") or done.get("busy")
+                      or done.get("paused_for_post") or done.get("blocked"))
+        completed = int(_engagement_manual_status().get("completed") or 0)
+        _set_engagement_manual_state(
+            status="error" if failed else "complete", active=False,
+            completed=completed, remaining=max(0, len(posts) - completed),
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+            current_action=((done.get("note") or
+                             "เก็บยังไม่ครบ — รักษาข้อมูลเดิมไว้ กดสั่งใหม่ได้")
+                            if failed else "รอบ Manual เสร็จแล้ว"),
+            result={
+                "read": int(done.get("ok") or 0),
+                "blocked": int(done.get("blocked") or 0),
+                "new_comments": int(done.get("new_comments") or 0),
+            },
+        )
+        append_log(
+            "publish", f"Bot8 จบรอบ Manual {label} — อ่านได้ "
+            f"{done.get('ok', 0)}/{len(posts)} · คอมเมนต์ใหม่ "
+            f"{done.get('new_comments', 0)}")
+    except Exception as error:                                # noqa: BLE001
+        _set_engagement_manual_state(
+            status="error", active=False,
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+            current_action=f"รอบ Manual ล้มเหลว: {type(error).__name__}",
+            error=str(error)[:240],
+        )
+        append_log("publish", f"Bot8 รอบ Manual ล้มเหลว: {error}")
+    finally:
+        _engagement_manual_requested.clear()
+        _engagement_run_lock.release()
+
+
+def _start_engagement_manual(posts: list[dict], scope: str, label: str) -> dict:
+    """เข้าคิว Manual หนึ่งรอบ; ไม่ยอมให้ปุ่มสร้างคิวซ้ำทับงานเดิม."""
+    with _engagement_manual_lock:
+        if _engagement_manual_state.get("status") in {"queued", "running"}:
+            return {"busy": True, **dict(_engagement_manual_state)}
+        now = datetime.now().isoformat(timespec="seconds")
+        _engagement_manual_state.clear()
+        _engagement_manual_state.update({
+            "status": "queued", "active": True, "scope": scope,
+            "label": label, "total": len(posts), "completed": 0,
+            "remaining": len(posts), "queued_at": now, "updated_at": now,
+            "current_action": "รอ Bot8 จบโพสต์ปัจจุบันแล้วจะเริ่ม Manual",
+        })
+    _engagement_manual_requested.set()
+    threading.Thread(
+        target=_engagement_manual_worker, args=(list(posts), scope, label),
+        daemon=True, name=f"fb-engage-manual-{scope}",
+    ).start()
+    return _engagement_manual_status()
+
+
+def _engagement_active_posts(account: str) -> list[dict]:
+    """โพสต์ที่ Bot8 ยังตามเก็บของบัญชีเดียว ใช้ร่วม Manual และตารางเวลา."""
+    import fb_engagement                                      # noqa: PLC0415
+
+    wanted = str(account or "").strip().casefold()
+    if not wanted:
+        return []
+    conn = fb_engagement.open_db()
+    try:
+        return [
+            post for post in fb_engagement.our_posts()
+            if str(post.get("account") or "").strip().casefold() == wanted
+            and fb_engagement.still_worth_watching(
+                conn, str(post.get("post_url") or ""))[0]
+        ]
+    finally:
+        conn.close()
+
+
+_engagement_schedule_sleep = time.sleep
+
+
+def _engagement_schedule_keeper() -> None:
+    """ปลุก Bot8 ตามเวลาที่เจ้าของตั้ง; งานชนกันต้องรอและห้ามสร้างคิวซ้ำ."""
+    import fb_engagement_schedule                            # noqa: PLC0415
+
+    _engagement_schedule_sleep(5)
+    while True:
+        try:
+            for item in fb_engagement_schedule.due():
+                account = str(item.get("account") or "").strip()
+                posts = _engagement_active_posts(account)
+                if not posts:
+                    fb_engagement_schedule.mark_started(account)
+                    append_log(
+                        "publish",
+                        f"ตาราง Bot8 ของ {account} ถึงเวลาแล้ว แต่ไม่มีโพสต์ที่ยังตามเก็บ",
+                    )
+                    continue
+                manual = _start_engagement_manual(
+                    posts, "scheduled",
+                    f"ตารางเวลา {item.get('time')} · {account} ({len(posts)} โพสต์)",
+                )
+                if manual.get("busy"):
+                    # ยังไม่กินรอบเวลา — ตื่นมาลองใหม่หลังงาน Manual เดิมจบ.
+                    continue
+                fb_engagement_schedule.mark_started(account)
+                append_log(
+                    "publish",
+                    f"ตาราง Bot8 เริ่มเก็บ {len(posts)} โพสต์ของ {account} · "
+                    + ("ทุกวัน" if item.get("mode") == "daily" else "ครั้งเดียว"),
+                )
+        except Exception as error:                            # noqa: BLE001
+            append_log("publish", f"ตัวปลุกตาราง Bot8 สะดุด: {error}")
+        _engagement_schedule_sleep(15)
+
+
+def _mass_report_worker(job_id: str) -> None:
+    """Give Bot8 to one external report process while holding the comment lock."""
+    import bot8_mass_report
+
+    if not _mass_report_worker_guard.acquire(blocking=False):
+        return
+    try:
+        _engagement_run_lock.acquire()
+        try:
+            job = bot8_mass_report.job_status()
+            if job.get("id") != job_id or job.get("status") != "queued":
+                return
+            manual = _engagement_manual_status()
+            if manual.get("status") in {"queued", "running"}:
+                bot8_mass_report.update_job(
+                    job_id, current_action="รอ Bot8 เก็บคอมเมนต์ให้จบ")
+                return
+            from bot_profiles import ProfileFarm
+            farm = ProfileFarm(DATA_DIR)
+            bot = next((row for row in farm.list_profiles(fresh=True)["profiles"]
+                        if row["name"].casefold() == "bot8"), None)
+            if bot is None:
+                bot8_mass_report.update_job(job_id, status="error",
+                                            error="ไม่พบโปรไฟล์ Bot8")
+                return
+            if bot.get("running"):
+                bot8_mass_report.update_job(
+                    job_id, current_action="รอ Chrome Bot8 ว่างก่อนเริ่มหาโพสต์แมส")
+                return
+            bot8_mass_report.update_job(
+                job_id, status="running", started_at=datetime.now().isoformat(
+                    timespec="seconds"), current_action="กำลังเปิด Chrome Bot8")
+            log_path = LOG_DIR / "bot8_mass_report.log"
+            with log_path.open("ab") as output:
+                process = subprocess.Popen(
+                    [sys.executable, str(BASE_DIR / "tools" / "bot8_mass_report.py"),
+                     "--job-id", job_id, "--scrolls", "60"],
+                    cwd=str(BASE_DIR), stdout=output, stderr=subprocess.STDOUT,
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                bot8_mass_report.update_job(job_id, pid=process.pid)
+                append_log("publish", f"Bot8 เริ่มหาโพสต์แมส · PID {process.pid}")
+                while True:
+                    try:
+                        code = process.wait(timeout=30)
+                        break
+                    except subprocess.TimeoutExpired:
+                        # Keep the cross-restart guard fresh even during a slow page load.
+                        bot8_mass_report.update_job(job_id)
+            current = bot8_mass_report.job_status()
+            if current.get("id") == job_id and current.get("status") == "running":
+                bot8_mass_report.update_job(
+                    job_id, status="error", finished_at=datetime.now().isoformat(
+                        timespec="seconds"),
+                    error=f"ตัวสแกนหยุดโดยไม่สรุปผล (รหัส {code})",
+                    current_action="งานหาโพสต์แมสหยุด — ดู log แล้วสั่งใหม่ได้")
+            append_log("publish", f"Bot8 จบงานหาโพสต์แมส · รหัส {code}")
+        finally:
+            _engagement_run_lock.release()
+    except Exception as error:                              # noqa: BLE001
+        bot8_mass_report.update_job(
+            job_id, status="error", error=f"{type(error).__name__}: {error}",
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+            current_action="เริ่มงานหาโพสต์แมสไม่สำเร็จ")
+        append_log("publish", f"Bot8 หาโพสต์แมสเริ่มไม่สำเร็จ: {error}")
+    finally:
+        _mass_report_worker_guard.release()
+
+
+def _mass_report_keeper() -> None:
+    """Consume a due clock once and leave the job queued behind comment work."""
+    import bot8_mass_report
+
+    global _mass_report_worker_thread
+    time.sleep(5)
+    while True:
+        try:
+            bot8_mass_report.expire_stale()
+            if bot8_mass_report.schedule_status().get("due"):
+                accepted, job = bot8_mass_report.enqueue("scheduled")
+                if accepted:
+                    append_log("publish", f"Bot8 หาโพสต์แมสตามเวลาเข้าคิว {job['id']}")
+            job = bot8_mass_report.job_status()
+            if job.get("status") == "queued" and not (
+                    _mass_report_worker_thread and _mass_report_worker_thread.is_alive()):
+                manual = _engagement_manual_status()
+                if manual.get("status") in {"queued", "running"} or _engagement_run_lock.locked():
+                    if job.get("current_action") != "รอ Bot8 เก็บคอมเมนต์ให้จบ":
+                        bot8_mass_report.update_job(
+                            job["id"], current_action="รอ Bot8 เก็บคอมเมนต์ให้จบ")
+                else:
+                    _mass_report_worker_thread = threading.Thread(
+                        target=_mass_report_worker, args=(job["id"],), daemon=True,
+                        name="bot8-mass-report")
+                    _mass_report_worker_thread.start()
+        except Exception as error:                            # noqa: BLE001
+            append_log("publish", f"ตัวปลุกหาโพสต์แมสสะดุด: {error}")
+        time.sleep(15)
+
+
+def _fb_reply_schedule_status(account: str) -> dict:
+    import fb_engagement
+    import fb_engage
+    status = fb_engagement.reply_schedule_status(account)
+    try:
+        quota = fb_engage.reply_quota_status(account)
+    except (fb_engage.devices.DeviceError, ValueError):
+        return status
+    if quota.get("waiting") and quota["wait_seconds"] >= status["wait_seconds"]:
+        next_at = time.time() + quota["wait_seconds"]
+        return {**status, **quota, "account": account, "next_at": next_at,
+                "next_at_text": datetime.fromtimestamp(next_at).isoformat(timespec="seconds")}
+    return status
+
+
+def _run_one_fb_reply(send: bool = False, account: str = "",
+                      comment_key: str = "") -> dict:
+    """ตรวจ/ส่งหนึ่งคิว โดยแยกบัญชี ช่วงพัก และเพดาน 50/24 ชม."""
+    import fb_engage                                      # noqa: PLC0415
+    import fb_engagement                                  # noqa: PLC0415
+    import phone_queue                                    # noqa: PLC0415
+
+    global _fb_reply_active_account
+    if not _fb_reply_run_lock.acquire(blocking=False):
+        return {"busy": True, "note": "ตัวตอบคอมเมนต์กำลังทำคิวก่อนหน้าอยู่"}
+    busy_key = ""
+    try:
+        queue = fb_engagement.queued_replies(limit=10_000)
+        if account:
+            queue = [row for row in queue if row.get("account") == account]
+        if comment_key:
+            queue = [row for row in queue if row.get("comment_key") == comment_key]
+        if not queue:
+            return {"ok": True, "empty": True, "sent": False,
+                    "note": "ไม่มีคิวตอบกลับที่รอมือถือ"}
+        priorities = {profile: _fb_comment_priority_status(account=profile)
+                      for profile in {str(row.get("account") or "") for row in queue}}
+        eligible = [row for row in queue if not priorities[row["account"]]["blocked"]]
+        if not eligible:
+            priority = next(iter(priorities.values()))
+            return {"ok": True, "waiting": True, "sent": False,
+                    "priority": priority["reason"], "note": priority["note"],
+                    "wait_seconds": priority.get("wait_seconds", 0),
+                    "by_account": priorities}
+        if send:
+            accounts = {str(row.get("account") or "").strip() for row in eligible}
+            schedule_by_account = {
+                account: _fb_reply_schedule_status(account)
+                for account in accounts
+            }
+            daily_by_account = {
+                account: fb_engagement.reply_daily_status(account)
+                for account in accounts
+            }
+            eligible = [
+                row for row in eligible
+                if row.get("reply_submitted_at") or (
+                    not daily_by_account[str(row.get("account") or "").strip()].get("waiting")
+                    and (row.get("queue_kind") == "followup"
+                         or not schedule_by_account[str(row.get("account") or "").strip()].get(
+                             "waiting")))
+            ]
+            if not eligible:
+                # ต้องผ่านทั้งสองด่าน จึงใช้เวลารอที่มากกว่าของแต่ละโปรไฟล์
+                # แล้วเลือกโปรไฟล์ที่พร้อมก่อนสุดจากคิวทั้งหมด
+                account_waits = {
+                    account: max(
+                        int(schedule_by_account[account].get("wait_seconds") or 0),
+                        int(daily_by_account[account].get("wait_seconds") or 0),
+                    ) for account in accounts
+                }
+                next_account = min(account_waits, key=account_waits.get)
+                daily = daily_by_account[next_account]
+                schedule = schedule_by_account[next_account]
+                quota_wait = bool(daily.get("waiting"))
+                return {"ok": True, "waiting": True, "sent": False,
+                        "account": next_account,
+                        "wait_seconds": account_waits[next_account],
+                        "next_at": (daily.get("reset_at_text", "") if quota_wait
+                                    else schedule.get("next_at_text", "")),
+                        "reply_daily": daily,
+                        "note": ("โปรไฟล์ที่มีคิวตอบครบ 50 รายการแล้ว "
+                                 "คิวถูกเก็บไว้รอรอบ 24 ชั่วโมงรีเซ็ต"
+                                 if quota_wait else
+                                 "ทุกโปรไฟล์ที่มีคิวยังอยู่ในช่วงสุ่มพัก 10–15 นาที")}
+        item = fb_engagement.pick_random_reply(eligible)
+        _fb_reply_active_account = item["account"]
+        # Recheck after selecting: a post request may have arrived during quota reads.
+        priority = _fb_comment_priority_status(account=item["account"])
+        if priority["blocked"]:
+            return {"ok": True, "waiting": True, "sent": False,
+                    "priority": priority["reason"], "note": priority["note"]}
+        busy_key = f"fb-reply:{item['comment_key']}"
+        started_at = datetime.now().isoformat(timespec="seconds")
+        _set_fb_reply_activity(
+            active=True, account=item["account"], author=item["author"],
+            job_id=str(item.get("job_id") or ""),
+            group_name=str(item.get("group_name") or ""),
+            post_url=str(item.get("post_url") or ""),
+            comment_key=item["comment_key"], started_at=started_at,
+            action=("กำลังตรวจผลคำตอบเดิม" if item.get("reply_submitted_at")
+                    else "กำลังเตรียมมือถือเพื่อพิมพ์คำตอบ"),
+        )
+        # งานนี้อยู่ในโปรเซส 8866 โดยตรง ปิดเซิร์ฟเวอร์กลางทาง = พิมพ์ค้าง
+        # ก่อนกดส่ง. ต้องให้ /api/busy มองเห็น เพื่อให้ restart_studio หยุดรอ.
+        _busy_mark(
+            busy_key,
+            what=(f"ตอบคอมเมนต์ {item['author']}"
+                  + (f" · ใบงาน {item.get('job_id')}" if item.get("job_id") else "")),
+            account=item["account"], serial="", step=1, steps=1,
+        )
+
+        def reply_log(line) -> None:
+            action = str(line or "").strip()
+            if action:
+                _set_fb_reply_activity(action=action[:240])
+            append_log("publish", f"ตอบคอมเมนต์: {line}")
+
+        try:
+            result = fb_engage.run_queued_reply(
+                item, send=bool(send),
+                log=reply_log)
+        except (phone_queue.QueueBusy, studio_shared.PhoneBusy) as error:
+            # No phone lock was acquired: this is scheduling contention, not
+            # failed delivery. Keep the draft and retry without consuming quota.
+            result = {"ok": True, "sent": False, "waiting": True,
+                      "reason": "phone_busy", "wait_seconds": 30,
+                      "note": f"รอเครื่องว่างแล้วทำคิวเดิมต่อ: {error}"}
+        except Exception as error:                        # noqa: BLE001
+            result = {"ok": False, "sent": False,
+                      "error": f"{type(error).__name__}: {error}"}
+        finally:
+            _busy_clear(busy_key)
+            busy_key = ""
+            _set_fb_reply_activity(active=False, action="")
+        if send:
+            if result.get("waiting"):
+                return {**result, "account": item["account"],
+                        "comment_key": item["comment_key"]}
+            marked = fb_engagement.mark_reply_result(
+                item["comment_key"], bool(result.get("sent")),
+                str(result.get("error") or ""))
+            if marked.get("reply_daily"):
+                result = {**result, "reply_daily": marked["reply_daily"]}
+            # A verification-only success confirms a tap that happened earlier;
+            # it does not send a new comment now and must not create a fresh
+            # 10–15 minute delay between read-only checks.
+            new_submission = False
+            if not item.get("reply_submitted_at") and not result.get("verification_only"):
+                states = fb_engagement.reply_states([item["comment_key"]])
+                new_submission = any(row.get("reply_submitted_at") for row in states)
+            if (result.get("sent") or new_submission) and not result.get("verification_only"):
+                cooldown = fb_engagement.schedule_next_reply(
+                    item["comment_key"], item["account"])
+                result = {**result,
+                          "wait_seconds": cooldown["wait_seconds"],
+                          "next_at": cooldown["next_at_text"]}
+        return {**result, "comment_key": item["comment_key"],
+                "account": item["account"], "author": item["author"],
+                "post_url": item["post_url"]}
+    finally:
+        if busy_key:
+            _busy_clear(busy_key)
+            _set_fb_reply_activity(active=False, action="")
+        _fb_reply_active_account = ""
+        _fb_reply_run_lock.release()
+
+
+def _fb_reply_queue_keeper() -> None:
+    """สุ่มหยิบทีละคิว; เวลาพักแยกโปรไฟล์และรายการล้มรอผู้ใช้สั่งใหม่"""
+    time.sleep(15)
+    try:
+        import fb_engagement
+        recovered = fb_engagement.recover_interrupted_reply_checks()
+        if recovered:
+            append_log('publish', f'กู้รายการตรวจผลหลังเซิร์ฟเวอร์เปิด {recovered} รายการ — ตรวจของเดิมเท่านั้น')
+    except Exception as error:
+        append_log('publish', f'กู้คิวตรวจผลไม่ได้: {error}')
+    while True:
+        try:
+            result = _run_one_fb_reply(send=True)
+            if result.get("sent"):
+                append_log("publish", f"ตอบ {result.get('author')} สำเร็จ — "
+                                      f"{result.get('account')} · โปรไฟล์นี้พัก "
+                                      f"{result.get('wait_seconds')} วินาที")
+                continue
+            elif result.get("waiting"):
+                # ตื่นตรวจเป็นช่วงสั้น ๆ เพื่อให้ปิดเซิร์ฟเวอร์ได้ทัน ไม่หลับยาว
+                time.sleep(min(30, max(5, int(result.get("wait_seconds") or 5))))
+                continue
+            if not result.get("empty") and not result.get("busy"):
+                append_log("publish", f"คิวตอบคอมเมนต์พักไว้ — "
+                                      f"{result.get('error') or result.get('note')}")
+        except Exception as error:                          # noqa: BLE001
+            append_log("publish", f"ตัวตอบคอมเมนต์สะดุด: {error}")
+        time.sleep(20)
 
 
 def ensure_posts_collect() -> list[str]:
@@ -6586,8 +7314,7 @@ def ensure_posts_collect() -> list[str]:
     if POSTS_COLLECT_OFF.exists() or not POSTS_COLLECT_SCRIPT.is_file():
         return []
     # ตัวตามยอดจองคิวไว้ — ไม่ปลุกรอบใหม่ ให้มันได้ Chrome ก่อน
-    if _chrome_wanted.is_set():
-        return []
+    # Bot8 is reserved for comment collection; owner disabled group-data keeper.
     left = posts_collect_work_left()
     if left <= 0:
         return []
@@ -6634,6 +7361,7 @@ def _posts_collect_keeper() -> None:
     """เฝ้าให้มีตัวเก็บข้อมูลทำงานอยู่เสมอตราบใดที่ยังมีกลุ่มค้างในคิว"""
     told = False
     while True:
+        cycle_started = time.monotonic()
         try:
             why = bots_paused()
             if why:
@@ -6772,12 +7500,16 @@ def _engagement_message(done: dict) -> str:
 
     rows = done.get("rows") or []
     moved = [r for r in rows
-             if (r.get("d_reactions") or 0) > 0 or (r.get("d_comments") or 0) > 0]
+             if ((r.get("d_reactions") or 0) > 0
+                 or (r.get("d_comments") or 0) > 0
+                 or (r.get("d_shares") or 0) > 0)]
+    suggestions = [row for row in (done.get("suggestions") or [])
+                   if row.get("notify_suggestion")]
     try:
         todo = fb_engagement.unanswered()
     except Exception:                                   # noqa: BLE001
         todo = []
-    if not moved and not todo:
+    if not moved and not todo and not suggestions:
         return ""
 
     lines = [f"📊 <b>ตามยอดโพสต์</b> — {datetime.now():%H:%M}"]
@@ -6805,18 +7537,45 @@ def _engagement_message(done: dict) -> str:
                 bits.append(f"ไลก์ {row['reactions']} (+{row['d_reactions']})")
             if (row.get("d_comments") or 0) > 0:
                 bits.append(f"คอมเมนต์ {row['comments']} (+{row['d_comments']})")
+            if (row.get("d_shares") or 0) > 0:
+                bits.append(f"แชร์ {row['shares']} (+{row['d_shares']})")
             name = telegram_bot._escape(str(row.get("group", ""))[:26])
             lines.append(f"• {name} — {' · '.join(bits)}")
 
-    quiet = done.get("quiet") or 0
-    if quiet:
+    if suggestions:
         lines.append("")
-        lines.append(f"💤 เลิกตามแล้ว {quiet} ใบ (ยอดไม่ขยับครบ 1 วัน)")
+        lines.append(f"💤 <b>แนะนำให้พิจารณาเลิกเก็บ {len(suggestions)} โพสต์</b>")
+        lines.append("ระบบยังเก็บต่ออยู่จนกว่าจะกด เลิกเก็บ")
+        for index, row in enumerate(suggestions, 1):
+            name = telegram_bot._escape(str(row.get("group", ""))[:30])
+            reason = telegram_bot._escape(str(row.get("suggest_reason", ""))[:120])
+            lines.append(f"{index}. <b>{name}</b> — {reason}")
+            if row.get("url"):
+                lines.append(str(row["url"]))
     return chr(10).join(lines)
 
 
+def _engagement_keyboard(done: dict) -> dict | None:
+    """ปุ่มตัดสินข้อเสนอรายโพสต์; ใช้กุญแจสั้นไม่ใส่ URL ลง callback."""
+    rows = []
+    suggestions = [row for row in (done.get("suggestions") or [])
+                   if row.get("notify_suggestion")]
+    for index, row in enumerate(suggestions, 1):
+        key = str(row.get("watch_key") or "")
+        if not key:
+            continue
+        rows.append([
+            {"text": f"🛑 เลิกเก็บ {index}", "callback_data": f"fb:ew:stop:{key}"},
+            {"text": f"▶ เก็บต่อ {index}", "callback_data": f"fb:ew:keep:{key}"},
+        ])
+    return {"inline_keyboard": rows} if rows else None
+
+
+_engagement_keeper_sleep = time.sleep
+
+
 def _engagement_keeper() -> None:
-    """ตามยอดไลก์/คอมเมนต์ของโพสต์ที่ลงไปแล้ว — รอบละชั่วโมง
+    """ตามยอดไลก์/คอมเมนต์/แชร์ของทุกโพสต์ที่มีลิงก์ — ทุก 6 ชั่วโมง
 
     **เจ้าของสั่งไว้ 28 ส.ค. 2569** — *"เบื้องต้น set ไว้ ทุก 1 ชั่วโมงก่อน"*
     และเพิ่ม 29 ส.ค. — *"เก็บครบแล้วให้ส่งมาแจ้งใน telegram ด้วย และถ้ามีงาน
@@ -6824,7 +7583,7 @@ def _engagement_keeper() -> None:
 
     **รอเฉพาะตอนส่ง ไม่ใช่ตอนเก็บ** — เจ้าของทักเองว่า *"รอบเก็บให้เริ่มทำปกติ
     เพราะมันใช้คนละ source"* ซึ่งถูกต้อง: ตัวเก็บใช้ Chrome บนคอม (โปรไฟล์
-    Bot11) ส่วนงานโพสต์กดจอมือถือ ไม่แย่งกัน — เก็บได้เลยไม่ต้องรอ
+    Bot8) ส่วนงานโพสต์กดจอมือถือ ไม่แย่งกัน — เก็บได้เลยไม่ต้องรอ
     ที่ชนกันจริงคือ **ห้อง Telegram ห้องเดียวกัน** ข้อความแทรกกลางรายงาน
     งานโพสต์แล้วอ่านสับสน จึงถือผลไว้จนกว่างานจะเสร็จค่อยส่งตามไป
 
@@ -6835,54 +7594,103 @@ def _engagement_keeper() -> None:
     ทั้งที่ไม่เคยต่อให้รันเอง วัด 29 ส.ค. 20:40 น.: เก็บล่าสุด 28 ส.ค. 17:22
     = เงียบไป 26 ชั่วโมง ระหว่างนั้นโพสต์ไป 12 ใบโดยไม่มีใบไหนถูกตาม
     """
-    time.sleep(120)         # ให้เซิร์ฟเวอร์กับงานค้างตั้งตัวก่อน
     try:
         import fb_engagement                            # noqa: PLC0415
+        import bot8_mass_report                          # noqa: PLC0415
     except Exception as error:                          # noqa: BLE001
         append_log("publish", f"เปิดตัวตามยอด engagement ไม่ได้: {error}")
         return
+    # รอบปกติรอให้ระบบอื่นตั้งตัว 2 นาที แต่ถ้ามี checkpoint ค้างจากการ
+    # restart ต้องรีบกลับมาต่อ ไม่ควรปล่อยงานที่เหลือนอนรออีก 6 ชั่วโมง.
+    cycle = fb_engagement.collect_cycle_status()
+    startup_wait = 15 if cycle.get("active") else 120
+    if cycle.get("active"):
+        append_log(
+            "publish",
+            f"Bot8 พบ checkpoint หลังรีสตาร์ต — เหลือ "
+            f"{cycle.get('remaining', 0)}/{cycle.get('total', 0)} โพสต์ "
+            f"และจะเริ่มต่อใน {startup_wait} วินาที",
+        )
+    _engagement_keeper_sleep(startup_wait)
     told = False
     while True:
+        # ต้องจับเวลาใหม่ทุกต้นรอบ ไม่เช่นนั้นหลังทำงานเสร็จจะอ้างตัวแปรที่ยัง
+        # ไม่ได้สร้างและ thread ตัวตามยอดจะตายก่อนถึงรอบ 6 ชั่วโมงถัดไป.
+        cycle_started = time.monotonic()
         try:
             why = bots_paused()
             if why:
                 if not told:
                     append_log("publish", f"⏸ ตัวตามยอด/เก็บคอมเมนต์หยุดไว้ — {why[:80]}")
                     told = True
-                time.sleep(fb_engagement.CHECK_EVERY_SECONDS)
+                _engagement_keeper_sleep(fb_engagement.CHECK_EVERY_SECONDS)
                 continue
             told = False
             # ปักธงขอคิว Chrome ก่อน แล้วรอรอบเก็บโพสต์ที่ค้างอยู่ให้จบ
             # (ไม่ตัดกลางคัน — รอบหนึ่งใช้ราว 12 นาที)
-            _chrome_wanted.set()
-            try:
-                if not _wait_chrome_free(fb_engagement.COLLECTOR_PROFILE):
-                    append_log("publish",
-                               "ข้ามรอบตามยอด — Chrome ไม่ว่างภายในเวลาที่รอ "
-                               "ไว้รอบหน้า")
-                    done = {}
-                else:
-                    done = fb_engagement.check_once()
-            finally:
-                # **ต้องลดธงเสมอ** ค้างไว้เมื่อไรตัวเก็บโพสต์หยุดถาวร
-                # (บั๊กจริง 21:36 น. — `continue` ข้าม sleep ไปด้วย ตัวตามยอด
-                #  จึงวนปักธงรัวไม่หยุด ตัวเก็บโพสต์ไม่ถูกปลุกเลยสักครั้ง)
-                _chrome_wanted.clear()
+            done = _run_engagement_once()
+            if done.get("needs_login"):
+                append_log("publish", done.get("note") or "Bot8 ต้องล็อกอินใหม่ — หยุดลองอัตโนมัติ")
+                _engagement_keeper_sleep(3600)
+                continue
+            if done.get("incomplete"):
+                # checkpoint ถูกเขียนหลังจบทุกโพสต์แล้ว รอบนี้สะดุดหรือถูกพัก
+                # จึงกลับมาต่อรายการที่เหลือเร็ว ๆ โดยไม่เริ่ม 185 ใบใหม่.
+                append_log(
+                    "publish",
+                    f"Bot8 เก็บ checkpoint แล้ว — เหลือ "
+                    f"{done.get('remaining', 0)}/{done.get('cycle_total', 0)} โพสต์ "
+                    "จะพักก่อนกลับมาทำต่อ (อย่างน้อย 5 นาทีเมื่อระบบสะดุด)",
+                )
+                _engagement_keeper_sleep(max(60 if done.get("preempted") else 300,
+                                             done.get("retry_after", 0)))
+                continue
+            if done.get("busy"):
+                note = done.get("note", "Bot8 ไม่ว่าง")
+                cycle = fb_engagement.collect_cycle_status()
+                manual = _engagement_manual_status()
+                # งาน Manual ใช้ Chrome Bot8 ตัวเดียวกันและตั้งใจแทรกรอบปกติ:
+                # รอบปกติจบโพสต์ปัจจุบันแล้วบันทึก checkpoint ก่อนคืน lock.
+                # ถ้ามาชนตอน Manual ยังถือ lock ห้ามตกลงไปนอน 6 ชั่วโมง ไม่เช่นนั้น
+                # checkpoint ที่เหลือจะดูเหมือนค้างทั้งที่งานแทรกจบไปแล้ว.
+                if (cycle.get("active")
+                        or manual.get("status") in {"queued", "running"}
+                        or bot8_mass_report.job_status().get("status") == "running"):
+                    append_log(
+                        "publish",
+                        f"Bot8 รอคิวงานแทรก — {note}; checkpoint เหลือ "
+                        f"{cycle.get('remaining', 0)}/{cycle.get('total', 0)} โพสต์ "
+                        "จะกลับมาทำต่อใน 30 วินาที",
+                    )
+                    _engagement_keeper_sleep(120)
+                    continue
+                append_log("publish", f"ข้ามรอบตามยอด — {note} ไว้รอบหน้า")
             if done.get("posts"):
                 append_log("publish",
                            f"ตามยอดโพสต์ — อ่านได้ {done.get('ok', 0)} ใบ · "
                            f"เข้าไม่ถึง {done.get('blocked', 0)} · "
-                           f"เลิกตาม {done.get('quiet', 0)} · "
+                           f"ผู้ใช้ปิดการตามเก็บ {done.get('stopped', 0)} · "
+                           f"เสนอให้พิจารณาหยุด {len(done.get('suggestions') or [])} · "
                            f"คอมเมนต์ใหม่ {done.get('new_comments', 0)} อัน")
                 _engagement_report(done)
         except Exception as error:                      # noqa: BLE001
             # **ห้ามเงียบ** ตัวที่ตายเงียบแย่กว่าไม่มีตัวเลย เพราะจะนึกว่ามีคนตามอยู่
             append_log("publish", f"ตัวตามยอด engagement สะดุด: {error}")
-        time.sleep(fb_engagement.CHECK_EVERY_SECONDS)
+            # error นอก check_once ก็ต้องให้ checkpoint มีโอกาสทำต่อเร็ว ไม่ใช่
+            # ค้างจนถึงรอบ 6 ชั่วโมงถัดไป.
+            import fb_collect_gate
+            failure = fb_collect_gate.failure(str(error))
+            _engagement_keeper_sleep(max(300, failure.get("retry_at", 0) - time.time()))
+            continue
+        # ยึดรอบจาก "เวลาเริ่ม" ไม่ใช่รอ 6 ชั่วโมงหลังงานจบ เพราะเมื่อมีลิงก์
+        # หลายร้อยใบ รอบหนึ่งอาจกินเวลาหลายชั่วโมงแล้วคาบจะเลื่อนออกทุกวัน
+        elapsed = time.monotonic() - cycle_started
+        _engagement_keeper_sleep(
+            max(60.0, fb_engagement.CHECK_EVERY_SECONDS - elapsed))
 
 
 # รอ Chrome ว่างได้นานสุดเท่าไร — รอบเก็บโพสต์หนึ่งกลุ่มใช้ราว 12 นาที
-# ตั้ง 20 นาทีให้เผื่อกลุ่มใหญ่ เกินนั้นข้ามไปรอบหน้า (อีกชั่วโมง) ดีกว่าค้างรอ
+# ตั้ง 20 นาทีให้เผื่อกลุ่มใหญ่ เกินนั้นข้ามไปรอบหน้า (อีก 6 ชั่วโมง) ดีกว่าค้างรอ
 CHROME_WAIT_MAX = 1200.0
 
 
@@ -6946,9 +7754,42 @@ def _engagement_report(done: dict) -> None:
         append_log("publish", f"มีผลตามยอดจะส่ง แต่ยังส่งไม่ได้ — {why}")
         return
     try:
-        telegram_bot.send_message(token, chat, text)
+        keyboard = _engagement_keyboard(done)
+        telegram_bot.send_message(token, chat, text, keyboard, preview=False)
+        if keyboard:
+            fb_engagement.mark_suggestions_sent([
+                row.get("watch_key", "") for row in (done.get("suggestions") or [])
+                if row.get("notify_suggestion")
+            ])
     except Exception as error:                          # noqa: BLE001
         append_log("publish", f"ส่งผลตามยอดเข้าแชทไม่สำเร็จ: {error}")
+
+
+def _engagement_watch_callback(chat_id: str, data: str, callback: dict) -> str:
+    """รับปุ่มเลิกเก็บ/เก็บต่อจากรายงาน Bot8 โดยไม่แตะประวัติโพสต์."""
+    import fb_engagement                                # noqa: PLC0415
+
+    action, _, key = str(data or "").partition(":")
+    if action != "ew" or not key:
+        return "ไม่รู้จักปุ่มนี้"
+    _, allowed_chat = _engagement_channel()
+    if allowed_chat and str(chat_id) != str(allowed_chat):
+        append_log("publish", f"ปฏิเสธปุ่มตามเก็บจาก chat {chat_id}")
+        return "แชทนี้ไม่มีสิทธิ์"
+    decision, _, watch_key = key.partition(":")
+    if decision not in ("stop", "keep") or not watch_key:
+        return "ปุ่มนี้ไม่ครบ"
+    try:
+        out = fb_engagement.set_post_watch(
+            watch_key=watch_key, active=(decision == "keep"), actor="telegram")
+    except ValueError as error:
+        return str(error)[:180]
+    append_log(
+        "publish",
+        f"ผู้ใช้กด{'เก็บต่อ' if decision == 'keep' else 'เลิกเก็บ'}ผ่าน Telegram: "
+        f"{out['post_url']}")
+    return ("เก็บต่อแล้ว — ระบบจะประเมินใหม่หลังครบ 24 ชั่วโมง" if decision == "keep"
+            else "เลิกเก็บโพสต์นี้แล้ว — ประวัติเดิมยังอยู่")
 
 @app.on_event("startup")
 async def _start_watcher() -> None:
@@ -6990,6 +7831,21 @@ async def _start_watcher() -> None:
     # ตามยอดไลก์/คอมเมนต์ของโพสต์ที่ลงไปแล้ว ทุกชั่วโมง (เจ้าของสั่ง 28 ส.ค.)
     # เดิมต้องสั่งเองทุกครั้ง จึงหยุดไป 26 ชั่วโมงโดยไม่มีใครรู้
     threading.Thread(target=_engagement_keeper, daemon=True).start()
+    # Bot8 can lose its Facebook session while idle; verify the real page
+    # periodically without opening a second Chrome during collection.
+    import bot8_login_health
+    threading.Thread(
+        target=bot8_login_health.watch,
+        args=(lambda message: append_log("publish", message),),
+        daemon=True, name="bot8-login-health").start()
+    # เวลาที่เจ้าของเลือกเอง แยกจากรอบอัตโนมัติ 6 ชั่วโมง และเข้าล็อก Manual
+    # ตัวเดียวกัน จึงรอ Bot8 ว่างโดยไม่เปิด Chrome ซ้อนหรือสร้างคิวซ้ำ.
+    threading.Thread(target=_engagement_schedule_keeper, daemon=True).start()
+    # งานหาโพสต์แมสใช้ Chrome Bot8 ตัวเดียวกัน: เข้าคิวหลังตัวเก็บคอมเมนต์
+    # และตัวสแกนรันแยกโปรเซสเพื่อให้รายงานไม่หายเมื่อหน้าเว็บรีสตาร์ต.
+    threading.Thread(target=_mass_report_keeper, daemon=True).start()
+    # คิวที่เจ้าของกด "ตอบกลับ" บนหน้าเว็บ — รอมือถือว่างแล้วทำทีละรายการ
+    threading.Thread(target=_fb_reply_queue_keeper, daemon=True).start()
 
 
 # บอท 2 ตัว: main = โพสต์ Facebook · clip = สายเจนคลิป (อนุมัติจุดขาย/คลิป)
@@ -7090,12 +7946,19 @@ def sync_extra_watchers() -> None:
             # เหตุผลเดียวกับ clip ด้านล่าง: getUpdates มีตัวอ่านได้ตัวเดียวต่อโทเคน
             continue
         if bot.get("role") == "engage":
-            # บอทสายตามยอด/ตอบคอมเมนต์เป็นหน้าที่ของ fb_engage_bot.py
-            # เหตุผลเดียวกัน: อ่านโทเคนซ้อนกัน = 409 Conflict
-            #
-            # **ยังไม่ปลุกให้อัตโนมัติเหมือนสาย mass** เพราะบอทตัวนั้นยังไม่เคย
-            # ทดสอบกับมือถือจริง — ปลุกเองตอนรีสตาร์ตแล้วมันไปแตะจอผิดจังหวะ
-            # จะพาลทำให้งานโพสต์พังด้วย ต้องรันมือจนกว่าจะทดสอบผ่าน
+            # app.py เป็นผู้ส่งรายงาน Bot8 อยู่แล้ว จึงรับเฉพาะ callback ของปุ่ม
+            # เลิกเก็บ/เก็บต่อที่นี่ด้วย โทเคนเดียวมีตัวอ่าน getUpdates ได้ตัวเดียว
+            # ห้ามเปิด fb_engage_bot.py ซ้อนกับเซิร์ฟเวอร์ 8866
+            watcher = telegram_bot.ApprovalWatcher(
+                approval_store,
+                get_token=lambda i=bot_id: extra_bot_token(i),
+                log=lambda message, n=name: append_log("input", f"[{n}] {message}"),
+            )
+            watcher.on_chat_seen = lambda chat, i=bot_id: _remember_extra_chat(i, chat)
+            watcher.on_callback = _engagement_watch_callback
+            _extra_watchers[bot_id] = watcher
+            watcher.start()
+            append_log("input", f"เปิดตัวรับปุ่มตามเก็บของบอท {name}")
             continue
         if bot.get("role") == "clip":
             # บอทสายคลิปเป็นหน้าที่ของ clip_app.py (พอร์ต 8877) ไม่ใช่ของที่นี่
@@ -7952,6 +8815,7 @@ FB_STATUS_LABEL = {
     fb_auto_post.STATUS_RUNNING: "กำลังโพสต์…",
     fb_auto_post.STATUS_FINISHING: "โพสต์แล้ว — กำลังเก็บลิงก์/ไลก์/คอมเมนต์ให้ครบ",
     fb_auto_post.STATUS_DONE: "เสร็จครบทุกขั้นแล้ว",
+    fb_auto_post.STATUS_MANUAL_DONE: "จบงานด้วยมือแล้ว — ไม่ทำขั้นตอนใดต่อ",
     fb_auto_post.STATUS_FAILED: "ล้มเหลว",
     fb_auto_post.STATUS_STOPPED: "หยุดไว้ — กด Resume เพื่อทำเฉพาะขั้นที่เหลือ",
     fb_auto_post.STATUS_CANCELLED: "ยกเลิกแล้ว",
@@ -7962,16 +8826,24 @@ def _fb_card(job: dict) -> tuple[str, dict | None]:
     """ข้อความ + ปุ่มของการ์ดงานหนึ่งใบ"""
     escape = telegram_bot._escape
     caption = job.get("caption", "")
+    status_label = FB_STATUS_LABEL.get(job["status"], job["status"])
+    if (job["status"] == fb_auto_post.STATUS_FINISHING
+            and job.get("no_comments_confirmed")):
+        status_label = "โพสต์แล้ว — กำลังเก็บลิงก์/ไลก์โพสต์ให้ครบ"
     lines = [
         f"📮 <b>งานโพสต์ {job['id']}</b>",
         f"🖼 รูป: {len(job.get('images') or ([job['image']] if job.get('image') else []))} ใบ"
         f" (สูงสุด {facebook_group_post.MAX_PHOTOS})"
         if job.get("image") else "🖼 รูป: — ยังไม่ได้ส่ง",
         f"📝 แคปชัน: {escape(caption[:300]) if caption else '— ยังไม่มี'}",
-        *( _fb_comment_lines(job) or ["💬 คอมเมนต์: — ไม่มี (/comment)"] ),
+        *( _fb_comment_lines(job) or [
+            "💬 คอมเมนต์: — ยืนยันแล้วว่าจะไม่ใส่"
+            if job.get("no_comments_confirmed") else
+            "💬 คอมเมนต์: — ไม่มี (/comment)"
+        ] ),
         f"📦 ชุดกลุ่ม: {escape(job.get('set', '') or 'ทั้งหมด')}",
         f"⏰ เวลาโพสต์: {_fb_when_text(job.get('run_at', '')) or '— กดเอง (/schedule)'}",
-        f"สถานะ: {FB_STATUS_LABEL.get(job['status'], job['status'])}",
+        f"สถานะ: {status_label}",
     ]
     if job.get("saved"):
         lines.append("💾 เก็บโพสต์นี้ไว้แล้ว · เรียกดูด้วย /recall")
@@ -8023,7 +8895,21 @@ def _fb_card(job: dict) -> tuple[str, dict | None]:
         "text": "✅ เก็บโพสต์แล้ว" if job.get("saved") else "💾 เก็บโพสต์",
         "callback_data": f"fb:sv:{job['id']}",
     }])
-    ready = job["status"] == fb_auto_post.STATUS_READY and selected
+    has_comments = bool(_fb_comments(job))
+    if not has_comments:
+        rows.append([{
+            "text": (
+                "✅ ยืนยันแล้ว: โพสต์นี้ไม่มีคอมเมนต์"
+                if job.get("no_comments_confirmed") else
+                "⬜ ยืนยันว่าโพสต์นี้ไม่มีคอมเมนต์"
+            ),
+            "callback_data": f"fb:nc:{job['id']}",
+        }])
+    ready = (
+        job["status"] == fb_auto_post.STATUS_READY
+        and selected
+        and (has_comments or bool(job.get("no_comments_confirmed")))
+    )
     rows.append([
         {
             "text": f"🚀 โพสต์ {len(selected)} กลุ่ม" if ready else "🚀 ยังโพสต์ไม่ได้",
@@ -8128,6 +9014,58 @@ def _fb_cancel_job(job_id: str) -> str:
         return "ยกเลิกแล้ว — หยุดหลังกลุ่มที่กำลังทำอยู่จบ"
     append_log("publish", f"[{job_id}] ยกเลิกงาน")
     return "ยกเลิกงานแล้ว"
+
+
+def _fb_manual_complete_job(job_id: str) -> dict:
+    """ปิดใบงานตามคำรับรองของผู้ใช้ และห้ามทุก worker หยิบกลับมาทำต่อ.
+
+    ต่างจาก Stop ซึ่ง Resume ได้ และต่างจาก Cancel ซึ่งแปลว่างานถูกยกเลิก:
+    Manual complete ถือว่างานสำเร็จตามที่เจ้าของตรวจเอง แม้หลักฐานอัตโนมัติ
+    (ลิงก์/ไลก์/คอมเมนต์) บางส่วนยังไม่ครบ.
+    """
+    job = fb_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="ไม่พบงานนี้")
+    if (job.get("manual_completed")
+            or job.get("status") == fb_auto_post.STATUS_MANUAL_DONE):
+        return {"ok": True, "message": "งานนี้จบด้วยมืออยู่แล้ว", "stopping": False}
+
+    finished_at = datetime.now().isoformat(timespec="seconds")
+    # เขียนธงปลายทางก่อนสั่งหยุด เพื่อให้ on_done ที่มาพร้อมกันเห็นคำตัดสินนี้
+    # และไม่มีสิทธิ์เปลี่ยนกลับเป็น failed/finishing.
+    fb_jobs.update(
+        job_id,
+        status=fb_auto_post.STATUS_MANUAL_DONE,
+        manual_completed=True,
+        manual_completed_at=finished_at,
+        finished_at=finished_at,
+        run_at="",
+        ui_reset=False,
+        blocked_why="",
+        blocked_at="",
+    )
+    _fb_cancel_followup_wait(job_id)
+    _deferred_jobs.discard(job_id)
+    # การล้างตัวนับเป็นงานเก็บกวาด ไม่ควรทำให้คำสั่งจบงานล้มหลังเขียนสถานะ
+    # สำเร็จแล้ว (เช่นทะเบียนบัญชีถูกถอดชั่วคราวตอนซ่อมเครื่อง).
+    try:
+        fb_pending.forget(job_id)
+    except Exception as error:  # noqa: BLE001
+        append_log("publish", f"[{job_id}] ล้างตัวนับตามเก็บหลังจบงานไม่ได้: {error}")
+    stopped = fb_runner.stop_job(job_id)
+    note = ("ผู้ใช้กดจบงานแบบ Manual — ถือว่าเสร็จสมบูรณ์ "
+            "ยกเลิกโพสต์และขั้นตามเก็บที่เหลือทั้งหมด")
+    fb_jobs.append_log(job_id, note)
+    append_log("publish", f"[{job_id}] {note}")
+    return {
+        "ok": True,
+        "stopping": bool(stopped),
+        "message": (
+            "จบงานแบบ Manual แล้ว — จะหยุดที่จุดปลอดภัยและไม่ทำขั้นตอนต่อ"
+            if stopped else
+            "จบงานแบบ Manual แล้ว — ถือว่าเสร็จสมบูรณ์และจะไม่ทำขั้นตอนต่อ"
+        ),
+    }
 
 
 REPOST_LIMIT = 6
@@ -8809,8 +9747,8 @@ def _fb_zero_streak(job_id: str, nothing: bool) -> int:
 
 
 def _fb_followup(comment_override: str = "", job_id: str = "",
-                 queued: bool = False) -> str:
-    """ตามเก็บงานล่าสุด: เปิดโพสต์จากแจ้งเตือน แล้วกดถูกใจ + คอมเมนต์
+                 queued: bool = False, resume_missing_posts: bool = False) -> str:
+    """Finish the selected job: resume missing posts before engagement follow-up.
 
     ทำไมต้องมีรอบสอง: กลุ่มส่วนใหญ่ตั้งให้ผู้ดูแลตรวจก่อนโพสต์ขึ้น ตอนกดโพสต์เสร็จ
     โพสต์จึงยัง "รออนุมัติ" ไม่ปรากฏในฟีด ยังกดถูกใจหรือคอมเมนต์ไม่ได้เลย
@@ -8820,10 +9758,28 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
     # ระบุรหัสงานได้ — จำเป็นตอนเข้าคิวรอจอ เพราะระหว่างรออาจมีงานใหม่เกิดขึ้น
     # ถ้ายังเลือก "งานล่าสุดที่มีผลลัพธ์" เหมือนเดิม จะไปตามเก็บผิดงาน
     job = fb_jobs.get(job_id) if job_id else \
-        next((j for j in fb_jobs.listing() if j.get("results")), None)
+        next((j for j in fb_jobs.listing()
+              if j.get("results") and not j.get("manual_completed")
+              and j.get("status") != fb_auto_post.STATUS_MANUAL_DONE), None)
     if job is None:
         return f"ไม่พบงาน {job_id}" if job_id else "ยังไม่มีงานที่โพสต์ไปแล้ว"
+    if (job.get("manual_completed")
+            or job.get("status") == fb_auto_post.STATUS_MANUAL_DONE):
+        return f"งาน {job['id']} ถูกกดจบด้วยมือแล้ว — ไม่ตามเก็บต่อ"
     _fb_cancel_followup_wait(job["id"])
+    pending_posts = _fb_pending_groups(job)
+    if pending_posts and resume_missing_posts:
+        # /followup previously counted only already-posted groups and could say
+        # "complete" while another group had never reached the Post button.
+        # Resume's posted markers make this path post only the missing groups.
+        if comment_override.strip():
+            return (f"งาน {job['id']} ยังเหลือโพสต์ {len(pending_posts)} กลุ่ม — "
+                    "กด Resume ให้โพสต์ที่ขาดก่อน แล้วค่อยแก้คอมเมนต์")
+        note = _fb_run_job(job["id"], queued=queued, resume=True)
+        if note:
+            return note
+        return (f"🔁 งาน {job['id']} เริ่ม Resume แล้ว — โพสต์เฉพาะ "
+                f"{len(pending_posts)} กลุ่มที่ยังไม่ขึ้น โดยไม่โพสต์ซ้ำ")
     serial, note = _fb_gate("followup", job, queued, str(job.get("serial") or ""))
     if note:
         return note
@@ -8836,10 +9792,12 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
     # (เจอจริง 12 ส.ค. งาน p525306924: ครบทั้ง 5 กลุ่มตั้งแต่รอบโพสต์)
     override = comment_override.strip()
     saved_comments = _fb_comments(job)
-    if not saved_comments and not override:
+    skip_comments = bool(job.get("no_comments_confirmed"))
+    if not saved_comments and not override and not skip_comments:
         return (f"งาน {job['id']} ยังไม่มีข้อความคอมเมนต์ — ขั้นคอมเมนต์และ"
-                "ไลก์คอมเมนต์เป็นขั้นบังคับ กรุณาใส่ /comment ก่อน Resume")
-    want_comment = True
+                "ไลก์คอมเมนต์เป็นขั้นบังคับ กรุณาใส่ /comment หรือกด "
+                "'ยืนยันว่าโพสต์นี้ไม่มีคอมเมนต์' ก่อน Resume")
+    want_comment = bool(saved_comments or override) and not skip_comments
     # โดนพักคอมเมนต์อยู่ = ตัดงานคอมเมนต์ออกจากรอบนี้ไปเลย ไม่ใช่ไปตันทีละกลุ่ม
     #
     # ถ้าไม่ตัดตรงนี้ รอบตามเก็บจะยังเปิดโพสต์ทีละกลุ่ม (กลุ่มละ ~13 วินาที)
@@ -8865,6 +9823,9 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         for r in job["results"] if _needs_work(r)
     ]
     if not targets:
+        if pending_posts:
+            return (f"งาน {job['id']} ยังเหลือโพสต์ {len(pending_posts)} กลุ่ม "
+                    "— กด Resume เพื่อโพสต์เฉพาะกลุ่มที่ขาด ไม่โพสต์ซ้ำ")
         done = sum(1 for r in job["results"] if r.get("posted"))
         if comment_hold:
             return (f"⏸ งาน {job['id']} เหลือแค่งานคอมเมนต์ แต่ตอนนี้{comment_hold}\n"
@@ -8873,8 +9834,13 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
             if _fb_job_complete(job):
                 fb_jobs.update(job["id"], status=fb_auto_post.STATUS_DONE,
                                finished_at=datetime.now().isoformat(timespec="seconds"))
-            return (f"✅ งาน {job['id']} ครบแล้วทั้ง {done} กลุ่ม — ถูกใจ คอมเมนต์ "
-                    "และลิงก์เก็บครบตั้งแต่รอบโพสต์ ไม่ต้องตามเก็บ")
+            completed = (
+                "ถูกใจและเก็บลิงก์ครบตามที่ยืนยันว่าไม่มีคอมเมนต์"
+                if skip_comments else
+                "ถูกใจ คอมเมนต์ และลิงก์เก็บครบ"
+            )
+            return (f"✅ งาน {job['id']} ครบแล้วทั้ง {done} กลุ่ม — {completed} "
+                    "ตั้งแต่รอบโพสต์ ไม่ต้องตามเก็บ")
         return "งานล่าสุดไม่มีกลุ่มที่โพสต์สำเร็จ"
 
     job_id = job["id"]
@@ -8894,6 +9860,7 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
         fb_jobs.append_log(job_id, line)
 
     def on_result(entry: dict) -> None:
+        entry = _fb_normalize_followup_result(fb_jobs.get(job_id) or job, entry)
         _fb_stamp_post_id(entry)
         fb_jobs.upsert_result(job_id, entry)
         step = f"[{entry['index']}/{entry['total']}] " if entry.get("index") else ""
@@ -8901,15 +9868,20 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
 
     def on_done(results: list[dict], error: str) -> None:
         latest = fb_jobs.get(job_id) or job
+        manually_done = bool(latest.get("manual_completed"))
         stopped = (
-            latest.get("status") in {
+            manually_done
+            or latest.get("status") in {
                 fb_auto_post.STATUS_STOPPED, fb_auto_post.STATUS_CANCELLED,
+                fb_auto_post.STATUS_MANUAL_DONE,
             }
             or fb_runner.for_device(serial).stop_flag.is_set()
         )
         pending_posts = _fb_pending_groups(latest)
         pending_followup = _fb_pending_followup_groups(latest)
-        if stopped:
+        if manually_done:
+            status = fb_auto_post.STATUS_MANUAL_DONE
+        elif stopped:
             status = latest.get("status")
         elif error:
             status = fb_auto_post.STATUS_FAILED
@@ -8919,12 +9891,18 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
             status = fb_auto_post.STATUS_FINISHING
         current = fb_jobs.update(
             job_id, status=status,
-            finished_at=(datetime.now().isoformat(timespec="seconds")
+            finished_at=(latest.get("manual_completed_at")
+                         if status == fb_auto_post.STATUS_MANUAL_DONE else
+                         datetime.now().isoformat(timespec="seconds")
                          if status in {fb_auto_post.STATUS_DONE,
                                        fb_auto_post.STATUS_FAILED}
                          else None),
         ) or latest
         _fb_show_card(current)
+
+        if status == fb_auto_post.STATUS_MANUAL_DONE:
+            append_log("publish", f"[{job_id}·ตามเก็บ] หยุดแล้ว — ผู้ใช้กดจบงานแบบ Manual")
+            return
 
         liked = sum(1 for r in results if r.get("liked"))
         commented = sum(1 for r in results if r.get("commented"))
@@ -8956,13 +9934,19 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
             return
 
         if status == fb_auto_post.STATUS_DONE:
+            completed_steps = (
+                "เก็บลิงก์ · ไลก์โพสต์ครบทุกกลุ่ม · ใบนี้ยืนยันว่าไม่มีคอมเมนต์"
+                if latest.get("no_comments_confirmed") else
+                "เก็บลิงก์ · ไลก์โพสต์ · คอมเมนต์ · ไลก์คอมเมนต์ครบทุกกลุ่ม"
+            )
             _fb_say(chat_id, (
                 f"✅ <b>งาน {job_id} เสร็จครบทุกขั้นแล้ว</b>\n"
-                "เก็บลิงก์ · ไลก์โพสต์ · คอมเมนต์ · ไลก์คอมเมนต์ครบทุกกลุ่ม"
+                + completed_steps
                 + "\n\nดูลิงก์ทั้งหมด: /links"
             ))
         elif status not in {fb_auto_post.STATUS_STOPPED,
-                            fb_auto_post.STATUS_CANCELLED}:
+                            fb_auto_post.STATUS_CANCELLED,
+                            fb_auto_post.STATUS_MANUAL_DONE}:
             left = len(_fb_pending_followup_groups(current))
             _fb_say(chat_id, (
                 f"⏳ <b>งาน {job_id} ยังไม่จบ — ตามเก็บค้าง {left} กลุ่ม</b>\n"
@@ -8987,6 +9971,12 @@ def _fb_followup(comment_override: str = "", job_id: str = "",
     except fb_auto_post.AutoPostError as error:
         return str(error)
     # ยังห้ามใช้ done ระหว่างรอบนี้ — done สงวนให้หลักฐานบังคับครบทุกกลุ่ม.
+    # ผู้ใช้อาจกดจบในจังหวะเดียวกับที่ worker เพิ่งเริ่ม ห้ามบรรทัดนี้เขียนทับ
+    # สถานะปลายทางที่ผู้ใช้เพิ่งเลือก.
+    current = fb_jobs.get(job_id) or {}
+    if current.get("manual_completed"):
+        fb_runner.stop_job(job_id)
+        return f"งาน {job_id} ถูกกดจบด้วยมือแล้ว — หยุดรอบตามเก็บที่เพิ่งเริ่ม"
     fb_jobs.update(job_id, status=fb_auto_post.STATUS_FINISHING,
                    finished_at=None, ui_reset=False)
     append_log("publish", f"[{job_id}] เริ่มตามเก็บ {len(targets)} กลุ่ม")
@@ -9818,10 +10808,11 @@ def _fb_auto_followup(job_id: str, delay: float = AUTO_FOLLOWUP_DELAY,
                 if stop_wait.wait(max(0.0, delay)):
                     return
                 current = fb_jobs.get(job_id) or {}
-                if current.get("status") in {
+                if current.get("manual_completed") or current.get("status") in {
                     fb_auto_post.STATUS_STOPPED,
                     fb_auto_post.STATUS_CANCELLED,
                     fb_auto_post.STATUS_DONE,
+                    fb_auto_post.STATUS_MANUAL_DONE,
                 }:
                     append_log("publish", f"[{job_id}] งดตามเก็บ — งานถูกหยุด/ยกเลิก/จบแล้ว")
                     return
@@ -10238,7 +11229,10 @@ def _phone_wait_pump() -> None:
     kind, job_id, chat_id = item["kind"], item["job_id"], item["chat_id"]
     append_log("publish", f"[{job_id}] จอว่างแล้ว — เริ่มงานที่รอคิวไว้ ({kind})")
     if kind == "followup":
-        note = _fb_followup(job_id=job_id, queued=True)
+        # Scheduler threads have no account context. Resolve from the job,
+        # exactly as the Resume route does; never infer from a default phone.
+        with _job_ctx(job_id):
+            note = _fb_followup(job_id=job_id, queued=True)
     elif kind == "collect":
         note = _fb_collect(job_id=job_id, queued=True)
     elif kind == "fiximage":
@@ -11056,7 +12050,10 @@ def _fb_comments(job: dict) -> list[str]:
 def _fb_set_comments(job_id: str, texts: list[str]) -> dict | None:
     """บันทึกคอมเมนต์ — เก็บทั้งรายการและช่องเดิมไว้ให้เข้ากันได้กับของเก่า"""
     clean = [t for t in texts if t.strip()][:facebook_group_post.MAX_COMMENTS]
-    return fb_jobs.update(job_id, comments=clean, comment=clean[0] if clean else "")
+    changes = {"comments": clean, "comment": clean[0] if clean else ""}
+    if clean:
+        changes["no_comments_confirmed"] = False
+    return fb_jobs.update(job_id, **changes)
 
 
 def _fb_comment_images(job: dict) -> list[str]:
@@ -11592,7 +12589,7 @@ def _telegram_command(chat_id: str, text: str) -> bool:
         _fb_say(chat_id, _fb_status_text())
         return True
     if command == "/followup":
-        note = _fb_followup(argument)
+        note = _fb_followup(argument, resume_missing_posts=True)
         if note:
             _fb_say(chat_id, note)
         return True
@@ -11783,6 +12780,9 @@ def _telegram_callback(chat_id: str, data: str, callback: dict) -> str:
     if action == "cl":
         return _fb_claude_start(chat_id, rest)
 
+    if action == "ew":
+        return _engagement_watch_callback(chat_id, f"ew:{rest}", callback)
+
     if action == "ri":
         return _fb_report_images(chat_id, rest)
 
@@ -11876,6 +12876,16 @@ def _telegram_callback(chat_id: str, data: str, callback: dict) -> str:
             ) or job
             append_log("publish", f"[{job_id}] เก็บโพสต์ไว้เรียกด้วย /recall")
             note = "เก็บโพสต์แล้ว — ดูได้ที่ /recall"
+    elif action == "nc":
+        if _fb_comments(job):
+            return "ใบงานนี้มีคอมเมนต์อยู่แล้ว — ไม่ต้องยืนยันว่าไม่มีคอมเมนต์"
+        confirmed = not bool(job.get("no_comments_confirmed"))
+        job = fb_jobs.update(job_id, no_comments_confirmed=confirmed) or job
+        note = (
+            "ยืนยันแล้ว — ใบนี้จะโพสต์โดยไม่คอมเมนต์"
+            if confirmed else
+            "ยกเลิกการยืนยันแล้ว — ต้องเพิ่มคอมเมนต์หรือยืนยันใหม่ก่อนโพสต์"
+        )
     elif action == "x":
         note = _fb_cancel_job(job_id)
         job = fb_jobs.get(job_id) or job
@@ -11934,8 +12944,38 @@ def _fb_pending_groups(job: dict) -> list[str]:
 
 
 def _fb_required_comment_count(job: dict) -> int:
-    """จำนวนคอมเมนต์ที่ต้องลงต่อกลุ่ม — ขั้นนี้เป็นงานบังคับอย่างน้อยหนึ่งใบ."""
+    """จำนวนคอมเมนต์ต่อกลุ่ม; เป็นศูนย์ได้เมื่อเจ้าของยืนยันไว้ชัดเจน."""
+    if job.get("no_comments_confirmed"):
+        return 0
     return max(1, len(_fb_comments(job)))
+
+
+def _fb_normalize_followup_result(job: dict, entry: dict) -> dict:
+    """ให้หลักฐานรอบตามเก็บอัปเดตผลตรวจซ้ำเก่าของกลุ่มเดียวกัน.
+
+    รอบโพสต์อาจอ่านผังหน้าจอไม่ทันแล้วฝาก `comments_seen=0` ไว้ แต่รอบ
+    ตามเก็บภายหลังเปิดลิงก์เดิมและยืนยันข้อความจริงว่า "มีอยู่แล้ว" พร้อม
+    `comment_count=1` ถ้า merge ตรง ๆ ค่า verified เก่าจะค้างศูนย์และงานวน
+    finishing ตลอดไป จึงเลื่อนเฉพาะจำนวนที่รอบใหม่ยืนยันได้จริงขึ้นมา.
+    """
+    fresh = dict(entry)
+    count = int(fresh.get("comment_count") or 0)
+    if not fresh.get("commented") or count <= 0:
+        return fresh
+    group_id = str(fresh.get("group_id") or "")
+    previous = next((
+        row for row in (job.get("results") or [])
+        if str(row.get("group_id") or "") == group_id
+    ), {})
+    verified = dict(previous.get("verified") or {})
+    if verified:
+        old_seen = verified.get("comments_seen")
+        verified["comments_seen"] = max(
+            int(old_seen) if isinstance(old_seen, int) else 0,
+            count,
+        )
+        fresh["verified"] = verified
+    return fresh
 
 
 def _fb_result_missing(job: dict, row: dict) -> list[str]:
@@ -11951,10 +12991,14 @@ def _fb_result_missing(job: dict, row: dict) -> list[str]:
     verified_seen = (row.get("verified") or {}).get("comments_seen")
     actual_comments = (int(verified_seen) if isinstance(verified_seen, int)
                        else int(row.get("comment_count") or 0))
-    if actual_comments < wanted or not row.get("commented"):
-        missing.append(f"คอมเมนต์ {wanted} รายการ")
-    if not row.get("comment_liked"):
-        missing.append("ไลก์คอมเมนต์")
+    if wanted:
+        if (row.get("verified") or {}).get("comments_complete") is False:
+            observed = int((row.get("verified") or {}).get("comments_observed") or 0)
+            missing.append(f"ยังตรวจคอมเมนต์ไม่ครบ ({observed}/{wanted})")
+        elif actual_comments < wanted or not row.get("commented"):
+            missing.append(f"คอมเมนต์ {wanted} รายการ")
+        if not row.get("comment_liked"):
+            missing.append("ไลก์คอมเมนต์")
     return missing
 
 
@@ -11973,7 +13017,7 @@ def _fb_pending_followup_groups(job: dict) -> list[str]:
 
 
 def _fb_job_complete(job: dict) -> bool:
-    """ครบจริงเมื่อทุกกลุ่มโพสต์แล้วและหลักฐานบังคับครบทั้งสี่ชนิด."""
+    """ครบเมื่อทุกกลุ่มมีหลักฐานตามที่ใบงานกำหนด รวมโหมดไม่มีคอมเมนต์."""
     groups = [str(g) for g in dict.fromkeys(job.get("groups") or []) if g]
     if not groups:
         return False
@@ -11987,6 +13031,10 @@ def _fb_job_complete(job: dict) -> bool:
 
 def _fb_effective_status(job: dict) -> str:
     """งานรุ่นเก่าที่เคยถูกปิด done เร็วเกินไป ต้องกลับมาเป็นคิวตามเก็บ."""
+    # ปุ่ม "จบงาน" คือคำตัดสินของเจ้าของ แม้หลักฐานบังคับยังไม่ครบก็ห้าม
+    # แปลงกลับเป็น finishing ไม่งั้นตัวไล่อัตโนมัติจะปลุกงานขึ้นมาทำใหม่.
+    if job.get("manual_completed"):
+        return fb_auto_post.STATUS_MANUAL_DONE
     status = str(job.get("status") or "")
     if (status == fb_auto_post.STATUS_DONE and job.get("results")
             and not _fb_job_complete(job)):
@@ -12030,7 +13078,35 @@ def _fb_run_job(job_id: str, queued: bool = False, resume: bool = False) -> str:
     ป้ายสถานะต้องตรงกับความจริง ณ วินาทีที่แสดง (ข้อ 2.3.1) — ใบที่เพิ่งถูก
     ปฏิเสธไป ต้องหน้าตาไม่เหมือนใบที่ยังไม่มีใครสั่ง
     """
+    # ปัก priority ก่อนแตะมือถือ: ตัวตอบมือถือจะไม่หยิบคิวใหม่ ส่วนคำตอบที่
+    # เริ่มส่งไปแล้วปล่อยให้ยืนยันจบเพื่อไม่สร้างคอมเมนต์ซ้ำจากผลลัพธ์ครึ่งทาง.
+    # Bot8 เก็บข้อมูลผ่าน Chrome บนคอม จึงไม่ต้องหยุดหรือรอที่นี่.
+    job_account = fb_auto_post.posting_account()
+    if fb_jobs.get(job_id) is not None:
+        _fb_request_post_priority(job_id, account=job_account)
+        if _fb_reply_run_lock.locked() and _fb_reply_active_account == job_account:
+            append_log(
+                "publish",
+                f"[{job_id}] งานโพสต์แทรก — รอคิวตอบคอมเมนต์บนมือถือหยุดที่จุดปลอดภัย",
+            )
+            if not _wait_comment_work_yield(account=job_account):
+                job = fb_jobs.get(job_id) or {}
+                try:
+                    serial = _fb_serial(str(job.get("serial") or ""))
+                except fb_auto_post.AutoPostError:
+                    serial = str(job.get("serial") or "")
+                place = _phone_wait_add(
+                    "post", job_id, str(job.get("chat_id") or ""), serial)
+                if place < 0:
+                    _fb_cancel_post_request_if_idle(job_id, account=job_account)
+                    return (f"คิวตอบคอมเมนต์บนมือถือยังไม่ถึงจุดหยุดที่ปลอดภัย "
+                            f"และคิวรอจอเต็ม "
+                            f"({PHONE_WAITLIST_LIMIT} งาน) — ยังไม่ได้รับใบนี้เข้าคิว")
+                return ("คิวตอบคอมเมนต์บนมือถือยังไม่ถึงจุดหยุดที่ปลอดภัย — "
+                        f"เก็บงานโพสต์ไว้คิวที่ {max(1, place)} แล้ว จะเริ่มให้อัตโนมัติ")
     note = _fb_run_job_inner(job_id, queued=queued, resume=resume)
+    if note and not _fb_post_work_active(job_account):
+        _fb_cancel_post_request_if_idle(job_id, account=job_account)
     # จอไม่ว่างเป็นเรื่องปกติของคิว ไม่ใช่ความผิดพลาดที่ต้องติดป้ายค้างไว้
     if note and note != PHONE_WAIT_NOTE:
         fb_jobs.update(
@@ -12047,6 +13123,9 @@ def _fb_run_job_inner(job_id: str, queued: bool = False, resume: bool = False) -
     job = fb_jobs.get(job_id)
     if job is None:
         return "ไม่พบงานนี้"
+    if (job.get("manual_completed")
+            or job.get("status") == fb_auto_post.STATUS_MANUAL_DONE):
+        return "งานนี้ถูกกดจบด้วยมือแล้ว — จะไม่โพสต์หรือทำขั้นตอนต่อ"
     if job["status"] == fb_auto_post.STATUS_RUNNING:
         return "งานนี้กำลังโพสต์อยู่แล้ว"
     # ---- ใบที่ลงครบทุกกลุ่มแล้ว ห้ามสั่งลงใหม่ทั้งใบ ----
@@ -12076,9 +13155,10 @@ def _fb_run_job_inner(job_id: str, queued: bool = False, resume: bool = False) -
         return note
     if not job.get("caption", "").strip():
         return "ยังไม่มีแคปชัน"
-    if not _fb_comments(job):
+    if not _fb_comments(job) and not job.get("no_comments_confirmed"):
         return ("ยังไม่มีข้อความคอมเมนต์ — คอมเมนต์และไลก์คอมเมนต์เป็น"
-                "ขั้นบังคับ กรุณาใส่ /comment ก่อนเริ่มหรือ Resume")
+                "ขั้นบังคับ กรุณาใส่ /comment หรือกด "
+                "'ยืนยันว่าโพสต์นี้ไม่มีคอมเมนต์' ก่อนเริ่มหรือ Resume")
     images = [Path(p) for p in (job.get("images") or [job.get("image", "")]) if p]
     images = [p for p in images if p.is_file()][:facebook_group_post.MAX_PHOTOS]
     if not images:
@@ -12105,7 +13185,9 @@ def _fb_run_job_inner(job_id: str, queued: bool = False, resume: bool = False) -
     import fb_account_guard                                     # noqa: PLC0415
     try:
         seen = fb_account_guard.require(
-            fb_account_guard.ADB, serial, device_book.account(serial))
+            fb_account_guard.ADB, serial, device_book.account(serial),
+            fresh_start=True,
+            log=lambda line: append_log("publish", f"[{job_id}] {line}"))
     except (fb_account_guard.AccountMismatch,
             fb_account_guard.AccountUnreadable) as error:
         append_log("publish", f"[{job_id}] ด่านบัญชีไม่ผ่าน — {error}")
@@ -12168,15 +13250,20 @@ def _fb_run_job_inner(job_id: str, queued: bool = False, resume: bool = False) -
             {**job, "results": previous_results}, results,
         ) if resume else results
         snapshot = {**latest, "results": merged_results}
+        manually_done = bool(latest.get("manual_completed"))
         stopped = (
-            latest.get("status") in {
+            manually_done
+            or latest.get("status") in {
                 fb_auto_post.STATUS_STOPPED, fb_auto_post.STATUS_CANCELLED,
+                fb_auto_post.STATUS_MANUAL_DONE,
             }
             or fb_runner.for_device(serial).stop_flag.is_set()
         )
         pending_posts = _fb_pending_groups(snapshot)
         pending_followup = _fb_pending_followup_groups(snapshot)
-        if stopped:
+        if manually_done:
+            status = fb_auto_post.STATUS_MANUAL_DONE
+        elif stopped:
             status = latest.get("status")
         elif error or pending_posts:
             status = fb_auto_post.STATUS_FAILED
@@ -12186,7 +13273,9 @@ def _fb_run_job_inner(job_id: str, queued: bool = False, resume: bool = False) -
             status = fb_auto_post.STATUS_DONE
         current = fb_jobs.update(
             job_id, status=status, results=merged_results,
-            finished_at=(datetime.now().isoformat(timespec="seconds")
+            finished_at=(latest.get("manual_completed_at")
+                         if status == fb_auto_post.STATUS_MANUAL_DONE else
+                         datetime.now().isoformat(timespec="seconds")
                          if status in {fb_auto_post.STATUS_DONE,
                                        fb_auto_post.STATUS_FAILED}
                          else None),
@@ -12195,14 +13284,19 @@ def _fb_run_job_inner(job_id: str, queued: bool = False, resume: bool = False) -
             _fb_show_card(current)
         summary = fb_auto_post.summarize(merged_results, fb_groups.label)
         posted = sum(1 for r in merged_results if r.get("posted"))
-        # ลิงก์/ไลก์โพสต์/คอมเมนต์/ไลก์คอมเมนต์เป็นขั้นบังคับ การตั้งค่าเก่า
-        # auto_followup จึงไม่มีสิทธิ์ตัด flow นี้อีกต่อไป. Stop/Cancel เท่านั้นที่ตัดได้.
+        # ปกติบังคับครบทั้งลิงก์/ไลก์โพสต์/คอมเมนต์/ไลก์คอมเมนต์ ส่วนใบที่
+        # เจ้าของยืนยันว่าไม่มีคอมเมนต์ บังคับเฉพาะลิงก์กับไลก์โพสต์.
         chain = status == fb_auto_post.STATUS_FINISHING and not stopped
         delay = _fb_followup_delay(merged_results)
         held = delay > AUTO_FOLLOWUP_DELAY      # ไม่เห็นโพสต์เลย = รออนุมัติ
         if status == fb_auto_post.STATUS_DONE:
+            completed_steps = (
+                "เก็บลิงก์ · ไลก์โพสต์ครบทุกกลุ่ม · ใบนี้ยืนยันว่าไม่มีคอมเมนต์"
+                if job.get("no_comments_confirmed") else
+                "เก็บลิงก์ · ไลก์โพสต์ · คอมเมนต์ · ไลก์คอมเมนต์ครบทุกกลุ่ม"
+            )
             _fb_say(chat_id, f"✅ <b>งาน {job_id} เสร็จครบทุกขั้นแล้ว</b>\n{summary}\n\n"
-                    "เก็บลิงก์ · ไลก์โพสต์ · คอมเมนต์ · ไลก์คอมเมนต์ครบทุกกลุ่ม")
+                    + completed_steps)
         elif chain:
             _fb_say(chat_id, f"⏳ <b>งาน {job_id} โพสต์ครบแล้ว แต่ยังไม่จบ</b>\n"
                     f"{summary}\n\nเหลือขั้นบังคับตามเก็บ {len(pending_followup)} กลุ่ม\n" + (
@@ -12281,6 +13375,13 @@ def _fb_run_job_inner(job_id: str, queued: bool = False, resume: bool = False) -
         )
     except fb_auto_post.AutoPostError as error:
         return str(error)
+
+    # ปิด race ระหว่าง start() กับปุ่มจบงาน: ถ้าผู้ใช้กดพอดี worker อาจถูกสร้าง
+    # แล้ว แต่ต้องรับ stop flag ทันทีและห้ามเขียนสถานะ running ทับ manual_done.
+    current = fb_jobs.get(job_id) or {}
+    if current.get("manual_completed"):
+        fb_runner.stop_job(job_id)
+        return "งานนี้ถูกกดจบด้วยมือแล้ว — กำลังหยุดที่จุดปลอดภัย"
 
     started_at = job.get("started_at") or datetime.now().isoformat(timespec="seconds")
     fb_jobs.update(
@@ -12657,7 +13758,7 @@ async def claude_inbox_write(request: Request) -> dict:
 
 @app.post("/api/fb/followup")
 async def fb_followup(request: Request) -> dict:
-    """สั่งรอบตามเก็บ (ถูกใจ + คอมเมนต์) แบบเดียวกับคำสั่ง /followup ในบอท
+    """Finish missing posts first, then likes/comments, like /followup in Telegram.
 
     มีไว้ให้หน้าเว็บและการทดสอบเรียกได้ ไม่ต้องพิมพ์ในแชทอย่างเดียว
 
@@ -12675,12 +13776,13 @@ async def fb_followup(request: Request) -> dict:
     note = await asyncio.to_thread(
         _fb_followup, str((payload or {}).get("comment", "")),
         str((payload or {}).get("job_id", "")),
+        resume_missing_posts=True,
     )
     return {"ok": True, "note": note}
 
 
 @app.get("/api/fb/engage/threads")
-async def fb_engage_threads(pending: int = 1, limit: int = 40,
+async def fb_engage_threads(pending: int = 1, limit: int = 200,
                             account: str = "") -> dict:
     """โพสต์ของเราพร้อมคอมเมนต์ใต้โพสต์ — สำหรับหน้าตอบคอมเมนต์บนเว็บ
 
@@ -12694,20 +13796,380 @@ async def fb_engage_threads(pending: int = 1, limit: int = 40,
     Facebook เลย** จึงเร็วและเรียกซ้ำได้ตามใจ
     """
     import fb_engagement                                        # noqa: PLC0415
+    import fb_engagement_schedule                               # noqa: PLC0415
+    import bot8_mass_report                                     # noqa: PLC0415
+    mass = bot8_mass_report.status()
     # นำเข้าตรงนี้เหมือนที่อื่นในไฟล์ — ตัวนี้เปิดฐานข้อมูลตอนนำเข้า ถ้าดึงไว้
     # ตั้งแต่หัวไฟล์ เซิร์ฟเวอร์จะเปิดไฟล์ค้างไว้ทั้งที่ยังไม่มีใครเรียกใช้
     # ว่าง = ทุกบัญชี · ระบุมา = เฉพาะโปรไฟล์นั้น (เจ้าของสั่งแยกรายโปรไฟล์ 16 ก.ย.)
     rows = await asyncio.to_thread(
-        fb_engagement.threads, max(1, min(int(limit), 200)), bool(pending),
+        fb_engagement.threads, max(1, min(int(limit), 500)), bool(pending),
         str(account or "").strip())
+    selected_account = str(account or "").strip()
+    accounts = sorted({str(post.get("account") or "").strip()
+                       for post in rows if str(post.get("account") or "").strip()})
+    if not selected_account and len(accounts) == 1:
+        selected_account = accounts[0]
+    schedule = (_fb_reply_schedule_status(selected_account)
+                if selected_account else {"account": "", "waiting": False,
+                                          "wait_seconds": 0, "next_at": 0})
+    daily = (fb_engagement.reply_daily_status(selected_account)
+             if selected_account else {"account": "", "limit": 50, "used": 0,
+                                       "remaining": 50, "waiting": False,
+                                       "wait_seconds": 0, "reset_at": 0,
+                                       "reset_at_text": ""})
+    comments = [comment for post in rows for comment in post.get("comments_list", [])
+                if not comment.get("is_ours") and not comment.get("ignored")]
+    queued_total = sum(
+        1 for comment in comments
+        if comment.get("reply_queued_at") and not comment.get("reply_sent_at")
+        and not comment.get("reply_error"))
+    failed_total = sum(
+        1 for comment in comments
+        if comment.get("reply_error") and not comment.get("reply_sent_at"))
     return {
         "ok": True,
-        "account": str(account or "").strip(),
+        "account": selected_account,
         "posts": rows,
         "pending_total": sum(p["pending"] for p in rows),
         "drafted_total": sum(p["drafted"] for p in rows),
+        "queued_total": queued_total,
+        "failed_total": failed_total,
+        "reply_schedule": schedule,
+        "reply_daily": daily,
+        "work_priority": _fb_comment_priority_status(account=selected_account),
+        "reply_worker": _fb_reply_activity_status(selected_account),
+        "collector_cycle": fb_engagement.collect_cycle_status(),
+        "collector_manual": _engagement_manual_status(),
+        "collector_schedule": fb_engagement_schedule.status(selected_account),
+        "mass_report": mass["job"],
+        "mass_schedule": mass["schedule"],
+        "mass_latest_report_url": mass["latest_report_url"],
+        "server_now": time.time(),
         "at": datetime.now().strftime("%H:%M:%S"),
     }
+
+
+@app.get("/api/fb/engage/tracked")
+async def fb_engage_tracked(account: str = "", group_id: str = "",
+                            group_name: str = "", job_id: str = "") -> dict:
+    """รายการตามเก็บของบัญชี/ใบงาน/กลุ่ม; ไม่เปิด Facebook."""
+    import fb_engagement
+    rows = await asyncio.to_thread(
+        fb_engagement.tracked_posts, account, group_id, group_name, job_id)
+    return {"ok": True, "posts": rows, "total": len(rows)}
+
+
+@app.get("/api/fb/engage/status")
+async def fb_engage_status(account: str = "") -> dict:
+    """สถานะสดแบบเบาของ Bot8 สำหรับ polling; ไม่อ่าน DB และไม่แตะ Chrome."""
+    import fb_engagement                                        # noqa: PLC0415
+    import fb_collect_gate
+    import fb_engagement_schedule
+    import bot8_mass_report
+    mass = bot8_mass_report.status()
+    return {
+        "ok": True,
+        "collector_cycle": fb_engagement.collect_cycle_status(),
+        "collector_manual": _engagement_manual_status(),
+        "collector_gate": fb_collect_gate.status(),
+        "collector_schedule": fb_engagement_schedule.status(account),
+        "mass_report": mass["job"],
+        "mass_schedule": mass["schedule"],
+        "mass_latest_report_url": mass["latest_report_url"],
+        "collector_profile": fb_engagement.COLLECTOR_PROFILE,
+        "work_priority": _fb_comment_priority_status(account=account),
+        "reply_worker": _fb_reply_activity_status(account),
+        "at": datetime.now().strftime("%H:%M:%S"),
+    }
+
+
+@app.get("/api/fb/mass-report/status")
+async def fb_mass_report_status() -> dict:
+    """Current queue, clock and last report, without opening Facebook."""
+    import bot8_mass_report
+    return {"ok": True, **bot8_mass_report.status()}
+
+
+@app.post("/api/fb/mass-report/schedule")
+async def fb_mass_report_schedule(request: Request) -> dict:
+    """A single Bot8 mass-post schedule, once or daily, for all linked groups."""
+    import bot8_mass_report
+
+    payload = await request.json() if await request.body() else {}
+    action = str((payload or {}).get("action") or "save").strip().lower()
+    if action == "clear":
+        schedule = bot8_mass_report.clear_schedule()
+        append_log("publish", "ยกเลิกเวลาหาโพสต์แมส Bot8")
+        return {"ok": True, "schedule": schedule}
+    try:
+        schedule = bot8_mass_report.set_schedule(
+            str((payload or {}).get("time") or ""),
+            str((payload or {}).get("mode") or ""))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    append_log("publish", f"ตั้งเวลา Bot8 หาโพสต์แมส {schedule['time']} · {schedule['mode']}")
+    return {"ok": True, "schedule": schedule}
+
+
+@app.post("/api/fb/mass-report/start")
+async def fb_mass_report_start() -> dict:
+    """Queue one report; comment collection keeps exclusive use of Bot8."""
+    import bot8_mass_report
+    from tools.bot8_mass_report import linked_groups
+
+    try:
+        groups = await asyncio.to_thread(linked_groups)
+    except RuntimeError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    accepted, job = await asyncio.to_thread(bot8_mass_report.enqueue, "manual")
+    if accepted:
+        append_log("publish", f"เข้าคิว Bot8 หาโพสต์แมส {len(groups)} กลุ่ม · {job['id']}")
+    return {"ok": True, "accepted": accepted, "job": job,
+            "groups": len(groups)}
+
+
+@app.get("/api/fb/mass-report/report/{report_id}/{filename}")
+async def fb_mass_report_file(report_id: str, filename: str) -> FileResponse:
+    """Serve only this report's HTML and screenshots, never arbitrary data/."""
+    if not re.fullmatch(r"bot8-mass-sales-\d{8}-\d{6}-[0-9a-f]{12}", report_id):
+        raise HTTPException(status_code=404, detail="ไม่พบรายงาน")
+    if filename != "report.html" and not re.fullmatch(r"\d+-\d+\.png", filename):
+        raise HTTPException(status_code=404, detail="ไม่พบไฟล์รายงาน")
+    path = DATA_DIR / "reports" / report_id / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="ไม่พบไฟล์รายงาน")
+    return FileResponse(path, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/fb/engage/schedule")
+async def fb_engage_schedule(request: Request) -> dict:
+    """ตั้งเวลา Bot8 ของบัญชีเดียว: ครั้งเดียวหรือทุกวัน."""
+    import fb_engagement                                      # noqa: PLC0415
+    import fb_engagement_schedule                             # noqa: PLC0415
+
+    payload = await request.json() if await request.body() else {}
+    account = str((payload or {}).get("account") or "").strip()
+    known = {name.casefold(): name for name in fb_engagement.watched_accounts()}
+    account = known.get(account.casefold(), "")
+    if not account:
+        raise HTTPException(status_code=400, detail="ไม่พบบัญชี Facebook ที่เลือก")
+    action = str((payload or {}).get("action") or "save").strip().lower()
+    if action == "clear":
+        current = fb_engagement_schedule.clear_schedule(account)
+        append_log("publish", f"ยกเลิกตาราง Bot8 ของ {account}")
+        return {"ok": True, "schedule": current,
+                "message": f"ยกเลิกเวลาของ Bot8 สำหรับ {account} แล้ว"}
+    try:
+        current = fb_engagement_schedule.set_schedule(
+            account,
+            str((payload or {}).get("time") or ""),
+            str((payload or {}).get("mode") or ""),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    label = "ทุกวัน" if current["mode"] == "daily" else "1 ครั้ง"
+    append_log(
+        "publish",
+        f"ตั้งตาราง Bot8 ของ {account} เวลา {current['time']} · {label}",
+    )
+    return {"ok": True, "schedule": current,
+            "message": f"ตั้ง Bot8 เวลา {current['time']} · {label} แล้ว"}
+
+
+@app.post("/api/fb/engage/collect")
+async def fb_engage_collect(request: Request) -> dict:
+    """สั่ง Bot8 เก็บคอมเมนต์ของโพสต์ในวันที่ระบุ แยกตามเจ้าของโพสต์
+
+    body ``{"date": "YYYY-MM-DD"}`` · ไม่ส่ง date = วันนี้
+    หรือเจาะจงลิงก์ด้วย
+    ``{"links": [...], "account": "Khao Fang Nichapa",
+       "max_comment_age_hours": 24}``
+    รอบที่สั่งเองบังคับเปิดทุกโพสต์ของวันนั้น แม้รอบปกติเคยตัดว่าเงียบแล้ว
+    และไม่ดึง ``last_link`` ของวันเก่าเข้ามาปน
+    """
+    from urllib.parse import urlsplit                         # noqa: PLC0415
+    import fb_engagement                                      # noqa: PLC0415
+
+    payload = await request.json() if await request.body() else {}
+    scope = str((payload or {}).get("scope") or "").strip().lower()
+    if scope:
+        if scope not in {"all", "job", "group", "post"}:
+            raise HTTPException(
+                status_code=400, detail="scope ต้องเป็น all, job, group หรือ post")
+        all_posts = fb_engagement.our_posts()
+        # โพสต์ที่ผู้ใช้กดเลิกเก็บต้องไม่กลับเข้าคิวจากปุ่ม Manual.
+        conn = fb_engagement.open_db()
+        try:
+            active_posts = [
+                post for post in all_posts
+                if fb_engagement.still_worth_watching(
+                    conn, str(post.get("post_url") or ""))[0]
+            ]
+        finally:
+            conn.close()
+
+        if scope == "all":
+            account = str((payload or {}).get("account") or "").strip()
+            if not account:
+                raise HTTPException(status_code=400, detail="ต้องระบุโปรไฟล์")
+            posts = _engagement_active_posts(account)
+            label = f"ทุกโพสต์ของ {account} ที่ยังตามเก็บ ({len(posts)} โพสต์)"
+        elif scope == "job":
+            account = str((payload or {}).get("account") or "").strip()
+            job_id = str((payload or {}).get("job_id") or "").strip()
+            if not account or not job_id:
+                raise HTTPException(status_code=400, detail="ต้องระบุโปรไฟล์และใบงาน")
+            posts = [
+                post for post in active_posts
+                if str(post.get("account") or "").casefold() == account.casefold()
+                and str(post.get("job_id") or "") == job_id
+            ]
+            label = f"ใบงาน {job_id} · {account} ({len(posts)} โพสต์)"
+        elif scope == "group":
+            account = str((payload or {}).get("account") or "").strip()
+            job_id = str((payload or {}).get("job_id") or "").strip()
+            group_id = str((payload or {}).get("group_id") or "").strip()
+            group_name = str((payload or {}).get("group_name") or "").strip()
+            if not account or not (group_id or group_name):
+                raise HTTPException(
+                    status_code=400, detail="ต้องระบุโปรไฟล์และกลุ่ม")
+            posts = [
+                post for post in active_posts
+                if str(post.get("account") or "").casefold() == account.casefold()
+                and (not job_id
+                     or (job_id == "__unlinked__" and not post.get("job_id"))
+                     or str(post.get("job_id") or "") == job_id)
+                and ((group_id and str(post.get("group_id") or "") == group_id)
+                     or (not group_id and str(post.get("group_name") or "") == group_name))
+            ]
+            label = (f"กลุ่ม {group_name or group_id} · {account} "
+                     f"({len(posts)} โพสต์)")
+        else:
+            post_url = str((payload or {}).get("post_url") or "").strip()
+            account = str((payload or {}).get("account") or "").strip()
+            if not post_url:
+                raise HTTPException(status_code=400, detail="ต้องระบุลิงก์โพสต์")
+            posts = [
+                post for post in active_posts
+                if str(post.get("post_url") or "") == post_url
+                and (not account or str(post.get("account") or "").casefold()
+                     == account.casefold())
+            ]
+            caption = str(posts[0].get("caption") or "").strip().splitlines()[0] \
+                if posts else ""
+            label = f"โพสต์ {caption[:60] or post_url}"
+
+        if not posts:
+            raise HTTPException(
+                status_code=404,
+                detail="ไม่พบโพสต์ที่ยังตามเก็บในขอบเขตที่เลือก")
+        manual = _start_engagement_manual(posts, scope, label)
+        if manual.get("busy"):
+            raise HTTPException(
+                status_code=409,
+                detail=("มีรอบ Manual อยู่แล้ว — รอให้จบก่อนสั่งรอบใหม่"))
+        append_log("publish", f"เข้าคิว Bot8 Manual: {label}")
+        return {"ok": True, "queued": True, "manual": manual}
+
+    raw_links = (payload or {}).get("links") or []
+    if raw_links:
+        if not isinstance(raw_links, list):
+            raise HTTPException(status_code=400, detail="links ต้องเป็นรายการ")
+        links: list[str] = []
+        for raw in raw_links:
+            link = str(raw or "").strip()
+            try:
+                parsed = urlsplit(link)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=f"ลิงก์ไม่ถูกต้อง: {link}") from error
+            host = (parsed.hostname or "").casefold()
+            if parsed.scheme != "https" or not (host == "facebook.com"
+                                                  or host.endswith(".facebook.com")):
+                raise HTTPException(status_code=400,
+                                    detail=f"รับเฉพาะลิงก์ https ของ Facebook: {link}")
+            if link not in links:
+                links.append(link)
+        if not links or len(links) > 20:
+            raise HTTPException(status_code=400,
+                                detail="ต้องมีลิงก์ Facebook 1–20 ลิงก์")
+
+        requested = str((payload or {}).get("account") or "").strip()
+        accounts = {name.casefold(): name for name in fb_engagement.watched_accounts()}
+        account = accounts.get(requested.casefold(), "")
+        if not account:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"ไม่พบบัญชีสายโพสต์ {requested or '(ไม่ได้ระบุ)'} — "
+                        f"บัญชีที่ใช้ได้: {', '.join(accounts.values()) or 'ไม่มี'}"))
+        try:
+            max_age = float((payload or {}).get("max_comment_age_hours", 24))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400,
+                                detail="max_comment_age_hours ต้องเป็นตัวเลข") from error
+        if not 0 < max_age <= 168:
+            raise HTTPException(status_code=400,
+                                detail="max_comment_age_hours ต้องมากกว่า 0 และไม่เกิน 168")
+        posts = [{"post_url": link, "caption": "", "group_id": "",
+                  "group_name": f"ลิงก์ที่สั่งเก็บ {index}", "account": account}
+                 for index, link in enumerate(links, 1)]
+        done = await asyncio.to_thread(
+            _run_engagement_once, posts_override=posts,
+            max_comment_age_hours=max_age, force=True)
+        if done.get("busy") or done.get("paused_for_post"):
+            raise HTTPException(status_code=409,
+                                detail=done.get("note") or "Bot8 ไม่ว่าง")
+        append_log(
+            "publish",
+            f"สั่ง Bot8 เก็บคอมเมนต์ {len(links)} ลิงก์ของ {account} "
+            f"(ไม่เกิน {max_age:g} ชม.) — อ่านได้ {done.get('ok', 0)}/"
+            f"{done.get('posts', 0)} ใบ · คอมเมนต์ใหม่ที่ยังไม่ตอบ "
+            f"{done.get('new_comments', 0)} อัน")
+        return {"ok": True, **done, "account": account, "links": links}
+
+    on_date = str((payload or {}).get("date") or datetime.now().strftime("%Y-%m-%d"))
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", on_date):
+        raise HTTPException(status_code=400, detail="date ต้องเป็น YYYY-MM-DD")
+    done = await asyncio.to_thread(_run_engagement_once, on_date, True)
+    if done.get("busy") or done.get("paused_for_post"):
+        raise HTTPException(status_code=409, detail=done.get("note") or "Bot8 ไม่ว่าง")
+    append_log(
+        "publish",
+        f"สั่ง Bot8 เก็บคอมเมนต์วันที่ {on_date} — อ่านได้ {done.get('ok', 0)}/"
+        f"{done.get('posts', 0)} ใบ · คอมเมนต์ใหม่ที่ยังไม่ตอบ "
+        f"{done.get('new_comments', 0)} อัน")
+    return {"ok": True, **done}
+
+
+@app.post("/api/fb/engage/watch")
+async def fb_engage_watch(request: Request) -> dict:
+    """หยุดหรือเก็บต่อรายโพสต์/ทั้งใบงาน — ไม่ลบลิงก์หรือประวัติ."""
+    import fb_engagement                                      # noqa: PLC0415
+
+    payload = await request.json() if await request.body() else {}
+    action = str((payload or {}).get("action") or "").strip().lower()
+    if action not in ("stop", "keep"):
+        raise HTTPException(status_code=400, detail="action ต้องเป็น stop หรือ keep")
+    try:
+        job_id = str((payload or {}).get("job_id") or "").strip()
+        account = str((payload or {}).get("account") or "").strip()
+        if job_id:
+            out = await asyncio.to_thread(
+                fb_engagement.set_job_watch, account=account, job_id=job_id,
+                active=(action == "keep"), actor="web")
+        else:
+            out = await asyncio.to_thread(
+                fb_engagement.set_post_watch,
+                post_url=str((payload or {}).get("post_url") or ""),
+                watch_key=str((payload or {}).get("watch_key") or ""),
+                active=(action == "keep"), actor="web", account=account)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    append_log(
+        "publish",
+        f"หน้าเว็บกด{'เก็บต่อ' if action == 'keep' else 'เลิกเก็บ'}: "
+        f"{out.get('job_id') or out.get('post_url')}")
+    return {"ok": True, **out}
 
 
 @app.post("/api/fb/engage/reply")
@@ -12738,8 +14200,8 @@ async def fb_engage_send(request: Request) -> dict:
     body `{"comment_key": "...", "text": "..."}`
 
     **ยังไม่ใช่การส่งขึ้น Facebook** ตัวพิมพ์จริงคือบอทมือถือ (กติกาข้อ 2.7
-    ต้องกดบนจอจริงทุกจุด) ซึ่งยังไม่ได้สร้าง เส้นนี้จดว่า "สั่งแล้ว" เท่านั้น
-    หน้าเว็บจึงต้องเขียนให้ชัดว่ายังไม่ขึ้น Facebook
+    ต้องกดบนจอจริงทุกจุด) เส้นนี้แค่เข้าคิวของโปรไฟล์นั้น; หลังส่งสำเร็จ
+    ระบบสุ่มพักโปรไฟล์นั้น 10–15 นาทีก่อนเลือกคิวถัดไป
     """
     import fb_engagement                                        # noqa: PLC0415
     payload = await request.json() if await request.body() else {}
@@ -12750,7 +14212,78 @@ async def fb_engage_send(request: Request) -> dict:
             str((payload or {}).get("text") or ""))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    # แค่เข้าคิว — ให้ keeper เป็นผู้สุ่มหยิบในรอบเดียวกันทั้งหมด ถ้าปลุก worker
+    # ทันที รายการแรกจะวิ่งก่อนผู้ใช้กดรายการที่สองและคำว่า "สุ่มคิว" จะไม่จริง
     return {"ok": True, **out}
+
+
+@app.post("/api/fb/engage/followup")
+async def fb_engage_followup(request: Request) -> dict:
+    """Queue comment 2 under the same parent after a persisted 1-5 minute gap."""
+    import fb_engagement                                        # noqa: PLC0415
+    payload = await request.json() if await request.body() else {}
+    try:
+        out = await asyncio.to_thread(
+            fb_engagement.queue_followup,
+            str((payload or {}).get("comment_key") or ""),
+            str((payload or {}).get("text") or ""))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, **out}
+
+
+@app.post("/api/fb/engage/reply-run")
+async def fb_engage_reply_run(request: Request) -> dict:
+    """ตรวจเป้าหมายหรือส่งคิวแรกบนมือถือ; verify เป็นค่าปริยายเพื่อความปลอดภัย"""
+    payload = await request.json() if await request.body() else {}
+    send = bool((payload or {}).get("send", False))
+    result = await asyncio.to_thread(
+        _run_one_fb_reply, send,
+        str((payload or {}).get("account") or "").strip(),
+        str((payload or {}).get("comment_key") or "").strip())
+    if result.get("busy"):
+        raise HTTPException(status_code=409, detail=result.get("note"))
+    return result
+
+
+@app.post("/api/fb/engage/retry")
+async def fb_engage_retry(request: Request) -> dict:
+    """Notification action: resume the saved answer, or verify a submitted one."""
+    import fb_engagement
+    payload = await request.json()
+    try:
+        result = await asyncio.to_thread(
+            fb_engagement.retry_saved_reply,
+            str(payload.get('comment_key') or '').strip(),
+            str(payload.get('account') or '').strip())
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {'ok': True, **result}
+
+
+@app.post("/api/fb/engage/reply-status")
+async def fb_engage_reply_status(request: Request) -> dict:
+    """คืนสถานะล่าสุดเฉพาะคอมเมนต์ที่หน้าเว็บมองเห็น เพื่อซ่อนตัวที่ตอบแล้ว."""
+    import fb_engagement                                        # noqa: PLC0415
+    payload = await request.json() if await request.body() else {}
+    keys = (payload or {}).get("comment_keys") or []
+    if not isinstance(keys, list):
+        raise HTTPException(status_code=400, detail="comment_keys ต้องเป็นรายการ")
+    if len(keys) > 500:
+        raise HTTPException(status_code=400, detail="ตรวจสถานะได้ครั้งละไม่เกิน 500 คอมเมนต์")
+    states = await asyncio.to_thread(fb_engagement.reply_states, keys)
+    account = str((payload or {}).get("account") or "").strip()
+    return {
+        "ok": True,
+        "comments": states,
+        "reply_daily": (await asyncio.to_thread(
+            fb_engagement.reply_daily_status, account) if account else None),
+        "reply_schedule": (_fb_reply_schedule_status(account)
+                           if account else None),
+        "work_priority": _fb_comment_priority_status(account=account),
+        "reply_worker": _fb_reply_activity_status(account),
+        "at": datetime.now().strftime("%H:%M:%S"),
+    }
 
 
 @app.post("/api/fb/engage/ignore")
@@ -12769,6 +14302,133 @@ async def fb_engage_ignore(request: Request) -> dict:
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     return {"ok": True, **out}
+
+
+@app.post("/api/fb/engage/start-now")
+async def fb_engage_start_now(request: Request) -> dict:
+    """ปุ่ม "เริ่มเลย" — ข้ามการเว้นระยะ แล้วยิงคอมเมนต์แรกทันที
+
+    **เจ้าของสั่ง 20 ก.ย. 2569** *"เพิ่มปุ่ม เริ่มเลย เพื่อเริ่มคอมเมนต์แรกให้หน่อย"*
+
+    การรอก่อนตอบคอมเมนต์มีสามชั้นซ้อนกัน ปุ่มนี้ข้ามได้แค่สองชั้นแรก
+
+        1. เว้นระยะหลังงานโพสต์จบ   สุ่ม 10–15 นาที   ← ข้ามได้
+        2. ระยะห่างระหว่างคอมเมนต์   สุ่ม 10–15 นาที   ← ข้ามได้
+        3. โควตาต่อวัน 50 อัน                        ← **ข้ามไม่ได้**
+
+    **ข้ามโควตาไม่ได้โดยตั้งใจ** เพดานรายวันคือตัวกันบัญชีโดนตีธง ซึ่งถ้าโดน
+    แล้วกู้คืนไม่ได้ ส่วนสองชั้นแรกเป็นแค่จังหวะให้ดูเป็นคนมากขึ้น เจ้าของ
+    ตัดสินใจข้ามเองได้
+
+    **และห้ามข้ามตอนงานโพสต์ยังทำอยู่จริง** เพราะสองงานนี้แย่งจอมือถือกัน
+    ข้ามไปก็ยิงไม่ออกอยู่ดี แถมทำให้ใบงานที่โพสต์ค้างกลางทาง —
+    ตอบ 409 พร้อมบอกว่าให้รอใบงานจบก่อน
+    """
+    import fb_engagement                                        # noqa: PLC0415
+    payload = await request.json() if await request.body() else {}
+    account = str((payload or {}).get("account") or "").strip()
+
+    status = _fb_comment_priority_status(account=account)
+    if status.get("blocked") and status.get("reason") == "post":
+        raise HTTPException(
+            status_code=409,
+            detail="งานโพสต์ยังทำอยู่ — ข้ามไม่ได้เพราะแย่งจอมือถือกัน "
+                   "รอใบงานจบก่อนแล้วปุ่มนี้จะกดได้")
+
+    _clear_fb_post_reply_cooldown(account)
+
+    gap = {}
+    if account:
+        try:
+            gap = await asyncio.to_thread(fb_engagement.clear_reply_gap, account)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    priority = _fb_comment_priority_status(account=account)
+    if priority.get("blocked") and priority.get("reason") == "post":
+        raise HTTPException(
+            status_code=409,
+            detail="มีงานโพสต์เริ่มขึ้นระหว่างกดปุ่ม — รอใบงานจบก่อน "
+                   "ระบบจะไม่แย่งจอมือถือ")
+
+    append_log("publish",
+               f"เจ้าของกด \"เริ่มเลย\" — ข้ามการเว้นระยะตอบคอมเมนต์"
+               + (f" ({account})" if account else ""))
+    return {
+        "ok": True,
+        "message": "ข้ามการเว้นระยะแล้ว — คอมเมนต์แรกจะถูกส่งในรอบตรวจถัดไป "
+                   "(ไม่เกิน 20 วินาที)",
+        "work_priority": priority,
+        "reply_schedule": gap,
+    }
+
+
+@app.post("/api/fb/engage/resume-after-restriction")
+async def fb_engage_resume_after_restriction(request: Request) -> dict:
+    """เจ้าของยืนยันให้ลองคิวตอบอีกครั้งหลัง Facebook จำกัดคอมเมนต์.
+
+    ปุ่มนี้ปลดเฉพาะ safety hold ของบัญชีที่หน้าเว็บกำลังเปิด และข้ามช่วงพัก
+    ปกติสองชั้นเหมือนปุ่ม ``เริ่มเลย`` เพื่อให้ตัวเฝ้าลองคิวถัดไปได้จริง.
+    เพดาน 24 ชั่วโมง, ล็อกมือถือ, ลำดับงานโพสต์ และเครื่องหมาย "ส่งแล้วแต่ยัง
+    ยืนยันไม่ได้" ยังอยู่ครบ จึงไม่กลายเป็นทางลัดส่งซ้ำหรือแย่งจอมือถือ.
+
+    หาก Facebook ยังจำกัดอยู่ ตัวตรวจบนหน้าจอจะตั้ง safety hold กลับทันทีจาก
+    ข้อความจำกัดเดิม. จุดประสงค์ของปุ่มคือให้เจ้าของลองหลังตรวจบัญชีแล้ว ไม่ใช่
+    ปิดตัวป้องกันถาวร.
+    """
+    import fb_engage                                           # noqa: PLC0415
+    import fb_engagement                                       # noqa: PLC0415
+
+    payload = await request.json() if await request.body() else {}
+    account = str((payload or {}).get("account") or "").strip()
+    if not account:
+        raise HTTPException(status_code=400, detail="ไม่พบบัญชี Facebook ที่จะลองรันต่อ")
+
+    priority = _fb_comment_priority_status(account=account)
+    if priority.get("blocked") and priority.get("reason") == "post":
+        raise HTTPException(
+            status_code=409,
+            detail="งานโพสต์ของบัญชีนี้ยังทำอยู่ — ยังลองตอบคอมเมนต์ไม่ได้ "
+                   "เพราะจะแย่งจอมือถือกัน")
+
+    try:
+        hold = await asyncio.to_thread(fb_engage.reply_quota_status, account)
+    except (fb_engage.devices.DeviceError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if hold.get("reason") != "safety_hold" or not hold.get("waiting"):
+        raise HTTPException(
+            status_code=409,
+            detail="ตอนนี้บัญชีนี้ไม่ได้พักเพราะ Facebook จำกัดคอมเมนต์แล้ว "
+                   "กรุณาโหลดสถานะใหม่")
+
+    def release_selected_account() -> str:
+        # fb_comment_guard หาแฟ้มจาก context ของบัญชี จึงต้องครอบไว้ในเธรด
+        # เดียวกันตลอด มิฉะนั้นอาจปลดบัญชีอีกเครื่องหนึ่งโดยไม่ตั้งใจ.
+        with fb_auto_post.use_account(account):
+            return fb_comment_guard.release()
+
+    released = await asyncio.to_thread(release_selected_account)
+    _clear_fb_post_reply_cooldown(account)
+    try:
+        await asyncio.to_thread(fb_engagement.clear_reply_gap, account)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    # งานโพสต์อาจเริ่มในช่วงสั้น ๆ ระหว่างปลดพัก: ไม่ฝืนรัน แต่คืนสถานะจริงให้
+    # หน้าเว็บบอกผู้ใช้ว่าคิวจะเดินหลังงานโพสต์จบ.
+    priority = _fb_comment_priority_status(account=account)
+    schedule = _fb_reply_schedule_status(account)
+    append_log(
+        "publish",
+        f"เจ้าของกดลองรันต่อหลังพักคอมเมนต์ ({account}) — {released}",
+    )
+    return {
+        "ok": True,
+        "message": ("ปลดช่วงพักแล้ว — ระบบจะลองคิวที่ยังไม่เคยส่งในรอบถัดไป "
+                    "และจะพักใหม่อัตโนมัติถ้า Facebook ยังจำกัดอยู่"),
+        "work_priority": priority,
+        "reply_schedule": schedule,
+    }
 
 
 @app.post("/api/fb/settings")
@@ -12869,7 +14529,8 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
              for serial, job_id in running_on.items()}
     everything = fb_jobs.listing()
     live = [job for job in everything if _fb_effective_status(job) not in {
-        fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_CANCELLED,
+        fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_MANUAL_DONE,
+        fb_auto_post.STATUS_CANCELLED,
     }]
 
     def queue_key(job: dict) -> tuple:
@@ -12890,6 +14551,12 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
         by_group = {str(row.get("group_id") or ""): row for row in results}
         pending_posts = _fb_pending_groups(job)
         pending_followup = _fb_pending_followup_groups(job)
+        manual_done = status == fb_auto_post.STATUS_MANUAL_DONE
+        # Manual done is the owner's terminal decision. Keep old evidence on each
+        # result for audit, but it is no longer actionable work or a pending queue.
+        if manual_done:
+            pending_posts = []
+            pending_followup = []
         posted_count = sum(1 for row in results if row.get("posted") is True)
         on_phone = job_id in running_ids
         stopping = on_phone and status == fb_auto_post.STATUS_STOPPED
@@ -12904,16 +14571,19 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
                 queue.append({"name": fb_groups.label(group_id), "state": state})
                 continue
             missing = _fb_result_missing(job, row)
+            accepted_missing = missing if manual_done and missing else []
             queue.append({
                 "name": fb_groups.label(group_id),
-                "state": ("finish" if row.get("posted") is True and missing else
+                "state": ("manual" if accepted_missing else
+                          "finish" if row.get("posted") is True and missing else
                           ("ok" if row.get("posted") is True else "fail")),
                 "link": str(row.get("link") or ""),
                 "error": str(row.get("error") or ""),
                 "liked": bool(row.get("liked")),
                 "commented": bool(row.get("commented")),
                 "comment_liked": bool(row.get("comment_liked")),
-                "missing": missing,
+                "missing": [] if accepted_missing else missing,
+                "accepted_missing": accepted_missing,
             })
 
         # ทำต่อไม่ได้ ต้องบอกว่าเพราะอะไร — ปุ่มที่หายไปเฉยๆ แยกไม่ออกจากปุ่มเสีย
@@ -12924,7 +14594,9 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
         )
         why = ""
         if not can_resume:
-            if status == fb_auto_post.STATUS_RUNNING:
+            if manual_done:
+                why = "ผู้ใช้รับรองว่าจบงานแล้ว — ปิดคิวโพสต์และตามเก็บทั้งหมด"
+            elif status == fb_auto_post.STATUS_RUNNING:
                 why = ""
             elif on_phone:
                 why = "มือถือยังทำกลุ่มปัจจุบันค้างอยู่ — รอให้หยุดสนิทก่อนถึงจะทำต่อได้"
@@ -12968,6 +14640,10 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
             "can_run": status == fb_auto_post.STATUS_READY and not on_phone,
             "can_resume": can_resume,
             "can_reset": not on_phone,
+            "can_complete": status not in {
+                fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_MANUAL_DONE,
+                fb_auto_post.STATUS_CANCELLED,
+            },
             "can_stop": on_phone or status in {
                 fb_auto_post.STATUS_READY, fb_auto_post.STATUS_FINISHING,
             },
@@ -12982,7 +14658,8 @@ def _fb_jobs_live_body(history: int, _who: str) -> dict:
     past = []
     if history:
         for job in [j for j in everything if _fb_effective_status(j) in {
-                fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_CANCELLED}][:8]:
+                fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_MANUAL_DONE,
+                fb_auto_post.STATUS_CANCELLED}][:8]:
             results = job.get("results") or []
             past.append({
                 "id": job.get("id"),
@@ -13018,6 +14695,14 @@ def _fb_list_jobs_body() -> dict:
     running_on = fb_runner.running()
     running_ids = set(running_on.values())
 
+    def image_available(path: str) -> bool:
+        # Google Drive ที่เชื่อมเป็น G: อาจเห็นชื่อไฟล์แต่ stat ถูกปฏิเสธชั่วคราว.
+        # สถานะรูปหนึ่งใบต้องไม่ทำ API/หน้า Group Facebook ล้มทั้งหน้า.
+        try:
+            return bool(path) and Path(path).is_file()
+        except OSError:
+            return False
+
     def view(job: dict) -> dict:
         pending = _fb_pending_groups(job)
         pending_followup = _fb_pending_followup_groups(job)
@@ -13026,7 +14711,7 @@ def _fb_list_jobs_body() -> dict:
         return {
             **job,
             "status": effective_status,
-            "has_image": bool(job.get("image")) and Path(job["image"]).is_file(),
+            "has_image": image_available(str(job.get("image") or "")),
             "group_names": [fb_groups.label(g) for g in (job.get("groups") or [])],
             "pending_groups": pending,
             "pending_followup_groups": pending_followup,
@@ -13045,6 +14730,10 @@ def _fb_list_jobs_body() -> dict:
                     and job.get("id") not in running_ids
                 ),
                 "can_reset": job.get("id") not in running_ids,
+                "can_complete": effective_status not in {
+                    fb_auto_post.STATUS_DONE, fb_auto_post.STATUS_MANUAL_DONE,
+                    fb_auto_post.STATUS_CANCELLED,
+                },
                 # Stop ตั้งใจให้กดได้ตลอด แม้ตอนว่าง endpoint จะตอบแบบ idempotent
                 "can_stop": True,
             },
@@ -13110,6 +14799,7 @@ def _fb_create_web_job_data(
     *, serial: str, caption: str, group_ids: list[str], comments: list[str],
     post_assets: list[tuple[str, bytes]],
     comment_assets: list[tuple[str, bytes] | None],
+    no_comments_confirmed: bool = False,
 ) -> tuple[dict, str]:
     """สร้างงานช่องทางเว็บลง store เดียวกับ Telegram และบันทึกรูปอย่างปลอดภัย."""
     clean, account = _fb_web_target(serial)
@@ -13143,6 +14833,15 @@ def _fb_create_web_job_data(
             raise fb_auto_post.AutoPostError(
                 f"รูปคอมเมนต์ช่อง {index + 1} ต้องมีข้อความคอมเมนต์ด้วย"
             )
+    has_comments = any(clean_comments)
+    if no_comments_confirmed and has_comments:
+        raise fb_auto_post.AutoPostError(
+            "เลือกได้อย่างเดียว: ใส่คอมเมนต์ หรือยืนยันว่าไม่มีคอมเมนต์"
+        )
+    if not has_comments and not no_comments_confirmed:
+        raise fb_auto_post.AutoPostError(
+            "ยังไม่มีคอมเมนต์ — ถ้าตั้งใจโพสต์อย่างเดียว ให้ติ๊กยืนยันว่าไม่มีคอมเมนต์"
+        )
 
     written: list[Path] = []
     job: dict | None = None
@@ -13157,6 +14856,7 @@ def _fb_create_web_job_data(
         job = fb_jobs.add(
             caption=text[:5000], comments=[], comment="", groups=picked,
             source="web", chat_id=chat_id, serial=clean,
+            no_comments_confirmed=bool(no_comments_confirmed),
             status=fb_auto_post.STATUS_READY,
         )
         try:
@@ -13200,6 +14900,7 @@ def _fb_create_web_job_data(
 async def fb_create_web_job(
     serial: str = Form(...), caption: str = Form(...), groups: str = Form("[]"),
     comment_1: str = Form(""), comment_2: str = Form(""),
+    no_comments_confirmed: str = Form("false"),
     run_now: str = Form("false"),
     post_images: list[UploadFile] = File(...),
     comment_image_1: UploadFile | None = File(None),
@@ -13233,6 +14934,7 @@ async def fb_create_web_job(
             serial=serial, caption=caption, group_ids=parsed_groups,
             comments=[comment_1, comment_2], post_assets=post_assets,
             comment_assets=comment_assets,
+            no_comments_confirmed=no_comments_confirmed.lower() == "true",
         )
     except fb_auto_post.AutoPostError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -13278,7 +14980,7 @@ async def fb_create_web_job(
 _PAGE_POST_LOCK = threading.Lock()
 _PAGE_POST: dict = {"running": False, "lines": [], "result": None,
                     "error": "", "started_at": 0.0, "finished_at": 0.0,
-                    "page": "", "serial": ""}
+                    "page": "", "serial": "", "job_id": ""}
 
 
 def _page_post_note(message: str) -> None:
@@ -13613,6 +15315,12 @@ async def fb_resume(job_id: str) -> dict:
         if job.get("status") == fb_auto_post.STATUS_CANCELLED:
             raise HTTPException(status_code=409,
                                 detail="งานนี้ถูกยกเลิกแล้ว — Resume ไม่ทำงานที่ยกเลิก")
+        if (job.get("manual_completed")
+                or job.get("status") == fb_auto_post.STATUS_MANUAL_DONE):
+            raise HTTPException(
+                status_code=409,
+                detail="งานนี้ถูกกดจบด้วยมือแล้ว — ไม่มีขั้นตอนให้ Resume",
+            )
         pending_posts = len(_fb_pending_groups(job))
         pending_followup = len(_fb_pending_followup_groups(job))
         if not pending_posts and not pending_followup:
@@ -13644,6 +15352,13 @@ async def fb_stop(job_id: str) -> dict:
     """หยุดสายโพสต์ที่จุดปลอดภัย และเก็บผลเดิมไว้ให้ Resume ได้."""
     with _job_ctx(job_id):
         return _fb_stop_body(job_id)
+
+
+@app.post("/api/fb/jobs/{job_id}/complete")
+async def fb_complete(job_id: str) -> dict:
+    """จบงานแบบ Manual: ถือว่าสมบูรณ์และปิดทุกคิวของใบนี้ถาวร."""
+    with _job_ctx(job_id):
+        return _fb_manual_complete_job(job_id)
 
 
 def _fb_stop_body(job_id: str) -> dict:

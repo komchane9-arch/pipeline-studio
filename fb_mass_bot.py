@@ -97,7 +97,7 @@ SET_FIELDS = {
     "scrolls": ("เลื่อน", "scroll", "scrolls"),
 }
 
-# งานเบราว์เซอร์ (สแกน/เข้ากลุ่ม) ทำทีละอย่าง — Bot10 มีตัวเดียว
+# งานเบราว์เซอร์ (สแกน/เข้ากลุ่ม) ทำทีละอย่าง — โปรไฟล์ต้องไม่ใช่ Bot10
 _busy = threading.Lock()
 
 # การ์ด /groups ใบล่าสุดของแต่ละแชท — ปุ่มลบผูกกับ "ลำดับในรายการ" ซึ่งเลื่อนได้
@@ -807,6 +807,11 @@ def _kw_worker_loop(token: str, chat_id: str) -> None:
     log("เดมอน /keyword (โหมดอัตโนมัติ) ทำงานแล้ว")
     while True:
         try:
+            # Bot10 สงวนให้ตัวเก็บคอมเมนต์เท่านั้น ถ้ายังไม่ได้ผูกโปรไฟล์อื่น
+            # ให้พักคิวเดิมไว้เฉย ๆ ห้ามหยิบออก/ทำ failed และห้ามเปิด Chrome.
+            if not bool(mf.load_config().get("browser_enabled", True)):
+                time.sleep(15)
+                continue
             state = mf.load_kw_state()
             if not state.get("keyword"):
                 time.sleep(5)

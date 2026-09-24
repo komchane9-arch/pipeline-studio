@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+from contextlib import contextmanager
 
 import studio_shared
 
@@ -260,6 +261,54 @@ def disable_stay_on(shell, log=None) -> bool:
     except Exception as error:
         say(f"  ปิด stay_on_while_plugged_in ไม่สำเร็จ: {error}")
         return False
+
+
+@contextmanager
+def keep_awake_while_working(shell, log=None):
+    """กันจอดับตลอดอายุงาน แล้วคืนค่าของเครื่องเมื่อออกจากงานเสมอ
+
+    การยิง ``input tap`` เป็นครั้งคราวไม่พอ เพราะบางขั้นรอ Facebook โหลดนานกว่า
+    screen timeout ของเครื่อง (REDMI 15C ตั้งไว้ 60 วินาที) จึงต้องบอก
+    PowerManager ตรง ๆ ว่าเครื่องที่เสียบสายกำลังถูกใช้งานอยู่
+
+    ค่าเดิมถูกเก็บและคืนใน ``finally`` เพื่อไม่ให้จอติดค้างหลังงานสำเร็จ ล้ม
+    หรือถูกยกเลิก อาการที่เคยทำให้เครื่องร้อน 50 °C จึงไม่ย้อนกลับมาอีก
+    ถ้าอ่าน/เขียนค่าไม่ได้จะเตือนแล้วปล่อยให้งานเดินต่อ ไม่ทำให้งานโพสต์ล้ม
+    เพราะฟังก์ชันดูแลจอเพียงอย่างเดียว
+    """
+    say = log or (lambda _: None)
+    original = ""
+    armed = False
+    try:
+        original = (shell("settings get global stay_on_while_plugged_in") or "").strip()
+        if not re.fullmatch(r"\d+", original):
+            raise RuntimeError(f"อ่านค่าเดิมไม่ได้ ({original or 'ว่าง'})")
+        if original != "7":
+            shell("settings put global stay_on_while_plugged_in 7")
+        current = (shell("settings get global stay_on_while_plugged_in") or "").strip()
+        if current != "7":
+            raise RuntimeError(f"ตั้งค่าแล้วอ่านกลับได้ {current or 'ว่าง'}")
+        armed = True
+        if not wake(shell, log=say):
+            say("  ⚠️ เปิดโหมดกันจอดับแล้ว แต่ปลุกจอไม่ขึ้น")
+        say("  🔆 กำลังทำงาน — กันจอดับไว้จนกว่างานจะจบ")
+    except Exception as error:
+        say(f"  ⚠️ เปิดโหมดกันจอดับไม่สำเร็จ: {error}")
+
+    try:
+        yield
+    finally:
+        if armed and original != "7":
+            try:
+                shell(f"settings put global stay_on_while_plugged_in {original}")
+                restored = (
+                    shell("settings get global stay_on_while_plugged_in") or ""
+                ).strip()
+                if restored != original:
+                    raise RuntimeError(f"อ่านกลับได้ {restored or 'ว่าง'}")
+                say(f"  🌙 งานจบแล้ว — คืนค่าพักหน้าจอเดิม ({original})")
+            except Exception as error:
+                say(f"  ⚠️ คืนค่าพักหน้าจอไม่สำเร็จ: {error}")
 
 
 def stop_idle_apps(shell, log=None, packages=IDLE_APPS) -> list[str]:

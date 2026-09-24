@@ -69,9 +69,18 @@ class ScreenAsleep(AccountUnreadable):
     """ปลุกจอไม่ขึ้น จึงยังไม่ได้ตรวจอะไรเลย — คนละเรื่องกับตรวจแล้วอ่านไม่ออก"""
 
 
+# **ต้องใส่ธงซ่อนหน้าต่างเสมอ** Windows 11 ตั้ง Windows Terminal เป็นตัวรับ
+# คอนโซล โปรเซสที่ไม่ใส่ธงนี้จะเด้งหน้าต่างดำขึ้นมาจริงทุกครั้งที่ถูกเรียก
+# ด่านนี้ยิง adb ทุก 2 วินาที สูงสุด 12 รอบ = เด้งได้ถึง 36 หน้าต่างต่อการตรวจ
+# หนึ่งครั้ง (วัดจริง 21 ก.ย. 2569: WindowsTerminal.exe เกิด 9 ตัวใน 40 วินาที
+# ตอนคิวตอบคอมเมนต์วนอ่านชื่อบัญชีไม่สำเร็จ)
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def _sh(adb: str, serial: str, *args: str, timeout: float = 90.0):
     return subprocess.run([adb, "-s", serial, *args],
-                          capture_output=True, timeout=timeout)
+                          capture_output=True, timeout=timeout,
+                          creationflags=NO_WINDOW)
 
 
 def _dump(adb: str, serial: str) -> str:
@@ -113,7 +122,28 @@ def _bottom_tabs(xml: str) -> list[tuple[int, int, int, int, str]]:
         bands.setdefault(y1, []).append((x1, x2, y1, y2, desc))
     if not bands:
         return []
-    return sorted(bands[max(bands)])
+
+    # หน้าคอมเมนต์มีปุ่มเลือกว่า "ตอบในนามใคร" อยู่ชิดขอบล่าง และ node
+    # เดียวกันมักซ้อนกัน 2 ชั้นด้วย bounds เดิม เดิมเราเห็นสอง node นั้นแล้ว
+    # เข้าใจผิดว่าเป็นแถบนำทาง ก่อนแตะไปเปิด composer/identity sheet แทน
+    # แถบนำทางจริงต้องมี 5–6 ช่องคนละตำแหน่งและกางเกือบเต็มความกว้างจอ.
+    candidates: list[list[tuple[int, int, int, int, str]]] = []
+    for rows in bands.values():
+        unique: dict[tuple[int, int, int, int], tuple[int, int, int, int, str]] = {}
+        for row in rows:
+            key = row[:4]
+            # เก็บป้ายที่มีข้อความไว้ หาก node ซ้อนกันมี bounds เดียวกัน
+            if key not in unique or (not unique[key][4] and row[4]):
+                unique[key] = row
+        tabs = sorted(unique.values())
+        if len(tabs) < 5:
+            continue
+        if tabs[0][0] > 0.08 * width or tabs[-1][1] < 0.92 * width:
+            continue
+        candidates.append(tabs)
+    if not candidates:
+        return []
+    return max(candidates, key=lambda rows: (rows[0][2], len(rows)))
 
 
 def _tap_profile_tab(adb: str, serial: str, xml: str) -> bool:
@@ -198,6 +228,7 @@ def _name_near_marker(xml: str) -> str:
     for text in reversed(re.findall(r'text="([^"]{1,45})"', xml[:marker.start()])):
         clean = re.sub(r"\s+", " ", text.replace(" ", " ")).strip()
         if (len(clean) < 3 or clean.isdigit() or _NOT_A_NAME.match(clean)
+                or re.fullmatch(r'(?:[\d,.]+\s*)?(?:posts?|friends?|followers?|following)', clean, re.I)
                 or ":" in clean or "·" in clean
                 or not re.fullmatch(r"[^<>{}\[\]|]{3,45}", clean)):
             continue
@@ -205,7 +236,28 @@ def _name_near_marker(xml: str) -> str:
     return ""
 
 
-def read_account(adb: str, serial: str, wait: float = 6.0) -> str:
+def _open_facebook_fresh(adb: str, serial: str, log=None) -> None:
+    """ปิด Facebook จริงแล้วเปิดหน้าฟีดใหม่ก่อนยืนยันบัญชี.
+
+    Android/Facebook คืน activity เดิมแม้เปิดจาก launcher ใหม่ จึงอาจกลับไปหน้า
+    โพสต์ของคิวตอบคอมเมนต์ การเปิด ``fb://feed`` หลัง force-stop บังคับให้มี
+    แถบนำทางหลักอีกครั้ง โดยไม่ระบุ profile id และไม่เปลี่ยนบัญชีผู้ใช้.
+    """
+    if log:
+        log("ปิด Facebook ของงานก่อนหน้า แล้วเปิดหน้าฟีดใหม่เพื่อตรวจบัญชี")
+    _sh(adb, serial, "shell", "am", "force-stop", APP)
+    time.sleep(1.0)
+    opened = _sh(
+        adb, serial, "shell", "am", "start", "-a",
+        "android.intent.action.VIEW", "-d", "fb://feed",
+    )
+    if opened.returncode:
+        _sh(adb, serial, "shell", "monkey", "-p", APP,
+            "-c", "android.intent.category.LAUNCHER", "1")
+
+
+def read_account(adb: str, serial: str, wait: float = 6.0, *,
+                 fresh_start: bool = False, log=None) -> str:
     """ชื่อบัญชี Facebook ที่แอป**กำลังใช้อยู่**บนเครื่องนี้ — อ่านไม่ออกคืนค่าว่าง
 
     เปิดแอป (ข้อ 2.7 ยกเว้นให้เฉพาะตอนเปิดแอป) แล้ว**กด**แท็บโปรไฟล์
@@ -224,19 +276,23 @@ def read_account(adb: str, serial: str, wait: float = 6.0) -> str:
     วัดจริง 3 รอบติดได้ 3 คำตอบ: 'ตัวกรอง' · '' · 'Preaw Buchakorn'
     คำแรกเป็นป้ายปุ่มบนจอ ไม่ใช่ชื่อคน
 
-    **และห้าม force-stop ก่อนเปิด** วัดแล้วทำให้แถบล่างไม่มีป้ายและกดแท็บไม่ติด
-    นานเกิน 24 วินาที ส่วนเปิดทับของเดิมเจอแถบแท็บตั้งแต่วินาทีที่ 2
+    ``fresh_start=True`` ใช้ต้นงานโพสต์และคิวตอบ: ปิด Facebook ที่งานก่อนหน้า
+    เปิดค้างไว้ แล้วเปิดหน้าฟีดใหม่ก่อนตรวจบัญชี งานตอบคอมเมนต์รอบถัดไปยังเปิด
+    จาก ``post_url`` ที่บันทึกในคิว จึงไม่พึ่งหน้าเดิมที่ถูกปิดไป.
     """
     if not _wake(adb, serial):
         raise ScreenAsleep(
             "ปลุกจอมือถือไม่ขึ้น — ยังไม่ได้ตรวจบัญชีเลยสักนิด "
             "(จออาจติดหน้าล็อกที่ต้องใส่รหัส)")
 
-    _sh(adb, serial, "shell", "monkey", "-p", APP,
-        "-c", "android.intent.category.LAUNCHER", "1")
+    if fresh_start:
+        _open_facebook_fresh(adb, serial, log=log)
+    else:
+        _sh(adb, serial, "shell", "monkey", "-p", APP,
+            "-c", "android.intent.category.LAUNCHER", "1")
 
     # รอ**จนแถบแท็บโผล่จริง** ไม่ใช่รอเวลาตายตัวแล้วเดาว่าพร้อมแล้ว
-    for _ in range(8):
+    for _ in range(12 if fresh_start else 8):
         time.sleep(2.0)
         xml = _dump(adb, serial)
         if xml and _bottom_tabs(xml):
@@ -246,8 +302,15 @@ def read_account(adb: str, serial: str, wait: float = 6.0) -> str:
 
     if not _tap_profile_tab(adb, serial, xml):
         return ""
-    time.sleep(wait)
-    return _name_near_marker(_dump(adb, serial))
+    # หน้าโปรไฟล์บางรอบแสดงโครงก่อนข้อความชื่อ อย่าตัดสินจาก dump เดียว.
+    edge = time.monotonic() + max(wait, 2.0)
+    while True:
+        time.sleep(min(2.0, max(0.0, edge - time.monotonic())))
+        found = _name_near_marker(_dump(adb, serial))
+        if found:
+            return found
+        if time.monotonic() >= edge:
+            return ""
 
 
 def same_account(a: str, b: str) -> bool:
@@ -256,7 +319,8 @@ def same_account(a: str, b: str) -> bool:
     return bool(norm(a)) and norm(a) == norm(b)
 
 
-def require(adb: str, serial: str, expect: str) -> str:
+def require(adb: str, serial: str, expect: str, *,
+            fresh_start: bool = False, log=None) -> str:
     """ต้องเป็นบัญชีนี้เท่านั้นถึงจะโพสต์ได้ — คืนชื่อที่อ่านได้จริง
 
     โยน `AccountUnreadable` เมื่ออ่านไม่ออก และ `AccountMismatch` เมื่อไม่ตรง
@@ -267,7 +331,8 @@ def require(adb: str, serial: str, expect: str) -> str:
         raise AccountUnreadable(
             "ยังไม่รู้ว่าเครื่องนี้ควรโพสต์ในนามบัญชีไหน — ผูกบัญชีก่อนด้วย "
             f'python devices.py account {serial} "<ชื่อบัญชี>"')
-    found = read_account(adb, serial)
+    found = read_account(
+        adb, serial, fresh_start=fresh_start, log=log)
     if not found:
         raise AccountUnreadable(
             "อ่านชื่อบัญชีจากหน้าจอไม่ได้ — ไม่ยอมให้โพสต์ต่อ เพราะยังพิสูจน์ไม่ได้ "

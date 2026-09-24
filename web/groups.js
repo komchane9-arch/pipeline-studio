@@ -41,24 +41,31 @@ function blockOf(row) {
   const look = LOOKS[row.status] || LOOKS.unknown;
   const g = row.group_side || {};
   const o = row.our_side || {};
-  const box = document.createElement("article");
-  box.className = `gh-card ${look.chip}`;
 
-  const head = document.createElement("header");
-  head.className = "gh-head";
+  const det = document.createElement("details");
+  det.className = `gh-card ${look.chip}`;
+
+  // summary = chip + ชื่อกลุ่ม (กดแล้วค่อยเปิด)
+  const sum = document.createElement("summary");
+  sum.className = "gh-summary";
   const chip = document.createElement("span");
   chip.className = "gh-chip";
   chip.textContent = `${look.icon} ${row.status_label}`;
-  const title = document.createElement("h3");
+  const title = document.createElement("span");
   title.className = "gh-name";
   title.textContent = row.name;
-  head.append(chip, title);
+  sum.append(chip, title);
   if (!row.enabled) {
     const off = document.createElement("span");
     off.className = "gh-off";
     off.textContent = "ปิดใช้อยู่";
-    head.append(off);
+    sum.append(off);
   }
+  det.append(sum);
+
+  // body — โชว์เมื่อกดเปิด
+  const body = document.createElement("div");
+  body.className = "gh-body";
 
   const why = document.createElement("p");
   why.className = "gh-why";
@@ -106,7 +113,7 @@ function blockOf(row) {
   }
   grid.append(left, right);
 
-  box.append(head, why, act, grid);
+  body.append(why, act, grid);
   if (row.url) {
     const link = document.createElement("a");
     link.className = "gh-link";
@@ -114,10 +121,13 @@ function blockOf(row) {
     link.target = "_blank";
     link.rel = "noopener";
     link.textContent = "เปิดกลุ่มใน Facebook ↗";
-    box.append(link);
+    link.addEventListener("click", (e) => e.stopPropagation());
+    body.append(link);
   }
-  return box;
+  det.append(body);
+  return det;
 }
+
 
 export async function loadGroupHealth() {
   const wrap = $("#ghList");

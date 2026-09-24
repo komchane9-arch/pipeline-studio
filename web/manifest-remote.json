@@ -1,0 +1,25 @@
+{
+  "name": "Pipeline Remote · ควบคุมจอมือถือ",
+  "short_name": "Remote",
+  "description": "ศูนย์ควบคุมและรีโมทหน้าจอมือถือแบบเรียลไทม์ผ่าน Pipeline Studio",
+  "start_url": "/remote",
+  "scope": "/remote",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0d1117",
+  "theme_color": "#161b22",
+  "icons": [
+    {
+      "src": "/static/fonts/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/static/fonts/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

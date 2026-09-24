@@ -31,6 +31,8 @@
 }
 .notes-brand { flex: 1 1 auto; font-size: 15px; white-space: nowrap; }
 .notes-new { font-size: 17px; line-height: 1; padding: 4px 11px; }
+.notes-refresh { font-size: 16px; line-height: 1; padding: 4px 10px; }
+.notes-refresh:disabled { opacity: 0.5; cursor: progress; }
 .notes-find {
   margin: 0 12px 10px; padding: 7px 11px; border-radius: 9px;
   border: 1px solid var(--line); background: var(--panel); color: var(--ink);

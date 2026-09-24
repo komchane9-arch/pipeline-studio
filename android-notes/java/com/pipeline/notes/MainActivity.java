@@ -2,7 +2,11 @@ package com.pipeline.notes;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
+import android.widget.Toast;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
@@ -98,9 +102,21 @@ public class MainActivity extends Activity {
         WebView.setWebContentsDebuggingEnabled(true);
 
         web.setWebViewClient(new WebViewClient() {
+            /** ลิงก์ที่ไม่ใช่สมุดโน้ต **ส่งให้มือถือเปิดเอง** (เจ้าของแจ้ง 24 ก.ย. 2569)
+             *
+             *  เดิมคืน false = เปิดทุกลิงก์ในแอปนี้ ลิงก์ย่อ s.shopee.co.th /
+             *  s.lazada.co.th จะเด้งต่อไปเป็นลิงก์เปิดแอป (intent:// · shopee://)
+             *  ซึ่งหน้าต่างเว็บเปิดไม่เป็น → ล้มแบบ "หน้าหลัก" → แอปขึ้นหน้า
+             *  "เปิดสมุดโน้ตไม่ได้ · โน้ตทั้งหมดเก็บอยู่ที่คอม" ทั้งที่คอมปกติดี
+             *
+             *  ส่งออกไปแล้ว Android เลือกเองว่าจะเปิดด้วยแอป Shopee / Lazada
+             *  หรือเบราว์เซอร์ — เหมือนกดลิงก์จากแอปแชททั่วไป */
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return false;   // ลิงก์ร้านค้าในโน้ตเปิดในแอปนี้เลย
+                Uri uri = request.getUrl();
+                if (isOurs(uri)) return false;          // หน้าสมุดโน้ตเปิดในแอปนี้ตามเดิม
+                openOutside(uri);
+                return true;
             }
 
             @Override
@@ -274,6 +290,44 @@ public class MainActivity extends Activity {
     private void showWeb() {
         trouble.setVisibility(View.GONE);
         web.setVisibility(View.VISIBLE);
+    }
+
+    /** ลิงก์นี้เป็นหน้าของสมุดโน้ตเองไหม — เทียบกับที่อยู่ที่ต่อติดอยู่ตอนนี้ */
+    private boolean isOurs(Uri uri) {
+        String base = prefs().getString(KEY_BASE, "");
+        if (base.isEmpty() || uri == null || uri.getHost() == null) return false;
+        Uri home = Uri.parse(base);
+        return uri.getHost().equalsIgnoreCase(home.getHost())
+                && uri.getPort() == home.getPort();
+    }
+
+    /** ส่งลิงก์ให้มือถือเปิด — เปิดไม่ได้ต้อง **บอกตรงๆ** ไม่ใช่เงียบ (ข้อ 2.4) */
+    private void openOutside(Uri uri) {
+        // **ลองเปิดจริงเลย ไม่ถามก่อนว่ามีแอปไหม** — Android 11 ขึ้นไปซ่อนรายชื่อ
+        // แอปอื่นจากเรา การถามก่อน (resolveActivity) จะได้ "ไม่มี" ทั้งที่มีแอป Shopee
+        try {
+            if ("intent".equalsIgnoreCase(uri.getScheme())) {
+                // intent:// ของ Shopee/Lazada — ไม่มีแอปในเครื่องให้ใช้ลิงก์สำรองที่แนบมา
+                Intent go = Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME);
+                go.addCategory(Intent.CATEGORY_BROWSABLE);
+                go.setComponent(null);
+                go.setSelector(null);
+                try {
+                    startActivity(go);
+                } catch (ActivityNotFoundException none) {
+                    String fallback = go.getStringExtra("browser_fallback_url");
+                    if (fallback == null) throw none;
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(fallback)));
+                }
+            } else {
+                Intent go = new Intent(Intent.ACTION_VIEW, uri);
+                go.addCategory(Intent.CATEGORY_BROWSABLE);
+                startActivity(go);
+            }
+        } catch (Exception error) {
+            Toast.makeText(this, "ไม่มีแอปในเครื่องที่เปิดลิงก์นี้ได้ — กดคัดลอกแล้ววางในเบราว์เซอร์แทน",
+                    Toast.LENGTH_LONG).show();
+        }
     }
 
     private SharedPreferences prefs() {

@@ -26,6 +26,7 @@ const SHELL = `
     <aside class="notes-side">
       <div class="notes-side-top">
         <strong class="notes-brand">📝 โน้ต</strong>
+        <button type="button" class="ghost notes-refresh" title="ดึงโน้ตล่าสุด (ที่แก้จากอีกเครื่อง)">↻</button>
         <button type="button" class="ghost notes-new" title="โน้ตใหม่">＋</button>
       </div>
       <input type="search" class="notes-find" placeholder="ค้นหาในโน้ตทั้งหมด"
@@ -358,11 +359,35 @@ export function mountNotes(root, api, { onClose = null } = {}) {
       drawLinks("");
       wrap.classList.remove("is-reading");
     }
+    // **ใบที่เปิดอยู่ต้องได้ข้อความใหม่ด้วย** ไม่ใช่แค่รายการทางซ้าย (24 ก.ย. 2569)
+    // เดิมอัปเดตแค่รายการ แก้บนมือถือแล้วกดดึงบนคอม ใบที่เปิดค้างยังเป็นของเก่า
+    // — ยกเว้นใบที่มีของพิมพ์ค้างยังไม่บันทึก ห้ามทับเด็ดขาด
+    const open = notes.find((row) => row.id === openId);
+    if (open && !draft.has(openId) && textBox.value !== open.text) {
+      textBox.value = open.text || "";
+      drawLinks(textBox.value);
+    }
     drawList();
     return data;
   }
 
+  /** ↻ ดึงโน้ตล่าสุด — บันทึกของที่พิมพ์ค้างก่อน แล้วค่อยดึง (เจ้าของสั่ง 24 ก.ย. 2569) */
+  async function refresh(button) {
+    if (button) button.disabled = true;
+    try {
+      await flush();
+      await load();
+      const now = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+      tellState(`ดึงโน้ตล่าสุดแล้ว ${now}`);
+    } catch (error) {
+      tellState(`ดึงโน้ตล่าสุดไม่ได้: ${error.message}`, true);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
   // ------------------------------------------------------------- ต่อสาย
+  $("notes-refresh").addEventListener("click", (event) => refresh(event.currentTarget));
   $("notes-new").addEventListener("click", newNote);
   $("notes-del").addEventListener("click", deleteNote);
   $("notes-back").addEventListener("click", async () => {

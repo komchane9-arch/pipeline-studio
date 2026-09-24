@@ -431,11 +431,52 @@ def start_app() -> None:
     handle = open(log, "a", encoding="utf-8", errors="replace")
     handle.write(f"\n=== รีสตาร์ตโดย restart_studio.py {datetime.now():%d/%m %H:%M:%S} ===\n")
     handle.flush()
-    # DETACHED_PROCESS — ต้องอยู่ต่อหลังสคริปต์นี้จบ ไม่งั้นปิดหน้าต่างแล้วตายตาม
-    subprocess.Popen(
-        [PYTHON, "app.py"], cwd=str(BASE_DIR), stdout=handle, stderr=handle,
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
+    handle.close()
+    # ---- เปิดผ่าน WMI ให้เซิร์ฟเวอร์ไม่มี "พ่อ" อยู่ใต้แอป Claude (24 ก.ย. 2569) ----
+    #
+    # **เกิดจริง 23 ก.ย. 23:29** แอป Claude อัปเดตตัวเองแล้วเปิดใหม่ (Claude.exe
+    # เริ่มใหม่ 23:29:36) เซิร์ฟเวอร์ทั้งชุด — 8866 · สายคลิป 8877 · บอทแมส — ดับ
+    # พร้อมกันทุกตัว เงียบจนเช้า 09:04 ไม่มีใครรู้ (ไม่มี error ใน log เลยสักบรรทัด)
+    #
+    # ของเดิมใช้ Popen + DETACHED_PROCESS ซึ่งแค่ไม่ผูกหน้าต่าง **แต่ Windows ยังจด
+    # พ่อ-ลูกไว้** ตัวรีสตาร์ตถูกเรียกจากแชท Claude เซิร์ฟเวอร์จึงเป็นหลานของแอป
+    # Claude พอแอปปิดทั้งสายตอนอัปเดต เซิร์ฟเวอร์ก็ตายตาม
+    #
+    # พิสูจน์แล้วด้วยการจำลองปิดทั้งสาย (taskkill /T): เปิดแบบ Popen เดิม **ตายตาม**
+    # · เปิดผ่าน WMI **ยังอยู่** เพราะพ่อของมันคือตัวบริการ WMI ของ Windows
+    #
+    # ห้ามมีทางถอยกลับไปใช้ Popen เงียบๆ — ถ้า WMI เปิดไม่ได้ต้องล้มดังๆ (ข้อ 2.1)
+    # ไม่งั้นเราจะได้เซิร์ฟเวอร์ที่ดูปกติแต่ตายอีกรอบตอนแอป Claude อัปเดตครั้งหน้า
+    #
+    # PYTHONIOENCODING ต้องตั้งใน cmd เพราะโปรเซสจาก WMI ไม่ได้รับตัวแปรของเรา —
+    # ไม่ตั้งแล้ว Python ตกไปใช้ cp1252 และตายทันทีเมื่อพิมพ์ภาษาไทยตอนเริ่ม
+    command = (f'cmd.exe /c "set PYTHONIOENCODING=utf-8&& "{PYTHON}" app.py '
+               f'>> "{log}" 2>&1"')
+    script = ("$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
+              "-Arguments @{CommandLine=$env:RS_CMD; CurrentDirectory=$env:RS_DIR}; "
+              "\"$($r.ReturnValue) $($r.ProcessId)\"")
+    env = {**os.environ, "RS_CMD": command, "RS_DIR": str(BASE_DIR)}
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                         capture_output=True, text=True, env=env, timeout=60,
+                         creationflags=_NO_WINDOW)
+    code = (out.stdout.strip().split() or ["?"])[0]
+    if code != "0":
+        raise Blocked(f"สั่ง Windows เปิดเซิร์ฟเวอร์ไม่สำเร็จ (รหัส {code}) "
+                      f"{out.stderr.strip()[:200]}")
+
+
+def under_claude(pid: int) -> str:
+    """ไล่สายพ่อของโปรเซส — คืนชื่อพ่อที่เป็นแอป Claude ถ้ามี ไม่มีคืน ""
+
+    ใช้ยืนยันว่าเปิดสำเร็จ **แบบที่ต้องการ** ไม่ใช่แค่ "ตอบแล้ว" (ข้อ 2.3.1)
+    เซิร์ฟเวอร์ที่ยังอยู่ใต้แอป Claude ตอบได้ปกติทุกอย่าง จนวันที่แอปอัปเดต
+    """
+    script = (f"$p={int(pid)}; $n=0; while($p -and $n -lt 30){{ "
+              "$x=Get-CimInstance Win32_Process -Filter \"ProcessId=$p\"; if(-not $x){break}; "
+              "if($x.Name -match '^claude'){ $x.Name; break }; $p=$x.ParentProcessId; $n++ }")
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                         capture_output=True, text=True, timeout=60, creationflags=_NO_WINDOW)
+    return out.stdout.strip()
 
 
 def wait_ready(started_after: datetime) -> dict:
@@ -460,6 +501,10 @@ def wait_ready(started_after: datetime) -> dict:
     ]
     if not fresh:
         raise Blocked("ตอบอยู่ก็จริง แต่โปรเซสที่ถือพอร์ตยังเป็นตัวเดิม — ไม่ได้รีสตาร์ตจริง")
+    boss = under_claude(fresh[0]["pid"])
+    if boss:
+        raise Blocked(f"เปิดได้แต่ยังอยู่ใต้ {boss} — แอป Claude อัปเดตเมื่อไรเซิร์ฟเวอร์จะดับตาม "
+                      "(เกิดจริง 23 ก.ย. 23:29)")
     return {"system": system, "process": fresh[0]}
 
 

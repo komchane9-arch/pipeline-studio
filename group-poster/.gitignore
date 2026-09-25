@@ -1,0 +1,3 @@
+agent/config.json
+agent/tools/
+.pytest_cache/

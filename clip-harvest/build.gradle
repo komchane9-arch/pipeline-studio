@@ -1,0 +1,5 @@
+// โปรเจกต์ราก — เวอร์ชันปลั๊กอิน Android Gradle
+// ถ้า Android Studio เตือนให้ปรับเวอร์ชัน ให้กดตามที่มันแนะนำได้เลย
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

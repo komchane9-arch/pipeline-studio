@@ -34,4 +34,7 @@ dependencies {
     implementation 'dev.rikka.shizuku:provider:13.1.5'
     // ML Kit อ่านตัวอักษรจากภาพ (ใช้หา EXTRA COMM ซึ่งเป็นภาษาอังกฤษ)
     implementation 'com.google.mlkit:text-recognition:16.0.1'
+    // ML Kit พ่วง kotlin-stdlib-jdk7/jdk8 1.6.21 มา ชนกับ kotlin-stdlib 1.8.22 ของ androidx.core
+    // (build ล้ม "Duplicate class kotlin.*") — BOM บังคับให้ทุกตัวใช้ 1.8.22 ซึ่ง jdk7/jdk8 เป็นแค่ตัวเปล่า
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
 }

@@ -29,7 +29,9 @@ android {
 
 dependencies {
     implementation 'androidx.core:core:1.13.1'
-    // Shizuku — ให้แอปเรียก system service ด้วยสิทธิ์ระดับ shell (อ่านคลิปบอร์ดเบื้องหลังได้)
+    // Shizuku — ให้แอปเรียก shell/สั่งกดหน้าจอด้วยสิทธิ์ระดับ adb โดยไม่ต้องต่อคอม
     implementation 'dev.rikka.shizuku:api:13.1.5'
     implementation 'dev.rikka.shizuku:provider:13.1.5'
+    // ML Kit อ่านตัวอักษรจากภาพ (ใช้หา EXTRA COMM ซึ่งเป็นภาษาอังกฤษ)
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
 }

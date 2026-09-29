@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  ClipHarvest — ดักลิงก์ Shopee/Lazada จากคลิปบอร์ดเบื้องหลัง แล้วส่งต่อ (แนวเดียวกับ clippipe)
+  ClipHarvest — ไล่ค้น Shopee/Lazada ตาม keyword เก็บลิงก์สินค้าเอง (แนว clippipe)
 
-  ทำงาน: กด "คัดลอกลิงก์" ของสินค้า (extra comm) ในแอป Shopee/Lazada → แอปนี้อ่านคลิปบอร์ด
-  ผ่าน Shizuku ทุกไม่กี่วินาที → กรองเฉพาะลิงก์ที่มีคำที่ตั้งไว้ → เก็บ + ส่งต่อไป URL/แอป pipeline links
-
-  Shizuku ให้สิทธิ์ระดับ shell จึงอ่านคลิปบอร์ดตอนแอปไม่ได้อยู่หน้าจอได้ (Android ปกติห้าม)
+  ทำงานผ่าน Shizuku (สิทธิ์ระดับ shell): เปิดแอป, พิมพ์ค้นหา, หา EXTRA COMM (OCR),
+  กดเข้าสินค้า → แชร์ → คัดลอกลิงก์ → อ่านคลิปบอร์ดเก็บลิงก์
+  มีปุ่มลอย (overlay) ให้กด เริ่ม/หยุด/ลบ ระหว่างทำงาน
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -13,6 +12,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="false"
@@ -32,7 +32,6 @@
             </intent-filter>
         </activity>
 
-        <!-- รับลิงก์แบบแชร์ตรงด้วย (สำรอง เผื่ออยากส่งเข้าเองโดยไม่พึ่งคลิปบอร์ด) -->
         <activity
             android:name=".ShareInActivity"
             android:exported="true"
@@ -46,12 +45,13 @@
             </intent-filter>
         </activity>
 
+        <!-- ปุ่มลอย + รันงานขับ Shopee/Lazada -->
         <service
-            android:name=".CaptureService"
+            android:name=".RunService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- ผู้ให้บริการของ Shizuku — ต้องประกาศตามคู่มือ Shizuku -->
+        <!-- ผู้ให้บริการของ Shizuku -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"

@@ -20,10 +20,23 @@ public class ShareInActivity extends Activity {
         }
         if (text != null && !text.isEmpty()) {
             Store store = new Store(this);
-            boolean fresh = store.add(text);
+            String link = extractLink(text);            // ดึงเฉพาะ URL จากข้อความที่แชร์เข้ามา
+            boolean fresh = store.add(link.isEmpty() ? text : link);
+            store.log("รับลิงก์จากหน้าแชร์: " + (link.isEmpty() ? "(ไม่พบ URL) " : "") + trim(link.isEmpty() ? text : link));
             Toast.makeText(this, fresh ? "เก็บลิงก์แล้ว · รวม " + store.count() : "ลิงก์นี้มีอยู่แล้ว",
                     Toast.LENGTH_SHORT).show();
         }
         finish();
+    }
+
+    /** ดึง URL ตัวแรกจากข้อความ (Shopee แชร์เป็นข้อความยาวมีลิงก์ปน) */
+    private static String extractLink(String text) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("https?://\\S+").matcher(text);
+        return m.find() ? m.group() : "";
+    }
+
+    private static String trim(String s) {
+        return s.length() > 70 ? s.substring(0, 70) + "…" : s;
     }
 }

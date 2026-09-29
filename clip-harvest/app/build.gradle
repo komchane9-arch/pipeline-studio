@@ -28,8 +28,6 @@ android {
 }
 
 dependencies {
-    // กัน "Duplicate class kotlin.*" — ML Kit พ่วง kotlin-stdlib คนละเวอร์ชันกับ androidx.core
-    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
     implementation 'androidx.core:core:1.13.1'
     // Shizuku — ให้แอปเรียก shell/สั่งกดหน้าจอด้วยสิทธิ์ระดับ adb โดยไม่ต้องต่อคอม
     implementation 'dev.rikka.shizuku:api:13.1.5'

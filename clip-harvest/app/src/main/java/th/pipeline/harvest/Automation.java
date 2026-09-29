@@ -23,7 +23,9 @@ public class Automation {
     // ---- พิกัดสัดส่วน (0..1) ที่ต้องจูน ----
     private static final float SEARCH_BAR_X = 0.40f, SEARCH_BAR_Y = 0.067f;   // ช่องค้นหาบนสุด
     private static final float SHARE_ICON_X = 0.71f, SHARE_ICON_Y = 0.067f;   // ปุ่มแชร์มุมขวาบนหน้าสินค้า (ยืนยันแล้ว)
-    private static final float MORE_BTN_X = 0.90f, MORE_BTN_Y = 0.83f;        // ปุ่ม "อื่นๆ" ท้ายแถวในแผงแชร์คอมมิชชั่น
+    // ปุ่ม "อื่นๆ" ท้ายแถวในแผงแชร์คอมมิชชั่น — วัดจากภาพจริง 93a21824 (1080x2400) 29 ก.ย.:
+    // วงปุ่มอยู่ x≈985–1080 (ล้นขอบขวา) y≈1935–2055 · ค่าเดิม 0.90 = x 972 ตกช่องว่างก่อนถึงปุ่ม
+    private static final float MORE_BTN_X = 0.963f, MORE_BTN_Y = 0.83f;
     private static final int MAX_PRODUCTS = 30;         // กันวนไม่จบ (ฝั่งทดสอบตัดจบเองที่ 1 ใบ)
     private static final int MAX_SCROLLS = 12;
 

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Link Harvester — แอปหาลิงก์สินค้าใน Shopee/Lazada ตาม keyword แล้วส่งเข้า pipeline links
+
+  เจ้าของสั่ง 29 ก.ย. 2569 "ทำเป็นแอปรันในมือถือ เว้นแบบสุ่ม"
+
+  เวอร์ชันแรกนี้พิสูจน์ก่อนว่า AccessibilityService อ่านหน้าจอ Shopee ได้ไหม
+  (uiautomator อ่านไม่ได้ แต่ accessibility คนละกลไก) — มีปุ่ม dump หน้าจอปัจจุบัน
+  พออ่าน EXTRA COMM ได้ ค่อยต่อส่วนก๊อปลิงก์ + ส่งเข้า th.pipeline.links
+
+  ไม่พึ่งไลบรารีนอกเลย (AccessibilityService เป็น API ของ Android เอง) จึง build ด้วย
+  ชุดเครื่องมือเดียวกับ android-notes ได้ ไม่ต้องใช้ Gradle
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="th.pipeline.harvester">
+
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <application
+      android:label="@string/app_name"
+      android:icon="@mipmap/ic_launcher"
+      android:roundIcon="@mipmap/ic_launcher"
+      android:allowBackup="false"
+      android:supportsRtl="false"
+      android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+    <activity
+        android:name=".MainActivity"
+        android:exported="true"
+        android:launchMode="singleTask"
+        android:windowSoftInputMode="adjustResize"
+        android:screenOrientation="portrait">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+
+    <!-- เครื่องยนต์อ่าน/กดหน้าจอแอปอื่น — ผู้ใช้ต้องเปิดสิทธิ์เองในตั้งค่า > การช่วยเหลือพิเศษ -->
+    <service
+        android:name=".HarvestService"
+        android:exported="false"
+        android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+      <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+      </intent-filter>
+      <meta-data
+          android:name="android.accessibilityservice"
+          android:resource="@xml/accessibility_config" />
+    </service>
+  </application>
+</manifest>

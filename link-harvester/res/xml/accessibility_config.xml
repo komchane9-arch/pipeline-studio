@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ตั้งให้ service เห็นเหตุการณ์หน้าจอของทุกแอป และดึงเนื้อหาหน้าต่างได้
+  canRetrieveWindowContent = true คือหัวใจ — ทำให้ getRootInActiveWindow() ใช้ได้
+  flagRetrieveInteractiveWindows ช่วยให้เห็นหน้าต่างซ้อน (เช่น กล่องแชร์)
+-->
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:notificationTimeout="200"
+    android:description="@string/service_desc" />

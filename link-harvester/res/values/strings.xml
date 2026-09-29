@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="app_name">Link Harvester</string>
+  <string name="service_desc">อ่านและกดหน้าจอแอป Shopee/Lazada เพื่อหาลิงก์สินค้าตาม keyword ที่ตั้งไว้ แล้วส่งเข้าแอป pipeline links</string>
+</resources>
